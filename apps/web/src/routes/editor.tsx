@@ -1,12 +1,8 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router';
+import { CreativeSuite } from '../components/suite/CreativeSuite';
 
-export const Route = createFileRoute('/editor')({ component: Editor })
+export const Route = createFileRoute('/editor')({ component: Editor });
 
 function Editor() {
-  return (
-    <main>
-      <h1>Editor</h1>
-      <p>Coming soon.</p>
-    </main>
-  )
+  return <CreativeSuite />;
 }
