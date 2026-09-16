@@ -1,0 +1,15 @@
+{
+  "name": "opencut-creative-suite",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @opencut/web dev",
+    "build": "pnpm -r build",
+    "desktop:dev": "pnpm --filter @opencut/desktop tauri dev",
+    "desktop:build": "pnpm --filter @opencut/desktop tauri build",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}
