@@ -5,7 +5,7 @@ import {
   applyImageAdjustments,
   cropCanvas,
   type AssetItem
-} from '@opencut/media';
+} from '@duckfoot/media';
 import {
   Crop,
   RotateCw,

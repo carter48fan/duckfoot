@@ -3,7 +3,7 @@ import {
   type AssetItem,
   formatTimecode,
   VideoExporter
-} from '@opencut/media';
+} from '@duckfoot/media';
 import { nanoid } from 'nanoid';
 import type { TimelineClip, TrackType } from './types';
 import {
@@ -269,7 +269,7 @@ export function VideoEditor({ assets, onSave }: VideoEditorProps) {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'opencut-video.mp4';
+        a.download = 'duckfoot-video.mp4';
         a.click();
         URL.revokeObjectURL(url);
       }

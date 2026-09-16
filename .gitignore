@@ -3,8 +3,3 @@ dist/
 target/
 .env
 .env.*
-!.env.example
-docs/
-
-# moon runtime cache
-.moon/cache/

@@ -1,5 +1,5 @@
 {
-  "name": "@opencut/tool-photo",
+  "name": "@duckfoot/tool-photo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,8 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencut/core": "workspace:*",
-    "@opencut/media": "workspace:*",
+    "@duckfoot/core": "workspace:*",
+    "@duckfoot/media": "workspace:*",
     "lucide-react": "^0.475.0"
   },
   "peerDependencies": {
