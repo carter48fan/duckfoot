@@ -7,7 +7,7 @@ let globalDriver: StorageDriver | null = null;
 export function getStorageDriver(): StorageDriver {
   if (globalDriver) return globalDriver;
 
-  if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
+  if (typeof navigator !== 'undefined' && navigator.storage && 'getDirectory' in navigator.storage) {
     globalDriver = new OpfsStorageDriver();
   } else {
     globalDriver = new MemoryStorageDriver();

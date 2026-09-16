@@ -1,13 +1,9 @@
 {
-  "name": "opencut-creative-suite",
+  "name": "duckfoot",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "dev": "pnpm --filter @opencut/web dev",
-    "build": "pnpm -r build",
-    "desktop:dev": "pnpm --filter @opencut/desktop tauri dev",
-    "desktop:build": "pnpm --filter @opencut/desktop tauri build",
-    "test": "pnpm -r test"
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
     "typescript": "^5.8.2"

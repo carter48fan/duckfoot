@@ -7,7 +7,7 @@ import {
   normalizeAudioBuffer,
   applyFade,
   encodeWav
-} from '@opencut/media';
+} from '@duckfoot/media';
 import {
   Play,
   Pause,

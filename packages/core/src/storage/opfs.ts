@@ -5,7 +5,7 @@ export class OpfsStorageDriver implements StorageDriver {
 
   private async getRoot(): Promise<FileSystemDirectoryHandle> {
     if (!this.rootPromise) {
-      if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
+      if (typeof navigator !== 'undefined' && navigator.storage && 'getDirectory' in navigator.storage) {
         this.rootPromise = navigator.storage.getDirectory();
       } else {
         throw new Error('OPFS is not supported in this environment');
