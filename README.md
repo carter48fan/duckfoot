@@ -345,7 +345,7 @@ DESIGN.md invariant 8.
 | **Decode** | 4-colour CFA (CYGM / X-Trans) | `@stub` | Only 2×2 RGB patterns |
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
-| **Engine** | demosaic | Working | 3×3 neighbourhood, general over any 2×2 CFA |
+| **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |
 | **Params** | white balance, exposure | Working | |
 | **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT |
 | **Params** | filmic, colour balance | Working | |
@@ -376,20 +376,28 @@ Fit-to-window preview is not implemented and should cut the per-frame cost furth
 time varies with how much of the chain is enabled; a bare stack is ~6 ms and everything on
 is ~19 ms, both on integrated graphics.
 
-The bench also verifies correctness, not just speed: export matches the preview byte for
-byte, the full frame has real contrast, and a synthetically clipped highlight must come out
-neutral. Each of those assertions exists because a bug got past a weaker one.
+The bench also verifies correctness, not just speed. Each assertion exists because a bug
+got past a weaker one:
+
+| Check | Catches |
+|---|---|
+| export equals preview, byte for byte | a second render path drifting (invariant 2) |
+| full-frame contrast (stddev > 8) | a module crushing the tonal range — this is how the broken filmic hid |
+| clipped highlight stays neutral | white balance gains colouring blown speculars |
+| neutral stripes gain no colour | the demosaic inventing chroma on fine detail |
+
+The last two use synthetic ground truth rather than a photograph, and both were verified to
+**fail** when the fix they guard is removed — a test that only passes proves nothing.
 
 ### Known gaps and caveats
 
 - **Pixel 8 Pro DNG reports white balance `[1.0, 1.0, 1.0]`.** Almost certainly rawloader
   not reading that file's as-shot neutral rather than a genuinely neutral shot. The Sony
   reads correctly at `[2.03, 1.00, 1.80]`. Worth re-checking against `rawler`.
-- **Demosaic is a 3×3 neighbourhood average.** Correct for every 2×2 Bayer layout, but
-  softer than RCD or AHD. It produces visible **false colour on fine periodic detail** —
-  wire shelving, guitar strings, fabric — as magenta/green speckle. This is the largest
-  remaining image-quality defect and the reason a better kernel is the next engine job. It
-  is a drop-in replacement point; nothing downstream depends on it.
+- **Demosaic is Hamilton-Adams**, not RCD or AHD. It resolves fine detail without the
+  purple edge fringing the old box filter produced, and scores zero false colour on a
+  ground-truth neutral test pattern. RCD would do better on diagonal and near-Nyquist
+  detail; this is a drop-in replacement point and nothing downstream depends on it.
 - **Highlight reconstruction recovers colour, not detail.** A blown specular is rendered
   neutral rather than magenta, but texture lost at capture stays lost.
 - **No colour management beyond sRGB.** Output is sRGB; display profiles are ignored.

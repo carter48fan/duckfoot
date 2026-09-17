@@ -25,6 +25,10 @@ pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// that makes highlight recovery possible at all.
 const SENSOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// The intermediate green plane. Half float is ample — it only has to carry one channel
+/// of a signal that is about to be added back to a colour difference.
+const GREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DemosaicUniforms {
@@ -76,8 +80,10 @@ impl LoadedImage {
 }
 
 pub struct Engine {
-    demosaic_pipeline: wgpu::RenderPipeline,
-    demosaic_bgl: wgpu::BindGroupLayout,
+    green_pipeline: wgpu::RenderPipeline,
+    green_bgl: wgpu::BindGroupLayout,
+    rb_pipeline: wgpu::RenderPipeline,
+    rb_bgl: wgpu::BindGroupLayout,
     adjust_pipeline: wgpu::RenderPipeline,
     adjust_bgl: wgpu::BindGroupLayout,
     adjust_buffer: wgpu::Buffer,
@@ -89,29 +95,50 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(device: &wgpu::Device) -> Self {
-        let demosaic_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("demosaic"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic.wgsl").into()),
+        let green_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("demosaic green"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_green.wgsl").into()),
+        });
+        let rb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("demosaic rb"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_rb.wgsl").into()),
         });
         let adjust_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("adjust"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/adjust.wgsl").into()),
         });
 
-        let demosaic_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("demosaic bgl"),
+        let mosaic_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+
+        let green_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("demosaic green bgl"),
+            entries: &[mosaic_entry, uniform_entry(1)],
+        });
+
+        let rb_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("demosaic rb bgl"),
             entries: &[
+                mosaic_entry,
+                uniform_entry(1),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Uint,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
                 },
-                uniform_entry(1),
             ],
         });
 
@@ -144,13 +171,15 @@ impl Engine {
             ],
         });
 
-        let demosaic_pipeline = fullscreen_pipeline(
+        let green_pipeline = fullscreen_pipeline(
             device,
-            "demosaic",
-            &demosaic_shader,
-            &demosaic_bgl,
-            SENSOR_FORMAT,
+            "demosaic green",
+            &green_shader,
+            &green_bgl,
+            GREEN_FORMAT,
         );
+        let rb_pipeline =
+            fullscreen_pipeline(device, "demosaic rb", &rb_shader, &rb_bgl, SENSOR_FORMAT);
         let adjust_pipeline =
             fullscreen_pipeline(device, "adjust", &adjust_shader, &adjust_bgl, OUTPUT_FORMAT);
 
@@ -178,8 +207,10 @@ impl Engine {
         let lut_view = lut_texture.create_view(&Default::default());
 
         Self {
-            demosaic_pipeline,
-            demosaic_bgl,
+            green_pipeline,
+            green_bgl,
+            rb_pipeline,
+            rb_bgl,
             adjust_pipeline,
             adjust_bgl,
             adjust_buffer,
@@ -263,6 +294,18 @@ impl Engine {
         });
         let sensor_view = sensor.create_view(&Default::default());
 
+        let green = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("green plane"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: GREEN_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let green_view = green.create_view(&Default::default());
+
         let demosaic_uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("demosaic uniforms"),
             contents: bytemuck::bytes_of(&DemosaicUniforms {
@@ -275,9 +318,9 @@ impl Engine {
         });
 
         let mosaic_view = mosaic.create_view(&Default::default());
-        let demosaic_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("demosaic bind"),
-            layout: &self.demosaic_bgl,
+        let green_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("demosaic green bind"),
+            layout: &self.green_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -289,15 +332,41 @@ impl Engine {
                 },
             ],
         });
+        let rb_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("demosaic rb bind"),
+            layout: &self.rb_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&mosaic_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: demosaic_uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&green_view),
+                },
+            ],
+        });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("demosaic encoder"),
         });
+        // Green first and alone: red and blue are reconstructed relative to it.
         draw_fullscreen(
             &mut encoder,
-            "demosaic pass",
-            &self.demosaic_pipeline,
-            &demosaic_bind,
+            "demosaic green pass",
+            &self.green_pipeline,
+            &green_bind,
+            &green_view,
+        );
+        draw_fullscreen(
+            &mut encoder,
+            "demosaic rb pass",
+            &self.rb_pipeline,
+            &rb_bind,
             &sensor_view,
         );
         queue.submit([encoder.finish()]);
@@ -346,7 +415,8 @@ impl Engine {
             output_texture,
             adjust_bind,
         });
-        // The mosaic and its bind group drop here. Only linear RGB survives.
+        // The mosaic, the green plane and their bind groups drop here. Only linear RGB
+        // survives, and it is immutable from this point (invariant 5).
         Ok(())
     }
 
