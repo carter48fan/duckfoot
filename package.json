@@ -6,6 +6,8 @@
     "dev": "pnpm --filter @duckfoot/web dev",
     "build": "pnpm --filter @duckfoot/web build",
     "preview": "pnpm --filter @duckfoot/web preview",
+    "desktop:dev": "pnpm --filter @duckfoot/web tauri dev",
+    "desktop:build": "pnpm --filter @duckfoot/web tauri build",
     "typecheck": "pnpm -r typecheck",
     "stubs": "grep -rn '@stub' packages/*/src | sort",
     "lint:vocab": "! grep -rniE '\\btracks?\\b' packages/tool-audio/src packages/ui/src"
