@@ -200,7 +200,10 @@ impl PhotoApp {
                     ui.separator();
                     if ui.button("Open RAW…").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Camera RAW", photo_engine::RAW_EXTENSIONS)
+                            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+                            // A fallback the filter cannot lock the user out of: the
+                            // extension list will never cover every camera.
+                            .add_filter("All files", &["*"])
                             .pick_file()
                         {
                             self.open_path(gpu, path);

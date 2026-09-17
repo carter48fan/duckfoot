@@ -457,6 +457,12 @@ Checked items are done **and verified**, not merely written.
 `xdg-desktop-portal-gtk` (or `-cosmic` / `-kde`) and relog. Passing the file as a CLI
 argument or dragging it onto the window bypasses the dialog entirely.
 
+**The picker greys out files that are obviously RAW** — the filter list does not cover that
+extension. XDG portal globs are case-sensitive, so the filter lists every extension in both
+cases; if your camera writes something not in `RAW_EXTENSIONS`, switch the dialog to
+**All files**, or pass the path on the command line. Add the extension to
+`crates/photo-engine/src/lib.rs` if it decodes.
+
 **A file fails to open** — the status bar gives the filename and the reason. `@stub`
 reasons (non-mosaic, float-encoded, 4-colour CFA) are unimplemented, not broken. Run
 `--example probe` on the file for detail.

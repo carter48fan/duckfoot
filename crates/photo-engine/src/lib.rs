@@ -22,6 +22,19 @@ pub const RAW_EXTENSIONS: &[&str] = &[
     "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "dng", "orf", "rw2", "raf", "pef", "raw",
 ];
 
+/// Extensions for a file-dialog filter, in both cases.
+///
+/// XDG desktop portal filters are literal globs (`*.arw`) and are matched
+/// case-sensitively, so a lowercase-only list hides `DSC08450.ARW` — which is exactly what
+/// cameras actually write. Windows and macOS are case-insensitive here; listing both costs
+/// nothing there and is the difference between a usable and an empty picker on Linux.
+pub fn raw_dialog_extensions() -> Vec<String> {
+    RAW_EXTENSIONS
+        .iter()
+        .flat_map(|e| [e.to_string(), e.to_uppercase()])
+        .collect()
+}
+
 pub fn is_raw_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -33,6 +46,16 @@ pub fn is_raw_path(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn dialog_filter_covers_both_cases() {
+        let exts = raw_dialog_extensions();
+        // The regression: cameras write uppercase, portal globs are case-sensitive.
+        assert!(exts.contains(&"arw".to_string()));
+        assert!(exts.contains(&"ARW".to_string()));
+        assert!(exts.contains(&"CR3".to_string()));
+        assert_eq!(exts.len(), RAW_EXTENSIONS.len() * 2);
+    }
 
     #[test]
     fn recognises_raw_extensions_regardless_of_case() {
