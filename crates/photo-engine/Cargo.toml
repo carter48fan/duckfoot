@@ -1,0 +1,16 @@
+[package]
+name = "photo-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+rawloader.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+pollster = "1"
+env_logger = "0.11"

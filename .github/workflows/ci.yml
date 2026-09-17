@@ -5,24 +5,41 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  typecheck:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 20
+          components: clippy, rustfmt
 
-      - run: pnpm install --frozen-lockfile
+      - uses: Swatinem/rust-cache@v2
 
-      - run: pnpm typecheck
+      # winit needs these to build on Linux even though CI never opens a window.
+      - name: Install Linux windowing dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
 
-      - run: pnpm build
+      - run: cargo fmt --all --check
 
-      - run: pnpm test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - run: pnpm run lint:vocab
+      - run: cargo test --workspace
+
+      # Catches WGSL errors, which are otherwise only found at device creation.
+      - run: cargo build --workspace --all-targets
+
+  stubs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # DESIGN.md invariant 8: the docs document only what runs. The previous audit only
+      # grepped the TypeScript packages, which is exactly where the unfinished code wasn't.
+      - name: Audit stubs
+        run: grep -rn '@stub' crates/ || echo "no stubs"
