@@ -10,6 +10,7 @@ use wgpu::util::DeviceExt;
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::CfaImage;
 use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
+use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::params::PhotoStack;
 
 /// The adjusted image is written here, and egui samples it directly.
@@ -28,6 +29,17 @@ const SENSOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The intermediate green plane. Half float is ample — it only has to carry one channel
 /// of a signal that is about to be added back to a colour difference.
 const GREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HistogramParams {
+    size: [u32; 4],
+    stride: [u32; 4],
+}
+
+/// Sample every Nth pixel on both axes. 256 bins are saturated long before 24M samples,
+/// and every sample is an atomic increment into one of 256 addresses.
+const HISTOGRAM_STRIDE: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -91,6 +103,19 @@ pub struct Engine {
     lut_view: wgpu::TextureView,
     cached_curve: Vec<CurveNode>,
     image: Option<LoadedImage>,
+
+    hist_pipeline: wgpu::ComputePipeline,
+    hist_bgl: wgpu::BindGroupLayout,
+    hist_bins: wgpu::Buffer,
+    hist_staging: wgpu::Buffer,
+    hist_params: wgpu::Buffer,
+    hist_state: ReadbackState,
+    histogram: Histogram,
+    /// Bumped whenever the image changes. A readback issued before the change completes
+    /// after it, and without this its stale bins would be accepted as the new image's —
+    /// opening a photo would show the previous one's scopes.
+    hist_epoch: u64,
+    hist_inflight_epoch: u64,
 }
 
 impl Engine {
@@ -206,7 +231,89 @@ impl Engine {
         });
         let lut_view = lut_texture.create_view(&Default::default());
 
+        let hist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("histogram"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/histogram.wgsl").into()),
+        });
+        let hist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("histogram bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let hist_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("histogram"),
+            bind_group_layouts: &[Some(&hist_bgl)],
+            immediate_size: 0,
+        });
+        let hist_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("histogram"),
+            layout: Some(&hist_layout),
+            module: &hist_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let hist_bins = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("histogram bins"),
+            size: BUFFER_BYTES,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let hist_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("histogram staging"),
+            size: BUFFER_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let hist_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("histogram params"),
+            size: std::mem::size_of::<HistogramParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
+            hist_pipeline,
+            hist_bgl,
+            hist_bins,
+            hist_staging,
+            hist_params,
+            hist_state: ReadbackState::new(),
+            histogram: Histogram::default(),
+            hist_epoch: 0,
+            hist_inflight_epoch: 0,
             green_pipeline,
             green_bgl,
             rb_pipeline,
@@ -227,6 +334,8 @@ impl Engine {
 
     pub fn unload(&mut self) {
         self.image = None;
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
     }
 
     /// Upload, demosaic, and keep only the linear RGB result.
@@ -404,6 +513,10 @@ impl Engine {
             ],
         });
 
+        // Any histogram in flight describes the previous image.
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
+
         self.image = Some(LoadedImage {
             width: cfa.width,
             height: cfa.height,
@@ -560,7 +673,98 @@ impl Engine {
             &image.adjust_bind,
             &image.output_view,
         );
+
+        // Only queue a new histogram when the previous one has been collected. Otherwise a
+        // fast drag would pile up map requests against a buffer that is already mapped.
+        let measuring = self.hist_state.is_idle();
+        if measuring {
+            let (w, h) = (image.width, image.height);
+            queue.write_buffer(
+                &self.hist_params,
+                0,
+                bytemuck::bytes_of(&HistogramParams {
+                    size: [w, h, 0, 0],
+                    stride: [HISTOGRAM_STRIDE, 0, 0, 0],
+                }),
+            );
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("histogram bind"),
+                layout: &self.hist_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&image.output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.hist_bins.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.hist_params.as_entire_binding(),
+                    },
+                ],
+            });
+
+            encoder.clear_buffer(&self.hist_bins, 0, None);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.hist_pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                let groups_x = w.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
+                let groups_y = h.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);
+        }
+
         queue.submit([encoder.finish()]);
+
+        if measuring {
+            self.hist_inflight_epoch = self.hist_epoch;
+            self.hist_state.set_pending();
+            let state = self.hist_state.clone();
+            self.hist_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    // A failed map leaves the previous histogram on screen, which is a
+                    // better outcome than a panic in a scope widget.
+                    if result.is_ok() {
+                        state.set_ready();
+                    } else {
+                        state.set_idle();
+                    }
+                });
+        }
+    }
+
+    /// The most recent histogram. Never blocks: if the GPU has not finished, the previous
+    /// one is returned and the plot is one interaction stale, which is invisible.
+    pub fn histogram(&self) -> &Histogram {
+        &self.histogram
+    }
+
+    /// Collect a finished histogram readback. Cheap, and safe to call every frame.
+    pub fn poll_histogram(&mut self, device: &wgpu::Device) {
+        // Drives wgpu's map callbacks; without this the readback never completes.
+        let _ = device.poll(wgpu::PollType::Poll);
+        if !self.hist_state.is_ready() {
+            return;
+        }
+        if self.hist_inflight_epoch == self.hist_epoch {
+            let slice = self.hist_staging.slice(..);
+            if let Ok(view) = slice.get_mapped_range() {
+                let raw: &[u32] = bytemuck::cast_slice(&view);
+                self.histogram = Histogram::from_bins(raw);
+            }
+        }
+        // Whether it was accepted or discarded, the buffer must be released before the
+        // next dispatch can reuse it.
+        self.hist_staging.unmap();
+        self.hist_state.set_idle();
     }
 }
 
