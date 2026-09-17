@@ -22,6 +22,28 @@ pub struct Gpu<'a> {
     pub renderer: &'a RwLock<egui_wgpu::Renderer>,
 }
 
+/// Zoom and pan over the image.
+///
+/// `zoom` is relative to fit-to-window, so 1.0 always means "the whole frame is visible"
+/// no matter how the window is resized. `pan` is in **image pixels**, not screen pixels,
+/// for the same reason: resizing the window must not slide the image around.
+struct View {
+    zoom: f32,
+    pan: egui::Vec2,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+        }
+    }
+}
+
+/// Above this the image is bigger than the window and panning becomes meaningful.
+const MAX_ZOOM_SCALE: f32 = 16.0;
+
 /// Where an export has got to.
 ///
 /// The GPU readback is fast enough to do inline, but encoding 24 MP of PNG is seconds of
@@ -96,6 +118,9 @@ pub struct PhotoApp {
     decode_ms: f32,
     render_ms: f32,
     export: Export,
+    view: View,
+    /// Size the image panel got last frame, so "100%" can be resolved outside of it.
+    last_panel: egui::Vec2,
 }
 
 impl PhotoApp {
@@ -111,6 +136,8 @@ impl PhotoApp {
             decode_ms: 0.0,
             render_ms: 0.0,
             export: Export::Idle,
+            view: View::default(),
+            last_panel: egui::Vec2::ZERO,
         }
     }
 
@@ -202,6 +229,7 @@ impl PhotoApp {
                 self.loaded_path = Some(path);
                 self.stack = PhotoStack::default();
                 self.history = History::new();
+                self.view = View::default();
                 self.needs_render = true;
             }
             Err(e) => {
@@ -267,6 +295,26 @@ impl PhotoApp {
         }
         if redo && self.history.redo(&mut self.stack) {
             self.needs_render = true;
+        }
+
+        let (fit, actual) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Num0),
+                i.key_pressed(egui::Key::Num1),
+            )
+        });
+        if fit {
+            self.view = View::default();
+        }
+        if actual {
+            // 1:1 is expressed relative to fit, which depends on the panel size, so it is
+            // resolved against the screen rect the workspace actually got last frame.
+            if let Some(percent) = self.zoom_percent(self.last_panel) {
+                if percent > 0.0 {
+                    self.view.zoom *= 100.0 / percent;
+                    self.view.zoom = self.view.zoom.max(1.0);
+                }
+            }
         }
     }
 
@@ -350,6 +398,11 @@ impl PhotoApp {
                             ui.separator();
                             ui.label(theme::dim("adjust submit"));
                             ui.label(theme::num(format!("{:.2} ms", self.render_ms)));
+                            if let Some(percent) = self.zoom_percent(self.last_panel) {
+                                ui.separator();
+                                ui.label(theme::dim("zoom"));
+                                ui.label(theme::num(format!("{percent:.0}%")));
+                            }
 
                             match &self.export {
                                 Export::Idle => {}
@@ -387,27 +440,82 @@ impl PhotoApp {
     fn workspace(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(bare_frame(theme::BG_950))
-            .show(ui, |ui| match (self.texture_id, self.engine.image()) {
-                (Some(id), Some(image)) => {
-                    let available = ui.available_size();
-                    let aspect = image.width as f32 / image.height as f32;
-                    let mut size = egui::vec2(available.x, available.x / aspect);
-                    if size.y > available.y {
-                        size = egui::vec2(available.y * aspect, available.y);
-                    }
-                    ui.centered_and_justified(|ui| {
-                        ui.add(
-                            egui::Image::new(egui::load::SizedTexture::new(id, size))
-                                .fit_to_exact_size(size),
-                        );
-                    });
-                }
-                _ => {
+            .show(ui, |ui| {
+                let (Some(id), Some(image)) = (self.texture_id, self.engine.image()) else {
                     ui.centered_and_justified(|ui| {
                         ui.label(theme::dim("Open a camera RAW file"));
                     });
+                    return;
+                };
+
+                let img = egui::vec2(image.width as f32, image.height as f32);
+                let (rect, response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                self.last_panel = rect.size();
+                if rect.width() < 1.0 || rect.height() < 1.0 {
+                    return;
+                }
+
+                // Scale at which the whole frame fits. Everything is expressed relative to
+                // this so that resizing the window never changes what you are looking at.
+                let fit = (rect.width() / img.x).min(rect.height() / img.y);
+                let max_zoom = (MAX_ZOOM_SCALE / fit).max(1.0);
+
+                if response.dragged() {
+                    let scale = fit * self.view.zoom;
+                    self.view.pan -= response.drag_delta() / scale;
+                }
+
+                if let Some(pointer) = response.hover_pos() {
+                    let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        let before = fit * self.view.zoom;
+                        let centre = rect.center() - self.view.pan * before;
+                        // The image point under the cursor, in image pixels from centre.
+                        let anchor = (pointer - centre) / before;
+
+                        self.view.zoom =
+                            (self.view.zoom * (scroll * 0.004).exp()).clamp(1.0, max_zoom);
+
+                        // Keep that point under the cursor rather than zooming to centre.
+                        let after = fit * self.view.zoom;
+                        self.view.pan = (rect.center() - pointer) / after + anchor;
+                    }
+                }
+
+                let scale = fit * self.view.zoom;
+                // Never let the image be dragged entirely out of view.
+                let limit = img * 0.5;
+                self.view.pan = self.view.pan.clamp(-limit, limit);
+
+                let dest = egui::Rect::from_center_size(
+                    rect.center() - self.view.pan * scale,
+                    img * scale,
+                );
+                ui.painter().with_clip_rect(rect).image(
+                    id,
+                    dest,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                if response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if self.view.zoom > 1.0 && response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
             });
+    }
+
+    /// Display scale as a percentage of 1:1, for the status bar.
+    fn zoom_percent(&self, panel: egui::Vec2) -> Option<f32> {
+        let image = self.engine.image()?;
+        let img = egui::vec2(image.width as f32, image.height as f32);
+        if panel.x < 1.0 || panel.y < 1.0 {
+            return None;
+        }
+        let fit = (panel.x / img.x).min(panel.y / img.y);
+        Some(fit * self.view.zoom * 100.0)
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
