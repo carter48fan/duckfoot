@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@duckfoot/core": "workspace:*",
@@ -23,6 +24,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

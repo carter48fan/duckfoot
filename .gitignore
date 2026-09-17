@@ -3,3 +3,5 @@ dist/
 target/
 .env
 .env.*
+src-tauri/gen/
+apps/web/src-tauri/gen/
