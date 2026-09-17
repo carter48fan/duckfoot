@@ -10,6 +10,7 @@ bytemuck.workspace = true
 rawloader.workspace = true
 anyhow.workspace = true
 log.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 pollster = "1"

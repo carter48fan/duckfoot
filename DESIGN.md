@@ -150,6 +150,25 @@ is not optional.
 White balance is applied as camera-neutral channel multipliers from `wb_coeffs`, **before**
 the matrix. A kelvin/tint UI control modulates those multipliers; it does not replace them.
 
+## Highlight reconstruction is not optional either
+
+A photosite saturates at a fixed level, so a blown specular reads as the white level in all
+three channels no matter what colour it actually was. White balance then multiplies those
+equal readings by unequal gains — `[2.03, 1.00, 1.80]` on a Sony A7 III — and the colour
+matrix subtracts the inflated red and blue from green. Every blown highlight comes out
+magenta.
+
+For a neutral subject **green saturates first**, because its balance gain is 1.0 while red
+and blue are above it. So the damaging case is *partial* clipping, not total: a fully
+clipped pixel clamps to white anyway, which is why a test built on one proves nothing.
+
+A saturated photosite carries no colour information, so the only defensible colour for it is
+neutral. The shader collapses toward the minimum balanced channel as the sensor approaches
+saturation, which is self-normalising — an unclipped neutral pixel already has three equal
+channels, so it is a no-op everywhere the sensor had range left.
+
+This recovers **colour, not detail**. Texture inside a blown highlight is gone at capture.
+
 ## Decoding
 
 `rawloader` 0.37, behind a `RawDecoder` trait.

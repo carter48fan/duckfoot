@@ -91,6 +91,36 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+// Where a photosite stops carrying colour information. Demosaicing averages neighbours,
+// so a clipped site lands slightly under 1.0; the ramp starts early enough to catch that
+// without desaturating legitimately bright colour.
+const CLIP_LO: f32 = 0.93;
+const CLIP_HI: f32 = 1.0;
+
+// Highlight reconstruction.
+//
+// A photosite saturates at 1.0 after black/white normalisation, so a blown specular reads
+// (1,1,1) there no matter what colour it actually was. White balance then multiplies those
+// three equal values by three unequal gains — [2.03, 1.00, 1.80] on a Sony A7 III — and a
+// neutral highlight comes out magenta. That is not a white balance error; it is a channel
+// being asked to report a value it never measured.
+//
+// A saturated photosite carries no colour, so the only defensible colour is neutral.
+// Collapsing toward the minimum balanced channel does that, and it is self-normalising: an
+// unclipped neutral pixel already has three equal channels, so this is a no-op everywhere
+// except where the sensor actually ran out of range.
+//
+// This reconstructs colour, not detail. Texture inside a blown highlight is gone at capture
+// and no amount of arithmetic here brings it back.
+fn reconstruct_highlights(balanced: vec3<f32>, sensor_peak: f32) -> vec3<f32> {
+    let t = smoothstep(CLIP_LO, CLIP_HI, sensor_peak);
+    if (t <= 0.0) {
+        return balanced;
+    }
+    let neutral = vec3<f32>(min(balanced.r, min(balanced.g, balanced.b)));
+    return mix(balanced, neutral, t);
+}
+
 fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
     var o = v + off;
     o = o * (1.0 + gn) + lift * (1.0 - o);
@@ -104,10 +134,17 @@ fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var c = textureLoad(sensor, vec2<i32>(i32(pos.x), i32(pos.y)), 0).rgb;
 
+    // Captured before the gains are applied: saturation is a property of the sensor, and
+    // after white balance there is no longer any way to tell a clipped channel from a
+    // merely bright one.
+    let sensor_peak = max(c.r, max(c.g, c.b));
+
     // White balance is applied in camera space, BEFORE the primaries conversion.
     if (enabled(FLAG_WB)) {
         c = c * u.wb.rgb;
     }
+
+    c = reconstruct_highlights(c, sensor_peak);
 
     // Camera-native primaries -> linear sRGB. Never optional: skipping this is what made
     // every image in the last build look like a broken white balance.

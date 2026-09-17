@@ -75,10 +75,15 @@ fn main() -> anyhow::Result<()> {
         t.elapsed().as_secs_f64() * 1000.0
     );
 
+    // Benchmark what the app actually shows by default. Enabling modules here that the
+    // UI leaves off is how a broken module hides from its own benchmark.
     let mut stack = PhotoStack::default();
-    stack.filmic.enabled = true;
-    stack.tone_curve.enabled = true;
-    stack.color_balance.enabled = true;
+    if std::env::var("BENCH_FILMIC").is_ok() {
+        stack.filmic.enabled = true;
+    }
+    if std::env::var("BENCH_CURVE").is_ok() {
+        stack.tone_curve.enabled = true;
+    }
 
     // Warm up: first submit compiles/validates and is not representative.
     engine.render(&device, &queue, &stack);
@@ -168,6 +173,144 @@ fn main() -> anyhow::Result<()> {
         r / n > 0.5 && g / n > 0.5 && b / n > 0.5,
         "at least one channel is dead"
     );
-    println!("\nOK — real pixels, all three channels live.");
+
+    // --- export the full frame and read it back off disk --------------------------------
+    let t = Instant::now();
+    let exported = engine.export(&device, &queue)?;
+    println!(
+        "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
+        t.elapsed().as_secs_f64() * 1000.0,
+        exported.width,
+        exported.height,
+        exported.megapixels(),
+        exported.rgba.len() / 1_048_576
+    );
+
+    let out = std::env::temp_dir().join("duckfoot-bench-export.png");
+    let t = Instant::now();
+    exported.write(&out)?;
+    println!(
+        "png encode+write {:.0} ms   {}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        out.display()
+    );
+
+    // Decoding it again is the only way to know the file is a real image and not a
+    // correctly-sized pile of sheared rows.
+    let reread = image::open(&out)?.to_rgba8();
+    anyhow::ensure!(
+        reread.width() == exported.width && reread.height() == exported.height,
+        "wrote {}x{} but read back {}x{}",
+        exported.width,
+        exported.height,
+        reread.width(),
+        reread.height()
+    );
+    anyhow::ensure!(
+        reread.as_raw() == &exported.rgba,
+        "PNG round trip changed the pixels"
+    );
+
+    // The exported frame must equal the preview: same shader, same uniforms, same texture.
+    let cx = (exported.width / 2 - PATCH / 2) as usize;
+    let cy = (exported.height / 2 - PATCH / 2) as usize;
+    let row = exported.width as usize * 4;
+    let mut mismatched = 0usize;
+    for y in 0..PATCH as usize {
+        for x in 0..(PATCH as usize * 4) {
+            let from_export = exported.rgba[(cy + y) * row + cx * 4 + x];
+            let from_preview = data[y * PATCH as usize * 4 + x];
+            if from_export != from_preview {
+                mismatched += 1;
+            }
+        }
+    }
+    anyhow::ensure!(
+        mismatched == 0,
+        "export and preview disagree on {mismatched} bytes — DESIGN.md invariant 2 is broken"
+    );
+    println!("export matches preview byte for byte over the sampled patch");
+
+    // A photograph has contrast. Asserting only "not black, all channels live" passed a
+    // build whose filmic module crushed every pixel into a narrow band around mid grey.
+    // Measured over the whole frame, not a patch: the centre of a frame is often a flat
+    // subject, and a broken pipeline is not.
+    //
+    //   broken filmic (latitude 200): stddev ~3
+    //   working filmic (latitude 20): stddev ~30
+    //   no filmic:                    stddev ~33
+    let luma: Vec<f64> = exported
+        .rgba
+        .chunks_exact(4)
+        .map(|c| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64)
+        .collect();
+    let mean_luma = luma.iter().sum::<f64>() / luma.len() as f64;
+    let stddev =
+        (luma.iter().map(|v| (v - mean_luma).powi(2)).sum::<f64>() / luma.len() as f64).sqrt();
+    println!("full frame luma mean {mean_luma:.1}  stddev {stddev:.1}");
+    anyhow::ensure!(
+        stddev > 8.0,
+        "full-frame stddev is {stddev:.1} — the image is nearly uniform, so a module is \
+         crushing the tonal range instead of mapping it"
+    );
+
+    // --- synthetic check: a partly clipped highlight must come out neutral --------------
+    //
+    // Independent of whatever photograph was passed in, and modelled on the real failure.
+    // A *fully* clipped pixel clamps to white with or without reconstruction, so it proves
+    // nothing. The magenta comes from PARTIAL clipping: for a neutral subject the green
+    // photosite saturates first (its balance gain is 1.0 while red and blue are 2.03 and
+    // 1.80), so green pins at the white level while red and blue still have headroom. The
+    // colour matrix then subtracts those larger red and blue values from green
+    // — the Sony green row is [-0.549, 2.418, -0.869] — and drives output green below the
+    // other two. That is the magenta.
+    let (sw, sh) = (256u32, 256u32);
+    let cfa2x2 = [0u32, 1, 1, 2]; // RGGB
+    let white = 4000u16;
+    let mut data = vec![0u16; (sw * sh) as usize];
+    for y in 0..sh {
+        for x in 0..sw {
+            let colour = cfa2x2[((y % 2) * 2 + (x % 2)) as usize];
+            // Green at saturation, red and blue well short of it.
+            data[(y * sw + x) as usize] = if colour == 1 {
+                white
+            } else {
+                (white as f32 * 0.6) as u16
+            };
+        }
+    }
+    let clipped = photo_engine::CfaImage {
+        data,
+        width: sw,
+        height: sh,
+        cfa2x2,
+        black: [0.0; 4],
+        white: [white as f32; 4],
+        wb: [2.03, 1.0, 1.80],
+        // The real Sony A7 III matrix, because the mixing is what produces the cast.
+        cam_to_srgb: [
+            [1.1939, -0.1153, -0.0786],
+            [-0.5488, 2.4177, -0.8689],
+            [0.0203, -0.2783, 1.2581],
+        ],
+        make: "synthetic".into(),
+        model: "clipped-green".into(),
+    };
+    engine.load(&device, &queue, clipped)?;
+    engine.render(&device, &queue, &PhotoStack::default());
+    wait(&device)?;
+    let blown = engine.export(&device, &queue)?;
+    // Sample away from the border so the demosaic has full neighbourhoods.
+    let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
+    let px = &blown.rgba[mid..mid + 3];
+    let spread = px.iter().max().unwrap() - px.iter().min().unwrap();
+    println!("clipped-green highlight -> RGB {px:?}  channel spread {spread}");
+    anyhow::ensure!(
+        spread <= 3,
+        "a clipped highlight came out as RGB {px:?} (spread {spread}) — blown highlights \
+         are taking on the colour of the white balance gains instead of staying neutral"
+    );
+
+    println!("\nOK — real pixels, all three channels live, export verified.");
     Ok(())
 }
