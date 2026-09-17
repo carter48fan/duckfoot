@@ -14,7 +14,8 @@
   "dependencies": {
     "@duckfoot/core": "workspace:*",
     "@duckfoot/media": "workspace:*",
-    "@duckfoot/ui": "workspace:*"
+    "@duckfoot/ui": "workspace:*",
+    "@tauri-apps/api": "^2.11.1"
   },
   "peerDependencies": {
     "react": "^19.0.0",

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetItem, RawModuleId, RawStack } from '@duckfoot/core';
 import {
   computeHistogram,
+  decodeCameraRawNative,
   decodeRasterAsScene,
   renderRawStack,
   sceneToImageData,
@@ -52,6 +53,30 @@ export function usePhotoRender(asset: AssetItem | null, stack: RawStack): PhotoR
     setLoading(true);
     setError(null);
 
+    const isRawFile = /\.(cr[23]|nef|arw|dng|raw|orf|rw2)$/i.test(asset.name || asset.url || '');
+    const isLocalPath = asset.url && !asset.url.startsWith('data:') && !asset.url.startsWith('blob:') && !asset.url.startsWith('http');
+
+    if (isRawFile && isLocalPath) {
+      decodeCameraRawNative(asset.url!)
+        .then((res) => {
+          if (tokenRef.current !== token) return;
+          setScene(res.scene);
+          setOriginal(sceneToImageData(res.scene));
+          setDims({ width: res.metadata.width, height: res.metadata.height });
+          setLoading(false);
+        })
+        .catch((err) => {
+          if (tokenRef.current !== token) return;
+          setError(`${asset.name}: ${(err as Error).message || 'could not decode RAW'}`);
+          setScene(null);
+          setOriginal(null);
+          setLoading(false);
+        });
+      return () => {
+        tokenRef.current++;
+      };
+    }
+
     const image = new Image();
     image.crossOrigin = 'anonymous';
     image.onload = () => {
@@ -61,6 +86,18 @@ export function usePhotoRender(asset: AssetItem | null, stack: RawStack): PhotoR
         setScene(decoded);
         setOriginal(sceneToImageData(decoded));
         setDims({ width: image.naturalWidth, height: image.naturalHeight });
+
+        if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+          import('@tauri-apps/api/core')
+            .then(({ invoke }) => {
+              invoke('set_photo_scene', {
+                pixels: Array.from(decoded.data),
+                width: decoded.width,
+                height: decoded.height,
+              }).catch(() => {});
+            })
+            .catch(() => {});
+        }
       } catch (cause) {
         // DESIGN.md: "Failures surface in the UI, never only in the console. A file
         // that won't decode says so, in place, with its filename."

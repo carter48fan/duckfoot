@@ -7,7 +7,7 @@ import type {
   ToneCurveChannel,
 } from '@duckfoot/core';
 import type { SceneBuffer } from './scene';
-import { likeScene, mapPixels } from './scene';
+import { likeScene } from './scene';
 
 /**
  * Module implementations, keyed by id.
@@ -23,7 +23,8 @@ import { likeScene, mapPixels } from './scene';
  */
 export type RawModuleApply<K extends RawModuleId = RawModuleId> = (
   scene: SceneBuffer,
-  params: RawModuleParamMap[K]
+  params: RawModuleParamMap[K],
+  inPlace?: boolean
 ) => SceneBuffer;
 
 // --- tone curve -------------------------------------------------------------
@@ -88,11 +89,12 @@ function buildCurveLut(nodes: CurveNode[], size = 1024): Float32Array {
 
 function sampleLut(lut: Float32Array, value: number): number {
   if (value <= 0) return lut[0];
-  if (value >= 1) return lut[lut.length - 1] + (value - 1);
-  const pos = value * (lut.length - 1);
+  const maxIdx = lut.length - 1;
+  if (value >= 1) return lut[maxIdx] + (value - 1);
+  const pos = value * maxIdx;
   const i = Math.floor(pos);
   const frac = pos - i;
-  return lut[i] + (lut[Math.min(i + 1, lut.length - 1)] - lut[i]) * frac;
+  return lut[i] + (lut[Math.min(i + 1, maxIdx)] - lut[i]) * frac;
 }
 
 function applyCurveChannel(
@@ -205,80 +207,172 @@ function cropRotate(scene: SceneBuffer, params: RawModuleParamMap['cropRotate'])
 type ApplyMap = { [K in RawModuleId]: RawModuleApply<K> };
 
 export const RAW_MODULE_APPLY: ApplyMap = {
-  rawLevels: (scene, p) => {
-    // Normalise sensor counts to 0..1. Below black is real information (noise floor),
-    // but it is not light, so it clamps.
+  rawLevels: (scene, p, inPlace = false) => {
     const range = p.white - p.black;
     if (range <= 0) return scene;
+    const out = inPlace ? scene : likeScene(scene);
+    const src = scene.data;
+    const dst = out.data;
     const scale = 1 / range;
     const black = p.black / 65535;
     const norm = 65535 * scale;
-    return mapPixels(scene, (r, g, b) => [
-      Math.max(0, (r - black) * norm),
-      Math.max(0, (g - black) * norm),
-      Math.max(0, (b - black) * norm),
-    ]);
+    const len = src.length;
+    for (let i = 0; i < len; i += 3) {
+      const r = (src[i] - black) * norm;
+      const g = (src[i + 1] - black) * norm;
+      const b = (src[i + 2] - black) * norm;
+      dst[i] = r < 0 ? 0 : r;
+      dst[i + 1] = g < 0 ? 0 : g;
+      dst[i + 2] = b < 0 ? 0 : b;
+    }
+    return out;
   },
 
-  whiteBalance: (scene, p) => {
-    // Van Kries adaptation approximated from correlated colour temperature, with
-    // tint pulling the green/magenta axis. Good enough to be useful; a real camera
-    // profile would use the as-shot neutral from the file.
+  whiteBalance: (scene, p, inPlace = false) => {
     const t = p.temperatureK / 5500;
     const rGain = Math.pow(t, 0.55);
     const bGain = Math.pow(1 / t, 0.55);
     const gGain = 1 - p.tint / 400;
-    return mapPixels(scene, (r, g, b) => [r * rGain, g * gGain, b * bGain]);
+    const out = inPlace ? scene : likeScene(scene);
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+    for (let i = 0; i < len; i += 3) {
+      dst[i] = src[i] * rGain;
+      dst[i + 1] = src[i + 1] * gGain;
+      dst[i + 2] = src[i + 2] * bGain;
+    }
+    return out;
   },
 
   demosaic: () => notImplemented('demosaic', 'needs CFA input, which decodeRaw does not yet produce'),
 
-  exposure: (scene, p) => {
+  exposure: (scene, p, inPlace = false) => {
     const gain = Math.pow(2, p.ev);
     const black = p.blackLevel;
-    return mapPixels(scene, (r, g, b) => [
-      (r - black) * gain,
-      (g - black) * gain,
-      (b - black) * gain,
-    ]);
+    const out = inPlace ? scene : likeScene(scene);
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+    for (let i = 0; i < len; i += 3) {
+      dst[i] = (src[i] - black) * gain;
+      dst[i + 1] = (src[i + 1] - black) * gain;
+      dst[i + 2] = (src[i + 2] - black) * gain;
+    }
+    return out;
   },
 
-  toneCurve: (scene, p) => {
+  toneCurve: (scene, p, inPlace = false) => {
     const lut = buildCurveLut(p.nodes);
-    return mapPixels(scene, (r, g, b) => applyCurveChannel(p.channel, lut, r, g, b));
+    const out = inPlace ? scene : likeScene(scene);
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+    const channel = p.channel;
+
+    if (channel === 'r') {
+      for (let i = 0; i < len; i += 3) {
+        dst[i] = sampleLut(lut, src[i]);
+        if (!inPlace) {
+          dst[i + 1] = src[i + 1];
+          dst[i + 2] = src[i + 2];
+        }
+      }
+    } else if (channel === 'g') {
+      for (let i = 0; i < len; i += 3) {
+        if (!inPlace) dst[i] = src[i];
+        dst[i + 1] = sampleLut(lut, src[i + 1]);
+        if (!inPlace) dst[i + 2] = src[i + 2];
+      }
+    } else if (channel === 'b') {
+      for (let i = 0; i < len; i += 3) {
+        if (!inPlace) {
+          dst[i] = src[i];
+          dst[i + 1] = src[i + 1];
+        }
+        dst[i + 2] = sampleLut(lut, src[i + 2]);
+      }
+    } else if (channel === 'l') {
+      for (let i = 0; i < len; i += 3) {
+        const r = src[i];
+        const g = src[i + 1];
+        const b = src[i + 2];
+        const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (luma <= 0) {
+          if (!inPlace) {
+            dst[i] = r;
+            dst[i + 1] = g;
+            dst[i + 2] = b;
+          }
+        } else {
+          const scale = sampleLut(lut, luma) / luma;
+          dst[i] = r * scale;
+          dst[i + 1] = g * scale;
+          dst[i + 2] = b * scale;
+        }
+      }
+    } else {
+      // 'rgb' or default
+      for (let i = 0; i < len; i += 3) {
+        dst[i] = sampleLut(lut, src[i]);
+        dst[i + 1] = sampleLut(lut, src[i + 1]);
+        dst[i + 2] = sampleLut(lut, src[i + 2]);
+      }
+    }
+    return out;
   },
 
-  filmicRgb: (scene, p) => {
-    // A filmic sigmoid in log space: maps scene-referred values with headroom into a
-    // display range without the hard shoulder clip that makes highlights look cut off.
-    // This is the shape of filmic, not darktable's full implementation.
+  filmicRgb: (scene, p, inPlace = false) => {
     const white = Math.pow(2, p.whiteRelEv);
     const black = Math.pow(2, p.blackRelEv);
     const latitude = Math.max(0.01, p.latitude / 100);
     const contrast = p.contrast;
     const logRange = Math.log2(white / black);
-    const curve = (v: number): number => {
-      if (v <= 0) return 0;
-      const norm = (Math.log2(v / black) / logRange - 0.5) * contrast;
-      const s = 1 / (1 + Math.exp(-norm / latitude));
-      return Math.max(0, Math.min(1, s));
-    };
-    return mapPixels(scene, (r, g, b) => [curve(r), curve(g), curve(b)], 'display');
+    const invLatitude = 1 / latitude;
+    const invLogRange = 1 / logRange;
+
+    const out: SceneBuffer = inPlace
+      ? { ...scene, colorspace: 'display' }
+      : likeScene(scene, 'display');
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+
+    for (let i = 0; i < len; i += 3) {
+      for (let c = 0; c < 3; c++) {
+        const v = src[i + c];
+        if (v <= 0) {
+          dst[i + c] = 0;
+        } else {
+          const norm = (Math.log2(v / black) * invLogRange - 0.5) * contrast;
+          const s = 1 / (1 + Math.exp(-norm * invLatitude));
+          dst[i + c] = s < 0 ? 0 : s > 1 ? 1 : s;
+        }
+      }
+    }
+    return out;
   },
 
   toneEqualizer: () =>
     notImplemented('toneEqualizer', 'needs a guided-filter luminance mask'),
 
-  colorBalanceRgb: (scene, p) => {
+  colorBalanceRgb: (scene, p, inPlace = false) => {
     const [lr, lg, lb] = four(p.lift);
     const [gr, gg, gb] = four(p.gamma);
     const [ar, ag, ab] = four(p.gain);
     const [or_, og, ob] = four(p.offset);
-    return mapPixels(scene, (r, g, b) => [
-      balanceChannel(r, lr, gr, ar, or_),
-      balanceChannel(g, lg, gg, ag, og),
-      balanceChannel(b, lb, gb, ab, ob),
-    ]);
+
+    const out = inPlace ? scene : likeScene(scene);
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+
+    for (let i = 0; i < len; i += 3) {
+      dst[i] = balanceChannel(src[i], lr, gr, ar, or_);
+      dst[i + 1] = balanceChannel(src[i + 1], lg, gg, ag, og);
+      dst[i + 2] = balanceChannel(src[i + 2], lb, gb, ab, ob);
+    }
+    return out;
   },
 
   localContrast: () => notImplemented('localContrast', 'needs a guided or bilateral filter'),
@@ -292,24 +386,28 @@ export const RAW_MODULE_APPLY: ApplyMap = {
 
   cropRotate,
 
-  outputProfile: (scene, p) => {
-    // Primaries conversion is a stub; what is real here is the clamp to the output
-    // range, which is what makes the histogram and the clipping readout meaningful.
+  outputProfile: (scene, p, inPlace = false) => {
     void p;
-    return mapPixels(
-      scene,
-      (r, g, b) => [
-        Math.max(0, Math.min(1, r)),
-        Math.max(0, Math.min(1, g)),
-        Math.max(0, Math.min(1, b)),
-      ],
-      'display'
-    );
+    const out: SceneBuffer = inPlace
+      ? { ...scene, colorspace: 'display' }
+      : likeScene(scene, 'display');
+    const src = scene.data;
+    const dst = out.data;
+    const len = src.length;
+    for (let i = 0; i < len; i += 3) {
+      const r = src[i];
+      const g = src[i + 1];
+      const b = src[i + 2];
+      dst[i] = r < 0 ? 0 : r > 1 ? 1 : r;
+      dst[i + 1] = g < 0 ? 0 : g > 1 ? 1 : g;
+      dst[i + 2] = b < 0 ? 0 : b > 1 ? 1 : b;
+    }
+    return out;
   },
 };
 
 /** Exposed for the tone-curve editor, which draws the same LUT it renders through. */
-export { buildCurveLut, sampleLut };
+export { buildCurveLut, sampleLut, applyCurveChannel };
 
 /** Unused re-export guard: keeps `likeScene` reachable for module authors. */
 export { likeScene };

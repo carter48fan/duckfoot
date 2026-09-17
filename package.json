@@ -8,11 +8,13 @@
     "preview": "pnpm --filter @duckfoot/web preview",
     "desktop:dev": "pnpm --filter @duckfoot/web tauri dev",
     "desktop:build": "pnpm --filter @duckfoot/web tauri build",
+    "test": "vitest run",
     "typecheck": "pnpm -r typecheck",
     "stubs": "grep -rn '@stub' packages/*/src | sort",
     "lint:vocab": "! grep -rniE '\\btracks?\\b' packages/tool-audio/src packages/ui/src"
   },
   "devDependencies": {
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^5.0.1"
   }
 }

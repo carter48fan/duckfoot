@@ -39,7 +39,13 @@ export function renderRawStack(
   options: RenderRawOptions
 ): RenderRawResult {
   const stubbed: RawModuleId[] = [];
-  let scene = input;
+  let scene: SceneBuffer = {
+    data: new Float32Array(input.data),
+    width: input.width,
+    height: input.height,
+    colorspace: input.colorspace,
+    scale: input.scale,
+  };
 
   const enabled = RAW_MODULE_ORDER.filter((id) => stack[id].enabled);
 
@@ -55,9 +61,10 @@ export function renderRawStack(
     const instance = stack[id] as RawModuleInstance;
     const apply = RAW_MODULE_APPLY[id] as (
       s: SceneBuffer,
-      p: typeof instance.params
+      p: typeof instance.params,
+      inPlace?: boolean
     ) => SceneBuffer;
-    scene = apply(scene, instance.params);
+    scene = apply(scene, instance.params, true);
     options.onProgress?.(id, index, enabled.length);
   });
 

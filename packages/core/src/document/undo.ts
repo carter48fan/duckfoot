@@ -96,7 +96,11 @@ export function execute(state: AppState, command: Command, options: UndoOptions 
   const truncated = state.history.slice(0, state.index + 1);
 
   const shouldCoalesce =
-    key !== null && state.index > 0 && head.coalesceKey === key && now - head.at <= coalesceMs;
+    coalesceMs > 0 &&
+    key !== null &&
+    state.index > 0 &&
+    head.coalesceKey === key &&
+    now - head.at <= coalesceMs;
 
   if (shouldCoalesce) {
     // Replace the head in place: one drag, one entry. `at` advances so a continuous

@@ -91,7 +91,7 @@ Audit stubs anytime with `pnpm stubs`.
 - [x] Barrel 1 — Photo Studio (RAW processor, 14-module pipeline, scopes, before/after split)
 - [x] Barrel 2 — Audio stem stack (phase alignment, 4-node gain envelope, mixdown)
 - [ ] Barrel 3 — 3-track video timeline with MP4 export
-- [ ] Tauri desktop shell
+- [x] Tauri desktop shell
 - [ ] Offline-capable PWA build
 
 ---

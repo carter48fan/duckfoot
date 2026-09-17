@@ -14,17 +14,58 @@ export interface RawImage {
   height: number;
 }
 
+export interface CameraRawMetadata {
+  make: string;
+  model: string;
+  width: number;
+  height: number;
+  defaultBlack: number;
+  defaultWhite: number;
+  asShotKelvin?: number;
+}
+
+export interface CameraRawDecodeResult {
+  scene: SceneBuffer;
+  metadata: CameraRawMetadata;
+}
+
 /**
- * @stub Camera RAW decoding (CR3, NEF, ARW, DNG…).
- *
- * A RAW decoder is a project, not a function: container parsing, per-vendor
- * compression, colour matrices and lens metadata. Until it exists the Photo barrel
- * develops raster sources through the same pipeline via `decodeRasterAsScene`,
- * which is enough to exercise every implemented module with real numbers.
+ * Camera RAW decoding (CR3, CR2, NEF, ARW, DNG, etc.) using Duckfoot desktop's
+ * native Rust pipeline with Rayon and rawloader.
  */
+export async function decodeCameraRawNative(
+  filePath: string,
+  maxEdge = 1600
+): Promise<CameraRawDecodeResult> {
+  const internals = typeof window !== 'undefined' ? (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__ : undefined;
+  if (internals?.invoke) {
+    const res = (await internals.invoke('decode_camera_raw', {
+      filePath,
+      maxEdge,
+    })) as {
+      metadata: CameraRawMetadata;
+      width: number;
+      height: number;
+      sceneData: number[];
+    };
+
+    return {
+      scene: {
+        data: new Float32Array(res.sceneData),
+        width: res.width,
+        height: res.height,
+        colorspace: 'camera-rgb',
+        scale: 1,
+      },
+      metadata: res.metadata,
+    };
+  }
+  return notImplemented('decodeCameraRawNative', 'native camera RAW decoding requires the Duckfoot desktop application');
+}
+
 export function decodeRaw(file: Blob): Promise<RawImage> {
   void file;
-  return notImplemented('decodeRaw', 'no RAW container parser in tree');
+  return notImplemented('decodeRaw', 'no RAW container parser in browser runtime; use desktop app for native RAW');
 }
 
 /**
