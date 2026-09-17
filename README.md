@@ -150,6 +150,9 @@ You can also **drag a RAW file onto the window**.
 | | |
 |---|---|
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo |
+| Scroll wheel | zoom about the cursor |
+| Drag the image | pan |
+| `0` / `1` | fit to window / 100% (1:1) |
 | Drag a slider | live re-render; one undo step per gesture, not per frame |
 | Drag in the curve box | move the nearest node; endpoints keep their x |
 | Checkbox by a module name | enable/disable that stage of the chain |
@@ -354,6 +357,7 @@ DESIGN.md invariant 8.
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | file open, drag-and-drop | Working | XDG portal dialog |
 | **App** | export | Working | Export… button, format from the filename |
+| **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
 | **App** | histogram / scopes | Not built | |
 | **App** | crop / rotate | Not built | |
