@@ -5,6 +5,7 @@
 pub mod theme;
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use std::sync::RwLock;
@@ -19,6 +20,25 @@ pub struct Gpu<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     pub renderer: &'a RwLock<egui_wgpu::Renderer>,
+}
+
+/// Where an export has got to.
+///
+/// The GPU readback is fast enough to do inline, but encoding 24 MP of PNG is seconds of
+/// CPU work — doing that on the UI thread would freeze the window with no way to tell the
+/// user why. DESIGN.md: long operations show real progress.
+enum Export {
+    Idle,
+    Writing {
+        path: PathBuf,
+        started: Instant,
+        result: Receiver<Result<(), String>>,
+    },
+    Done {
+        path: PathBuf,
+        seconds: f32,
+    },
+    Failed(String),
 }
 
 /// Snapshot undo. The whole stack is a few hundred bytes, so there is no reason to build
@@ -75,6 +95,7 @@ pub struct PhotoApp {
     loaded_path: Option<PathBuf>,
     decode_ms: f32,
     render_ms: f32,
+    export: Export,
 }
 
 impl PhotoApp {
@@ -89,6 +110,77 @@ impl PhotoApp {
             loaded_path: None,
             decode_ms: 0.0,
             render_ms: 0.0,
+            export: Export::Idle,
+        }
+    }
+
+    /// Read the current frame back and write it, encoding off the UI thread.
+    fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
+        // Make sure what we are about to copy reflects the current stack.
+        self.engine.render(gpu.device, gpu.queue, &self.stack);
+
+        let exported = match self.engine.export(gpu.device, gpu.queue) {
+            Ok(e) => e,
+            Err(e) => {
+                self.export = Export::Failed(format!("{e:#}"));
+                return;
+            }
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let outcome = exported.write(&target).map_err(|e| format!("{e:#}"));
+            // The receiver is gone only if the app is shutting down; nothing to report to.
+            let _ = tx.send(outcome);
+        });
+
+        self.export = Export::Writing {
+            path,
+            started: Instant::now(),
+            result: rx,
+        };
+    }
+
+    /// Default filename beside the source: DSC08450.ARW -> DSC08450.png
+    fn export_suggestion(&self) -> (PathBuf, String) {
+        match &self.loaded_path {
+            Some(src) => {
+                let stem = src
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("untitled");
+                let dir = src.parent().map(PathBuf::from).unwrap_or_default();
+                (dir, format!("{stem}.png"))
+            }
+            None => (PathBuf::new(), "untitled.png".to_string()),
+        }
+    }
+
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        let Export::Writing {
+            path,
+            started,
+            result,
+        } = &self.export
+        else {
+            return;
+        };
+        match result.try_recv() {
+            Ok(Ok(())) => {
+                self.export = Export::Done {
+                    path: path.clone(),
+                    seconds: started.elapsed().as_secs_f32(),
+                };
+            }
+            Ok(Err(e)) => self.export = Export::Failed(e),
+            Err(mpsc::TryRecvError::Empty) => {
+                // Keep animating the "writing…" state rather than waiting for input.
+                ctx.request_repaint();
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.export = Export::Failed("export thread stopped unexpectedly".into());
+            }
         }
     }
 
@@ -150,6 +242,7 @@ impl PhotoApp {
 
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         self.handle_keys(ui.ctx());
+        self.poll_export(ui.ctx());
         self.sync(gpu);
 
         self.top_bar(ui, gpu);
@@ -210,6 +303,24 @@ impl PhotoApp {
                         }
                     }
 
+                    let busy = matches!(self.export, Export::Writing { .. });
+                    let ready = self.engine.image().is_some() && !busy;
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Export…"))
+                        .clicked()
+                    {
+                        let (dir, name) = self.export_suggestion();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PNG", &["png"])
+                            .add_filter("JPEG", &["jpg", "jpeg"])
+                            .set_directory(dir)
+                            .set_file_name(name)
+                            .save_file()
+                        {
+                            self.export_to(gpu, path);
+                        }
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(image) = self.engine.image() {
                             ui.label(theme::dim(format!("{} {}", image.make, image.model)));
@@ -239,6 +350,31 @@ impl PhotoApp {
                             ui.separator();
                             ui.label(theme::dim("adjust submit"));
                             ui.label(theme::num(format!("{:.2} ms", self.render_ms)));
+
+                            match &self.export {
+                                Export::Idle => {}
+                                Export::Writing { path, started, .. } => {
+                                    ui.separator();
+                                    ui.label(theme::dim("writing"));
+                                    ui.label(theme::num(format!(
+                                        "{}  {:.1}s",
+                                        file_name(path),
+                                        started.elapsed().as_secs_f32()
+                                    )));
+                                }
+                                Export::Done { path, seconds } => {
+                                    ui.separator();
+                                    ui.label(theme::dim("exported"));
+                                    ui.label(theme::num(format!(
+                                        "{}  {seconds:.1}s",
+                                        file_name(path)
+                                    )));
+                                }
+                                Export::Failed(e) => {
+                                    ui.separator();
+                                    ui.colored_label(theme::DANGER, e);
+                                }
+                            }
                         }
                         None => {
                             ui.label(theme::dim("no image — Open RAW to begin"));
@@ -380,7 +516,7 @@ impl PhotoApp {
                         ui.add(egui::Slider::new(&mut p.black_ev, -16.0..=-1.0).text("black EV"))
                     );
                     track!(
-                        ui.add(egui::Slider::new(&mut p.latitude, 10.0..=600.0).text("latitude"))
+                        ui.add(egui::Slider::new(&mut p.latitude, 5.0..=80.0).text("latitude %"))
                     );
                     track!(ui.add(egui::Slider::new(&mut p.contrast, 0.1..=3.0).text("contrast")));
                 }
@@ -520,4 +656,11 @@ fn renderer_write<'a>(gpu: &Gpu<'a>) -> std::sync::RwLockWriteGuard<'a, egui_wgp
     gpu.renderer
         .write()
         .expect("egui renderer lock poisoned by a panic in another thread")
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string()
 }

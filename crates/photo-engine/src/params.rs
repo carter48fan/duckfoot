@@ -40,6 +40,12 @@ pub struct Exposure {
 pub struct Filmic {
     pub white_ev: f32,
     pub black_ev: f32,
+    /// Width of the near-linear midtone region, as a **percentage of the log range**.
+    ///
+    /// The shader divides the normalised log position by `latitude / 100`, so this is the
+    /// sigmoid's softness: small values give a steep S-curve, large values flatten it.
+    /// Anything much above ~60 compresses the whole image toward mid grey — at 200 the
+    /// output spanned only 0.43..0.57 and every photograph came out as a flat slab.
     pub latitude: f32,
     pub contrast: f32,
 }
@@ -97,7 +103,7 @@ impl Default for PhotoStack {
                 Filmic {
                     white_ev: 3.5,
                     black_ev: -8.0,
-                    latitude: 200.0,
+                    latitude: 20.0,
                     contrast: 1.1,
                 },
             ),

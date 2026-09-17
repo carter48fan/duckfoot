@@ -349,10 +349,12 @@ DESIGN.md invariant 8.
 | **Params** | white balance, exposure | Working | |
 | **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT |
 | **Params** | filmic, colour balance | Working | |
+| **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
+| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, encoded off the UI thread |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | file open, drag-and-drop | Working | XDG portal dialog |
+| **App** | export | Working | Export… button, format from the filename |
 | **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
-| **App** | export | Not built | The PoC's last missing piece |
 | **App** | histogram / scopes | Not built | |
 | **App** | crop / rotate | Not built | |
 | **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
@@ -362,14 +364,21 @@ DESIGN.md invariant 8.
 Sony A7 III (ILCE-7M3), 24.3 MP, **Intel integrated graphics** (RPL-S, Vulkan):
 
 ```
-decode              81 ms    6048×4024
-upload + demosaic  215 ms    once per image
-slider drag       18.3 ms/frame at FULL sensor resolution
+decode              77 ms    6048×4024
+upload + demosaic  220 ms    once per image
+slider drag        6.1 ms/frame at FULL sensor resolution
+export readback    61 ms     92 MB
+png encode+write  205 ms
 ```
 
-18.3 ms is the **pessimistic** number — preview currently renders at full sensor
-resolution. Fit-to-window preview is not implemented and should cut it by roughly an order
-of magnitude. On a discrete GPU it would already be far lower.
+These are the **pessimistic** numbers — preview renders at full sensor resolution.
+Fit-to-window preview is not implemented and should cut the per-frame cost further. Frame
+time varies with how much of the chain is enabled; a bare stack is ~6 ms and everything on
+is ~19 ms, both on integrated graphics.
+
+The bench also verifies correctness, not just speed: export matches the preview byte for
+byte, the full frame has real contrast, and a synthetically clipped highlight must come out
+neutral. Each of those assertions exists because a bug got past a weaker one.
 
 ### Known gaps and caveats
 
@@ -377,8 +386,12 @@ of magnitude. On a discrete GPU it would already be far lower.
   not reading that file's as-shot neutral rather than a genuinely neutral shot. The Sony
   reads correctly at `[2.03, 1.00, 1.80]`. Worth re-checking against `rawler`.
 - **Demosaic is a 3×3 neighbourhood average.** Correct for every 2×2 Bayer layout, but
-  softer than RCD or AHD and will show zipper artefacts on fine detail. Deliberate: it is a
-  drop-in replacement point and nothing downstream depends on it.
+  softer than RCD or AHD. It produces visible **false colour on fine periodic detail** —
+  wire shelving, guitar strings, fabric — as magenta/green speckle. This is the largest
+  remaining image-quality defect and the reason a better kernel is the next engine job. It
+  is a drop-in replacement point; nothing downstream depends on it.
+- **Highlight reconstruction recovers colour, not detail.** A blown specular is rendered
+  neutral rather than magenta, but texture lost at capture stays lost.
 - **No colour management beyond sRGB.** Output is sRGB; display profiles are ignored.
 - **`Engine::render` submits its own command buffer** rather than sharing the frame's
   encoder. Costs an extra submit per frame; irrelevant at current scale, worth revisiting
@@ -469,6 +482,13 @@ reasons (non-mosaic, float-encoded, 4-colour CFA) are unimplemented, not broken.
 
 **The image looks green** — that would mean white balance isn't being applied. Check
 `--example probe` output: `wb mult` should not be `[1.0, 1.0, 1.0]` for a daylight shot.
+
+**Magenta or green speckle on fine detail** — wire mesh, strings, fabric. That is demosaic
+false colour, not a highlight or white-balance fault, and it needs a better demosaic kernel.
+Magenta on *blown speculars* specifically is a different thing and is fixed.
+
+**The image looks flat and grey with filmic on** — `latitude` is a percentage of the log
+range. Above roughly 60 it compresses everything toward mid grey. The default is 20.
 
 ---
 

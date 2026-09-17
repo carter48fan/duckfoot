@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::CfaImage;
+use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
 use crate::params::PhotoStack;
 
 /// The adjusted image is written here, and egui samples it directly.
@@ -347,6 +348,74 @@ impl Engine {
         });
         // The mosaic and its bind group drop here. Only linear RGB survives.
         Ok(())
+    }
+
+    /// Read the adjusted image back off the GPU.
+    ///
+    /// This copies the very texture the screen is showing — invariant 2 is satisfied by
+    /// there being nothing else to copy. The caller is expected to have rendered the
+    /// current stack first; `render` is cheap and idempotent, so callers just call it.
+    ///
+    /// Blocks until the GPU has finished and the buffer is mapped. At 24 MP the readback
+    /// is ~98 MB, so this belongs off the UI thread in anything interactive.
+    pub fn export(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<ExportedImage> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let (width, height) = (image.width, image.height);
+
+        let stride = padded_bytes_per_row(width);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("export readback"),
+            size: stride as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("export encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &image.output_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })?;
+
+        let rgba = {
+            let mapped = slice.get_mapped_range()?;
+            unpad_rows(&mapped, width, height)?
+        };
+        buffer.unmap();
+
+        Ok(ExportedImage {
+            width,
+            height,
+            rgba,
+        })
     }
 
     /// Re-run the adjustment chain. This is the per-frame path and the per-slider-tick
