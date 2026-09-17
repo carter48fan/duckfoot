@@ -81,7 +81,11 @@ makes the Android bootstrap a small file instead of a fork.
                                   │
               ┌───────────────────┘
               ▼
-        PASS 1  demosaic          ──►  SENSOR TEXTURE  RGBA16Float, immutable
+        PASS 1a demosaic green    ──►  GREEN PLANE     R16Float
+              │                         directional (Hamilton-Adams)
+              ▼
+        PASS 1b demosaic red/blue ──►  SENSOR TEXTURE  RGBA16Float, immutable
+              │                         colour-difference against green
               │                         linear camera-native RGB
               │
               ▼
@@ -149,6 +153,28 @@ is not optional.
 
 White balance is applied as camera-neutral channel multipliers from `wb_coeffs`, **before**
 the matrix. A kelvin/tint UI control modulates those multipliers; it does not replace them.
+
+## Demosaic: green first, then colour differences
+
+Green is reconstructed first and alone. It carries most of the luminance, it is sampled at
+twice the density of red or blue, and every other channel is derived from it — so an error
+here propagates into all three.
+
+Green is interpolated **directionally**: estimate the gradient horizontally and vertically
+and interpolate along whichever is smoother, never across an edge. The centre photosite's
+own curvature corrects the result, because at an edge all three channels turn together.
+Averaging across edges instead is what produces zipper artefacts.
+
+Red and blue are then interpolated as **colour differences** (`R - G`, `B - G`) rather than
+directly. This is the step that removes false colour. Red and blue are sampled at a quarter
+of the sensor's density, so above that frequency they alias, and the aliases land in
+different places per channel — which is exactly what magenta and green speckle is. Chroma,
+though, varies slowly in almost every real scene even where luminance does not, so the
+difference signal survives the sparse sampling. Detail comes from green; colour comes from a
+signal smooth enough to interpolate.
+
+Measured against a ground-truth neutral pattern, direct interpolation scores a mean false
+colour of 49.5/255. Colour-difference interpolation scores 0.
 
 ## Highlight reconstruction is not optional either
 

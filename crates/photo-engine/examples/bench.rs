@@ -311,6 +311,69 @@ fn main() -> anyhow::Result<()> {
          are taking on the colour of the white balance gains instead of staying neutral"
     );
 
+    // --- synthetic check: fine neutral detail must not gain colour ----------------------
+    //
+    // Ground truth, unlike any photograph. The scene is pure luminance — grey vertical
+    // stripes, zero chroma everywhere — so a neutral sensor records equal values in all
+    // three channels and a correct demosaic returns equal values. Every bit of colour in
+    // the output is therefore false colour, measured rather than eyeballed.
+    //
+    // A stripe period of 4 px is comfortably resolvable by a 2x2 Bayer grid; this is not a
+    // Nyquist trick question. The identity matrix and unit white balance keep the
+    // measurement about the demosaic and nothing else.
+    let (sw, sh) = (256u32, 256u32);
+    let cfa2x2 = [0u32, 1, 1, 2];
+    let white = 4095u16;
+    let mut data = vec![0u16; (sw * sh) as usize];
+    for y in 0..sh {
+        for x in 0..sw {
+            let bright = (x / 2) % 2 == 0;
+            data[(y * sw + x) as usize] = if bright { white } else { white / 8 };
+        }
+    }
+    let stripes = photo_engine::CfaImage {
+        data,
+        width: sw,
+        height: sh,
+        cfa2x2,
+        black: [0.0; 4],
+        white: [white as f32; 4],
+        wb: [1.0, 1.0, 1.0],
+        cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        make: "synthetic".into(),
+        model: "neutral-stripes".into(),
+    };
+    engine.load(&device, &queue, stripes)?;
+    engine.render(&device, &queue, &PhotoStack::default());
+    wait(&device)?;
+    let out = engine.export(&device, &queue)?;
+
+    // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
+    let mut worst = 0i32;
+    let mut total = 0i64;
+    let mut counted = 0i64;
+    for y in 4..(sh - 4) as usize {
+        for x in 4..(sw - 4) as usize {
+            let i = (y * sw as usize + x) * 4;
+            let (r, g, b) = (
+                out.rgba[i] as i32,
+                out.rgba[i + 1] as i32,
+                out.rgba[i + 2] as i32,
+            );
+            let err = (r - g).abs().max((b - g).abs());
+            worst = worst.max(err);
+            total += err as i64;
+            counted += 1;
+        }
+    }
+    let mean = total as f64 / counted as f64;
+    println!("neutral stripes -> false colour: mean {mean:.2}, worst {worst} (of 255)");
+    anyhow::ensure!(
+        worst <= 24 && mean <= 3.0,
+        "a purely neutral test pattern picked up colour: mean {mean:.2}, worst {worst}. \
+         The demosaic is inventing chroma on fine detail."
+    );
+
     println!("\nOK — real pixels, all three channels live, export verified.");
     Ok(())
 }
