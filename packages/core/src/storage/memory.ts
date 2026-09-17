@@ -1,6 +1,8 @@
-import type { StorageDriver } from '../types';
+import type { StorageDriver, StorageUsage } from '../types';
 
 export class MemoryStorageDriver implements StorageDriver {
+  readonly name = 'memory' as const;
+
   private storage = new Map<string, Blob>();
 
   async saveFile(key: string, data: Blob | ArrayBuffer): Promise<string> {
@@ -21,5 +23,11 @@ export class MemoryStorageDriver implements StorageDriver {
 
   async listFiles(): Promise<string[]> {
     return Array.from(this.storage.keys());
+  }
+
+  async usage(): Promise<StorageUsage> {
+    let usedBytes = 0;
+    for (const blob of this.storage.values()) usedBytes += blob.size;
+    return { usedBytes };
   }
 }

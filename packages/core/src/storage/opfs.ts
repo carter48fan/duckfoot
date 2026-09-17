@@ -1,6 +1,8 @@
-import type { StorageDriver } from '../types';
+import type { StorageDriver, StorageUsage } from '../types';
 
 export class OpfsStorageDriver implements StorageDriver {
+  readonly name = 'opfs' as const;
+
   private rootPromise: Promise<FileSystemDirectoryHandle> | null = null;
 
   private async getRoot(): Promise<FileSystemDirectoryHandle> {
@@ -45,5 +47,12 @@ export class OpfsStorageDriver implements StorageDriver {
       }
     }
     return files;
+  }
+
+  async usage(): Promise<StorageUsage | null> {
+    if (typeof navigator === 'undefined' || !navigator.storage?.estimate) return null;
+    const estimate = await navigator.storage.estimate();
+    if (typeof estimate.usage !== 'number') return null;
+    return { usedBytes: estimate.usage, quotaBytes: estimate.quota };
   }
 }

@@ -1,0 +1,197 @@
+/*
+ * Shared control styling.
+ *
+ * Every value here is a custom property emitted by @duckfoot/core's tokensToCssText().
+ * No literal hex appears in this file — if a colour is needed that is not a token,
+ * the token list is wrong and should be extended rather than worked around.
+ */
+
+/* --- focus -------------------------------------------------------------- */
+/* DESIGN.md is keyboard-first. The boards show no focus state because they are
+   static images, so this is the one deliberate visual addition. */
+.df-chip:focus-visible,
+.df-icon-button:focus-visible,
+.df-action:focus-visible,
+.df-slider__track:focus-visible {
+  outline: 1px solid var(--df-brass);
+  outline-offset: 1px;
+}
+
+/* --- panel heading ------------------------------------------------------ */
+.df-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--df-panel-header);
+}
+
+.df-panel-heading__label {
+  font-family: var(--df-font-serif);
+  font-size: 14px;
+  letter-spacing: 0.07em;
+  color: var(--df-brass-label);
+}
+
+.df-panel-heading__trailing {
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  color: var(--df-text5);
+}
+
+/* --- mono readouts ------------------------------------------------------ */
+.df-mono {
+  font-family: var(--df-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.df-mono--default { color: var(--df-text-calm); }
+.df-mono--accent  { color: var(--df-brass); }
+.df-mono--dim     { color: var(--df-text4); }
+.df-mono--in      { color: var(--df-in-point); }
+.df-mono--out     { color: var(--df-out-point); }
+
+/* --- stub --------------------------------------------------------------- */
+.df-stub {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px dashed var(--df-control);
+  color: var(--df-text5);
+}
+.df-stub__label {
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.df-stub__note {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--df-text-faint);
+}
+
+/* --- chips -------------------------------------------------------------- */
+.df-chip-group { display: flex; gap: 4px; }
+
+.df-chip {
+  flex: 1;
+  padding: 5px 0;
+  text-align: center;
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  color: var(--df-text3);
+  background: transparent;
+  border: 1px solid var(--df-control);
+  cursor: pointer;
+}
+.df-chip--active {
+  color: var(--df-brass);
+  border-color: var(--df-brass-edge);
+  background: var(--df-wash-accent-chip);
+}
+.df-chip:disabled { cursor: not-allowed; color: var(--df-text-ghost); }
+
+/* --- slider ------------------------------------------------------------- */
+.df-slider { display: flex; flex-direction: column; gap: 6px; }
+
+.df-slider__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.df-slider__label { font-size: 11px; color: var(--df-text-calm); }
+.df-slider__row .df-mono { font-size: 10px; }
+
+.df-slider__track {
+  position: relative;
+  height: 3px;
+  background: var(--df-rule);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.df-slider__centre {
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--df-disabled);
+}
+
+.df-slider__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--df-text-ghost);
+}
+
+.df-slider__handle {
+  position: absolute;
+  top: -4px;
+  width: 4px;
+  height: 11px;
+  margin-left: -2px;
+  background: var(--df-text);
+}
+
+.df-slider--disabled { opacity: 0.45; }
+.df-slider--disabled .df-slider__track { cursor: not-allowed; }
+
+/* --- icon buttons ------------------------------------------------------- */
+.df-icon-button {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--df-font-mono);
+  font-size: 11px;
+  color: var(--df-text3);
+  background: transparent;
+  border: 1px solid var(--df-control);
+  cursor: pointer;
+}
+.df-icon-button--active {
+  color: var(--df-brass);
+  border-color: var(--df-brass);
+  background: var(--df-wash-accent-fill);
+}
+.df-icon-button--destructive { color: var(--df-destructive-text); border-color: var(--df-destructive-edge); }
+.df-icon-button:disabled { cursor: not-allowed; color: var(--df-text-ghost); }
+
+/* --- action buttons ----------------------------------------------------- */
+.df-action {
+  padding: 7px 12px;
+  font-family: var(--df-font-sans);
+  font-size: 11px;
+  color: var(--df-text-calm);
+  background: transparent;
+  border: 1px solid var(--df-control);
+  cursor: pointer;
+}
+.df-action:disabled { cursor: not-allowed; color: var(--df-text-ghost); }
+
+/*
+ * The one gradient in the interface, and the reason DESIGN.md's rule is stated as
+ * "never on or adjacent to the media surface" rather than "never": this is chrome
+ * at the far edge of the Inspector, nowhere near the image or the waveform.
+ */
+.df-action--primary {
+  font-family: var(--df-font-serif);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--df-brass-shadow);
+  background: linear-gradient(180deg, var(--df-brass-lit), var(--df-brass) 60%, #a87f22);
+  border: none;
+  padding: 8px 0;
+  width: 100%;
+}
+
+.df-action--destructive {
+  color: var(--df-destructive-text);
+  border-color: var(--df-destructive-edge);
+  background: var(--df-wash-destructive);
+}

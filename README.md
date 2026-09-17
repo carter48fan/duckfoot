@@ -2,10 +2,10 @@
 
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
-> **Status: pre-alpha. Nothing runs yet.**
-> The application shell was demolished deliberately and is being rebuilt. What remains
-> in this repository is the media/DSP core and the three tool components, kept as
-> reference for the rewrite. There is no runnable app, no desktop build and no release.
+> **Status: Alpha.**
+> The web shell is rebuilt as a Vite SPA with a unified document model, snapshot undo/redo,
+> and two barrels running: Photo Studio (RAW pipeline) and Audio Cutter (stem stack with phase alignment).
+> Video Editor is preserved as reference and registered as a stub.
 
 ---
 
@@ -26,7 +26,7 @@ pistol firing distinct barrels from a single stock.
              ┌──────────────────┼──────────────────┐
              ▼                  ▼                  ▼
       [ 📷 Photo ]        [ 🎵 Audio ]       [ 🎬 Video ]
-       one image           stem stack         3-track timeline
+       RAW processor       stem stack         3-track timeline
        no timeline         no timeline        the only timeline
 ```
 
@@ -48,42 +48,48 @@ The design brief — including what each barrel deliberately refuses to do — i
 ```
 duckfoot/
 ├── DESIGN.md              # the design brief — start here
+├── apps/
+│   └── web/               # Vite SPA shared application shell
 └── packages/
-    ├── core/              # domain types, storage drivers, math + colour helpers
-    ├── media/             # RMS waveforms, WAV encoder, image filters, video exporter
-    ├── tool-photo/        # Photo Studio component  (reference; pending rewrite)
-    ├── tool-audio/        # Audio Cutter component  (reference; pending rewrite)
-    └── tool-video/        # Video Editor component  (reference; pending rewrite)
+    ├── core/              # document model, snapshot undo, storage drivers, tokens
+    ├── media/             # RMS waveforms, WAV encoder, RAW scene, audio DSP
+    ├── ui/                # shared controls: sliders, chips, gestures, focus rings
+    ├── tool-photo/        # Barrel 1: Photo Studio (RAW pipeline, scopes, A/B split)
+    ├── tool-audio/        # Barrel 2: Audio Cutter (stem stack, phase alignment, envelope)
+    └── tool-video/        # Barrel 3: Video Editor (reference; pending turn 3 rebuild)
 ```
-
-`apps/` is intentionally absent. The web shell is being rebuilt as a plain Vite SPA and
-the desktop shell will be regenerated with the Tauri CLI.
 
 ---
 
 ## Current state, honestly
 
-**Works:** the pure functions in `packages/media` — RMS waveform computation, audio
-slice/normalize/fade, 16-bit PCM WAV encoding, canvas image adjustments, and a
-`mediabunny` WebCodecs export pipeline with a MediaRecorder fallback.
+| Area | Export / Symbol | Status | Notes |
+|---|---|---|---|
+| **Core** | `createDocument`, `execute`, `undo`, `redo` | Working | Snapshot-based undo reducer with command coalescing |
+| **Core** | `OpfsStorageDriver`, `MemoryStorageDriver` | Working | Local-first browser storage and memory fallback |
+| **Core** | `tokensToCssText`, design tokens | Working | Single TS source of truth injecting `:root{--df-*}` |
+| **Media** | `computeHistogram`, `pickSample` | Working | Real preview histogram and sample picker |
+| **Media** | `decodeRasterAsScene` | Working | Lifts 8-bit raster to scene-referred linear float |
+| **Media** | `invertPolarity`, `applyIntegerDelay` | Working | Exact per-lane phase and integer delay |
+| **Media** | `evaluateEnvelopeDb`, `buildDuckEnvelope`| Working | Evaluates envelope curve at sample time |
+| **Media** | `decodeRaw` | `@stub` | Camera RAW demosaicing (CR3, NEF, ARW) |
+| **Media** | `crossCorrelate`, `autoAlign` | `@stub` | Inter-lane cross-correlation and phase alignment |
+| **Media** | `rotatePhase` | `@stub` | Broadband Hilbert phase rotation |
+| **Media** | `computeWaveform`, `computeVectorscope`| `@stub` | RGB parade and CbCr vectorscopes |
+| **Tool Photo** | `PhotoWorkspace`, `PhotoInspector` | Working | 14-module RAW pipeline, before/after split, snapshots |
+| **Tool Audio** | `AudioWorkspace`, `AudioInspector` | Working | Stem stack, phase controls, 4-node gain envelope |
+| **Tool Video** | `VideoEditor` | Reference | 544 lines of reference implementation; stub mounted |
 
-**Reference only:** the three `tool-*` components render and lay out correctly, but hold
-all state internally, have no undo, and carry known defects (in-place buffer mutation,
-unawaited video seeks during export, full-resolution work on the UI thread). They are
-kept so their canvas and layout code can be lifted into the rewrite. Do not treat them
-as working software.
-
-**Not built:** the asset shelf, persistence, the document/undo model, photo crop, the
-stem stack, timeline editing, and both application shells.
+Audit stubs anytime with `pnpm stubs`.
 
 ---
 
 ## Roadmap
 
-- [ ] Shared shell: asset shelf, document model, undo/redo
-- [ ] Local-first persistence (OPFS on web, Tauri fs on desktop)
-- [ ] Barrel 1 — Photo Studio end-to-end
-- [ ] Barrel 2 — Audio stem stack
+- [x] Shared shell: asset shelf, document model, snapshot undo/redo
+- [x] Local-first persistence (OPFS driver, Memory fallback)
+- [x] Barrel 1 — Photo Studio (RAW processor, 14-module pipeline, scopes, before/after split)
+- [x] Barrel 2 — Audio stem stack (phase alignment, 4-node gain envelope, mixdown)
 - [ ] Barrel 3 — 3-track video timeline with MP4 export
 - [ ] Tauri desktop shell
 - [ ] Offline-capable PWA build
@@ -97,10 +103,16 @@ Requires Node 20+ and pnpm 9+.
 ```bash
 pnpm install
 pnpm typecheck
+pnpm build
+pnpm dev
 ```
 
-That is currently the entire build surface. `pnpm dev` returns once there is an app to
-run.
+Verification helpers:
+
+```bash
+pnpm run lint:vocab    # enforces lanes-never-tracks invariant in audio & ui
+pnpm run stubs         # audits all @stub tags across packages
+```
 
 ---
 

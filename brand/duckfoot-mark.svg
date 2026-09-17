@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Duckfoot">
+  <!--
+    Duckfoot brand mark — five barrels splayed from one breech.
+    Three tines up, two legs down, converging on a rounded node.
+    Matches the five-tine lockup in the turn-2 design boards.
+  -->
+  <rect width="512" height="512" rx="108" fill="#1a1a1c"/>
+  <g stroke="#d49b3e" stroke-width="34" stroke-linecap="round" fill="none">
+    <!-- three barrels, splayed up -->
+    <path d="M256 292 L256 92"/>
+    <path d="M256 292 L152 156"/>
+    <path d="M256 292 L360 156"/>
+    <!-- two legs, splayed down -->
+    <path d="M256 292 L152 414"/>
+    <path d="M256 292 L360 414"/>
+  </g>
+  <!-- the breech: where the barrels meet the stock -->
+  <circle cx="256" cy="288" r="36" fill="#d49b3e"/>
+</svg>
