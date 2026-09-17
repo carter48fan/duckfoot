@@ -178,6 +178,18 @@ singular-matrix fallback), white-balance normalisation including garbage input, 
 monotone tone curve (identity, no reversal between close nodes, passes through control
 points, degenerate input).
 
+### Smoke test in BOTH profiles
+
+```bash
+cargo run              # debug — do not skip this
+cargo run --release
+```
+
+**A release-only smoke test is not sufficient.** egui, epaint and wgpu validate heavily
+through `debug_assert!`, which is compiled out in release. A bug that panics loudly in
+debug can degrade silently in release — an unapplied `TexturesDelta` crashes a debug build
+and merely loses the font atlas in a release one. Run debug first.
+
 ### Lint and format
 
 ```bash
