@@ -1,6 +1,9 @@
 /**
  * Audio buffer manipulation primitives: slice, normalize, fade, and WAV export.
+ *
+ * Every function here returns new data. DESIGN.md invariant 5.
  */
+import { applyGainEnvelope } from './envelope';
 
 export function sliceAudioBuffer(
   audioContext: AudioContext,
@@ -66,36 +69,39 @@ export function normalizeAudioBuffer(
   return newBuffer;
 }
 
+/**
+ * Linear fade in and out, returning new data.
+ *
+ * Previously this mutated the buffer in place, which DESIGN.md invariant 5 forbids
+ * with a warning that turned out to be a description of a live bug: the Audio
+ * barrel held `originalBuffer` and `audioBuffer` as the same decoded object, so
+ * fading corrupted the original and "Revert to original" restored the faded copy.
+ *
+ * Implemented over `applyGainEnvelope` so there is one envelope engine rather than
+ * two fade implementations that drift apart.
+ */
 export function applyFade(
+  context: BaseAudioContext,
   buffer: AudioBuffer,
   fadeInSeconds: number,
   fadeOutSeconds: number
-): void {
-  const sampleRate = buffer.sampleRate;
-  const fadeInSamples = Math.floor(fadeInSeconds * sampleRate);
-  const fadeOutSamples = Math.floor(fadeOutSeconds * sampleRate);
-  const totalSamples = buffer.length;
-
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    const data = buffer.getChannelData(c);
-
-    // Fade in
-    if (fadeInSamples > 0) {
-      const len = Math.min(fadeInSamples, totalSamples);
-      for (let i = 0; i < len; i++) {
-        data[i] *= i / len;
-      }
-    }
-
-    // Fade out
-    if (fadeOutSamples > 0) {
-      const start = Math.max(0, totalSamples - fadeOutSamples);
-      const len = totalSamples - start;
-      for (let i = 0; i < len; i++) {
-        data[start + i] *= 1 - (i / len);
-      }
-    }
+): AudioBuffer {
+  const duration = buffer.duration;
+  const nodes = [];
+  if (fadeInSeconds > 0) {
+    nodes.push({ timeSeconds: 0, gainDb: -120 });
+    nodes.push({ timeSeconds: Math.min(fadeInSeconds, duration), gainDb: 0 });
+  } else {
+    nodes.push({ timeSeconds: 0, gainDb: 0 });
   }
+  if (fadeOutSeconds > 0) {
+    nodes.push({ timeSeconds: Math.max(0, duration - fadeOutSeconds), gainDb: 0 });
+    nodes.push({ timeSeconds: duration, gainDb: -120 });
+  } else {
+    nodes.push({ timeSeconds: duration, gainDb: 0 });
+  }
+  nodes.sort((a, b) => a.timeSeconds - b.timeSeconds);
+  return applyGainEnvelope(context, buffer, { nodes, interpolation: 'lin' });
 }
 
 /**

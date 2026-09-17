@@ -13,10 +13,13 @@ wizard, no onboarding, no mode you can get lost in.
 ## The three barrels
 
 **Barrel 1 — Photo Studio.** Load one image. Adjust, crop, brand, export.
-*Is not:* a layer compositor, a RAW developer, a batch processor.
+*Is not:* a layer compositor, a node graph, a DAM.
+The module stack is **fixed-order and not rearrangeable** — that is the line that keeps it
+from becoming a node graph. "Batch" means *copy one stack, paste to a selection* — no queue,
+no job list, no UI of its own.
 
-**Barrel 2 — Audio Cutter.** Load one or more time-aligned sources. Balance them, find
-the part you want, cut it, clean it, export it.
+**Barrel 2 — Audio Cutter.** Load one or more time-aligned sources. Balance them, align
+their phase, find the part you want, envelope it, clean it, export it.
 *Is not:* a DAW, a mixer with an effects rack, a recorder.
 
 **Barrel 3 — Video Editor.** Three fixed tracks — overlay, main, audio. Sequence, split,
@@ -35,26 +38,34 @@ run the same length. That needs a **stack**, not a timeline.
 ```
 BARREL 2 — stem stack
 
-  drums   [~~~~~~~~~~~~~~~~~~~~~~~~~~]  gain --O--  M  S
+  drums   [~~~~~~~~~~~~~~~~~~~~~~~~~~]  gain --O--  M  S  [REF]
   bass    [~~~~~~~~~~~~~~~~~~~~~~~~~~]  gain --O--  M  S
-  vox     [~~~~~~~~~~~~~~~~~~~~~~~~~~]  gain --O--  M  S
+  vox     [~~~~~~~~~~~~~~~~~~~~~~~~~~]  gain --O--  M  S  [ø -1.4ms +38°]
                 ^         :  in/out spans ALL lanes
              playhead     :
+  envelope: 4-node gain over selection [LIN | LOG | S-CURVE]
 ```
 
-**Has:** N lanes locked at `t=0`. Per-lane gain, mute, solo. One shared playhead and one
+**Has:** N lanes locked at `t=0`. Per-lane gain, mute, solo, and per-lane phase alignment
+(polarity, fractional delay offset, phase rotation). One shared playhead and one
 shared in/out selection across the whole stack. Trim, delete-region, normalize and fades
-apply to the selection across all active lanes. Exports either a mixdown WAV or the
-trimmed stems individually.
+apply to the selection across all active lanes. One 4-node gain envelope over the
+selection. Exports either a mixdown WAV back to the Shelf or the trimmed stems individually.
+
+**Phase solo:** Monitor the sum of the selected lane and the reference lane only.
+Undefined, it is the crack an effects rack grows through.
 
 **Refuses** — this is the line that keeps it from becoming Audacity:
 
-- **No per-lane horizontal offset.** Lanes are locked at zero. The moment one lane can
-  slide against another you must visualise the offset, and that visualisation *is* a
-  timeline. If you need offset, that's Barrel 3.
+- **No horizontal positioning handle.** Lanes stay locked at zero visually. A lane carries
+  a **bounded** phase offset (±50 ms) edited numerically in the Inspector, never by dragging
+  a lane. The offset is an alignment correction, not a position. The moment one lane can
+  slide arbitrarily against another, that is Barrel 3.
 - **No clips.** A lane is one continuous source, not a sequence. No splitting a lane.
-- **No effects rack.** Gain, normalize, fades. That is the whole verb list.
-- No recording, no automation curves, no EQ.
+- **No effects rack.** Gain, phase alignment, normalize, one gain envelope. That is the whole verb list.
+- **No general automation curves.** Exactly **one** gain envelope, over the selection, gain
+  only, applied to active lanes together. Not per-lane, not per-parameter, not per-effect.
+- No recording, no EQ.
 
 They are **lanes**, never tracks — in the code and in the UI. Different word, different
 mental model, and it stops the distinction eroding the first time someone reasonably
@@ -79,11 +90,14 @@ voice in Barrel 2, export the mixdown to the Shelf, and drop that one file onto 
    data and must stay interactive. Full-resolution work happens at export only, off the
    main thread. *Because full-res pixel loops per slider tick will freeze the tab.*
 5. **Never mutate a source buffer or bitmap in place.** Operations return new data.
-   *Because in-place mutation is how "revert to original" quietly stops working.*
+   Documents hold ids and numbers, never buffers or bitmaps. *Because in-place mutation
+   is how "revert to original" quietly stops working, and documents holding raw media
+   cannot do snapshot undo.*
 6. **No timeline outside Barrel 3.** This is the product thesis. It is not negotiable
    for convenience.
-7. **The README documents only what runs.** Nothing gets a checkmark before it works
-   end-to-end.
+7. **The README documents only what runs.** A stub function called directly throws
+   `NotImplementedError`, appears in the README audit table as `stub`, and never gets a
+   checkmark before it works end-to-end.
 
 ## Look and feel
 
@@ -97,8 +111,9 @@ frame are the only saturated pixels on screen. Everything else recedes.
   and walnut. Not indigo; indigo-on-zinc is the default generated-app look.
 - **Semantic colour is reserved and never decorative:** green = in-point, red = out-point
   and destructive actions, white/high-contrast = playhead, accent wash = selection.
-- **No gradients, shadows or glows near the media surface.** They lie about what you're
-  editing.
+- **No gradients, shadows or glows on or adjacent to the media surface.** They lie about
+  what you're editing. Gradients are reserved for chrome at the frame edge (primary action
+  buttons, machined knurled top rule).
 - Monospace for all numbers — timecode, dimensions, sample rate, percentages. They are
   read as values, not prose.
 - Every control that changes the media shows its current numeric value. No mystery
@@ -141,14 +156,14 @@ the furniture of the other two.
 
 ## Done means
 
-**Photo:** open an image, drag a crop box with an optional locked ratio, move every
-slider without stutter on a 24 MP file, add a watermark, export PNG/JPEG/WebP where the
-file matches the preview exactly, undo every step back to the original.
+**Photo:** open an image, adjust scene-referred RAW parameters through the 14-module
+pipeline, inspect scopes and filmstrip, compare before/after with a draggable split,
+copy stack and paste to selected shelf assets, and export with exact match to preview.
 
-**Audio:** load three stems, balance and solo them, scrub, set in/out and hear *only*
-the selection across all lanes, trim and delete-region, normalize with a visible result,
-fade in/out, revert to the true original, export a mixdown WAV that opens correctly in
-another editor.
+**Audio:** load stems, balance and solo them, scrub, inspect correlation, align phase
+(polarity flip, bounded offset, rotation), set in/out and hear only the selection across
+all lanes, shape gain with the 4-node envelope, trim and delete-region, normalize with a
+visible result, revert to original, and export a mixdown WAV directly back to the Shelf.
 
 **Video:** drag an asset from the Shelf onto the right track, move and trim clips with
 snapping, split at the playhead, add a title, hear the audio track during preview, and
@@ -156,11 +171,7 @@ export an MP4 with correct frames *and* audio that plays in an external player.
 
 ## Order of work
 
-Build the shared shell and the document/undo layer first, with one barrel wired through
-it end to end — Photo, because it is the smallest complete loop. Prove that export
-matches preview and that undo survives a barrel switch. Only then start the second
-barrel.
-
-Do not build three barrels to 80%. One finished barrel teaches you what the shared layer
-actually needs; three unfinished ones teach you nothing and hide the same bug in
-triplicate.
+Build the shared shell and the document/undo layer first, then the UI and state models
+for the barrels (Photo 2a and Audio 2b) with honest, typed stubs for unfinished DSP/RAW math.
+Prove that preview matches export, that multi-select and shelf round-tripping work, and
+that undo survives a barrel switch. Only then deepen the headless ops.

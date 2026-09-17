@@ -3,7 +3,12 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "typecheck": "pnpm -r typecheck"
+    "dev": "pnpm --filter @duckfoot/web dev",
+    "build": "pnpm --filter @duckfoot/web build",
+    "preview": "pnpm --filter @duckfoot/web preview",
+    "typecheck": "pnpm -r typecheck",
+    "stubs": "grep -rn '@stub' packages/*/src | sort",
+    "lint:vocab": "! grep -rniE '\\btracks?\\b' packages/tool-audio/src packages/ui/src"
   },
   "devDependencies": {
     "typescript": "^5.8.2"

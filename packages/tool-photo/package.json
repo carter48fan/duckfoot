@@ -14,7 +14,7 @@
   "dependencies": {
     "@duckfoot/core": "workspace:*",
     "@duckfoot/media": "workspace:*",
-    "lucide-react": "^0.475.0"
+    "@duckfoot/ui": "workspace:*"
   },
   "peerDependencies": {
     "react": "^19.0.0",
