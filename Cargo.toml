@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/photo-engine", "crates/photo-app", "crates/duckfoot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/goldtone/duckfoot"
+
+[workspace.dependencies]
+photo-engine = { path = "crates/photo-engine" }
+photo-app = { path = "crates/photo-app" }
+
+wgpu = "30"
+egui = "0.36"
+egui-wgpu = { version = "0.36", features = ["winit"] }
+# eframe is deliberately absent. eframe 0.36.2 requires egui_glow ^0.36.2, which was never
+# published — that crate stops at 0.34.3 — and Cargo resolves optional dependencies whether
+# or not a feature enables them, so eframe cannot be locked at current versions at all.
+# Driving winit directly is also what the Android bootstrap will need, so this is not a
+# detour taken under protest.
+egui-winit = { version = "0.36", default-features = false, features = ["x11", "wayland"] }
+winit = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+rawloader = "0.37"
+anyhow = "1"
+log = "0.4"
+
+# Debug builds of pixel code are unusably slow; optimise dependencies even in dev.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

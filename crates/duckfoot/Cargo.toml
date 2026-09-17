@@ -1,0 +1,22 @@
+[package]
+name = "duckfoot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "duckfoot"
+path = "src/main.rs"
+
+[dependencies]
+photo-app.workspace = true
+photo-engine.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger = "0.11"
+pollster = "1"
