@@ -111,6 +111,19 @@ impl Surface {
         })
     }
 
+    fn renderer_write(&self) -> std::sync::RwLockWriteGuard<'_, egui_wgpu::Renderer> {
+        self.renderer
+            .write()
+            .expect("egui renderer lock poisoned by a panic in another thread")
+    }
+
+    fn free_textures<'a>(&self, ids: impl IntoIterator<Item = &'a egui::TextureId>) {
+        let mut renderer = self.renderer_write();
+        for id in ids {
+            renderer.free_texture(id);
+        }
+    }
+
     fn gpu(&self) -> Gpu<'_> {
         Gpu {
             device: &self.device,
@@ -132,7 +145,7 @@ impl Surface {
         let input = self.egui_winit.take_egui_input(&self.window);
 
         let egui_ctx = self.egui_ctx.clone();
-        let output = egui_ctx.run_ui(input, |ui| {
+        let mut output = egui_ctx.run_ui(input, |ui| {
             app.update(ui, &self.gpu());
         });
 
@@ -142,6 +155,27 @@ impl Surface {
         let pixels_per_point = self.egui_ctx.pixels_per_point();
         let primitives = self.egui_ctx.tessellate(output.shapes, pixels_per_point);
 
+        // `TexturesDelta` panics (debug_assert) if it is dropped with entries still in
+        // it, so it is taken out of `output` and emptied here rather than borrowed.
+        // Uploads happen before the surface is acquired so that an early return below
+        // cannot strand them — the font atlas arrives on the very first frame, and
+        // losing it leaves egui drawing against a texture that was never uploaded.
+        let mut textures_delta = std::mem::take(&mut output.textures_delta);
+        {
+            let mut renderer = self.renderer_write();
+            // One id can carry several deltas in a single frame (a partial font atlas
+            // update followed by a full one, for instance).
+            for (id, deltas) in &textures_delta.set {
+                for delta in deltas {
+                    renderer.update_texture(&self.device, &self.queue, *id, delta);
+                }
+            }
+        }
+        // Frees are deferred until after the render pass: a texture released this frame
+        // may still be referenced by this frame's primitives.
+        let to_free = std::mem::take(&mut textures_delta.free);
+        textures_delta.clear();
+
         use wgpu::CurrentSurfaceTexture as Acquired;
         let frame = match self.surface.get_current_texture() {
             Acquired::Success(f) => f,
@@ -149,12 +183,21 @@ impl Surface {
             Acquired::Suboptimal(f) => f,
             Acquired::Outdated | Acquired::Lost => {
                 self.surface.configure(&self.device, &self.config);
+                self.free_textures(&to_free);
+                // Without this the window can sit blank forever under ControlFlow::Wait,
+                // because nothing else is guaranteed to ask for another frame.
+                self.window.request_redraw();
                 return;
             }
-            // Minimised or behind another window: skip the frame, do no GPU work.
-            Acquired::Timeout | Acquired::Occluded => return,
+            // Minimised or behind another window: skip the frame, do no GPU work, and
+            // do NOT ask for another — that would spin while the window is hidden.
+            Acquired::Timeout | Acquired::Occluded => {
+                self.free_textures(&to_free);
+                return;
+            }
             other => {
                 log::error!("could not acquire a surface texture: {other:?}");
+                self.free_textures(&to_free);
                 return;
             }
         };
@@ -172,18 +215,8 @@ impl Surface {
         };
 
         {
-            let mut renderer = self
-                .renderer
-                .write()
-                .expect("egui renderer lock poisoned by a panic in another thread");
+            let mut renderer = self.renderer_write();
 
-            // One id can carry several deltas in a single frame (a partial font atlas
-            // update followed by a full one, for instance).
-            for (id, deltas) in &output.textures_delta.set {
-                for delta in deltas {
-                    renderer.update_texture(&self.device, &self.queue, *id, delta);
-                }
-            }
             renderer.update_buffers(&self.device, &self.queue, &mut encoder, &primitives, &desc);
 
             let mut pass = encoder
@@ -213,7 +246,7 @@ impl Surface {
             renderer.render(&mut pass, &primitives, &desc);
             drop(pass);
 
-            for id in &output.textures_delta.free {
+            for id in &to_free {
                 renderer.free_texture(id);
             }
         }
