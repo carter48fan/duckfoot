@@ -358,8 +358,9 @@ DESIGN.md invariant 8.
 | **App** | file open, drag-and-drop | Working | XDG portal dialog |
 | **App** | export | Working | Export… button, format from the filename |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
+| **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
+| **App** | RGB + luma histogram | Working | With clipped-low / clipped-high percentages |
 | **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
-| **App** | histogram / scopes | Not built | |
 | **App** | crop / rotate | Not built | |
 | **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
 
@@ -389,6 +390,7 @@ got past a weaker one:
 | full-frame contrast (stddev > 8) | a module crushing the tonal range — this is how the broken filmic hid |
 | clipped highlight stays neutral | white balance gains colouring blown speculars |
 | neutral stripes gain no colour | the demosaic inventing chroma on fine detail |
+| a flat frame fills exactly one histogram bin | scopes wired to the wrong texture, or showing a stale readback |
 
 The last two use synthetic ground truth rather than a photograph, and both were verified to
 **fail** when the fix they guard is removed — a test that only passes proves nothing.

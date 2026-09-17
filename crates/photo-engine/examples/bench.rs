@@ -374,6 +374,58 @@ fn main() -> anyhow::Result<()> {
          The demosaic is inventing chroma on fine detail."
     );
 
+    // --- the histogram must describe the pixels that were actually rendered -------------
+    //
+    // A flat mid-grey frame has one populated luminance bin, and its index is known in
+    // advance. That catches a histogram wired to the wrong texture, the wrong channel or
+    // a stale buffer — all of which look plausible in a plot.
+    let level = 4095u16 / 2;
+    let flat = photo_engine::CfaImage {
+        data: vec![level; (sw * sh) as usize],
+        width: sw,
+        height: sh,
+        cfa2x2,
+        black: [0.0; 4],
+        white: [4095.0; 4],
+        wb: [1.0, 1.0, 1.0],
+        cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        make: "synthetic".into(),
+        model: "flat".into(),
+    };
+    engine.load(&device, &queue, flat)?;
+    // The readback is asynchronous by design, so drive frames rather than blocking. The
+    // first poll discards whatever was in flight for the previous image.
+    for _ in 0..64 {
+        engine.poll_histogram(&device);
+        engine.render(&device, &queue, &PhotoStack::default());
+        wait(&device)?;
+        engine.poll_histogram(&device);
+        if engine.histogram().peak > 0 {
+            break;
+        }
+    }
+    let hist = engine.histogram();
+    let expected = {
+        let flat_px = engine.export(&device, &queue)?;
+        flat_px.rgba[1] as usize
+    };
+    let populated: Vec<usize> = hist
+        .luma
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v > 0)
+        .map(|(i, _)| i)
+        .collect();
+    println!(
+        "flat frame -> luma bins populated {populated:?}, expected around {expected}, peak {}",
+        hist.peak
+    );
+    anyhow::ensure!(
+        populated.len() <= 2 && populated.iter().any(|i| i.abs_diff(expected) <= 1),
+        "a uniform frame produced luma bins {populated:?}, but every pixel is {expected} — \
+         the histogram is not measuring the rendered image"
+    );
+
     println!("\nOK — real pixels, all three channels live, export verified.");
     Ok(())
 }

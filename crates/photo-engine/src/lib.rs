@@ -11,12 +11,14 @@ pub mod curve;
 pub mod decode;
 pub mod engine;
 pub mod export;
+pub mod histogram;
 pub mod params;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{CfaImage, RawDecoder, RawloaderBackend};
 pub use engine::{Engine, LoadedImage, OUTPUT_FORMAT};
 pub use export::{ExportFormat, ExportedImage};
+pub use histogram::Histogram;
 pub use params::{ColorBalance, Exposure, Filmic, Module, PhotoStack, Rgb, WhiteBalance};
 
 /// File extensions the decoder will attempt.

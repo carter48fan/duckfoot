@@ -271,6 +271,7 @@ impl PhotoApp {
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         self.handle_keys(ui.ctx());
         self.poll_export(ui.ctx());
+        self.engine.poll_histogram(gpu.device);
         self.sync(gpu);
 
         self.top_bar(ui, gpu);
@@ -532,6 +533,9 @@ impl PhotoApp {
                     return;
                 }
 
+                histogram_plot(ui, self.engine.histogram());
+                ui.add_space(8.0);
+
                 // One checkpoint per gesture, taken on drag start — not per frame, or the
                 // undo stack fills with a hundred identical steps per slider drag.
                 let mut before: Option<PhotoStack> = None;
@@ -771,4 +775,80 @@ fn file_name(path: &std::path::Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// RGB + luminance histogram of what is actually on screen.
+///
+/// Drawn as three additive channel outlines over a filled luminance body, which is the
+/// convention every photographer already reads. The vertical scale ignores pure black and
+/// pure white, so a large flat sky or shadow does not squash everything else into a line.
+fn histogram_plot(ui: &mut egui::Ui, hist: &photo_engine::Histogram) {
+    let size = egui::vec2(ui.available_width().min(252.0), 90.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 2.0, theme::BG_950);
+
+    if hist.peak > 0 {
+        let bins = hist.luma.len().max(1);
+        let step = rect.width() / bins as f32;
+        let peak = hist.peak as f32;
+        let height = |v: u32| (v as f32 / peak).min(1.0) * rect.height();
+
+        // Luminance first, as a solid body behind the channels.
+        for (i, v) in hist.luma.iter().enumerate() {
+            let h = height(*v);
+            if h <= 0.0 {
+                continue;
+            }
+            let x = rect.left() + i as f32 * step;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x, rect.bottom() - h),
+                    egui::pos2(x + step.max(1.0), rect.bottom()),
+                ),
+                0.0,
+                theme::TEXT_DIM.linear_multiply(0.30),
+            );
+        }
+
+        let channels: [(&Vec<u32>, egui::Color32); 3] = [
+            (&hist.red, egui::Color32::from_rgb(0xd0, 0x5a, 0x50)),
+            (&hist.green, egui::Color32::from_rgb(0x6a, 0xb0, 0x6a)),
+            (&hist.blue, egui::Color32::from_rgb(0x5a, 0x86, 0xd0)),
+        ];
+        for (data, colour) in channels {
+            let points: Vec<egui::Pos2> = data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| egui::pos2(rect.left() + i as f32 * step, rect.bottom() - height(*v)))
+                .collect();
+            painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, colour)));
+        }
+    }
+
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    // Clipping is the one number worth calling out; it is what you actually lose.
+    let low = hist.clipped_low() * 100.0;
+    let high = hist.clipped_high() * 100.0;
+    ui.horizontal(|ui| {
+        ui.label(theme::dim("clipped"));
+        let warn = |v: f32| {
+            if v >= 0.1 {
+                theme::num(format!("{v:.2}%")).color(theme::DANGER)
+            } else {
+                theme::num(format!("{v:.2}%"))
+            }
+        };
+        ui.label(theme::dim("lo"));
+        ui.label(warn(low));
+        ui.label(theme::dim("hi"));
+        ui.label(warn(high));
+    });
 }
