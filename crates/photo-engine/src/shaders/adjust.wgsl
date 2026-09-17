@@ -23,6 +23,9 @@ struct Adjust {
     gain:     vec4<f32>,
     offset:   vec4<f32>,
     flags:    vec4<u32>,   // x = enabled bitmask
+    sizes:    vec4<f32>,   // xy = output size, zw = sensor size
+    orient:   vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
+    turns:    vec4<u32>,   // x = quarter turns clockwise
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -34,6 +37,7 @@ const FLAG_BALANCE:  u32 = 16u;
 @group(0) @binding(0) var sensor: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> u: Adjust;
 @group(0) @binding(2) var curve_lut: texture_2d<f32>;
+@group(0) @binding(3) var sensor_sampler: sampler;
 
 const LUT_MAX: i32 = 1023;
 
@@ -121,6 +125,40 @@ fn reconstruct_highlights(balanced: vec3<f32>, sensor_peak: f32) -> vec3<f32> {
     return mix(balanced, neutral, t);
 }
 
+// Orientation, by inverse mapping.
+//
+// The fragment knows where it is in the OUTPUT and has to find where that came from in the
+// sensor, so every step is applied backwards and in reverse order: straighten, then mirror,
+// then the right-angle turns.
+//
+// Right-angle turns swap the output dimensions; straightening does not, so straightening
+// rotates the corners out of frame and a crop is expected to take them. That is the normal
+// bargain and the alternative — growing the canvas — invents pixels that were never
+// photographed.
+fn sensor_coords(out_px: vec2<f32>) -> vec2<f32> {
+    let out_size = u.sizes.xy;
+    let sensor_size = u.sizes.zw;
+
+    // Centred, so rotation is about the middle of the frame rather than a corner.
+    var p = out_px - out_size * 0.5;
+
+    // Undo the fine straighten.
+    let c = u.orient.x;
+    let s = u.orient.y;
+    p = vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
+
+    // Undo mirroring. Signs are -1 when that axis was flipped.
+    p = p * u.orient.zw;
+
+    // Undo the right-angle turns. Each clockwise turn maps (x, y) -> (-y, x), so the
+    // inverse of one turn is (x, y) -> (y, -x).
+    for (var i = 0u; i < u.turns.x; i = i + 1u) {
+        p = vec2<f32>(p.y, -p.x);
+    }
+
+    return p + sensor_size * 0.5;
+}
+
 fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
     var o = v + off;
     o = o * (1.0 + gn) + lift * (1.0 - o);
@@ -132,7 +170,17 @@ fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    var c = textureLoad(sensor, vec2<i32>(i32(pos.x), i32(pos.y)), 0).rgb;
+    let src = sensor_coords(pos.xy);
+
+    // Straightening rotates the corners outside the sensor. Those pixels were never
+    // photographed, so they are black rather than a smeared edge clamp.
+    if (src.x < 0.0 || src.y < 0.0 || src.x >= u.sizes.z || src.y >= u.sizes.w) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+
+    // Sampled rather than loaded, because straightening lands between texels. With no
+    // straighten the coordinates fall on texel centres and this is exact.
+    var c = textureSampleLevel(sensor, sensor_sampler, src / u.sizes.zw, 0.0).rgb;
 
     // Captured before the gains are applied: saturation is a property of the sensor, and
     // after white balance there is no longer any way to tell a clipped channel from a

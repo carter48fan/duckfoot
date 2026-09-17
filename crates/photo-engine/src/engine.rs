@@ -11,7 +11,7 @@ use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::CfaImage;
 use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
-use crate::params::PhotoStack;
+use crate::params::{Crop, Geometry, PhotoStack};
 
 /// The adjusted image is written here, and egui samples it directly.
 ///
@@ -33,7 +33,8 @@ const GREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct HistogramParams {
-    size: [u32; 4],
+    /// xy = origin of the measured region, zw = its size.
+    region: [u32; 4],
     stride: [u32; 4],
 }
 
@@ -66,11 +67,19 @@ struct AdjustUniforms {
     gain: [f32; 4],
     offset: [f32; 4],
     flags: [u32; 4],
+    sizes: [f32; 4],
+    orient: [f32; 4],
+    turns: [u32; 4],
 }
 
 pub struct LoadedImage {
+    /// Output dimensions, after right-angle turns. What display and export work in.
     pub width: u32,
     pub height: u32,
+    /// The sensor's own dimensions, which never change once decoded.
+    pub sensor_width: u32,
+    pub sensor_height: u32,
+    geometry: Geometry,
     pub make: String,
     pub model: String,
     /// As-shot neutral multipliers, before any user tint.
@@ -101,6 +110,7 @@ pub struct Engine {
     adjust_buffer: wgpu::Buffer,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
+    sensor_sampler: wgpu::Sampler,
     cached_curve: Vec<CurveNode>,
     image: Option<LoadedImage>,
 
@@ -174,9 +184,11 @@ impl Engine {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        // Unfilterable: the shader uses textureLoad only, so this asks the
-                        // driver for nothing optional.
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        // Filterable now: straightening lands between texels, so the
+                        // sensor has to be sampled rather than loaded. Rgba16Float is
+                        // filterable in core WebGPU, so this still asks for no optional
+                        // feature.
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -187,13 +199,31 @@ impl Engine {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
+                        // The curve LUT is still textureLoad-only and stays unfilterable.
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
+        });
+
+        let sensor_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sensor sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
         });
 
         let green_pipeline = fullscreen_pipeline(
@@ -323,6 +353,7 @@ impl Engine {
             adjust_buffer,
             lut_texture,
             lut_view,
+            sensor_sampler,
             cached_curve: Vec::new(),
             image: None,
         }
@@ -480,9 +511,15 @@ impl Engine {
         );
         queue.submit([encoder.finish()]);
 
+        let geometry = Geometry::default();
+        let (out_w, out_h) = geometry.output_size(cfa.width, cfa.height);
         let output_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("adjusted output"),
-            size: extent,
+            size: wgpu::Extent3d {
+                width: out_w,
+                height: out_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -510,6 +547,10 @@ impl Engine {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&self.lut_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                },
             ],
         });
 
@@ -518,8 +559,11 @@ impl Engine {
         self.histogram = Histogram::default();
 
         self.image = Some(LoadedImage {
-            width: cfa.width,
-            height: cfa.height,
+            width: out_w,
+            height: out_h,
+            sensor_width: cfa.width,
+            sensor_height: cfa.height,
+            geometry,
             make: cfa.make,
             model: cfa.model,
             wb: cfa.wb,
@@ -541,11 +585,18 @@ impl Engine {
     ///
     /// Blocks until the GPU has finished and the buffer is mapped. At 24 MP the readback
     /// is ~98 MB, so this belongs off the UI thread in anything interactive.
-    pub fn export(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<ExportedImage> {
+    pub fn export(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        crop: Crop,
+    ) -> Result<ExportedImage> {
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
-        let (width, height) = (image.width, image.height);
+        // The crop is not baked into the texture, so export is where it becomes real: copy
+        // only the region the user framed. See `params::Crop` for why it is not in the shader.
+        let (ox, oy, width, height) = crop.to_pixels(image.width, image.height);
 
         let stride = padded_bytes_per_row(width);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -562,7 +613,7 @@ impl Engine {
             wgpu::TexelCopyTextureInfo {
                 texture: &image.output_texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -601,6 +652,53 @@ impl Engine {
         })
     }
 
+    /// Apply orientation, resizing the output texture only when right-angle turns actually
+    /// change its dimensions.
+    ///
+    /// Returns true if the texture was replaced, which invalidates any registered view.
+    /// Straightening and mirroring never resize, so they never cost an allocation, and the
+    /// crop is not applied here at all — see `params::Crop`.
+    pub fn set_geometry(&mut self, device: &wgpu::Device, geometry: Geometry) -> bool {
+        let Some(image) = &mut self.image else {
+            return false;
+        };
+        if image.geometry == geometry {
+            return false;
+        }
+
+        let (w, h) = geometry.output_size(image.sensor_width, image.sensor_height);
+        let resized = w != image.width || h != image.height;
+        image.geometry = geometry;
+
+        if !resized {
+            return false;
+        }
+
+        image.output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("adjusted output"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        image.output_view = image.output_texture.create_view(&Default::default());
+        image.width = w;
+        image.height = h;
+        // Whatever readback is in flight describes a texture that no longer exists.
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
+        true
+    }
+
     /// Re-run the adjustment chain. This is the per-frame path and the per-slider-tick
     /// path — it writes one uniform buffer and submits one fullscreen draw.
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
@@ -630,6 +728,7 @@ impl Engine {
             self.cached_curve = stack.tone_curve.params.clone();
         }
 
+        let g = stack.geometry;
         let wb = stack.white_balance.params;
         let m = image.cam_to_srgb;
         let f = stack.filmic.params;
@@ -660,6 +759,20 @@ impl Engine {
                 gain: cb.gain.to_array(),
                 offset: cb.offset.to_array(),
                 flags: [stack.bitmask(), 0, 0, 0],
+                sizes: [
+                    image.width as f32,
+                    image.height as f32,
+                    image.sensor_width as f32,
+                    image.sensor_height as f32,
+                ],
+                // The INVERSE straighten: the shader maps output back to sensor.
+                orient: [
+                    (-g.straighten_deg.to_radians()).cos(),
+                    (-g.straighten_deg.to_radians()).sin(),
+                    if g.mirror_h { -1.0 } else { 1.0 },
+                    if g.mirror_v { -1.0 } else { 1.0 },
+                ],
+                turns: [g.quarter_turns as u32, 0, 0, 0],
             }),
         );
 
@@ -678,12 +791,14 @@ impl Engine {
         // fast drag would pile up map requests against a buffer that is already mapped.
         let measuring = self.hist_state.is_idle();
         if measuring {
-            let (w, h) = (image.width, image.height);
+            // Scopes describe what the photograph will be, so they measure inside the crop.
+            // A histogram of pixels the user has framed out is actively misleading.
+            let (ox, oy, w, h) = g.crop.to_pixels(image.width, image.height);
             queue.write_buffer(
                 &self.hist_params,
                 0,
                 bytemuck::bytes_of(&HistogramParams {
-                    size: [w, h, 0, 0],
+                    region: [ox, oy, w, h],
                     stride: [HISTOGRAM_STRIDE, 0, 0, 0],
                 }),
             );
@@ -716,6 +831,7 @@ impl Engine {
                 pass.set_bind_group(0, &bind, &[]);
                 let groups_x = w.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
                 let groups_y = h.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
+                debug_assert!(groups_x > 0 && groups_y > 0);
                 pass.dispatch_workgroups(groups_x, groups_y, 1);
             }
             encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);

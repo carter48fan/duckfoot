@@ -12,7 +12,7 @@
 // increments into 256 addresses is pure contention.
 
 struct Params {
-    size: vec4<u32>,   // xy = width, height
+    region: vec4<u32>, // xy = origin, zw = size of the measured region
     stride: vec4<u32>, // x = sample every Nth pixel on both axes
 }
 
@@ -27,9 +27,11 @@ const LUMA: u32 = 768u;
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x * u.stride.x;
-    let y = gid.y * u.stride.x;
-    if (x >= u.size.x || y >= u.size.y) {
+    // Measured over the crop, not the whole frame: scopes describe the photograph the
+    // user is framing, and counting pixels they have cropped out would mislead.
+    let x = u.region.x + gid.x * u.stride.x;
+    let y = u.region.y + gid.y * u.stride.x;
+    if (gid.x * u.stride.x >= u.region.z || gid.y * u.stride.x >= u.region.w) {
         return;
     }
 

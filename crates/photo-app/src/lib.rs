@@ -121,6 +121,10 @@ pub struct PhotoApp {
     view: View,
     /// Size the image panel got last frame, so "100%" can be resolved outside of it.
     last_panel: egui::Vec2,
+    /// While true, dragging on the image defines a crop instead of panning.
+    cropping: bool,
+    /// Where a crop drag started, in normalised image coordinates.
+    crop_anchor: Option<egui::Pos2>,
 }
 
 impl PhotoApp {
@@ -138,6 +142,8 @@ impl PhotoApp {
             export: Export::Idle,
             view: View::default(),
             last_panel: egui::Vec2::ZERO,
+            cropping: false,
+            crop_anchor: None,
         }
     }
 
@@ -146,7 +152,10 @@ impl PhotoApp {
         // Make sure what we are about to copy reflects the current stack.
         self.engine.render(gpu.device, gpu.queue, &self.stack);
 
-        let exported = match self.engine.export(gpu.device, gpu.queue) {
+        let exported = match self
+            .engine
+            .export(gpu.device, gpu.queue, self.stack.geometry.crop)
+        {
             Ok(e) => e,
             Err(e) => {
                 self.export = Export::Failed(format!("{e:#}"));
@@ -248,6 +257,15 @@ impl PhotoApp {
 
     /// Runs the GPU work for this frame, if anything changed.
     fn sync(&mut self, gpu: &Gpu) {
+        // A right-angle turn replaces the output texture, so the id egui holds becomes
+        // stale and has to be re-registered. Straighten, mirror and crop never resize.
+        if self.engine.set_geometry(gpu.device, self.stack.geometry) {
+            if let Some(id) = self.texture_id.take() {
+                renderer_write(gpu).free_texture(&id);
+            }
+            self.needs_render = true;
+        }
+
         if !self.needs_render {
             return;
         }
@@ -462,9 +480,49 @@ impl PhotoApp {
                 let fit = (rect.width() / img.x).min(rect.height() / img.y);
                 let max_zoom = (MAX_ZOOM_SCALE / fit).max(1.0);
 
-                if response.dragged() {
-                    let scale = fit * self.view.zoom;
-                    self.view.pan -= response.drag_delta() / scale;
+                let scale_now = fit * self.view.zoom;
+                let dest_now = egui::Rect::from_center_size(
+                    rect.center() - self.view.pan * scale_now,
+                    img * scale_now,
+                );
+
+                if self.cropping {
+                    // In crop mode a drag frames the picture instead of moving it.
+                    let to_norm = |p: egui::Pos2| {
+                        egui::pos2(
+                            ((p.x - dest_now.left()) / dest_now.width()).clamp(0.0, 1.0),
+                            ((p.y - dest_now.top()) / dest_now.height()).clamp(0.0, 1.0),
+                        )
+                    };
+                    if response.drag_started() {
+                        self.crop_anchor = response.interact_pointer_pos().map(to_norm);
+                    }
+                    if let (Some(anchor), Some(now)) = (
+                        self.crop_anchor,
+                        response.interact_pointer_pos().map(to_norm),
+                    ) {
+                        if response.dragged() || response.drag_stopped() {
+                            let crop = Crop {
+                                x: anchor.x.min(now.x),
+                                y: anchor.y.min(now.y),
+                                width: (now.x - anchor.x).abs(),
+                                height: (now.y - anchor.y).abs(),
+                            }
+                            .sanitised();
+                            if crop != self.stack.geometry.crop {
+                                if response.drag_started() {
+                                    self.history.checkpoint(&self.stack);
+                                }
+                                self.stack.geometry.crop = crop;
+                                self.needs_render = true;
+                            }
+                        }
+                    }
+                    if response.drag_stopped() {
+                        self.crop_anchor = None;
+                    }
+                } else if response.dragged() {
+                    self.view.pan -= response.drag_delta() / scale_now;
                 }
 
                 if let Some(pointer) = response.hover_pos() {
@@ -500,7 +558,73 @@ impl PhotoApp {
                     egui::Color32::WHITE,
                 );
 
-                if response.dragged() {
+                // The crop is not baked into the texture, so it is drawn: everything
+                // outside it is dimmed, and thirds are marked while framing.
+                let crop = self.stack.geometry.crop.sanitised();
+                if self.cropping || !crop.is_full_frame() {
+                    let framed = egui::Rect::from_min_size(
+                        dest.min + egui::vec2(crop.x * dest.width(), crop.y * dest.height()),
+                        egui::vec2(crop.width * dest.width(), crop.height * dest.height()),
+                    );
+                    let painter = ui.painter().with_clip_rect(rect);
+                    let veil = egui::Color32::from_black_alpha(150);
+                    // Four bands rather than a stencil: cheap, exact, and no extra pass.
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), framed.top())),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), framed.bottom()),
+                            rect.max,
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), framed.top()),
+                            egui::pos2(framed.left(), framed.bottom()),
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(framed.right(), framed.top()),
+                            egui::pos2(rect.right(), framed.bottom()),
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_stroke(
+                        framed,
+                        0.0,
+                        egui::Stroke::new(1.0, theme::ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                    if self.cropping {
+                        let thin = egui::Stroke::new(1.0, theme::TEXT.linear_multiply(0.25));
+                        for i in 1..3 {
+                            let t = i as f32 / 3.0;
+                            let x = framed.left() + framed.width() * t;
+                            let y = framed.top() + framed.height() * t;
+                            painter.line_segment(
+                                [egui::pos2(x, framed.top()), egui::pos2(x, framed.bottom())],
+                                thin,
+                            );
+                            painter.line_segment(
+                                [egui::pos2(framed.left(), y), egui::pos2(framed.right(), y)],
+                                thin,
+                            );
+                        }
+                    }
+                }
+
+                if self.cropping {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                } else if response.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 } else if self.view.zoom > 1.0 && response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
@@ -535,6 +659,72 @@ impl PhotoApp {
 
                 histogram_plot(ui, self.engine.histogram());
                 ui.add_space(8.0);
+
+                let before_geometry = self.stack.clone();
+                let g = &mut self.stack.geometry;
+                let mut geometry_changed = false;
+
+                ui.label(theme::dim("geometry"));
+                ui.horizontal(|ui| {
+                    if ui.button("⟲").on_hover_text("rotate left").clicked() {
+                        g.rotate_left();
+                        geometry_changed = true;
+                    }
+                    if ui.button("⟳").on_hover_text("rotate right").clicked() {
+                        g.rotate_right();
+                        geometry_changed = true;
+                    }
+                    if ui
+                        .selectable_label(g.mirror_h, "⇄")
+                        .on_hover_text("mirror horizontally")
+                        .clicked()
+                    {
+                        g.mirror_h = !g.mirror_h;
+                        geometry_changed = true;
+                    }
+                    if ui
+                        .selectable_label(g.mirror_v, "⇅")
+                        .on_hover_text("mirror vertically")
+                        .clicked()
+                    {
+                        g.mirror_v = !g.mirror_v;
+                        geometry_changed = true;
+                    }
+                });
+
+                let straighten = ui.add(
+                    egui::Slider::new(&mut g.straighten_deg, -15.0..=15.0)
+                        .text("straighten°")
+                        .fixed_decimals(2),
+                );
+                if straighten.drag_started() {
+                    self.history.checkpoint(&before_geometry);
+                }
+                if straighten.changed() {
+                    self.needs_render = true;
+                }
+
+                ui.horizontal(|ui| {
+                    let cropping = self.cropping;
+                    if ui.selectable_label(cropping, "crop").clicked() {
+                        self.cropping = !cropping;
+                    }
+                    let g = &mut self.stack.geometry;
+                    if ui
+                        .add_enabled(!g.crop.is_full_frame(), egui::Button::new("reset"))
+                        .clicked()
+                    {
+                        g.crop = Crop::default();
+                        geometry_changed = true;
+                    }
+                });
+
+                if geometry_changed {
+                    self.history.checkpoint(&before_geometry);
+                    self.needs_render = true;
+                }
+
+                ui.separator();
 
                 // One checkpoint per gesture, taken on drag start — not per frame, or the
                 // undo stack fills with a hundred identical steps per slider drag.
