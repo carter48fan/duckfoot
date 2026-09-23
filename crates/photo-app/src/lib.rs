@@ -3,6 +3,8 @@
 //! The desktop bootstrap and the eventual Android bootstrap both drive this same type.
 
 pub mod theme;
+pub mod tonemap_3d;
+pub mod inspector_map_3d;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -14,6 +16,80 @@ use photo_engine::{
     find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
     RawDecoder, RawloaderBackend,
 };
+
+/// Sections available in the Inspector sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum InspectorSectionId {
+    Scope,
+    Geometry,
+    Snapshots,
+    WhiteBalance,
+    Exposure,
+    Tonal,
+    ToneCurve,
+    Filmic3D,
+    ColorBalance,
+    Vibrance,
+    Sharpen,
+    Vignette,
+}
+
+impl InspectorSectionId {
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Scope,
+            Self::Geometry,
+            Self::Snapshots,
+            Self::WhiteBalance,
+            Self::Exposure,
+            Self::Tonal,
+            Self::ToneCurve,
+            Self::Filmic3D,
+            Self::ColorBalance,
+            Self::Vibrance,
+            Self::Sharpen,
+            Self::Vignette,
+        ]
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Scope => "inspector map & scope",
+            Self::Geometry => "geometry",
+            Self::Snapshots => "snapshots",
+            Self::WhiteBalance => "white balance",
+            Self::Exposure => "exposure",
+            Self::Tonal => "highlights & shadows",
+            Self::ToneCurve => "tone curve",
+            Self::Filmic3D => "filmic rgb / 3d tonemap",
+            Self::ColorBalance => "colour balance",
+            Self::Vibrance => "vibrance & saturation",
+            Self::Sharpen => "capture sharpen",
+            Self::Vignette => "vignette",
+        }
+    }
+}
+
+/// Persistent configuration for an Inspector section.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InspectorSectionConfig {
+    pub id: InspectorSectionId,
+    pub visible: bool,
+    pub collapsed: bool,
+}
+
+impl InspectorSectionConfig {
+    pub fn default_sections() -> Vec<Self> {
+        InspectorSectionId::all()
+            .iter()
+            .map(|&id| Self {
+                id,
+                visible: true,
+                collapsed: id == InspectorSectionId::Snapshots,
+            })
+            .collect()
+    }
+}
 
 /// An asset represented in the Shelf.
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +226,12 @@ pub struct PhotoApp {
     pub new_snapshot_name: String,
     /// Brief notifications in the status bar with timestamp.
     pub status_notification: Option<(String, Instant)>,
+    pub tonemap_3d_state: tonemap_3d::Tonemap3DState,
+    pub inspector_map_state: inspector_map_3d::InspectorMapState,
+    pub inspector_sections: Vec<InspectorSectionConfig>,
+    pub customize_open: bool,
+    pub inspector_width: f32,
+    pub inspector_force_width: Option<f32>,
 }
 
 impl PhotoApp {
@@ -177,6 +259,12 @@ impl PhotoApp {
             snapshots: Vec::new(),
             new_snapshot_name: String::new(),
             status_notification: None,
+            tonemap_3d_state: tonemap_3d::Tonemap3DState::default(),
+            inspector_map_state: inspector_map_3d::InspectorMapState::default(),
+            inspector_sections: InspectorSectionConfig::default_sections(),
+            customize_open: false,
+            inspector_width: 288.0,
+            inspector_force_width: None,
         }
     }
 
@@ -551,6 +639,47 @@ impl PhotoApp {
                     self.view.zoom = self.view.zoom.max(1.0);
                 }
             }
+        }
+
+        let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc) = ctx.input(|i| {
+            (
+                !i.modifiers.command && i.key_pressed(egui::Key::OpenBracket),
+                !i.modifiers.command && i.key_pressed(egui::Key::CloseBracket),
+                !i.modifiers.command && i.key_pressed(egui::Key::H),
+                !i.modifiers.command && i.key_pressed(egui::Key::V),
+                !i.modifiers.command && i.key_pressed(egui::Key::C),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if rot_left {
+            let before = self.stack.clone();
+            self.stack.geometry.rotate_left();
+            self.history.checkpoint(&before);
+            self.needs_render = true;
+        }
+        if rot_right {
+            let before = self.stack.clone();
+            self.stack.geometry.rotate_right();
+            self.history.checkpoint(&before);
+            self.needs_render = true;
+        }
+        if flip_h {
+            let before = self.stack.clone();
+            self.stack.geometry.flip_h();
+            self.history.checkpoint(&before);
+            self.needs_render = true;
+        }
+        if flip_v {
+            let before = self.stack.clone();
+            self.stack.geometry.flip_v();
+            self.history.checkpoint(&before);
+            self.needs_render = true;
+        }
+        if crop_toggle {
+            self.cropping = !self.cropping;
+        }
+        if crop_esc && self.cropping {
+            self.cropping = false;
         }
     }
 
@@ -1104,334 +1233,742 @@ impl PhotoApp {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("inspector")
+        let mut panel = egui::Panel::right("inspector")
             .frame(bare_frame(theme::BG_900))
-            .default_size(272.0)
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(theme::dim("INSPECTOR"));
-                ui.add_space(6.0);
+            .resizable(true)
+            .default_size(self.inspector_width)
+            .min_size(240.0)
+            .max_size(850.0);
 
-                if self.engine.image().is_none() {
-                    ui.label(theme::dim("no image"));
-                    return;
-                }
+        if let Some(target_w) = self.inspector_force_width.take() {
+            panel = panel.exact_size(target_w);
+        }
 
-                histogram_plot(ui, self.engine.histogram());
-                ui.add_space(8.0);
+        let inner = panel.show(ui, |ui| {
+            // Header pinned at top
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(theme::head("INSPECTOR"));
 
-                let before_geometry = self.stack.clone();
-                let g = &mut self.stack.geometry;
-                let mut geometry_changed = false;
-
-                ui.label(theme::dim("geometry"));
-                ui.horizontal(|ui| {
-                    if ui.button("⟲").on_hover_text("rotate left").clicked() {
-                        g.rotate_left();
-                        geometry_changed = true;
-                    }
-                    if ui.button("⟳").on_hover_text("rotate right").clicked() {
-                        g.rotate_right();
-                        geometry_changed = true;
-                    }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let cust_label = if self.customize_open { "Done" } else { "⚙ Custom" };
                     if ui
-                        .selectable_label(g.mirror_h, "⇄")
-                        .on_hover_text("mirror horizontally")
+                        .selectable_label(self.customize_open, cust_label)
+                        .on_hover_text("Customize visible modules and change ordering")
                         .clicked()
                     {
-                        g.mirror_h = !g.mirror_h;
-                        geometry_changed = true;
+                        self.customize_open = !self.customize_open;
                     }
+
                     if ui
-                        .selectable_label(g.mirror_v, "⇅")
-                        .on_hover_text("mirror vertically")
+                        .small_button("↕ All")
+                        .on_hover_text("Expand all or collapse all sidebar sections")
                         .clicked()
                     {
-                        g.mirror_v = !g.mirror_v;
-                        geometry_changed = true;
+                        let any_collapsed = self.inspector_sections.iter().any(|s| s.collapsed);
+                        for s in &mut self.inspector_sections {
+                            s.collapsed = !any_collapsed;
+                        }
                     }
-                });
 
-                let straighten = ui.add(
-                    egui::Slider::new(&mut g.straighten_deg, -15.0..=15.0)
-                        .text("straighten°")
-                        .fixed_decimals(2),
-                );
-                if straighten.drag_started() {
-                    self.history.checkpoint(&before_geometry);
-                }
-                if straighten.changed() {
-                    self.needs_render = true;
-                }
-
-                ui.horizontal(|ui| {
-                    let cropping = self.cropping;
-                    if ui.selectable_label(cropping, "crop").clicked() {
-                        self.cropping = !cropping;
-                    }
-                    let g = &mut self.stack.geometry;
+                    let is_wide = self.inspector_width >= 400.0;
+                    let width_label = if is_wide { "⤹ Narrow" } else { "⤢ Expand" };
                     if ui
-                        .add_enabled(!g.crop.is_full_frame(), egui::Button::new("reset"))
+                        .small_button(width_label)
+                        .on_hover_text(if is_wide {
+                            "Compact sidebar width (288px)"
+                        } else {
+                            "Expand sidebar for large 3D views & precise control (460px)"
+                        })
                         .clicked()
                     {
-                        g.crop = Crop::default();
-                        geometry_changed = true;
-                    }
-                });
-
-                if geometry_changed {
-                    self.history.checkpoint(&before_geometry);
-                    self.needs_render = true;
-                }
-
-                ui.separator();
-
-                ui.collapsing("snapshots", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.new_snapshot_name);
-                        if ui
-                            .button("+ Add")
-                            .on_hover_text("Save current stack as a snapshot")
-                            .clicked()
-                        {
-                            let name = if self.new_snapshot_name.trim().is_empty() {
-                                format!("Snapshot {}", self.snapshots.len() + 1)
-                            } else {
-                                self.new_snapshot_name.trim().to_string()
-                            };
-                            self.snapshots.push((name, self.stack.clone()));
-                            self.new_snapshot_name.clear();
-                        }
-                    });
-                    let mut restore_idx = None;
-                    let mut delete_idx = None;
-                    for (i, (name, _)) in self.snapshots.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button(name)
-                                .on_hover_text("Restore this snapshot")
-                                .clicked()
-                            {
-                                restore_idx = Some(i);
-                            }
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Delete snapshot")
-                                .clicked()
-                            {
-                                delete_idx = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = restore_idx {
-                        self.history.checkpoint(&self.stack);
-                        self.stack = self.snapshots[i].1.clone();
-                        self.needs_render = true;
-                    }
-                    if let Some(i) = delete_idx {
-                        self.snapshots.remove(i);
-                    }
-                });
-
-                ui.separator();
-
-                // One checkpoint per gesture, taken on drag start — not per frame, or the
-                // undo stack fills with a hundred identical steps per slider drag.
-                let mut before: Option<PhotoStack> = None;
-                let mut changed = false;
-                let mut started = false;
-
-                macro_rules! track {
-                    ($r:expr) => {{
-                        let r = $r;
-                        if r.drag_started() || (r.changed() && !r.dragged()) {
-                            started = true;
-                        }
-                        if r.changed() {
-                            changed = true;
-                        }
-                    }};
-                }
-
-                before.get_or_insert_with(|| self.stack.clone());
-                let snapshot = before.take().unwrap();
-
-                module_header(
-                    ui,
-                    "white balance",
-                    &mut self.stack.white_balance.enabled,
-                    &mut changed,
-                );
-                if self.stack.white_balance.enabled {
-                    let p = &mut self.stack.white_balance.params;
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.small_button("As-Shot").clicked() {
-                            p.tint_r = 1.0;
-                            p.tint_b = 1.0;
-                            changed = true;
-                            started = true;
-                        }
-                        if ui
-                            .small_button("Daylight")
-                            .on_hover_text("5500K daylight")
-                            .clicked()
-                        {
-                            p.tint_r = 1.05;
-                            p.tint_b = 0.95;
-                            changed = true;
-                            started = true;
-                        }
-                        if ui
-                            .small_button("Cloudy")
-                            .on_hover_text("6500K overcast")
-                            .clicked()
-                        {
-                            p.tint_r = 1.15;
-                            p.tint_b = 0.88;
-                            changed = true;
-                            started = true;
-                        }
-                        if ui
-                            .small_button("Shade")
-                            .on_hover_text("7500K deep shade")
-                            .clicked()
-                        {
-                            p.tint_r = 1.28;
-                            p.tint_b = 0.80;
-                            changed = true;
-                            started = true;
-                        }
-                        if ui
-                            .small_button("Tungsten")
-                            .on_hover_text("3200K tungsten")
-                            .clicked()
-                        {
-                            p.tint_r = 0.72;
-                            p.tint_b = 1.38;
-                            changed = true;
-                            started = true;
-                        }
-                        if ui
-                            .small_button("Fluorescent")
-                            .on_hover_text("4000K fluorescent")
-                            .clicked()
-                        {
-                            p.tint_r = 0.85;
-                            p.tint_b = 1.18;
-                            changed = true;
-                            started = true;
-                        }
-                    });
-                    track!(ui.add(
-                        egui::Slider::new(&mut p.tint_r, 0.2..=4.0)
-                            .text("red")
-                            .fixed_decimals(3)
-                    ));
-                    track!(ui.add(
-                        egui::Slider::new(&mut p.tint_b, 0.2..=4.0)
-                            .text("blue")
-                            .fixed_decimals(3)
-                    ));
-                }
-                ui.separator();
-
-                module_header(
-                    ui,
-                    "exposure",
-                    &mut self.stack.exposure.enabled,
-                    &mut changed,
-                );
-                if self.stack.exposure.enabled {
-                    let p = &mut self.stack.exposure.params;
-                    track!(ui.add(
-                        egui::Slider::new(&mut p.ev, -5.0..=5.0)
-                            .text("EV")
-                            .fixed_decimals(2)
-                    ));
-                    track!(ui.add(
-                        egui::Slider::new(&mut p.black, -0.1..=0.1)
-                            .text("black")
-                            .fixed_decimals(4)
-                    ));
-                }
-                ui.separator();
-
-                module_header(
-                    ui,
-                    "tone curve",
-                    &mut self.stack.tone_curve.enabled,
-                    &mut changed,
-                );
-                if self.stack.tone_curve.enabled {
-                    track!(curve_editor(ui, &mut self.stack.tone_curve.params));
-                    if ui.button("reset curve").clicked() {
-                        self.stack.tone_curve.params = identity_nodes();
-                        changed = true;
-                        started = true;
-                    }
-                }
-                ui.separator();
-
-                module_header(
-                    ui,
-                    "filmic rgb",
-                    &mut self.stack.filmic.enabled,
-                    &mut changed,
-                );
-                if self.stack.filmic.enabled {
-                    let p = &mut self.stack.filmic.params;
-                    track!(ui.add(egui::Slider::new(&mut p.white_ev, 0.0..=8.0).text("white EV")));
-                    track!(
-                        ui.add(egui::Slider::new(&mut p.black_ev, -16.0..=-1.0).text("black EV"))
-                    );
-                    track!(
-                        ui.add(egui::Slider::new(&mut p.latitude, 5.0..=80.0).text("latitude %"))
-                    );
-                    track!(ui.add(egui::Slider::new(&mut p.contrast, 0.1..=3.0).text("contrast")));
-                }
-                ui.separator();
-
-                module_header(
-                    ui,
-                    "colour balance",
-                    &mut self.stack.color_balance.enabled,
-                    &mut changed,
-                );
-                if self.stack.color_balance.enabled {
-                    let p = &mut self.stack.color_balance.params;
-                    for (label, rgb) in [
-                        ("lift", &mut p.lift),
-                        ("gamma", &mut p.gamma),
-                        ("gain", &mut p.gain),
-                        ("offset", &mut p.offset),
-                    ] {
-                        ui.label(theme::dim(label));
-                        track!(ui.add(egui::Slider::new(&mut rgb.r, -0.5..=0.5).text("r")));
-                        track!(ui.add(egui::Slider::new(&mut rgb.g, -0.5..=0.5).text("g")));
-                        track!(ui.add(egui::Slider::new(&mut rgb.b, -0.5..=0.5).text("b")));
-                    }
-                }
-
-                if started {
-                    self.history.checkpoint(&snapshot);
-                }
-                if changed {
-                    self.needs_render = true;
-                }
-
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("undo").clicked() && self.history.undo(&mut self.stack) {
-                        self.needs_render = true;
-                    }
-                    if ui.button("redo").clicked() && self.history.redo(&mut self.stack) {
-                        self.needs_render = true;
+                        let target = if is_wide { 288.0 } else { 460.0 };
+                        self.inspector_width = target;
+                        self.inspector_force_width = Some(target);
                     }
                 });
             });
+            ui.add_space(4.0);
+
+            // Customize drawer when open
+            if self.customize_open {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("CUSTOMIZE SIDEBAR").size(10.5).color(theme::ACCENT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Reset Order").on_hover_text("Restore default pipeline ordering").clicked() {
+                                self.inspector_sections = InspectorSectionConfig::default_sections();
+                            }
+                            if ui.small_button("Show All").on_hover_text("Show all modules").clicked() {
+                                for s in &mut self.inspector_sections {
+                                    s.visible = true;
+                                }
+                            }
+                            if ui.small_button("Essentials").on_hover_text("Show only essential modules").clicked() {
+                                for s in &mut self.inspector_sections {
+                                    s.visible = matches!(
+                                        s.id,
+                                        InspectorSectionId::Scope
+                                            | InspectorSectionId::Geometry
+                                            | InspectorSectionId::WhiteBalance
+                                            | InspectorSectionId::Exposure
+                                            | InspectorSectionId::Filmic3D
+                                    );
+                                }
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    let mut move_act = None;
+                    let total = self.inspector_sections.len();
+                    for (i, sec) in self.inspector_sections.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut sec.visible, "");
+                            let title_text = if sec.visible {
+                                egui::RichText::new(sec.id.title()).color(theme::TEXT)
+                            } else {
+                                theme::dim(sec.id.title())
+                            };
+                            ui.label(title_text);
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(i + 1 < total, egui::Button::new("▼").small()).clicked() {
+                                    move_act = Some((i, 1));
+                                }
+                                if ui.add_enabled(i > 0, egui::Button::new("▲").small()).clicked() {
+                                    move_act = Some((i, -1));
+                                }
+                            });
+                        });
+                    }
+
+                    if let Some((idx, dir)) = move_act {
+                        let new_idx = (idx as isize + dir) as usize;
+                        if new_idx < self.inspector_sections.len() {
+                            self.inspector_sections.swap(idx, new_idx);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
+
+            ui.separator();
+
+            if self.engine.image().is_none() {
+                ui.label(theme::dim("no image"));
+                return;
+            }
+
+            // ScrollArea for the entire inspector sidebar:
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut move_action: Option<(usize, isize)> = None;
+                    let total = self.inspector_sections.len();
+
+                    let mut before: Option<PhotoStack> = None;
+                    let mut changed = false;
+                    let mut started = false;
+
+                    macro_rules! track {
+                        ($r:expr) => {{
+                            let r = $r;
+                            if r.drag_started() || (r.changed() && !r.dragged()) {
+                                started = true;
+                            }
+                            if r.changed() {
+                                changed = true;
+                            }
+                        }};
+                    }
+
+                    before.get_or_insert_with(|| self.stack.clone());
+                    let snapshot = before.take().unwrap();
+                    let before_geometry = self.stack.clone();
+                    let mut geometry_changed = false;
+
+                    let section_metas: Vec<(usize, InspectorSectionId, bool, bool)> = self
+                        .inspector_sections
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| (i, s.id, s.visible, s.collapsed))
+                        .collect();
+
+                    for (idx, id, visible, mut collapsed) in section_metas {
+                        if !visible {
+                            continue;
+                        }
+
+                        let can_up = idx > 0;
+                        let can_down = idx + 1 < total;
+
+                        match id {
+                            InspectorSectionId::Scope => {
+                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed {
+                                    ui.add_space(2.0);
+                                    inspector_map_3d::render_inspector_map(
+                                        ui,
+                                        &mut self.inspector_map_state,
+                                        self.engine.histogram(),
+                                    );
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Geometry => {
+                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed {
+                                    ui.add_space(2.0);
+                                    let g = &mut self.stack.geometry;
+                                    ui.horizontal(|ui| {
+                                        if geometry_icon_button(ui, GeometryIcon::RotateLeft, false, "Rotate 90° CCW ([)").clicked() {
+                                            g.rotate_left();
+                                            geometry_changed = true;
+                                        }
+                                        if geometry_icon_button(ui, GeometryIcon::RotateRight, false, "Rotate 90° CW (])").clicked() {
+                                            g.rotate_right();
+                                            geometry_changed = true;
+                                        }
+                                        if geometry_icon_button(ui, GeometryIcon::MirrorH, g.mirror_h, "Flip horizontally (H)").clicked() {
+                                            g.flip_h();
+                                            geometry_changed = true;
+                                        }
+                                        if geometry_icon_button(ui, GeometryIcon::MirrorV, g.mirror_v, "Flip vertically (V)").clicked() {
+                                            g.flip_v();
+                                            geometry_changed = true;
+                                        }
+                                    });
+
+                                    let straighten = ui.add(
+                                        egui::Slider::new(&mut g.straighten_deg, -15.0..=15.0)
+                                            .text("straighten°")
+                                            .fixed_decimals(2),
+                                    );
+                                    if straighten.drag_started() {
+                                        self.history.checkpoint(&before_geometry);
+                                    }
+                                    if straighten.changed() {
+                                        self.needs_render = true;
+                                    }
+
+                                    ui.horizontal(|ui| {
+                                        let cropping = self.cropping;
+                                        if ui.selectable_label(cropping, "crop").clicked() {
+                                            self.cropping = !cropping;
+                                        }
+                                        let g = &mut self.stack.geometry;
+                                        if ui
+                                            .add_enabled(!g.crop.is_full_frame(), egui::Button::new("reset"))
+                                            .clicked()
+                                        {
+                                            g.crop = Crop::default();
+                                            geometry_changed = true;
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Snapshots => {
+                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed {
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.text_edit_singleline(&mut self.new_snapshot_name);
+                                        if ui
+                                            .button("+ Add")
+                                            .on_hover_text("Save current stack as a snapshot")
+                                            .clicked()
+                                        {
+                                            let name = if self.new_snapshot_name.trim().is_empty() {
+                                                format!("Snapshot {}", self.snapshots.len() + 1)
+                                            } else {
+                                                self.new_snapshot_name.trim().to_string()
+                                            };
+                                            self.snapshots.push((name, self.stack.clone()));
+                                            self.new_snapshot_name.clear();
+                                        }
+                                    });
+                                    let mut restore_idx = None;
+                                    let mut delete_idx = None;
+                                    for (s_i, (name, _)) in self.snapshots.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .button(name)
+                                                .on_hover_text("Restore this snapshot")
+                                                .clicked()
+                                            {
+                                                restore_idx = Some(s_i);
+                                            }
+                                            if ui
+                                                .small_button("×")
+                                                .on_hover_text("Delete snapshot")
+                                                .clicked()
+                                            {
+                                                delete_idx = Some(s_i);
+                                            }
+                                        });
+                                    }
+                                    if let Some(s_i) = restore_idx {
+                                        self.history.checkpoint(&self.stack);
+                                        self.stack = self.snapshots[s_i].1.clone();
+                                        self.needs_render = true;
+                                    }
+                                    if let Some(s_i) = delete_idx {
+                                        self.snapshots.remove(s_i);
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::WhiteBalance => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.white_balance.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.white_balance.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.white_balance.params;
+                                    let (mut kelvin, mut tint) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
+                                    let mut kt_changed = false;
+                                    let k_slider = ui.add(
+                                        egui::Slider::new(&mut kelvin, 2000.0..=12000.0)
+                                            .text("temp (K)")
+                                            .fixed_decimals(0),
+                                    );
+                                    if k_slider.drag_started() {
+                                        started = true;
+                                    }
+                                    if k_slider.changed() {
+                                        kt_changed = true;
+                                    }
+
+                                    let t_slider = ui.add(
+                                        egui::Slider::new(&mut tint, -50.0..=50.0)
+                                            .text("tint")
+                                            .fixed_decimals(1),
+                                    );
+                                    if t_slider.drag_started() {
+                                        started = true;
+                                    }
+                                    if t_slider.changed() {
+                                        kt_changed = true;
+                                    }
+
+                                    if kt_changed {
+                                        let (r, b) = kelvin_tint_to_rgb(kelvin, tint);
+                                        p.tint_r = r;
+                                        p.tint_b = b;
+                                        changed = true;
+                                    }
+
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.small_button("As-Shot").clicked() {
+                                            p.tint_r = 1.0;
+                                            p.tint_b = 1.0;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                        if ui
+                                            .small_button("Daylight")
+                                            .on_hover_text("5500K daylight")
+                                            .clicked()
+                                        {
+                                            p.tint_r = 1.05;
+                                            p.tint_b = 0.95;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                        if ui
+                                            .small_button("Cloudy")
+                                            .on_hover_text("6500K overcast")
+                                            .clicked()
+                                        {
+                                            p.tint_r = 1.15;
+                                            p.tint_b = 0.88;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                        if ui
+                                            .small_button("Shade")
+                                            .on_hover_text("7500K deep shade")
+                                            .clicked()
+                                        {
+                                            p.tint_r = 1.28;
+                                            p.tint_b = 0.80;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                        if ui
+                                            .small_button("Tungsten")
+                                            .on_hover_text("3200K incandescent")
+                                            .clicked()
+                                        {
+                                            p.tint_r = 0.75;
+                                            p.tint_b = 1.35;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                        if ui
+                                            .small_button("Fluorescent")
+                                            .on_hover_text("4000K fluorescent")
+                                            .clicked()
+                                        {
+                                            p.tint_r = 0.88;
+                                            p.tint_b = 1.12;
+                                            changed = true;
+                                            started = true;
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Exposure => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.exposure.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.exposure.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.exposure.params;
+                                    track!(ui.add(egui::Slider::new(&mut p.ev, -4.0..=4.0).text("EV")));
+                                    track!(
+                                        ui.add(
+                                            egui::Slider::new(&mut p.black, -0.1..=0.1)
+                                                .text("black")
+                                                .fixed_decimals(4)
+                                        )
+                                    );
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Tonal => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.tonal.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.tonal.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.tonal.params;
+                                    track!(ui.add(egui::Slider::new(&mut p.highlights, -1.0..=1.0).text("highlights")));
+                                    track!(ui.add(egui::Slider::new(&mut p.shadows, -1.0..=1.0).text("shadows")));
+                                    track!(ui.add(egui::Slider::new(&mut p.whites, -1.0..=1.0).text("whites")));
+                                    track!(ui.add(egui::Slider::new(&mut p.blacks, -1.0..=1.0).text("blacks")));
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::ToneCurve => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.tone_curve.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.tone_curve.enabled {
+                                    ui.add_space(2.0);
+                                    let curve_response = curve_editor(ui, &mut self.stack.tone_curve.params);
+                                    if curve_response.drag_started() {
+                                        started = true;
+                                    }
+                                    if curve_response.changed() {
+                                        changed = true;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            self.stack.tone_curve.params != identity_nodes(),
+                                            egui::Button::new("reset"),
+                                        )
+                                        .clicked()
+                                    {
+                                        started = true;
+                                        self.stack.tone_curve.params = identity_nodes();
+                                        changed = true;
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Filmic3D => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.filmic.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.filmic.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.filmic.params;
+                                    tonemap_3d::render_tonemap_3d(
+                                        ui,
+                                        &mut self.tonemap_3d_state,
+                                        p,
+                                        &mut changed,
+                                        &mut started,
+                                    );
+                                    ui.add_space(4.0);
+                                    track!(ui.add(egui::Slider::new(&mut p.white_ev, 0.0..=8.0).text("white EV")));
+                                    track!(
+                                        ui.add(egui::Slider::new(&mut p.black_ev, -16.0..=-1.0).text("black EV"))
+                                    );
+                                    track!(
+                                        ui.add(egui::Slider::new(&mut p.latitude, 5.0..=80.0).text("latitude %"))
+                                    );
+                                    track!(ui.add(egui::Slider::new(&mut p.contrast, 0.1..=3.0).text("contrast")));
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::ColorBalance => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.color_balance.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.color_balance.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.color_balance.params;
+                                    for (label, rgb) in [
+                                        ("lift", &mut p.lift),
+                                        ("gamma", &mut p.gamma),
+                                        ("gain", &mut p.gain),
+                                        ("offset", &mut p.offset),
+                                    ] {
+                                        ui.label(theme::dim(label));
+                                        track!(ui.add(egui::Slider::new(&mut rgb.r, -0.5..=0.5).text("r")));
+                                        track!(ui.add(egui::Slider::new(&mut rgb.g, -0.5..=0.5).text("g")));
+                                        track!(ui.add(egui::Slider::new(&mut rgb.b, -0.5..=0.5).text("b")));
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Vibrance => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.vibrance.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.vibrance.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.vibrance.params;
+                                    track!(ui.add(
+                                        egui::Slider::new(&mut p.vibrance, -1.0..=1.0)
+                                            .text("vibrance")
+                                            .fixed_decimals(2)
+                                    ));
+                                    track!(ui.add(
+                                        egui::Slider::new(&mut p.saturation, -1.0..=1.0)
+                                            .text("saturation")
+                                            .fixed_decimals(2)
+                                    ));
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Sharpen => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.sharpen.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.sharpen.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.sharpen.params;
+                                    track!(ui.add(
+                                        egui::Slider::new(&mut p.amount, 0.0..=2.0)
+                                            .text("amount")
+                                            .fixed_decimals(2)
+                                    ));
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                            InspectorSectionId::Vignette => {
+                                let (up, down) = section_header_row(
+                                    ui,
+                                    id.title(),
+                                    &mut collapsed,
+                                    Some((&mut self.stack.vignette.enabled, &mut changed)),
+                                    can_up,
+                                    can_down,
+                                );
+                                if up { move_action = Some((idx, -1)); }
+                                if down { move_action = Some((idx, 1)); }
+                                if !collapsed && self.stack.vignette.enabled {
+                                    ui.add_space(2.0);
+                                    let p = &mut self.stack.vignette.params;
+                                    track!(ui.add(
+                                        egui::Slider::new(&mut p.amount, -1.0..=1.0)
+                                            .text("amount")
+                                            .fixed_decimals(2)
+                                    ));
+                                    track!(ui.add(
+                                        egui::Slider::new(&mut p.radius, 0.1..=1.5)
+                                            .text("radius")
+                                            .fixed_decimals(2)
+                                    ));
+                                    ui.add_space(4.0);
+                                }
+                                ui.separator();
+                            }
+                        }
+
+                        self.inspector_sections[idx].collapsed = collapsed;
+                    }
+
+                    if let Some((idx, dir)) = move_action {
+                        let new_idx = (idx as isize + dir) as usize;
+                        if new_idx < self.inspector_sections.len() {
+                            self.inspector_sections.swap(idx, new_idx);
+                        }
+                    }
+
+                    if started {
+                        self.history.checkpoint(&snapshot);
+                    }
+                    if changed {
+                        self.needs_render = true;
+                    }
+                    if geometry_changed {
+                        self.history.checkpoint(&before_geometry);
+                        self.needs_render = true;
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("undo").clicked() && self.history.undo(&mut self.stack) {
+                            self.needs_render = true;
+                        }
+                        if ui.button("redo").clicked() && self.history.redo(&mut self.stack) {
+                            self.needs_render = true;
+                        }
+                    });
+                });
+        });
+
+        self.inspector_width = inner.response.rect.width();
     }
 }
 
+fn section_header_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    collapsed: &mut bool,
+    mut enabled: Option<(&mut bool, &mut bool)>,
+    can_up: bool,
+    can_down: bool,
+) -> (bool, bool) {
+    let mut move_up = false;
+    let mut move_down = false;
+
+    ui.horizontal(|ui| {
+        let arrow = if *collapsed { "▶" } else { "▼" };
+        if ui
+            .small_button(arrow)
+            .on_hover_text(if *collapsed { "Expand section" } else { "Collapse section" })
+            .clicked()
+        {
+            *collapsed = !*collapsed;
+        }
+
+        let is_active = match enabled {
+            Some((ref mut en, ref mut chg)) => {
+                if ui.checkbox(en, "").changed() {
+                    **chg = true;
+                }
+                **en
+            }
+            None => true,
+        };
+
+        let label_text = if is_active {
+            egui::RichText::new(title).color(theme::TEXT)
+        } else {
+            theme::dim(title)
+        };
+
+        if ui
+            .selectable_label(false, label_text)
+            .on_hover_text("Click to collapse/expand")
+            .clicked()
+        {
+            *collapsed = !*collapsed;
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(can_down, egui::Button::new("▼").small())
+                .on_hover_text("Move section down in sidebar")
+                .clicked()
+            {
+                move_down = true;
+            }
+            if ui
+                .add_enabled(can_up, egui::Button::new("▲").small())
+                .on_hover_text("Move section up in sidebar")
+                .clicked()
+            {
+                move_up = true;
+            }
+        });
+    });
+
+    (move_up, move_down)
+}
+
+#[allow(dead_code)]
 fn module_header(ui: &mut egui::Ui, label: &str, enabled: &mut bool, changed: &mut bool) {
     ui.horizontal(|ui| {
         if ui.checkbox(enabled, "").changed() {
@@ -1539,6 +2076,7 @@ fn file_name(path: &std::path::Path) -> String {
 /// Drawn as three additive channel outlines over a filled luminance body, which is the
 /// convention every photographer already reads. The vertical scale ignores pure black and
 /// pure white, so a large flat sky or shadow does not squash everything else into a line.
+#[allow(dead_code)]
 fn histogram_plot(ui: &mut egui::Ui, hist: &photo_engine::Histogram) {
     let size = egui::vec2(ui.available_width().min(252.0), 90.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -1608,4 +2146,188 @@ fn histogram_plot(ui: &mut egui::Ui, hist: &photo_engine::Histogram) {
         ui.label(theme::dim("hi"));
         ui.label(warn(high));
     });
+}
+
+#[derive(Clone, Copy)]
+enum GeometryIcon {
+    RotateLeft,
+    RotateRight,
+    MirrorH,
+    MirrorV,
+}
+
+fn geometry_icon_button(
+    ui: &mut egui::Ui,
+    icon: GeometryIcon,
+    active: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let size = egui::vec2(28.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let bg_color = if active {
+            theme::ACCENT.linear_multiply(0.25)
+        } else if response.hovered() {
+            theme::BG_850
+        } else {
+            theme::BG_900
+        };
+
+        let stroke_color = if active {
+            theme::ACCENT
+        } else if response.hovered() {
+            theme::TEXT_DIM
+        } else {
+            theme::BORDER
+        };
+
+        let icon_color = if active {
+            theme::ACCENT
+        } else if response.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
+
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(2), bg_color);
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(2),
+            egui::Stroke::new(1.0, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+
+        let center = rect.center();
+        let stroke = egui::Stroke::new(1.5, icon_color);
+
+        match icon {
+            GeometryIcon::RotateLeft => {
+                let r = 5.5;
+                let mut points = Vec::new();
+                for i in 0..=12 {
+                    let angle =
+                        std::f32::consts::PI * 0.2 + (i as f32 / 12.0) * std::f32::consts::PI * 1.4;
+                    points.push(center + egui::vec2(angle.cos() * r, -angle.sin() * r));
+                }
+                for pair in points.windows(2) {
+                    ui.painter().line_segment([pair[0], pair[1]], stroke);
+                }
+                let tip = points[points.len() - 1];
+                ui.painter()
+                    .line_segment([tip, tip + egui::vec2(3.0, 0.0)], stroke);
+                ui.painter()
+                    .line_segment([tip, tip + egui::vec2(0.5, 3.0)], stroke);
+            }
+            GeometryIcon::RotateRight => {
+                let r = 5.5;
+                let mut points = Vec::new();
+                for i in 0..=12 {
+                    let angle =
+                        std::f32::consts::PI * 0.8 - (i as f32 / 12.0) * std::f32::consts::PI * 1.4;
+                    points.push(center + egui::vec2(angle.cos() * r, -angle.sin() * r));
+                }
+                for pair in points.windows(2) {
+                    ui.painter().line_segment([pair[0], pair[1]], stroke);
+                }
+                let tip = points[points.len() - 1];
+                ui.painter()
+                    .line_segment([tip, tip - egui::vec2(3.0, 0.0)], stroke);
+                ui.painter()
+                    .line_segment([tip, tip + egui::vec2(-0.5, 3.0)], stroke);
+            }
+            GeometryIcon::MirrorH => {
+                ui.painter().line_segment(
+                    [
+                        center + egui::vec2(0.0, -7.0),
+                        center + egui::vec2(0.0, 7.0),
+                    ],
+                    egui::Stroke::new(1.0, theme::BORDER),
+                );
+                let t_left = [
+                    center + egui::vec2(-2.0, -4.5),
+                    center + egui::vec2(-7.0, 0.0),
+                    center + egui::vec2(-2.0, 4.5),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    t_left.to_vec(),
+                    if active {
+                        theme::ACCENT.linear_multiply(0.4)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                    stroke,
+                ));
+                let t_right = [
+                    center + egui::vec2(2.0, -4.5),
+                    center + egui::vec2(7.0, 0.0),
+                    center + egui::vec2(2.0, 4.5),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    t_right.to_vec(),
+                    if active {
+                        theme::ACCENT.linear_multiply(0.4)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                    stroke,
+                ));
+            }
+            GeometryIcon::MirrorV => {
+                ui.painter().line_segment(
+                    [
+                        center + egui::vec2(-7.0, 0.0),
+                        center + egui::vec2(7.0, 0.0),
+                    ],
+                    egui::Stroke::new(1.0, theme::BORDER),
+                );
+                let t_top = [
+                    center + egui::vec2(-4.5, -2.0),
+                    center + egui::vec2(0.0, -7.0),
+                    center + egui::vec2(4.5, -2.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    t_top.to_vec(),
+                    if active {
+                        theme::ACCENT.linear_multiply(0.4)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                    stroke,
+                ));
+                let t_bottom = [
+                    center + egui::vec2(-4.5, 2.0),
+                    center + egui::vec2(0.0, 7.0),
+                    center + egui::vec2(4.5, 2.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    t_bottom.to_vec(),
+                    if active {
+                        theme::ACCENT.linear_multiply(0.4)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                    stroke,
+                ));
+            }
+        }
+    }
+
+    response.on_hover_text(tooltip)
+}
+
+fn kelvin_tint_to_rgb(kelvin: f32, tint: f32) -> (f32, f32) {
+    let k_factor = (kelvin - 5500.0) / 4500.0;
+    let r = 1.0 + k_factor * 0.45 - tint * 0.005;
+    let b = 1.0 - k_factor * 0.40 - tint * 0.005;
+    (r.clamp(0.2, 4.0), b.clamp(0.2, 4.0))
+}
+
+fn rgb_to_kelvin_tint(tint_r: f32, tint_b: f32) -> (f32, f32) {
+    let diff = (tint_r - tint_b) * 0.5;
+    let kelvin = (5500.0 + diff * 4500.0).clamp(2000.0, 12000.0);
+    let avg = (tint_r + tint_b) * 0.5;
+    let tint = ((1.0 - avg) * 100.0).clamp(-50.0, 50.0);
+    (kelvin, tint)
 }

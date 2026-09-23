@@ -28,6 +28,10 @@ struct Adjust {
     turns:    vec4<u32>,   // x = quarter turns clockwise
     split:    vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled
     as_shot_wb: vec4<f32>, // xyz = as-shot camera neutral multipliers
+    tonal:      vec4<f32>, // x = highlights, y = shadows, z = whites, w = blacks
+    vibrance:   vec4<f32>, // x = vibrance, y = saturation
+    vignette:   vec4<f32>, // x = amount, y = radius
+    sharpen:    vec4<f32>, // x = amount
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -35,6 +39,10 @@ const FLAG_EXPOSURE: u32 = 2u;
 const FLAG_CURVE:    u32 = 4u;
 const FLAG_FILMIC:   u32 = 8u;
 const FLAG_BALANCE:  u32 = 16u;
+const FLAG_TONAL:    u32 = 32u;
+const FLAG_VIBRANCE: u32 = 64u;
+const FLAG_VIGNETTE: u32 = 128u;
+const FLAG_SHARPEN:  u32 = 256u;
 
 @group(0) @binding(0) var sensor: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> u: Adjust;
@@ -182,7 +190,18 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Sampled rather than loaded, because straightening lands between texels. With no
     // straighten the coordinates fall on texel centres and this is exact.
-    var c = textureSampleLevel(sensor, sensor_sampler, src / u.sizes.zw, 0.0).rgb;
+    let uv = src / u.sizes.zw;
+    var c = textureSampleLevel(sensor, sensor_sampler, uv, 0.0).rgb;
+
+    if (enabled(FLAG_SHARPEN)) {
+        let step = vec2<f32>(1.0 / u.sizes.z, 1.0 / u.sizes.w);
+        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
+        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
+        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
+        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
+        let laplacian = c * 4.0 - (s_up + s_dn + s_lf + s_rt);
+        c = clamp(c + laplacian * u.sharpen.x, vec3<f32>(0.0), vec3<f32>(2.0));
+    }
 
     // Captured before the gains are applied: saturation is a property of the sensor, and
     // after white balance there is no longer any way to tell a clipped channel from a
@@ -221,6 +240,21 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         c = (c - vec3<f32>(u.exposure.y)) * u.exposure.x;
     }
 
+    if (enabled(FLAG_TONAL)) {
+        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let s_weight = 1.0 - smoothstep(0.0, 0.5, luma);
+        let h_weight = smoothstep(0.35, 1.0, luma);
+        let w_weight = smoothstep(0.7, 1.2, luma);
+        let b_weight = 1.0 - smoothstep(0.0, 0.2, luma);
+
+        let s_factor = 1.0 + u.tonal.y * s_weight * 0.75;
+        let h_factor = 1.0 + u.tonal.x * h_weight * 0.6;
+        let w_factor = 1.0 + u.tonal.z * w_weight * 0.5;
+        let b_offset = u.tonal.w * b_weight * 0.05;
+
+        c = max(vec3<f32>(0.0), (c + vec3<f32>(b_offset)) * max(s_factor * h_factor * w_factor, 0.01));
+    }
+
     if (enabled(FLAG_CURVE)) {
         c = vec3<f32>(curve(c.r), curve(c.g), curve(c.b));
     }
@@ -235,6 +269,24 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             balance_channel(c.g, u.lift.g, u.gamma.g, u.gain.g, u.offset.g),
             balance_channel(c.b, u.lift.b, u.gamma.b, u.gain.b, u.offset.b),
         );
+    }
+
+    if (enabled(FLAG_VIBRANCE)) {
+        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let max_ch = max(c.r, max(c.g, c.b));
+        let min_ch = min(c.r, min(c.g, c.b));
+        let cur_sat = (max_ch - min_ch) / max(max_ch, 0.001);
+        let vib_boost = u.vibrance.x * (1.0 - clamp(cur_sat, 0.0, 1.0));
+        let sat_factor = max(1.0 + u.vibrance.y + vib_boost, 0.0);
+        c = mix(vec3<f32>(luma), c, sat_factor);
+    }
+
+    if (enabled(FLAG_VIGNETTE)) {
+        let norm_pos = pos.xy / u.sizes.xy - vec2<f32>(0.5, 0.5);
+        let dist = length(norm_pos) * 1.4142;
+        let rad = max(u.vignette.y, 0.05);
+        let v_falloff = smoothstep(rad * 0.4, rad, dist);
+        c = c * max(1.0 + u.vignette.x * v_falloff, 0.0);
     }
 
     return vec4<f32>(linear_to_srgb(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);

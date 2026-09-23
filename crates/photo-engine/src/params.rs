@@ -165,12 +165,101 @@ impl Geometry {
         self.crop = Crop::default();
     }
 
+    pub fn flip_h(&mut self) {
+        self.mirror_h = !self.mirror_h;
+        if !self.crop.is_full_frame() {
+            let c = self.crop.sanitised();
+            self.crop.x = (1.0 - (c.x + c.width)).clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn flip_v(&mut self) {
+        self.mirror_v = !self.mirror_v;
+        if !self.crop.is_full_frame() {
+            let c = self.crop.sanitised();
+            self.crop.y = (1.0 - (c.y + c.height)).clamp(0.0, 1.0);
+        }
+    }
+
     pub fn is_identity(&self) -> bool {
         self.quarter_turns == 0
             && !self.mirror_h
             && !self.mirror_v
             && self.straighten_deg == 0.0
             && self.crop.is_full_frame()
+    }
+}
+
+/// Highlights and shadows tone compression / recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Tonal {
+    /// -1.0 compresses/recovers bright highlights; +1.0 boosts them.
+    pub highlights: f32,
+    /// +1.0 lifts deep shadows; -1.0 deepens them.
+    pub shadows: f32,
+    /// Fine adjustments to extreme white clip.
+    pub whites: f32,
+    /// Fine adjustments to shadow black floor.
+    pub blacks: f32,
+}
+
+impl Default for Tonal {
+    fn default() -> Self {
+        Self {
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+        }
+    }
+}
+
+/// Color vibrancy and chroma saturation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Vibrance {
+    /// Smart saturation boosting muted tones more than already saturated tones.
+    pub vibrance: f32,
+    /// Uniform chroma scaling.
+    pub saturation: f32,
+}
+
+impl Default for Vibrance {
+    fn default() -> Self {
+        Self {
+            vibrance: 0.0,
+            saturation: 0.0,
+        }
+    }
+}
+
+/// Lens falloff and optical vignetting control.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Vignette {
+    /// Negative darkens corners; positive lightens them to correct lens falloff.
+    pub amount: f32,
+    /// Normalized radius where falloff begins.
+    pub radius: f32,
+}
+
+impl Default for Vignette {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            radius: 0.8,
+        }
+    }
+}
+
+/// Capture unsharp masking / detail clarity.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Sharpen {
+    /// Amount of high-frequency detail boost.
+    pub amount: f32,
+}
+
+impl Default for Sharpen {
+    fn default() -> Self {
+        Self { amount: 0.0 }
     }
 }
 
@@ -187,6 +276,15 @@ impl<T> Module<T> {
     }
 }
 
+impl<T: Default> Default for Module<T> {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            params: T::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhotoStack {
     /// Not a `Module`: there is no meaningful "disabled" state for orientation, and a
@@ -194,9 +292,17 @@ pub struct PhotoStack {
     pub geometry: Geometry,
     pub white_balance: Module<WhiteBalance>,
     pub exposure: Module<Exposure>,
+    #[serde(default)]
+    pub tonal: Module<Tonal>,
     pub tone_curve: Module<Vec<CurveNode>>,
     pub filmic: Module<Filmic>,
     pub color_balance: Module<ColorBalance>,
+    #[serde(default)]
+    pub vibrance: Module<Vibrance>,
+    #[serde(default)]
+    pub vignette: Module<Vignette>,
+    #[serde(default)]
+    pub sharpen: Module<Sharpen>,
 }
 
 impl Default for PhotoStack {
@@ -217,6 +323,7 @@ impl Default for PhotoStack {
                     black: 0.0,
                 },
             ),
+            tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
             filmic: Module::new(
                 false,
@@ -236,6 +343,9 @@ impl Default for PhotoStack {
                     offset: Rgb::splat(0.0),
                 },
             ),
+            vibrance: Module::new(false, Vibrance::default()),
+            vignette: Module::new(false, Vignette::default()),
+            sharpen: Module::new(false, Sharpen::default()),
         }
     }
 }
@@ -246,6 +356,10 @@ pub(crate) mod flags {
     pub const CURVE: u32 = 4;
     pub const FILMIC: u32 = 8;
     pub const BALANCE: u32 = 16;
+    pub const TONAL: u32 = 32;
+    pub const VIBRANCE: u32 = 64;
+    pub const VIGNETTE: u32 = 128;
+    pub const SHARPEN: u32 = 256;
 }
 
 impl PhotoStack {
@@ -257,6 +371,9 @@ impl PhotoStack {
         if self.exposure.enabled {
             m |= flags::EXPOSURE;
         }
+        if self.tonal.enabled {
+            m |= flags::TONAL;
+        }
         if self.tone_curve.enabled {
             m |= flags::CURVE;
         }
@@ -265,6 +382,15 @@ impl PhotoStack {
         }
         if self.color_balance.enabled {
             m |= flags::BALANCE;
+        }
+        if self.vibrance.enabled {
+            m |= flags::VIBRANCE;
+        }
+        if self.vignette.enabled {
+            m |= flags::VIGNETTE;
+        }
+        if self.sharpen.enabled {
+            m |= flags::SHARPEN;
         }
         m
     }
@@ -362,5 +488,57 @@ mod tests {
         assert!(g.is_identity());
         g.mirror_h = true;
         assert!(!g.is_identity());
+    }
+
+    #[test]
+    fn flip_h_and_v_toggle_and_mirror_crop() {
+        let mut g = Geometry {
+            crop: Crop {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            ..Default::default()
+        };
+        g.flip_h();
+        assert!(g.mirror_h);
+        // Crop x was 0.1, width 0.3, right was 0.4 -> new x should be 1.0 - 0.4 = 0.6
+        assert!((g.crop.x - 0.6).abs() < 1e-5);
+        assert!((g.crop.width - 0.3).abs() < 1e-5);
+
+        g.flip_h();
+        assert!(!g.mirror_h);
+        assert!((g.crop.x - 0.1).abs() < 1e-5);
+
+        g.flip_v();
+        assert!(g.mirror_v);
+        // Crop y was 0.2, height 0.4, bottom was 0.6 -> new y should be 1.0 - 0.6 = 0.4
+        assert!((g.crop.y - 0.4).abs() < 1e-5);
+        assert!((g.crop.height - 0.4).abs() < 1e-5);
+
+        g.flip_v();
+        assert!(!g.mirror_v);
+        assert!((g.crop.y - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn new_stack_modules_affect_bitmask() {
+        let mut s = PhotoStack::default();
+        let base_mask = s.bitmask();
+        s.tonal.enabled = true;
+        assert_eq!(s.bitmask(), base_mask | flags::TONAL);
+        s.vibrance.enabled = true;
+        assert_eq!(s.bitmask(), base_mask | flags::TONAL | flags::VIBRANCE);
+        s.vignette.enabled = true;
+        assert_eq!(
+            s.bitmask(),
+            base_mask | flags::TONAL | flags::VIBRANCE | flags::VIGNETTE
+        );
+        s.sharpen.enabled = true;
+        assert_eq!(
+            s.bitmask(),
+            base_mask | flags::TONAL | flags::VIBRANCE | flags::VIGNETTE | flags::SHARPEN
+        );
     }
 }
