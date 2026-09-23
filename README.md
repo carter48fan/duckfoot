@@ -155,11 +155,19 @@ You can also **drag a RAW file onto the window**.
 | `\` | toggle before / after split view |
 | `C` / `Esc` | toggle crop tool / cancel crop gesture |
 | `[` / `]` | rotate 90° CCW / CW |
+| `H` / `V` | mirror / flip horizontal / vertical |
 | Scroll wheel | zoom about the cursor |
 | Drag the image | pan |
 | `0` / `1` | fit to window / 100% (1:1) |
 | Drag a slider | live re-render; one undo step per gesture, not per frame |
 | Drag in the curve box | move the nearest node; endpoints keep their x |
+| Drag in 3D Map / Tonemap | interactive 3D orbit camera (yaw & pitch) |
+| Scroll on 3D viewport | zoom 3D camera view (0.5x..=2.8x) |
+| Double-click on 3D view | reset 3D camera angle and zoom |
+| `▲` / `▼` on module header | reorder module up / down in sidebar |
+| `⚙ Custom` | show/hide modules and manage pipeline ordering |
+| `⤢ Expand` / `⤹ Narrow` | toggle sidebar width between compact (288px) and wide (460px) |
+| `↕ All` | expand all / collapse all inspector sections |
 | Checkbox by a module name | enable/disable that stage of the chain |
 
 Hotkeys deliberately do not fire while a text field has focus.
@@ -326,14 +334,16 @@ duckfoot/
 └── crates/
     ├── photo-engine/            # wgpu device, textures, shaders, RAW decode
     │   ├── src/decode.rs        #   rawloader → cropped CFA mosaic + metadata
-    │   ├── src/engine.rs        #   textures, pipelines, uniforms
+    │   ├── src/engine.rs        #   textures, pipelines, uniforms, GPU dispatch
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
-    │   ├── src/params.rs        #   the adjustment stack (plain data)
+    │   ├── src/params.rs        #   the adjustment stack (plain data + serde)
     │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
     │   ├── src/shaders/         #   demosaic.wgsl, adjust.wgsl
     │   └── examples/            #   probe.rs, bench.rs
     ├── photo-app/               # egui UI — no windowing dependency
-    │   ├── src/lib.rs           #   inspector, undo, curve editor, shelf, crop
+    │   ├── src/lib.rs           #   inspector, undo, shelf, crop, split view
+    │   ├── src/inspector_map_3d.rs # 3D rotatable inspector map & scopes
+    │   ├── src/tonemap_3d.rs    #   interactive 3D filmic tonemap & RGB cube
     │   └── src/theme.rs         #   DESIGN.md look and feel
     └── duckfoot/                # bootstrap: winit. The only platform crate
 ```
@@ -360,11 +370,17 @@ DESIGN.md invariant 8.
 | **Params** | white balance, exposure | Working | Including 5 one-click Kelvin presets + As-Shot reset |
 | **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT |
 | **Params** | filmic, colour balance | Working | |
+| **Params** | highlights & shadows (tonal) | Working | High dynamic range shadow & highlight balancing in shader |
+| **Params** | vibrance & saturation | Working | Non-linear skin-safe saturation boost |
+| **Params** | capture sharpen, vignette | Working | Edge-preserving convolution & radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
 | **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
 | **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, cropped & oriented, encoded off UI thread |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
+| **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
+| **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
+| **App** | inspector sidebar | Working | Smooth scrolling, module reorder (`▲`/`▼`), customizer, width toggle |
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
 | **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
@@ -373,7 +389,6 @@ DESIGN.md invariant 8.
 | **App** | export | Working | Export… button, format from the filename |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
-| **App** | RGB + luma histogram | Working | With clipped-low / clipped-high percentages |
 | **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
 | **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
 
@@ -454,10 +469,11 @@ Checked items are done **and verified**, not merely written.
 - [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
       near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
 - [ ] Preview at fit-to-window scale; full resolution reserved for export
-- [ ] PNG/JPEG export through the same shader — the real test of invariant 2
-- [ ] Live histogram via a compute pass and a 4 KB readback
-- [ ] Crop and rotate
-- [ ] Before/after split view
+- [x] PNG/JPEG export through the same shader — the real test of invariant 2
+- [x] Live histogram via a compute pass and a 4 KB readback
+- [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
+- [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)
+- [x] Before/after split view with draggable brass divider
 
 ### Stage 3 — Platforms
 
@@ -470,12 +486,13 @@ Checked items are done **and verified**, not merely written.
 
 ### Stage 4 — Barrel 1 proper
 
-- [ ] Remaining modules toward the full fixed-order stack (tone equaliser, local contrast,
-      capture sharpen, profiled denoise, lens correction)
+- [x] Extended pipeline modules (highlights & shadows, vibrance, capture sharpen, vignette)
+- [ ] Remaining modules (tone equaliser, local contrast, profiled denoise, lens correction)
 - [ ] Better demosaic (RCD or AHD)
-- [ ] The Shelf — asset list shared across barrels
-- [ ] Copy stack / paste to selection
-- [ ] Sidecar persistence so edits survive a restart
+- [x] The Shelf — asset list shared across barrels with multi-file ingest
+- [x] Copy stack / paste across photos
+- [x] Sidecar persistence (`.duckfoot` companion JSON files)
+- [x] Customizer drawer, module reordering, smooth scrolling, and sidebar expansion
 - [ ] Swap to `rawler` for camera coverage
 - [ ] Delete `apps/` and `packages/`
 

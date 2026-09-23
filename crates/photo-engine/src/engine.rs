@@ -72,6 +72,10 @@ struct AdjustUniforms {
     turns: [u32; 4],
     split: [f32; 4],
     as_shot_wb: [f32; 4],
+    tonal: [f32; 4],
+    vibrance: [f32; 4],
+    vignette: [f32; 4],
+    sharpen: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -787,6 +791,25 @@ impl Engine {
                 turns: [g.quarter_turns as u32, 0, 0, 0],
                 split: [split_x.unwrap_or(-1.0), 0.0, 0.0, 0.0],
                 as_shot_wb: [image.wb[0], image.wb[1], image.wb[2], 0.0],
+                tonal: [
+                    stack.tonal.params.highlights,
+                    stack.tonal.params.shadows,
+                    stack.tonal.params.whites,
+                    stack.tonal.params.blacks,
+                ],
+                vibrance: [
+                    stack.vibrance.params.vibrance,
+                    stack.vibrance.params.saturation,
+                    0.0,
+                    0.0,
+                ],
+                vignette: [
+                    stack.vignette.params.amount,
+                    stack.vignette.params.radius,
+                    0.0,
+                    0.0,
+                ],
+                sharpen: [stack.sharpen.params.amount, 0.0, 0.0, 0.0],
             }),
         );
 
