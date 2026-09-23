@@ -10,7 +10,19 @@ use std::time::Instant;
 
 use std::sync::RwLock;
 
-use photo_engine::{identity_nodes, CurveNode, Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{
+    find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
+    RawDecoder, RawloaderBackend,
+};
+
+/// An asset represented in the Shelf.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShelfItem {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_edited: bool,
+    pub has_sidecar: bool,
+}
 
 /// Everything the app needs from the GPU, supplied by whichever shell is running.
 ///
@@ -125,6 +137,19 @@ pub struct PhotoApp {
     cropping: bool,
     /// Where a crop drag started, in normalised image coordinates.
     crop_anchor: Option<egui::Pos2>,
+    /// The Shelf: assets in the project/session.
+    pub shelf: Vec<ShelfItem>,
+    pub shelf_open: bool,
+    /// Before/after split view toggle and position (0.0..=1.0).
+    pub split_active: bool,
+    pub split_pos: f32,
+    /// In-memory clipboard for copying/pasting adjustment stacks across photos.
+    pub clipboard_stack: Option<PhotoStack>,
+    /// Named snapshot history checkpoints.
+    pub snapshots: Vec<(String, PhotoStack)>,
+    pub new_snapshot_name: String,
+    /// Brief notifications in the status bar with timestamp.
+    pub status_notification: Option<(String, Instant)>,
 }
 
 impl PhotoApp {
@@ -144,13 +169,21 @@ impl PhotoApp {
             last_panel: egui::Vec2::ZERO,
             cropping: false,
             crop_anchor: None,
+            shelf: Vec::new(),
+            shelf_open: true,
+            split_active: false,
+            split_pos: 0.5,
+            clipboard_stack: None,
+            snapshots: Vec::new(),
+            new_snapshot_name: String::new(),
+            status_notification: None,
         }
     }
 
     /// Read the current frame back and write it, encoding off the UI thread.
     fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
-        // Make sure what we are about to copy reflects the current stack.
-        self.engine.render(gpu.device, gpu.queue, &self.stack);
+        // Make sure what we are about to copy reflects the current stack (export never splits).
+        self.engine.render(gpu.device, gpu.queue, &self.stack, None);
 
         let exported = match self
             .engine
@@ -220,7 +253,134 @@ impl PhotoApp {
         }
     }
 
+    pub fn is_stack_edited(&self) -> bool {
+        self.stack != PhotoStack::default()
+    }
+
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_notification = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn save_current_sidecar(&mut self) {
+        let Some(path) = &self.loaded_path else {
+            return;
+        };
+        match save_sidecar(path, &self.stack) {
+            Ok(p) => {
+                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
+                    item.has_sidecar = true;
+                    item.is_edited = false;
+                }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("sidecar");
+                self.set_status(format!("Saved sidecar: {name}"));
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to save sidecar: {e:#}"));
+            }
+        }
+    }
+
+    pub fn revert_to_sidecar(&mut self) {
+        let Some(path) = &self.loaded_path else {
+            return;
+        };
+        match load_sidecar(path) {
+            Ok(Some(saved)) => {
+                self.history.checkpoint(&self.stack);
+                self.stack = saved;
+                self.needs_render = true;
+                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
+                    item.is_edited = false;
+                }
+                self.set_status("Reverted to saved sidecar");
+            }
+            Ok(None) => {
+                self.set_status("No sidecar file found to revert to");
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to load sidecar: {e:#}"));
+            }
+        }
+    }
+
+    pub fn reset_to_default(&mut self) {
+        self.history.checkpoint(&self.stack);
+        self.stack = PhotoStack::default();
+        self.needs_render = true;
+        self.set_status("Reset all adjustments to default");
+    }
+
+    pub fn copy_adjustments(&mut self) {
+        self.clipboard_stack = Some(self.stack.clone());
+        self.set_status("Copied adjustments to clipboard");
+    }
+
+    pub fn paste_adjustments(&mut self) {
+        let Some(copied) = &self.clipboard_stack else {
+            self.set_status("Clipboard is empty");
+            return;
+        };
+        self.history.checkpoint(&self.stack);
+        self.stack = copied.clone();
+        self.needs_render = true;
+        if let Some(path) = &self.loaded_path {
+            if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
+                item.is_edited = true;
+            }
+        }
+        self.set_status("Pasted adjustments from clipboard");
+    }
+
+    pub fn paste_to_all_in_shelf(&mut self) {
+        let Some(copied) = &self.clipboard_stack else {
+            self.set_status("Clipboard is empty");
+            return;
+        };
+        let mut count = 0;
+        for item in &mut self.shelf {
+            if save_sidecar(&item.path, copied).is_ok() {
+                item.has_sidecar = true;
+                count += 1;
+            }
+        }
+        self.set_status(format!("Applied adjustments to {count} photos in shelf"));
+    }
+
+    pub fn add_to_shelf(&mut self, gpu: &Gpu, paths: Vec<PathBuf>) {
+        let open_first = self.loaded_path.is_none();
+        let mut to_open = None;
+        for path in paths {
+            let has_sidecar = find_sidecar(&path).is_some();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("RAW")
+                .to_string();
+            if !self.shelf.iter().any(|it| it.path == path) {
+                if open_first && to_open.is_none() {
+                    to_open = Some(path.clone());
+                }
+                self.shelf.push(ShelfItem {
+                    path,
+                    name,
+                    is_edited: false,
+                    has_sidecar,
+                });
+            }
+        }
+        if let Some(first) = to_open {
+            self.open_path(gpu, first);
+        }
+    }
+
     pub fn open_path(&mut self, gpu: &Gpu, path: PathBuf) {
+        // Auto-save sidecar for previous photo if it was edited
+        if let Some(current) = &self.loaded_path {
+            if self.is_stack_edited() {
+                let _ = save_sidecar(current, &self.stack);
+            }
+        }
+
         self.error = None;
         let started = Instant::now();
 
@@ -235,8 +395,36 @@ impl PhotoApp {
                     self.loaded_path = None;
                     return;
                 }
+
+                let has_sidecar = find_sidecar(&path).is_some();
+                let initial_stack = match load_sidecar(&path) {
+                    Ok(Some(s)) => {
+                        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+                        self.set_status(format!("Loaded sidecar for {fname}"));
+                        s
+                    }
+                    _ => PhotoStack::default(),
+                };
+
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("RAW")
+                    .to_string();
+                if let Some(existing) = self.shelf.iter_mut().find(|it| it.path == path) {
+                    existing.has_sidecar = has_sidecar;
+                    existing.is_edited = false;
+                } else {
+                    self.shelf.push(ShelfItem {
+                        path: path.clone(),
+                        name,
+                        is_edited: false,
+                        has_sidecar,
+                    });
+                }
+
                 self.loaded_path = Some(path);
-                self.stack = PhotoStack::default();
+                self.stack = initial_stack;
                 self.history = History::new();
                 self.view = View::default();
                 self.needs_render = true;
@@ -270,7 +458,13 @@ impl PhotoApp {
             return;
         }
         let started = Instant::now();
-        self.engine.render(gpu.device, gpu.queue, &self.stack);
+        let split_x = if self.split_active {
+            Some(self.split_pos)
+        } else {
+            None
+        };
+        self.engine
+            .render(gpu.device, gpu.queue, &self.stack, split_x);
         self.render_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.needs_render = false;
 
@@ -293,6 +487,7 @@ impl PhotoApp {
         self.sync(gpu);
 
         self.top_bar(ui, gpu);
+        self.shelf(ui, gpu);
         self.inspector(ui);
         self.status_bar(ui);
         self.workspace(ui);
@@ -313,6 +508,28 @@ impl PhotoApp {
             self.needs_render = true;
         }
         if redo && self.history.redo(&mut self.stack) {
+            self.needs_render = true;
+        }
+
+        let (save, copy, paste, split_toggle) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::S),
+                i.modifiers.command && i.key_pressed(egui::Key::C),
+                i.modifiers.command && i.key_pressed(egui::Key::V),
+                i.key_pressed(egui::Key::Backslash),
+            )
+        });
+        if save {
+            self.save_current_sidecar();
+        }
+        if copy {
+            self.copy_adjustments();
+        }
+        if paste {
+            self.paste_adjustments();
+        }
+        if split_toggle {
+            self.split_active = !self.split_active;
             self.needs_render = true;
         }
 
@@ -358,6 +575,10 @@ impl PhotoApp {
                     ui.add_enabled(false, egui::Button::new(theme::dim("Video")));
 
                     ui.separator();
+                    if ui.selectable_label(self.shelf_open, "Shelf").clicked() {
+                        self.shelf_open = !self.shelf_open;
+                    }
+
                     if ui.button("Open RAW…").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
@@ -388,11 +609,180 @@ impl PhotoApp {
                         }
                     }
 
+                    ui.separator();
+
+                    // Before / After split view toggle and control
+                    if ui
+                        .selectable_label(self.split_active, "Split (\\)")
+                        .on_hover_text("Toggle Before/After split view (\\)")
+                        .clicked()
+                    {
+                        self.split_active = !self.split_active;
+                        self.needs_render = true;
+                    }
+
+                    if self.split_active {
+                        let slider = ui.add(
+                            egui::Slider::new(&mut self.split_pos, 0.0..=1.0)
+                                .text("divider")
+                                .show_value(false),
+                        );
+                        if slider.changed() {
+                            self.needs_render = true;
+                        }
+                        if ui
+                            .small_button("50%")
+                            .on_hover_text("Reset split to center")
+                            .clicked()
+                        {
+                            self.split_pos = 0.5;
+                            self.needs_render = true;
+                        }
+                    }
+
+                    if ui
+                        .add_enabled(
+                            self.loaded_path.is_some(),
+                            egui::Button::new("Save Sidecar"),
+                        )
+                        .on_hover_text("Save adjustments to companion sidecar file (Ctrl+S)")
+                        .clicked()
+                    {
+                        self.save_current_sidecar();
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(image) = self.engine.image() {
                             ui.label(theme::dim(format!("{} {}", image.make, image.model)));
                         }
                     });
+                });
+            });
+    }
+
+    fn shelf(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        if !self.shelf_open {
+            return;
+        }
+        egui::Panel::left("shelf")
+            .frame(bare_frame(theme::BG_950))
+            .resizable(true)
+            .default_size(216.0)
+            .min_size(160.0)
+            .max_size(360.0)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(theme::head("SHELF"));
+                    ui.label(theme::dim(format!("({})", self.shelf.len())));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("+ Add…")
+                            .on_hover_text("Add RAW photos to shelf")
+                            .clicked()
+                        {
+                            if let Some(paths) = rfd::FileDialog::new()
+                                .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+                                .add_filter("All files", &["*"])
+                                .pick_files()
+                            {
+                                self.add_to_shelf(gpu, paths);
+                            }
+                        }
+                    });
+                });
+                ui.separator();
+
+                let mut to_open = None;
+                let mut to_remove = None;
+
+                egui::ScrollArea::vertical()
+                    .max_height(ui.available_height() - 70.0)
+                    .show(ui, |ui| {
+                        for (i, item) in self.shelf.iter().enumerate() {
+                            let is_active = self.loaded_path.as_ref() == Some(&item.path);
+                            ui.horizontal(|ui| {
+                                let text_color = if is_active {
+                                    theme::ACCENT
+                                } else {
+                                    theme::TEXT
+                                };
+                                let label_text = egui::RichText::new(&item.name).color(text_color);
+                                let btn = ui.selectable_label(is_active, label_text);
+                                if btn.clicked() && !is_active {
+                                    to_open = Some(item.path.clone());
+                                }
+
+                                if item.has_sidecar {
+                                    ui.label(
+                                        egui::RichText::new("●").color(theme::ACCENT).size(9.0),
+                                    )
+                                    .on_hover_text("Sidecar saved on disk");
+                                } else if item.is_edited {
+                                    ui.label(
+                                        egui::RichText::new("●").color(theme::TEXT_DIM).size(9.0),
+                                    )
+                                    .on_hover_text("Edits in memory");
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("×")
+                                            .on_hover_text("Remove from shelf")
+                                            .clicked()
+                                        {
+                                            to_remove = Some(i);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+
+                        if self.shelf.is_empty() {
+                            ui.add_space(20.0);
+                            ui.label(theme::dim(
+                                "Shelf is empty.\nClick '+ Add…' or drag\nRAW files onto window.",
+                            ));
+                        }
+                    });
+
+                if let Some(path) = to_open {
+                    self.open_path(gpu, path);
+                }
+                if let Some(idx) = to_remove {
+                    self.shelf.remove(idx);
+                }
+
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Copy Stack")
+                            .on_hover_text("Copy current adjustments (Ctrl+C)")
+                            .clicked()
+                        {
+                            self.copy_adjustments();
+                        }
+                        let has_clip = self.clipboard_stack.is_some();
+                        if ui
+                            .add_enabled(has_clip, egui::Button::new("Paste Stack"))
+                            .on_hover_text("Paste adjustments (Ctrl+V)")
+                            .clicked()
+                        {
+                            self.paste_adjustments();
+                        }
+                    });
+                    if self.clipboard_stack.is_some()
+                        && !self.shelf.is_empty()
+                        && ui
+                            .button("Apply to All in Shelf")
+                            .on_hover_text("Save copied adjustments to sidecar for all shelf items")
+                            .clicked()
+                    {
+                        self.paste_to_all_in_shelf();
+                    }
                 });
             });
     }
@@ -447,6 +837,35 @@ impl PhotoApp {
                                     ui.colored_label(theme::DANGER, e);
                                 }
                             }
+
+                            if let Some((msg, when)) = &self.status_notification {
+                                if when.elapsed().as_secs_f32() < 4.0 {
+                                    ui.separator();
+                                    ui.colored_label(theme::ACCENT, msg);
+                                }
+                            }
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if let Some(path) = &self.loaded_path {
+                                        let sidecar_label = if find_sidecar(path).is_some() {
+                                            if self.is_stack_edited() {
+                                                theme::dim("● sidecar (modified)")
+                                            } else {
+                                                theme::dim("● sidecar (synced)")
+                                            }
+                                        } else if self.is_stack_edited() {
+                                            theme::dim("○ unsaved edits")
+                                        } else {
+                                            theme::dim("○ default")
+                                        };
+                                        ui.label(sidecar_label);
+                                        ui.separator();
+                                        ui.label(theme::num(file_name(path)));
+                                    }
+                                },
+                            );
                         }
                         None => {
                             ui.label(theme::dim("no image — Open RAW to begin"));
@@ -622,6 +1041,47 @@ impl PhotoApp {
                     }
                 }
 
+                if self.split_active {
+                    let painter = ui.painter().with_clip_rect(rect);
+                    let font = egui::FontId::monospace(11.0);
+                    if self.split_pos > 0.12 {
+                        painter.text(
+                            dest.left_top() + egui::vec2(12.0, 12.0),
+                            egui::Align2::LEFT_TOP,
+                            "BEFORE (RAW)",
+                            font.clone(),
+                            theme::TEXT_DIM,
+                        );
+                    }
+                    if self.split_pos < 0.88 {
+                        painter.text(
+                            dest.right_top() + egui::vec2(-12.0, 12.0),
+                            egui::Align2::RIGHT_TOP,
+                            "AFTER (ADJUSTED)",
+                            font,
+                            theme::ACCENT,
+                        );
+                    }
+
+                    let split_screen_x = dest.left() + self.split_pos * dest.width();
+                    if let Some(pointer) = response.hover_pos() {
+                        if (pointer.x - split_screen_x).abs() < 14.0
+                            && dest.contains(pointer)
+                            && !self.cropping
+                        {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                            if ui.input(|i| i.pointer.primary_down()) {
+                                let new_fraction =
+                                    ((pointer.x - dest.left()) / dest.width()).clamp(0.0, 1.0);
+                                if (new_fraction - self.split_pos).abs() > 0.001 {
+                                    self.split_pos = new_fraction;
+                                    self.needs_render = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if self.cropping {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 } else if response.dragged() {
@@ -726,6 +1186,55 @@ impl PhotoApp {
 
                 ui.separator();
 
+                ui.collapsing("snapshots", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.new_snapshot_name);
+                        if ui
+                            .button("+ Add")
+                            .on_hover_text("Save current stack as a snapshot")
+                            .clicked()
+                        {
+                            let name = if self.new_snapshot_name.trim().is_empty() {
+                                format!("Snapshot {}", self.snapshots.len() + 1)
+                            } else {
+                                self.new_snapshot_name.trim().to_string()
+                            };
+                            self.snapshots.push((name, self.stack.clone()));
+                            self.new_snapshot_name.clear();
+                        }
+                    });
+                    let mut restore_idx = None;
+                    let mut delete_idx = None;
+                    for (i, (name, _)) in self.snapshots.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(name)
+                                .on_hover_text("Restore this snapshot")
+                                .clicked()
+                            {
+                                restore_idx = Some(i);
+                            }
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Delete snapshot")
+                                .clicked()
+                            {
+                                delete_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = restore_idx {
+                        self.history.checkpoint(&self.stack);
+                        self.stack = self.snapshots[i].1.clone();
+                        self.needs_render = true;
+                    }
+                    if let Some(i) = delete_idx {
+                        self.snapshots.remove(i);
+                    }
+                });
+
+                ui.separator();
+
                 // One checkpoint per gesture, taken on drag start — not per frame, or the
                 // undo stack fills with a hundred identical steps per slider drag.
                 let mut before: Option<PhotoStack> = None;
@@ -755,6 +1264,64 @@ impl PhotoApp {
                 );
                 if self.stack.white_balance.enabled {
                     let p = &mut self.stack.white_balance.params;
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("As-Shot").clicked() {
+                            p.tint_r = 1.0;
+                            p.tint_b = 1.0;
+                            changed = true;
+                            started = true;
+                        }
+                        if ui
+                            .small_button("Daylight")
+                            .on_hover_text("5500K daylight")
+                            .clicked()
+                        {
+                            p.tint_r = 1.05;
+                            p.tint_b = 0.95;
+                            changed = true;
+                            started = true;
+                        }
+                        if ui
+                            .small_button("Cloudy")
+                            .on_hover_text("6500K overcast")
+                            .clicked()
+                        {
+                            p.tint_r = 1.15;
+                            p.tint_b = 0.88;
+                            changed = true;
+                            started = true;
+                        }
+                        if ui
+                            .small_button("Shade")
+                            .on_hover_text("7500K deep shade")
+                            .clicked()
+                        {
+                            p.tint_r = 1.28;
+                            p.tint_b = 0.80;
+                            changed = true;
+                            started = true;
+                        }
+                        if ui
+                            .small_button("Tungsten")
+                            .on_hover_text("3200K tungsten")
+                            .clicked()
+                        {
+                            p.tint_r = 0.72;
+                            p.tint_b = 1.38;
+                            changed = true;
+                            started = true;
+                        }
+                        if ui
+                            .small_button("Fluorescent")
+                            .on_hover_text("4000K fluorescent")
+                            .clicked()
+                        {
+                            p.tint_r = 0.85;
+                            p.tint_b = 1.18;
+                            changed = true;
+                            started = true;
+                        }
+                    });
                     track!(ui.add(
                         egui::Slider::new(&mut p.tint_r, 0.2..=4.0)
                             .text("red")

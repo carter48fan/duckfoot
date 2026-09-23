@@ -5,9 +5,11 @@
 //! one shader pass. The product constraint and the fast implementation are the same
 //! decision.
 
+use serde::{Deserialize, Serialize};
+
 use crate::curve::{identity_nodes, CurveNode};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rgb {
     pub r: f32,
     pub g: f32,
@@ -23,20 +25,20 @@ impl Rgb {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WhiteBalance {
     /// Multiplies the as-shot camera neutral; 1.0 leaves the shot as metered.
     pub tint_r: f32,
     pub tint_b: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Exposure {
     pub ev: f32,
     pub black: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Filmic {
     pub white_ev: f32,
     pub black_ev: f32,
@@ -50,7 +52,7 @@ pub struct Filmic {
     pub contrast: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorBalance {
     pub lift: Rgb,
     pub gamma: Rgb,
@@ -64,7 +66,7 @@ pub struct ColorBalance {
 /// texture, which means reallocating ~97 MB on every frame of a crop drag. Instead the
 /// crop is honoured by display, export and the histogram, and the full frame stays on the
 /// GPU — which is also what makes the crop non-destructive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Crop {
     pub x: f32,
     pub y: f32,
@@ -115,7 +117,7 @@ impl Crop {
 
 /// Orientation and framing. Rotation and mirroring are applied by the shader; the crop is
 /// carried alongside because it is expressed in the rotated frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Geometry {
     /// Right-angle turns clockwise, 0..=3.
     pub quarter_turns: u8,
@@ -173,7 +175,7 @@ impl Geometry {
 }
 
 /// One module: its parameters plus whether it runs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module<T> {
     pub enabled: bool,
     pub params: T,
@@ -185,7 +187,7 @@ impl<T> Module<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhotoStack {
     /// Not a `Module`: there is no meaningful "disabled" state for orientation, and a
     /// checkbox that silently un-rotates a photograph would be a trap.
@@ -299,12 +301,14 @@ mod tests {
     fn rotating_resets_the_crop() {
         // The crop lives in the rotated frame, so keeping it across a turn would move it
         // to a different part of the picture.
-        let mut g = Geometry::default();
-        g.crop = Crop {
-            x: 0.1,
-            y: 0.2,
-            width: 0.5,
-            height: 0.5,
+        let mut g = Geometry {
+            crop: Crop {
+                x: 0.1,
+                y: 0.2,
+                width: 0.5,
+                height: 0.5,
+            },
+            ..Default::default()
         };
         g.rotate_right();
         assert!(g.crop.is_full_frame());

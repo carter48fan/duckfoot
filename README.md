@@ -150,6 +150,11 @@ You can also **drag a RAW file onto the window**.
 | | |
 |---|---|
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo |
+| `Ctrl+S` | save sidecar (`.duckfoot`) |
+| `Ctrl+C` / `Ctrl+V` | copy / paste adjustment stack |
+| `\` | toggle before / after split view |
+| `C` / `Esc` | toggle crop tool / cancel crop gesture |
+| `[` / `]` | rotate 90° CCW / CW |
 | Scroll wheel | zoom about the cursor |
 | Drag the image | pan |
 | `0` / `1` | fit to window / 100% (1:1) |
@@ -176,10 +181,12 @@ the filename and a reason in the status bar rather than silently rendering garba
 cargo test --workspace
 ```
 
-12 tests covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
-singular-matrix fallback), white-balance normalisation including garbage input, and the
+31 tests covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
+singular-matrix fallback), white-balance normalisation including garbage input, the
 monotone tone curve (identity, no reversal between close nodes, passes through control
-points, degenerate input).
+points, degenerate input), export row-padding/unpadding, GPU histogram computation,
+non-destructive geometry (quarter-turn swapping, crop clamping and pixel bounds),
+and JSON sidecar persistence round-tripping.
 
 ### Smoke test in BOTH profiles
 
@@ -322,10 +329,11 @@ duckfoot/
     │   ├── src/engine.rs        #   textures, pipelines, uniforms
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
     │   ├── src/params.rs        #   the adjustment stack (plain data)
+    │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
     │   ├── src/shaders/         #   demosaic.wgsl, adjust.wgsl
     │   └── examples/            #   probe.rs, bench.rs
     ├── photo-app/               # egui UI — no windowing dependency
-    │   ├── src/lib.rs           #   inspector, undo, curve editor
+    │   ├── src/lib.rs           #   inspector, undo, curve editor, shelf, crop
     │   └── src/theme.rs         #   DESIGN.md look and feel
     └── duckfoot/                # bootstrap: winit. The only platform crate
 ```
@@ -349,19 +357,24 @@ DESIGN.md invariant 8.
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
 | **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |
-| **Params** | white balance, exposure | Working | |
+| **Params** | white balance, exposure | Working | Including 5 one-click Kelvin presets + As-Shot reset |
 | **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT |
 | **Params** | filmic, colour balance | Working | |
+| **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
 | **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
-| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, encoded off the UI thread |
+| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, cropped & oriented, encoded off UI thread |
+| **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
-| **App** | file open, drag-and-drop | Working | XDG portal dialog |
+| **App** | history snapshots | Working | Named stack snapshots with instant recall |
+| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop |
+| **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
+| **App** | before / after split view | Working | Draggable brass divider (`\`), raw baseline vs active stack |
+| **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
 | **App** | export | Working | Export… button, format from the filename |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
 | **App** | RGB + luma histogram | Working | With clipped-low / clipped-high percentages |
 | **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
-| **App** | crop / rotate | Not built | |
 | **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
 
 ### Measured

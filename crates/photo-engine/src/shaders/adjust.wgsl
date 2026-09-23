@@ -26,6 +26,8 @@ struct Adjust {
     sizes:    vec4<f32>,   // xy = output size, zw = sensor size
     orient:   vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
     turns:    vec4<u32>,   // x = quarter turns clockwise
+    split:    vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled
+    as_shot_wb: vec4<f32>, // xyz = as-shot camera neutral multipliers
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -186,6 +188,23 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // after white balance there is no longer any way to tell a clipped channel from a
     // merely bright one.
     let sensor_peak = max(c.r, max(c.g, c.b));
+
+    let split_pos = u.split.x;
+    let is_split = split_pos >= 0.0;
+    if (is_split) {
+        let norm_x = pos.x / u.sizes.x;
+        // Subtle brass line at the divider boundary (1 pixel wide)
+        if (abs(pos.x - split_pos * u.sizes.x) < 1.0) {
+            return vec4<f32>(0.79, 0.60, 0.18, 1.0);
+        }
+        // "Before" baseline on the left side of the split: as-shot WB, highlight recovery, camera matrix -> sRGB
+        if (norm_x < split_pos) {
+            var bc = c * u.as_shot_wb.rgb;
+            bc = reconstruct_highlights(bc, sensor_peak);
+            bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
+            return vec4<f32>(linear_to_srgb(clamp(bc, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+        }
+    }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.
     if (enabled(FLAG_WB)) {
