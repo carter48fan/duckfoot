@@ -13,13 +13,17 @@ pub mod engine;
 pub mod export;
 pub mod histogram;
 pub mod params;
+pub mod sidecar;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{CfaImage, RawDecoder, RawloaderBackend};
 pub use engine::{Engine, LoadedImage, OUTPUT_FORMAT};
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
-pub use params::{ColorBalance, Exposure, Filmic, Module, PhotoStack, Rgb, WhiteBalance};
+pub use params::{
+    ColorBalance, Crop, Exposure, Filmic, Geometry, Module, PhotoStack, Rgb, WhiteBalance,
+};
+pub use sidecar::{find_sidecar, load_sidecar, save_sidecar, sidecar_path, SIDECAR_EXT};
 
 /// File extensions the decoder will attempt.
 pub const RAW_EXTENSIONS: &[&str] = &[

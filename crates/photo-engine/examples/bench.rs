@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{Crop, Engine, PhotoStack, RawDecoder, RawloaderBackend};
 
 /// Read back a square from the middle of the image. 256 px keeps `bytes_per_row` at
 /// 1024 — already a multiple of wgpu's 256-byte copy alignment, so no padding dance.
@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Warm up: first submit compiles/validates and is not representative.
-    engine.render(&device, &queue, &stack);
+    engine.render(&device, &queue, &stack, None);
     wait(&device)?;
 
     // A slider drag: rewrite the uniform buffer and re-run the chain. Nothing is decoded,
@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     for i in 0..N {
         stack.exposure.params.ev = (i as f32) * 0.01;
-        engine.render(&device, &queue, &stack);
+        engine.render(&device, &queue, &stack, None);
     }
     wait(&device)?;
     let per_frame = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
@@ -176,7 +176,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- export the full frame and read it back off disk --------------------------------
     let t = Instant::now();
-    let exported = engine.export(&device, &queue)?;
+    let exported = engine.export(&device, &queue, Crop::default())?;
     println!(
         "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -297,9 +297,9 @@ fn main() -> anyhow::Result<()> {
         model: "clipped-green".into(),
     };
     engine.load(&device, &queue, clipped)?;
-    engine.render(&device, &queue, &PhotoStack::default());
+    engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let blown = engine.export(&device, &queue)?;
+    let blown = engine.export(&device, &queue, Crop::default())?;
     // Sample away from the border so the demosaic has full neighbourhoods.
     let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
     let px = &blown.rgba[mid..mid + 3];
@@ -344,9 +344,9 @@ fn main() -> anyhow::Result<()> {
         model: "neutral-stripes".into(),
     };
     engine.load(&device, &queue, stripes)?;
-    engine.render(&device, &queue, &PhotoStack::default());
+    engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let out = engine.export(&device, &queue)?;
+    let out = engine.export(&device, &queue, Crop::default())?;
 
     // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
     let mut worst = 0i32;
@@ -397,7 +397,7 @@ fn main() -> anyhow::Result<()> {
     // first poll discards whatever was in flight for the previous image.
     for _ in 0..64 {
         engine.poll_histogram(&device);
-        engine.render(&device, &queue, &PhotoStack::default());
+        engine.render(&device, &queue, &PhotoStack::default(), None);
         wait(&device)?;
         engine.poll_histogram(&device);
         if engine.histogram().peak > 0 {
@@ -406,7 +406,7 @@ fn main() -> anyhow::Result<()> {
     }
     let hist = engine.histogram();
     let expected = {
-        let flat_px = engine.export(&device, &queue)?;
+        let flat_px = engine.export(&device, &queue, Crop::default())?;
         flat_px.rgba[1] as usize
     };
     let populated: Vec<usize> = hist

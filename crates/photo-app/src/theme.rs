@@ -68,3 +68,7 @@ pub fn num(text: impl Into<String>) -> egui::RichText {
 pub fn dim(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).color(TEXT_DIM)
 }
+
+pub fn head(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).color(ACCENT).strong()
+}

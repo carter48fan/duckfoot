@@ -29,6 +29,8 @@ rawloader = "0.37"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = "1"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Debug builds of pixel code are unusably slow; optimise dependencies even in dev.
 [profile.dev.package."*"]

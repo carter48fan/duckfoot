@@ -70,6 +70,8 @@ struct AdjustUniforms {
     sizes: [f32; 4],
     orient: [f32; 4],
     turns: [u32; 4],
+    split: [f32; 4],
+    as_shot_wb: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -701,7 +703,17 @@ impl Engine {
 
     /// Re-run the adjustment chain. This is the per-frame path and the per-slider-tick
     /// path — it writes one uniform buffer and submits one fullscreen draw.
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
+    ///
+    /// If `split_x` is `Some(fraction)` (0.0..=1.0), the shader draws a before/after split:
+    /// the left side (`< fraction`) shows the unadjusted raw baseline, the right side
+    /// shows the active adjustments, separated by a 1 px divider line.
+    pub fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        split_x: Option<f32>,
+    ) {
         let Some(image) = &self.image else { return };
 
         if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
@@ -773,6 +785,8 @@ impl Engine {
                     if g.mirror_v { -1.0 } else { 1.0 },
                 ],
                 turns: [g.quarter_turns as u32, 0, 0, 0],
+                split: [split_x.unwrap_or(-1.0), 0.0, 0.0, 0.0],
+                as_shot_wb: [image.wb[0], image.wb[1], image.wb[2], 0.0],
             }),
         );
 
