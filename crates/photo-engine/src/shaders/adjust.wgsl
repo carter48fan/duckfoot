@@ -106,34 +106,12 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
-// Where a photosite stops carrying colour information. Demosaicing averages neighbours,
-// so a clipped site lands slightly under 1.0; the ramp starts early enough to catch that
-// without desaturating legitimately bright colour.
-const CLIP_LO: f32 = 0.93;
-const CLIP_HI: f32 = 1.0;
-
-// Highlight reconstruction.
-//
-// A photosite saturates at 1.0 after black/white normalisation, so a blown specular reads
-// (1,1,1) there no matter what colour it actually was. White balance then multiplies those
-// three equal values by three unequal gains — [2.03, 1.00, 1.80] on a Sony A7 III — and a
-// neutral highlight comes out magenta. That is not a white balance error; it is a channel
-// being asked to report a value it never measured.
-//
-// A saturated photosite carries no colour, so the only defensible colour is neutral.
-// Collapsing toward the minimum balanced channel does that, and it is self-normalising: an
-// unclipped neutral pixel already has three equal channels, so this is a no-op everywhere
-// except where the sensor actually ran out of range.
-//
-// This reconstructs colour, not detail. Texture inside a blown highlight is gone at capture
-// and no amount of arithmetic here brings it back.
-fn reconstruct_highlights(balanced: vec3<f32>, sensor_peak: f32) -> vec3<f32> {
-    let t = smoothstep(CLIP_LO, CLIP_HI, sensor_peak);
-    if (t <= 0.0) {
-        return balanced;
-    }
-    let neutral = vec3<f32>(min(balanced.r, min(balanced.g, balanced.b)));
-    return mix(balanced, neutral, t);
+// The sensor texture holds each pixel in two parts (demosaic_rb.wgsl, `reconstruct`): rgb,
+// the camera colour still trusted, and a, the neutral standing in for whatever clipped.
+// White balance scales the first and must not touch the second, or a blown highlight takes
+// on the balance's tint.
+fn balanced(s: vec4<f32>, wb: vec3<f32>) -> vec3<f32> {
+    return s.rgb * wb + vec3<f32>(s.a);
 }
 
 // Orientation, by inverse mapping.
@@ -197,24 +175,20 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Sampled rather than loaded, because straightening lands between texels. With no
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
-    var c = textureSampleLevel(sensor, sensor_sampler, uv, lod).rgb;
+    var s = textureSampleLevel(sensor, sensor_sampler, uv, lod);
 
     if (enabled(FLAG_SHARPEN)) {
         // One texel of whichever level is being sampled, so a reduced preview sharpens at
         // its own scale. That is an approximation of the export, and the only one.
+        // All four channels: the neutral in `a` is part of the pixel's light too.
         let step = exp2(lod) / u.sizes.zw;
-        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), lod).rgb;
-        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), lod).rgb;
-        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), lod).rgb;
-        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod).rgb;
-        let laplacian = c * 4.0 - (s_up + s_dn + s_lf + s_rt);
-        c = clamp(c + laplacian * u.sharpen.x, vec3<f32>(0.0), vec3<f32>(2.0));
+        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), lod);
+        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), lod);
+        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), lod);
+        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod);
+        let laplacian = s * 4.0 - (s_up + s_dn + s_lf + s_rt);
+        s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
     }
-
-    // Captured before the gains are applied: saturation is a property of the sensor, and
-    // after white balance there is no longer any way to tell a clipped channel from a
-    // merely bright one.
-    let sensor_peak = max(c.r, max(c.g, c.b));
 
     let split_pos = u.split.x;
     let is_split = split_pos >= 0.0;
@@ -224,19 +198,17 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let norm_x = out_px.x / u.sizes.x;
         // "Before" baseline on the left side of the split: as-shot WB, highlight recovery, camera matrix -> sRGB
         if (norm_x < split_pos) {
-            var bc = c * u.as_shot_wb.rgb;
-            bc = reconstruct_highlights(bc, sensor_peak);
+            var bc = balanced(s, u.as_shot_wb.rgb);
             bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
             return vec4<f32>(linear_to_srgb(clamp(bc, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
         }
     }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.
+    var c = balanced(s, vec3<f32>(1.0));
     if (enabled(FLAG_WB)) {
-        c = c * u.wb.rgb;
+        c = balanced(s, u.wb.rgb);
     }
-
-    c = reconstruct_highlights(c, sensor_peak);
 
     // Camera-native primaries -> linear sRGB. Never optional: skipping this is what made
     // every image in the last build look like a broken white balance.

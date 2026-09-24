@@ -6,7 +6,9 @@
 // which is what keeps a reduced preview from aliasing.
 //
 // Linear camera RGB, no clamp: values above 1.0 are highlight headroom and must survive
-// into every level for the highlight reconstruction downstream.
+// into every level. Alpha is the reconstructed-highlight neutral (demosaic_rb.wgsl), and a
+// box average of it is exactly right: the reconstruction was split into parts that are
+// linear precisely so that this average could not undo it.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 

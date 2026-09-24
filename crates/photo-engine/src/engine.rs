@@ -22,8 +22,9 @@ use crate::params::{Crop, Geometry, PhotoStack};
 /// written by hand at the end of adjust.wgsl.
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Linear camera RGB, half float. 16 bits is the point: 8 would quantise the headroom
-/// that makes highlight recovery possible at all.
+/// Linear camera RGB, half float, with the reconstructed-highlight neutral in alpha
+/// (demosaic_rb.wgsl). 16 bits is the point: 8 would quantise the headroom that makes
+/// highlight recovery possible at all.
 const SENSOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The intermediate green plane. Half float is ample — it only has to carry one channel
