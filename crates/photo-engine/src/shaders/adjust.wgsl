@@ -32,6 +32,7 @@ struct Adjust {
     vibrance:   vec4<f32>, // x = vibrance, y = saturation
     vignette:   vec4<f32>, // x = amount, y = radius
     sharpen:    vec4<f32>, // x = amount
+    dest:       vec4<f32>, // xy = render target size, z = sensor mip level to sample
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -180,7 +181,12 @@ fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let src = sensor_coords(pos.xy);
+    // The target is either the full-resolution export or a reduced preview. Everything
+    // below works in full-resolution output pixels, so both compute the same image and
+    // differ only in how densely it is sampled (DESIGN.md: preview and export).
+    let out_px = pos.xy * u.sizes.xy / u.dest.xy;
+    let lod = u.dest.z;
+    let src = sensor_coords(out_px);
 
     // Straightening rotates the corners outside the sensor. Those pixels were never
     // photographed, so they are black rather than a smeared edge clamp.
@@ -191,14 +197,16 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Sampled rather than loaded, because straightening lands between texels. With no
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
-    var c = textureSampleLevel(sensor, sensor_sampler, uv, 0.0).rgb;
+    var c = textureSampleLevel(sensor, sensor_sampler, uv, lod).rgb;
 
     if (enabled(FLAG_SHARPEN)) {
-        let step = vec2<f32>(1.0 / u.sizes.z, 1.0 / u.sizes.w);
-        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
-        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
-        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
-        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
+        // One texel of whichever level is being sampled, so a reduced preview sharpens at
+        // its own scale. That is an approximation of the export, and the only one.
+        let step = exp2(lod) / u.sizes.zw;
+        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), lod).rgb;
+        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), lod).rgb;
+        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), lod).rgb;
+        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod).rgb;
         let laplacian = c * 4.0 - (s_up + s_dn + s_lf + s_rt);
         c = clamp(c + laplacian * u.sharpen.x, vec3<f32>(0.0), vec3<f32>(2.0));
     }
@@ -211,11 +219,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let split_pos = u.split.x;
     let is_split = split_pos >= 0.0;
     if (is_split) {
-        let norm_x = pos.x / u.sizes.x;
-        // Subtle brass line at the divider boundary (1 pixel wide)
-        if (abs(pos.x - split_pos * u.sizes.x) < 1.0) {
-            return vec4<f32>(0.79, 0.60, 0.18, 1.0);
-        }
+        // The divider itself is drawn by the UI, at screen resolution, so it stays one
+        // line wide at every zoom instead of scaling with the image.
+        let norm_x = out_px.x / u.sizes.x;
         // "Before" baseline on the left side of the split: as-shot WB, highlight recovery, camera matrix -> sRGB
         if (norm_x < split_pos) {
             var bc = c * u.as_shot_wb.rgb;
@@ -282,7 +288,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_VIGNETTE)) {
-        let norm_pos = pos.xy / u.sizes.xy - vec2<f32>(0.5, 0.5);
+        let norm_pos = out_px / u.sizes.xy - vec2<f32>(0.5, 0.5);
         let dist = length(norm_pos) * 1.4142;
         let rad = max(u.vignette.y, 0.05);
         let v_falloff = smoothstep(rad * 0.4, rad, dist);

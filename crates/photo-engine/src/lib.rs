@@ -17,7 +17,7 @@ pub mod sidecar;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{CfaImage, RawDecoder, RawloaderBackend};
-pub use engine::{Engine, LoadedImage, OUTPUT_FORMAT};
+pub use engine::{Engine, LoadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT};
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
 pub use params::{

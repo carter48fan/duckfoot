@@ -40,7 +40,14 @@ struct HistogramParams {
 
 /// Sample every Nth pixel on both axes. 256 bins are saturated long before 24M samples,
 /// and every sample is an atomic increment into one of 256 addresses.
+///
+/// This is the stride at full resolution; a reduced preview has fewer pixels to begin
+/// with, so it is scaled down with the preview (see `render`).
 const HISTOGRAM_STRIDE: u32 = 4;
+
+/// The coarsest preview: 1/32 of full resolution on each axis. Beyond that a preview is
+/// smaller than any window it could be shown in.
+pub const MAX_PREVIEW_LEVEL: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -76,10 +83,13 @@ struct AdjustUniforms {
     vibrance: [f32; 4],
     vignette: [f32; 4],
     sharpen: [f32; 4],
+    /// xy = render target size, z = sensor mip level to sample.
+    dest: [f32; 4],
 }
 
 pub struct LoadedImage {
-    /// Output dimensions, after right-angle turns. What display and export work in.
+    /// Full-resolution output dimensions, after right-angle turns. What export writes,
+    /// and what crop and aspect are measured in. The preview texture may be smaller.
     pub width: u32,
     pub height: u32,
     /// The sensor's own dimensions, which never change once decoded.
@@ -91,7 +101,14 @@ pub struct LoadedImage {
     /// As-shot neutral multipliers, before any user tint.
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
-    /// What egui draws. Also the export source.
+    /// Levels in the sensor texture's mip chain; level 0 is full resolution.
+    mip_levels: u32,
+    /// Kept so its memory can be recycled when this image is replaced by one the same size.
+    sensor: wgpu::Texture,
+    sensor_extent: wgpu::Extent3d,
+    /// The preview renders at 1/2^level of full resolution. 0 = full.
+    preview_level: u32,
+    /// The preview: what egui draws. Sized by `preview_level`, not by the sensor.
     pub output_view: wgpu::TextureView,
     output_texture: wgpu::Texture,
     adjust_bind: wgpu::BindGroup,
@@ -104,6 +121,46 @@ impl LoadedImage {
     pub fn output_texture(&self) -> &wgpu::Texture {
         &self.output_texture
     }
+    pub fn preview_level(&self) -> u32 {
+        self.preview_level
+    }
+    /// The preview texture's size in pixels.
+    pub fn preview_size(&self) -> (u32, u32) {
+        scaled(self.width, self.height, self.preview_level)
+    }
+}
+
+/// `width × height` reduced by 2^level, never below one pixel.
+fn scaled(width: u32, height: u32, level: u32) -> (u32, u32) {
+    (
+        width.div_ceil(1 << level).max(1),
+        height.div_ceil(1 << level).max(1),
+    )
+}
+
+/// Levels needed so the coarsest one is 1/2^MAX_PREVIEW_LEVEL, limited by the image size.
+fn mip_count(width: u32, height: u32) -> u32 {
+    let full_chain = 32 - width.max(height).max(1).leading_zeros();
+    full_chain.min(MAX_PREVIEW_LEVEL + 1)
+}
+
+fn output_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("adjusted output"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OUTPUT_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 pub struct Engine {
@@ -114,6 +171,8 @@ pub struct Engine {
     adjust_pipeline: wgpu::RenderPipeline,
     adjust_bgl: wgpu::BindGroupLayout,
     adjust_buffer: wgpu::Buffer,
+    mip_pipeline: wgpu::RenderPipeline,
+    mip_bgl: wgpu::BindGroupLayout,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
     sensor_sampler: wgpu::Sampler,
@@ -132,6 +191,22 @@ pub struct Engine {
     /// opening a photo would show the previous one's scopes.
     hist_epoch: u64,
     hist_inflight_epoch: u64,
+
+    /// The preview level, kept across images: the window has not changed size just
+    /// because the photo did, so the next one opens straight at the right resolution.
+    preview_level: u32,
+    /// GPU memory kept from the previous image for the next one of the same size — the
+    /// normal case when stepping through a roll from one camera. Allocating ~300 MB of
+    /// fresh textures per photo costs tens of milliseconds of driver time on the UI thread.
+    scratch: Option<Scratch>,
+    retired_sensor: Option<(wgpu::Extent3d, u32, wgpu::Texture)>,
+}
+
+/// The upload-only planes, which nothing reads once demosaic has run.
+struct Scratch {
+    extent: wgpu::Extent3d,
+    mosaic: wgpu::Texture,
+    green: wgpu::Texture,
 }
 
 impl Engine {
@@ -148,6 +223,30 @@ impl Engine {
             label: Some("adjust"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/adjust.wgsl").into()),
         });
+        let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sensor downsample"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/downsample.wgsl").into()),
+        });
+        let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sensor downsample bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let mip_pipeline = fullscreen_pipeline(
+            device,
+            "sensor downsample",
+            &mip_shader,
+            &mip_bgl,
+            SENSOR_FORMAT,
+        );
 
         let mosaic_entry = wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -228,6 +327,7 @@ impl Engine {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // The preview picks a whole level; there is nothing to blend between.
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -357,11 +457,16 @@ impl Engine {
             adjust_pipeline,
             adjust_bgl,
             adjust_buffer,
+            mip_pipeline,
+            mip_bgl,
             lut_texture,
             lut_view,
             sensor_sampler,
             cached_curve: Vec::new(),
             image: None,
+            preview_level: 0,
+            scratch: None,
+            retired_sensor: None,
         }
     }
 
@@ -370,7 +475,11 @@ impl Engine {
     }
 
     pub fn unload(&mut self) {
-        self.image = None;
+        if let Some(image) = self.image.take() {
+            // Only its memory is kept, for the next image to overwrite. The image itself
+            // is gone, so nothing it showed can change (invariant 5 is per image).
+            self.retired_sensor = Some((image.sensor_extent, image.mip_levels, image.sensor));
+        }
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
         self.histogram = Histogram::default();
     }
@@ -401,20 +510,38 @@ impl Engine {
             depth_or_array_layers: 1,
         };
 
-        let mosaic = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cfa mosaic"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let scratch = match self.scratch.take() {
+            Some(s) if s.extent == extent => s,
+            _ => Scratch {
+                extent,
+                mosaic: device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("cfa mosaic"),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R16Uint,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                }),
+                green: device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("green plane"),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: GREEN_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                }),
+            },
+        };
+        let mosaic = &scratch.mosaic;
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &mosaic,
+                texture: mosaic,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -428,29 +555,32 @@ impl Engine {
             extent,
         );
 
-        let sensor = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("sensor rgb"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: SENSOR_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let mip_levels = mip_count(cfa.width, cfa.height);
+        let sensor = match self.retired_sensor.take() {
+            Some((e, m, texture)) if e == extent && m == mip_levels => texture,
+            _ => device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("sensor rgb"),
+                size: extent,
+                mip_level_count: mip_levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SENSOR_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }),
+        };
+        // All levels, for the adjust pass to sample from; one view per level to render into.
         let sensor_view = sensor.create_view(&Default::default());
+        let level_view = |level: u32| {
+            sensor.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
 
-        let green = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("green plane"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: GREEN_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let green_view = green.create_view(&Default::default());
+        let green_view = scratch.green.create_view(&Default::default());
 
         let demosaic_uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("demosaic uniforms"),
@@ -513,28 +643,35 @@ impl Engine {
             "demosaic rb pass",
             &self.rb_pipeline,
             &rb_bind,
-            &sensor_view,
+            &level_view(0),
         );
+        // Each level from the one above. Still part of "demosaic once": after this the
+        // whole sensor texture, every level of it, is immutable (invariant 5).
+        for level in 1..mip_levels {
+            let parent = level_view(level - 1);
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sensor downsample bind"),
+                layout: &self.mip_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&parent),
+                }],
+            });
+            draw_fullscreen(
+                &mut encoder,
+                "sensor downsample pass",
+                &self.mip_pipeline,
+                &bind,
+                &level_view(level),
+            );
+        }
         queue.submit([encoder.finish()]);
 
         let geometry = Geometry::default();
         let (out_w, out_h) = geometry.output_size(cfa.width, cfa.height);
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("adjusted output"),
-            size: wgpu::Extent3d {
-                width: out_w,
-                height: out_h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        let preview_level = self.preview_level.min(mip_levels - 1);
+        let (preview_w, preview_h) = scaled(out_w, out_h, preview_level);
+        let output_texture = output_texture(device, preview_w, preview_h);
         let output_view = output_texture.create_view(&Default::default());
 
         let adjust_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -574,32 +711,58 @@ impl Engine {
             model: cfa.model,
             wb: cfa.wb,
             cam_to_srgb: cfa.cam_to_srgb,
+            mip_levels,
+            preview_level,
+            sensor_extent: extent,
+            sensor,
             output_view,
             output_texture,
             adjust_bind,
         });
-        // The mosaic, the green plane and their bind groups drop here. Only linear RGB
-        // survives, and it is immutable from this point (invariant 5).
+        // Only linear RGB survives as the image, and it is immutable from here
+        // (invariant 5). The upload planes are kept for the next photo's upload.
+        self.scratch = Some(scratch);
         Ok(())
     }
 
-    /// Read the adjusted image back off the GPU.
+    /// Render the stack at full resolution and read it back off the GPU.
     ///
-    /// This copies the very texture the screen is showing — invariant 2 is satisfied by
-    /// there being nothing else to copy. The caller is expected to have rendered the
-    /// current stack first; `render` is cheap and idempotent, so callers just call it.
+    /// Same shader, same uniforms as the preview; only the render target and the sensor
+    /// level differ (invariant 2, and DESIGN.md "Preview and export"). The full-resolution
+    /// target exists only for the length of this call, so a preview-sized session never
+    /// holds a second copy of a 24 MP frame.
     ///
     /// Blocks until the GPU has finished and the buffer is mapped. At 24 MP the readback
-    /// is ~98 MB, so this belongs off the UI thread in anything interactive.
+    /// is ~98 MB, so this belongs off the UI thread in anything interactive. The preview's
+    /// uniforms are overwritten, so render again before the next frame is shown.
     pub fn export(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        stack: &PhotoStack,
         crop: Crop,
     ) -> Result<ExportedImage> {
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
+        let full = output_texture(device, image.width, image.height);
+        let full_view = full.create_view(&Default::default());
+        self.write_uniforms(queue, stack, None, (image.width, image.height), 0);
+
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("export encoder"),
+        });
+        draw_fullscreen(
+            &mut encoder,
+            "export adjust pass",
+            &self.adjust_pipeline,
+            &image.adjust_bind,
+            &full_view,
+        );
+
         // The crop is not baked into the texture, so export is where it becomes real: copy
         // only the region the user framed. See `params::Crop` for why it is not in the shader.
         let (ox, oy, width, height) = crop.to_pixels(image.width, image.height);
@@ -611,13 +774,9 @@ impl Engine {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export encoder"),
-        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &image.output_texture,
+                texture: &full,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -658,6 +817,39 @@ impl Engine {
         })
     }
 
+    /// Choose the preview resolution: 1/2^level of full, clamped to what the sensor mip
+    /// chain has. The caller picks the coarsest level that is still at least as dense as
+    /// the screen, so the preview is never softer than the display.
+    ///
+    /// Returns true if the preview texture was replaced, which invalidates any registered
+    /// view — the same contract as `set_geometry`.
+    pub fn set_preview_level(&mut self, device: &wgpu::Device, level: u32) -> bool {
+        let Some(image) = &mut self.image else {
+            return false;
+        };
+        let level = level.min(image.mip_levels - 1);
+        self.preview_level = level;
+        if image.preview_level == level {
+            return false;
+        }
+        image.preview_level = level;
+        self.replace_output(device);
+        true
+    }
+
+    /// Reallocate the preview texture for the current geometry and preview level.
+    fn replace_output(&mut self, device: &wgpu::Device) {
+        let Some(image) = &mut self.image else {
+            return;
+        };
+        let (w, h) = image.preview_size();
+        image.output_texture = output_texture(device, w, h);
+        image.output_view = image.output_texture.create_view(&Default::default());
+        // Whatever readback is in flight describes a texture that no longer exists.
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
+    }
+
     /// Apply orientation, resizing the output texture only when right-angle turns actually
     /// change its dimensions.
     ///
@@ -680,43 +872,125 @@ impl Engine {
             return false;
         }
 
-        image.output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("adjusted output"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        image.output_view = image.output_texture.create_view(&Default::default());
         image.width = w;
         image.height = h;
-        // Whatever readback is in flight describes a texture that no longer exists.
-        self.hist_epoch = self.hist_epoch.wrapping_add(1);
-        self.histogram = Histogram::default();
+        self.replace_output(device);
         true
     }
 
-    /// Re-run the adjustment chain. This is the per-frame path and the per-slider-tick
-    /// path — it writes one uniform buffer and submits one fullscreen draw.
+    /// Re-run the adjustment chain into the preview. This is the per-frame path and the
+    /// per-slider-tick path — it writes one uniform buffer and submits one fullscreen draw,
+    /// at the preview's resolution rather than the sensor's (see `set_preview_level`).
     ///
-    /// If `split_x` is `Some(fraction)` (0.0..=1.0), the shader draws a before/after split:
-    /// the left side (`< fraction`) shows the unadjusted raw baseline, the right side
-    /// shows the active adjustments, separated by a 1 px divider line.
+    /// If `split_x` is `Some(fraction)` (0.0..=1.0), the shader renders a before/after
+    /// split: the left side (`< fraction`) shows the unadjusted raw baseline, the right side
+    /// the active adjustments. The divider line is the UI's to draw.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         stack: &PhotoStack,
         split_x: Option<f32>,
+    ) {
+        let Some(image) = &self.image else { return };
+        let target = image.preview_size();
+        let level = image.preview_level;
+        self.write_uniforms(queue, stack, split_x, target, level);
+        let Some(image) = &self.image else { return };
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("adjust encoder"),
+        });
+        draw_fullscreen(
+            &mut encoder,
+            "adjust pass",
+            &self.adjust_pipeline,
+            &image.adjust_bind,
+            &image.output_view,
+        );
+
+        // Only queue a new histogram when the previous one has been collected. Otherwise a
+        // fast drag would pile up map requests against a buffer that is already mapped.
+        let measuring = self.hist_state.is_idle();
+        if measuring {
+            // Scopes describe what the photograph will be, so they measure inside the crop.
+            // A histogram of pixels the user has framed out is actively misleading.
+            let (ox, oy, w, h) = stack.geometry.crop.to_pixels(target.0, target.1);
+            // A preview at level L already has 4^L fewer pixels; keep roughly the same
+            // sample count rather than striding over what is left.
+            let stride = (HISTOGRAM_STRIDE >> level).max(1);
+            queue.write_buffer(
+                &self.hist_params,
+                0,
+                bytemuck::bytes_of(&HistogramParams {
+                    region: [ox, oy, w, h],
+                    stride: [stride, 0, 0, 0],
+                }),
+            );
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("histogram bind"),
+                layout: &self.hist_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&image.output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.hist_bins.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.hist_params.as_entire_binding(),
+                    },
+                ],
+            });
+
+            encoder.clear_buffer(&self.hist_bins, 0, None);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.hist_pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                let groups_x = w.div_ceil(stride).div_ceil(16).max(1);
+                let groups_y = h.div_ceil(stride).div_ceil(16).max(1);
+                debug_assert!(groups_x > 0 && groups_y > 0);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);
+        }
+
+        queue.submit([encoder.finish()]);
+
+        if measuring {
+            self.hist_inflight_epoch = self.hist_epoch;
+            self.hist_state.set_pending();
+            let state = self.hist_state.clone();
+            self.hist_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    // A failed map leaves the previous histogram on screen, which is a
+                    // better outcome than a panic in a scope widget.
+                    if result.is_ok() {
+                        state.set_ready();
+                    } else {
+                        state.set_idle();
+                    }
+                });
+        }
+    }
+
+    /// Everything a pass needs, into the one uniform buffer, plus the curve LUT if it
+    /// changed. `target` is the render target's size and `level` the sensor mip to sample.
+    fn write_uniforms(
+        &mut self,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        split_x: Option<f32>,
+        target: (u32, u32),
+        level: u32,
     ) {
         let Some(image) = &self.image else { return };
 
@@ -810,88 +1084,9 @@ impl Engine {
                     0.0,
                 ],
                 sharpen: [stack.sharpen.params.amount, 0.0, 0.0, 0.0],
+                dest: [target.0 as f32, target.1 as f32, level as f32, 0.0],
             }),
         );
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("adjust encoder"),
-        });
-        draw_fullscreen(
-            &mut encoder,
-            "adjust pass",
-            &self.adjust_pipeline,
-            &image.adjust_bind,
-            &image.output_view,
-        );
-
-        // Only queue a new histogram when the previous one has been collected. Otherwise a
-        // fast drag would pile up map requests against a buffer that is already mapped.
-        let measuring = self.hist_state.is_idle();
-        if measuring {
-            // Scopes describe what the photograph will be, so they measure inside the crop.
-            // A histogram of pixels the user has framed out is actively misleading.
-            let (ox, oy, w, h) = g.crop.to_pixels(image.width, image.height);
-            queue.write_buffer(
-                &self.hist_params,
-                0,
-                bytemuck::bytes_of(&HistogramParams {
-                    region: [ox, oy, w, h],
-                    stride: [HISTOGRAM_STRIDE, 0, 0, 0],
-                }),
-            );
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("histogram bind"),
-                layout: &self.hist_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&image.output_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.hist_bins.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.hist_params.as_entire_binding(),
-                    },
-                ],
-            });
-
-            encoder.clear_buffer(&self.hist_bins, 0, None);
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("histogram pass"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.hist_pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                let groups_x = w.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
-                let groups_y = h.div_ceil(HISTOGRAM_STRIDE).div_ceil(16).max(1);
-                debug_assert!(groups_x > 0 && groups_y > 0);
-                pass.dispatch_workgroups(groups_x, groups_y, 1);
-            }
-            encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);
-        }
-
-        queue.submit([encoder.finish()]);
-
-        if measuring {
-            self.hist_inflight_epoch = self.hist_epoch;
-            self.hist_state.set_pending();
-            let state = self.hist_state.clone();
-            self.hist_staging
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    // A failed map leaves the previous histogram on screen, which is a
-                    // better outcome than a panic in a scope widget.
-                    if result.is_ok() {
-                        state.set_ready();
-                    } else {
-                        state.set_idle();
-                    }
-                });
-        }
     }
 
     /// The most recent histogram. Never blocks: if the GPU has not finished, the previous
