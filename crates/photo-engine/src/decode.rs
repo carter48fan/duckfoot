@@ -9,6 +9,9 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+use rawler::decoders::RawDecodeParams;
+use rawler::imgop::xyz::Illuminant;
+use rawler::rawsource::RawSource;
 
 use crate::params::Geometry;
 
@@ -151,15 +154,11 @@ pub trait RawDecoder {
     }
 }
 
-pub struct RawloaderBackend;
+pub struct RawlerBackend;
 
-impl RawDecoder for RawloaderBackend {
+impl RawDecoder for RawlerBackend {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        let mut cursor = Cursor::new(bytes);
-        let mut img = decode_reader(&mut cursor)?;
-        // rawloader reads DNG white balance only from AsShotNeutral. Plenty of DNGs —
-        // Google's Pixel phones among them — record AsShotWhiteXY instead, and without
-        // it the image comes out uncorrected: about twice as green as it should be.
+        let mut img = decode_reader_rawler(bytes, None)?;
         if img.wb_missing {
             if let Some(dng) = dng::colour(bytes) {
                 img.cfa.wb = dng.wb;
@@ -167,6 +166,68 @@ impl RawDecoder for RawloaderBackend {
             }
         }
         Ok(img.cfa)
+    }
+
+    fn decode_file(&self, path: &Path) -> Result<CfaImage> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("{}: could not be read", path.display()))?;
+        let mut img = decode_reader_rawler(&bytes, Some(path))
+            .with_context(|| format!("{}", path.display()))?;
+        if img.wb_missing {
+            if let Some(dng) = dng::colour(&bytes) {
+                img.cfa.wb = dng.wb;
+                img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+            }
+        }
+        Ok(img.cfa)
+    }
+}
+
+/// Default decoder: tries `rawler` first (~2,500 modern cameras including Sony A7 IV),
+/// falling back to `rawloader` if needed.
+pub struct DefaultRawDecoder;
+
+impl RawDecoder for DefaultRawDecoder {
+    fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
+        RawlerBackend.decode_bytes(bytes).or_else(|e| {
+            log::debug!("rawler decode failed ({e:#}), falling back to rawloader");
+            RawloaderBackend.decode_bytes(bytes)
+        })
+    }
+
+    fn decode_file(&self, path: &Path) -> Result<CfaImage> {
+        RawlerBackend.decode_file(path).or_else(|e| {
+            log::debug!("rawler decode failed ({e:#}), falling back to rawloader");
+            RawloaderBackend.decode_file(path)
+        })
+    }
+}
+
+/// Convenience function to decode a RAW file using the default backend.
+pub fn decode_raw(path: &Path) -> Result<CfaImage> {
+    DefaultRawDecoder.decode_file(path)
+}
+
+pub struct RawloaderBackend;
+
+impl RawDecoder for RawloaderBackend {
+    fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
+        let mut cursor = Cursor::new(bytes);
+        match decode_reader(&mut cursor) {
+            Ok(mut img) => {
+                if img.wb_missing {
+                    if let Some(dng) = dng::colour(bytes) {
+                        img.cfa.wb = dng.wb;
+                        img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+                    }
+                }
+                Ok(img.cfa)
+            }
+            Err(e) => {
+                log::debug!("rawloader backend failed ({e:#}), trying rawler backend");
+                RawlerBackend.decode_bytes(bytes)
+            }
+        }
     }
 }
 
@@ -307,6 +368,186 @@ fn orientation_geometry(o: rawloader::Orientation) -> Geometry {
         mirror_v,
         ..Geometry::default()
     }
+}
+
+fn orientation_geometry_rawler(o: rawler::Orientation) -> Geometry {
+    use rawler::Orientation as O;
+    let (quarter_turns, mirror_h, mirror_v) = match o {
+        O::Normal | O::Unknown => (0, false, false),
+        O::HorizontalFlip => (0, true, false),
+        O::Rotate180 => (2, false, false),
+        O::VerticalFlip => (0, false, true),
+        O::Transpose => (1, true, false),
+        O::Rotate90 => (1, false, false),
+        O::Transverse => (1, false, true),
+        O::Rotate270 => (3, false, false),
+    };
+    Geometry {
+        quarter_turns,
+        mirror_h,
+        mirror_v,
+        ..Geometry::default()
+    }
+}
+
+fn extract_xyz_to_cam_rawler(raw: &rawler::RawImage) -> [[f32; 3]; 4] {
+    let is_nonzero = |m: &[[f32; 3]; 4]| m[..3].iter().any(|row| row.iter().any(|&v| v != 0.0));
+    if is_nonzero(&raw.xyz_to_cam) {
+        return raw.xyz_to_cam;
+    }
+    let flat_opt = raw
+        .color_matrix
+        .get(&Illuminant::D65)
+        .or_else(|| raw.color_matrix.get(&Illuminant::Daylight))
+        .or_else(|| raw.camera.color_matrix.get(&Illuminant::D65))
+        .or_else(|| raw.camera.color_matrix.get(&Illuminant::Daylight))
+        .or_else(|| raw.color_matrix.values().next())
+        .or_else(|| raw.camera.color_matrix.values().next());
+
+    if let Some(flat) = flat_opt {
+        if flat.len() >= 9 {
+            return [
+                [flat[0], flat[1], flat[2]],
+                [flat[3], flat[4], flat[5]],
+                [flat[6], flat[7], flat[8]],
+                if flat.len() >= 12 {
+                    [flat[9], flat[10], flat[11]]
+                } else {
+                    [0.0; 3]
+                },
+            ];
+        }
+    }
+    [[0.0; 3]; 4]
+}
+
+fn decode_reader_rawler(bytes: &[u8], path: Option<&Path>) -> Result<Decoded> {
+    let mut raw_source = RawSource::new_from_slice(bytes);
+    if let Some(p) = path {
+        raw_source = raw_source.with_path(p);
+    }
+    let raw = rawler::decode(&raw_source, &RawDecodeParams::default())
+        .map_err(|e| anyhow!("not a supported RAW file (rawler): {e:?}"))?;
+
+    if raw.cpp != 1 {
+        bail!(
+            "{} {}: {} components per pixel — non-mosaic sensors are not supported yet (@stub)",
+            raw.make,
+            raw.model,
+            raw.cpp
+        );
+    }
+
+    let samples = match raw.data {
+        rawler::RawImageData::Integer(ref d) => d,
+        rawler::RawImageData::Float(_) => bail!(
+            "{} {}: float-encoded RAW is not supported yet (@stub)",
+            raw.make,
+            raw.model
+        ),
+    };
+
+    let src_w = raw.width;
+    let src_h = raw.height;
+
+    if samples.len() < src_w * src_h {
+        bail!(
+            "truncated sensor data: {} samples for {src_w}×{src_h}",
+            samples.len()
+        );
+    }
+
+    let crop = raw.crop_area.or(raw.active_area);
+    let (cl, ct, width, height) = if let Some(rect) = crop {
+        if !rect.is_empty() && rect.p.x + rect.d.w <= src_w && rect.p.y + rect.d.h <= src_h {
+            (rect.p.x, rect.p.y, rect.d.w, rect.d.h)
+        } else {
+            (0, 0, src_w, src_h)
+        }
+    } else {
+        (0, 0, src_w, src_h)
+    };
+
+    if width == 0 || height == 0 {
+        bail!("empty sensor dimensions after crop: {width}x{height}");
+    }
+
+    let mut data = Vec::with_capacity(width * height);
+    for row in 0..height {
+        let start = (row + ct) * src_w + cl;
+        data.extend_from_slice(&samples[start..start + width]);
+    }
+
+    let raw_cfa = match &raw.photometric {
+        rawler::rawimage::RawPhotometricInterpretation::Cfa(cfg) => cfg.cfa.clone(),
+        _ => raw.camera.cfa.clone(),
+    };
+    if !raw_cfa.is_valid() {
+        bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
+    }
+    let cfa = raw_cfa.shift(cl, ct);
+    let cfa2x2 = [
+        cfa.color_at(0, 0) as u32,
+        cfa.color_at(0, 1) as u32,
+        cfa.color_at(1, 0) as u32,
+        cfa.color_at(1, 1) as u32,
+    ];
+    if cfa2x2.iter().any(|c| *c > 2) {
+        bail!(
+            "{} {}: CFA pattern '{cfa}' has a fourth colour — not supported yet (@stub)",
+            raw.make,
+            raw.model
+        );
+    }
+
+    let raw_black = raw.blacklevel.shift(cl, ct).as_bayer_array();
+    let raw_white = raw.whitelevel.as_bayer_array();
+    let mut black = [0.0f32; 4];
+    let mut white = [65535.0f32; 4];
+    for i in 0..4 {
+        black[i] = raw_black[i];
+        let w = raw_white[i];
+        white[i] = if w > black[i] { w } else { black[i] + 1.0 };
+    }
+    let white = measured_white(&data, width, &cfa2x2, &black, &white);
+
+    let xyz_to_cam = extract_xyz_to_cam_rawler(&raw);
+
+    let wb_missing = raw.wb_coeffs[..3]
+        .iter()
+        .any(|c| !c.is_finite() || *c <= 0.0);
+    let mut wb = neutral_multipliers(&raw.wb_coeffs);
+    if wb_missing {
+        wb = daylight_multipliers(&xyz_to_cam).unwrap_or(wb);
+    }
+
+    let make = if !raw.clean_make.is_empty() {
+        raw.clean_make
+    } else {
+        raw.make
+    };
+    let model = if !raw.clean_model.is_empty() {
+        raw.clean_model
+    } else {
+        raw.model
+    };
+
+    Ok(Decoded {
+        cfa: CfaImage {
+            data,
+            width: width as u32,
+            height: height as u32,
+            cfa2x2,
+            black,
+            white,
+            wb,
+            cam_to_srgb: cam_to_srgb(&xyz_to_cam),
+            orientation: orientation_geometry_rawler(raw.orientation),
+            make,
+            model,
+        },
+        wb_missing,
+    })
 }
 
 /// The level the sensor actually clipped at, where the data shows one.
@@ -912,5 +1153,67 @@ mod tests {
             neutral_multipliers(&[1.0, f32::NAN, 1.0, 0.0]),
             [1.0, 1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn exif_orientation_rawler_maps_to_geometry() {
+        use rawler::Orientation as O;
+        assert_eq!(orientation_geometry_rawler(O::Rotate90).quarter_turns, 1);
+        assert_eq!(orientation_geometry_rawler(O::Rotate270).quarter_turns, 3);
+        assert!(orientation_geometry_rawler(O::Normal).is_identity());
+        let t = orientation_geometry_rawler(O::Transpose);
+        assert!(t.quarter_turns == 1 && t.mirror_h && !t.mirror_v);
+    }
+
+    #[test]
+    fn extract_xyz_to_cam_extracts_d65_matrix() {
+        use std::collections::HashMap;
+        let mut raw = rawler::RawImage {
+            camera: rawler::decoders::Camera::default(),
+            make: "SONY".to_string(),
+            model: "ILCE-7M4".to_string(),
+            clean_make: "Sony".to_string(),
+            clean_model: "ILCE-7M4".to_string(),
+            width: 100,
+            height: 100,
+            cpp: 1,
+            bps: 14,
+            wb_coeffs: [2.0, 1.0, 1.5, f32::NAN],
+            whitelevel: rawler::rawimage::WhiteLevel::default(),
+            blacklevel: rawler::rawimage::BlackLevel::default(),
+            xyz_to_cam: [[0.0; 3]; 4],
+            photometric: rawler::rawimage::RawPhotometricInterpretation::BlackIsZero,
+            active_area: None,
+            crop_area: None,
+            blackareas: Vec::new(),
+            orientation: rawler::Orientation::Normal,
+            data: rawler::RawImageData::Integer(vec![0; 10000]),
+            color_matrix: HashMap::new(),
+            dng_tags: HashMap::new(),
+            fuji_rotation_width: None,
+        };
+
+        // Initially zero
+        assert_eq!(extract_xyz_to_cam_rawler(&raw), [[0.0; 3]; 4]);
+
+        // Insert Sony A7 IV D65 matrix
+        let d65_matrix = vec![
+            0.7374, -0.2389, -0.0551, -0.5435, 1.3162, 0.2519, -0.1006, 0.1795, 0.6552,
+        ];
+        raw.color_matrix
+            .insert(rawler::imgop::xyz::Illuminant::D65, d65_matrix);
+
+        let extracted = extract_xyz_to_cam_rawler(&raw);
+        assert_eq!(extracted[0], [0.7374, -0.2389, -0.0551]);
+        assert_eq!(extracted[1], [-0.5435, 1.3162, 0.2519]);
+        assert_eq!(extracted[2], [-0.1006, 0.1795, 0.6552]);
+        assert_eq!(extracted[3], [0.0; 3]);
+
+        // cam_to_srgb converts it cleanly without panic
+        let srgb = cam_to_srgb(&extracted);
+        for row in srgb {
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "row sum is {sum}");
+        }
     }
 }

@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use photo_engine::{
-    decode_raster, extract_embedded_thumbnail, is_raster_path, CfaImage, Geometry, RasterImage,
-    RawDecoder, RawloaderBackend,
+    decode_raster, decode_raw, extract_embedded_thumbnail, is_raster_path, CfaImage, Geometry,
+    RasterImage,
 };
 
 /// Long side of a thumbnail, in pixels. A tile is 112×70 points; this covers it at 2×.
@@ -91,8 +91,7 @@ impl Loader {
                                         .map_err(|e| format!("{e:#}"))
                                 })
                         } else {
-                            RawloaderBackend
-                                .decode_file(&path)
+                            decode_raw(&path)
                                 .map(LoadedSource::Raw)
                                 .map_err(|e| format!("{e:#}"))
                         };
@@ -176,7 +175,7 @@ fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
             }
         }
         // Fall back to CFA block-average if embedded preview is absent
-        if let Ok(cfa) = RawloaderBackend.decode_file(path) {
+        if let Ok(cfa) = decode_raw(path) {
             return Some(thumbnail(&cfa));
         }
     }

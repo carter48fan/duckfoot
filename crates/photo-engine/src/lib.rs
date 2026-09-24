@@ -17,7 +17,8 @@ pub mod sidecar;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
-    decode_raster, extract_embedded_thumbnail, CfaImage, RasterImage, RawDecoder, RawloaderBackend,
+    decode_raster, decode_raw, extract_embedded_thumbnail, CfaImage, DefaultRawDecoder,
+    RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{Engine, LoadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT};
 pub use export::{ExportFormat, ExportedImage};
@@ -116,5 +117,32 @@ mod tests {
         assert!(is_supported_image(Path::new("/tmp/shot.ARW")));
         assert!(is_supported_image(Path::new("/tmp/shot.jpg")));
         assert!(!is_supported_image(Path::new("/tmp/noextension")));
+    }
+
+    #[test]
+    fn shaders_are_valid_wgsl() {
+        let shaders = [
+            ("adjust.wgsl", include_str!("shaders/adjust.wgsl")),
+            (
+                "demosaic_green.wgsl",
+                include_str!("shaders/demosaic_green.wgsl"),
+            ),
+            ("demosaic_rb.wgsl", include_str!("shaders/demosaic_rb.wgsl")),
+            ("downsample.wgsl", include_str!("shaders/downsample.wgsl")),
+            ("histogram.wgsl", include_str!("shaders/histogram.wgsl")),
+        ];
+
+        let mut validator = wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        );
+
+        for (name, source) in shaders {
+            let module = wgpu::naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name} failed WGSL parse: {e}"));
+            validator
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name} failed WGSL validation: {e}"));
+        }
     }
 }
