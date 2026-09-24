@@ -12,27 +12,36 @@
 // A slider drag rewrites `Adjust` and nothing else. No re-decode, no re-upload.
 
 struct Adjust {
-    cam0:     vec4<f32>,   // camera RGB -> linear sRGB, row 0 (xyz used)
-    cam1:     vec4<f32>,
-    cam2:     vec4<f32>,
-    wb:       vec4<f32>,   // xyz = neutral multipliers
-    exposure: vec4<f32>,   // x = gain (2^EV), y = black point
-    filmic:   vec4<f32>,   // x = white EV, y = black EV, z = latitude, w = contrast
-    lift:     vec4<f32>,
-    gamma:    vec4<f32>,
-    gain:     vec4<f32>,
-    offset:   vec4<f32>,
-    flags:    vec4<u32>,   // x = enabled bitmask
-    sizes:    vec4<f32>,   // xy = output size, zw = sensor size
-    orient:   vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
-    turns:    vec4<u32>,   // x = quarter turns clockwise
-    split:    vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled
-    as_shot_wb: vec4<f32>, // xyz = as-shot camera neutral multipliers
-    tonal:      vec4<f32>, // x = highlights, y = shadows, z = whites, w = blacks
-    vibrance:   vec4<f32>, // x = vibrance, y = saturation
-    vignette:   vec4<f32>, // x = amount, y = radius
-    sharpen:    vec4<f32>, // x = amount
-    dest:       vec4<f32>, // xy = render target size, z = sensor mip level to sample
+    cam0:       vec4<f32>,   // camera RGB -> linear sRGB, row 0 (xyz used)
+    cam1:       vec4<f32>,
+    cam2:       vec4<f32>,
+    wb:         vec4<f32>,   // xyz = neutral multipliers
+    exposure:   vec4<f32>,   // x = gain (2^EV), y = black point, z = rolloff, w = tau
+    filmic:     vec4<f32>,   // x = white EV, y = black EV, z = latitude, w = contrast
+    lift:       vec4<f32>,
+    gamma:      vec4<f32>,
+    gain:       vec4<f32>,
+    offset:     vec4<f32>,
+    flags:      vec4<u32>,   // x = enabled bitmask
+    sizes:      vec4<f32>,   // xy = output size, zw = sensor size
+    orient:     vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
+    turns:      vec4<u32>,   // x = quarter turns clockwise
+    split:      vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled
+    as_shot_wb: vec4<f32>,   // xyz = as-shot camera neutral multipliers
+    tonal:      vec4<f32>,   // x = highlights, y = shadows, z = whites, w = blacks
+    vibrance:   vec4<f32>,   // x = vibrance, y = saturation
+    vignette:   vec4<f32>,   // x = amount, y = radius
+    sharpen:    vec4<f32>,   // x = amount
+    dest:       vec4<f32>,   // xy = render target size, z = sensor mip level to sample
+    detail:     vec4<f32>,   // x = clarity, y = texture, z = dehaze
+    eq_red:     vec4<f32>,   // x = hue (-30..30 deg), y = sat (-100..100), z = lum (-100..100)
+    eq_orange:  vec4<f32>,
+    eq_yellow:  vec4<f32>,
+    eq_green:   vec4<f32>,
+    eq_aqua:    vec4<f32>,
+    eq_blue:    vec4<f32>,
+    eq_purple:  vec4<f32>,
+    eq_magenta: vec4<f32>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -44,6 +53,9 @@ const FLAG_TONAL:    u32 = 32u;
 const FLAG_VIBRANCE: u32 = 64u;
 const FLAG_VIGNETTE: u32 = 128u;
 const FLAG_SHARPEN:  u32 = 256u;
+const FLAG_CLARITY:  u32 = 512u;
+const FLAG_DEHAZE:   u32 = 1024u;
+const FLAG_COLOR_EQ: u32 = 2048u;
 
 @group(0) @binding(0) var sensor: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> u: Adjust;
@@ -157,6 +169,105 @@ fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
     return o;
 }
 
+fn apply_exposure_with_rolloff(c: vec3<f32>, gain: f32, black: f32, rolloff: f32, tau: f32) -> vec3<f32> {
+    let scaled = max(vec3<f32>(0.0), (c - vec3<f32>(black)) * gain);
+    if (rolloff <= 0.001) {
+        return scaled;
+    }
+    let threshold = max(tau, 0.1);
+    let over = max(scaled - vec3<f32>(threshold), vec3<f32>(0.0));
+    let compressed = over / (vec3<f32>(1.0) + over * rolloff);
+    return select(scaled, vec3<f32>(threshold) + compressed, scaled > vec3<f32>(threshold));
+}
+
+fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
+    let cmax = max(c.r, max(c.g, c.b));
+    let cmin = min(c.r, min(c.g, c.b));
+    let delta = cmax - cmin;
+    var h = 0.0;
+    if (delta > 0.0001) {
+        if (cmax == c.r) {
+            h = ((c.g - c.b) / delta) % 6.0;
+        } else if (cmax == c.g) {
+            h = ((c.b - c.r) / delta) + 2.0;
+        } else {
+            h = ((c.r - c.g) / delta) + 4.0;
+        }
+        h = h * 60.0;
+        if (h < 0.0) {
+            h = h + 360.0;
+        }
+    }
+    let s = select(0.0, delta / max(cmax, 0.0001), cmax > 0.0001);
+    let v = cmax;
+    return vec3<f32>(h, s, v);
+}
+
+fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
+    let h = (hsv.x % 360.0 + 360.0) % 360.0;
+    let s = clamp(hsv.y, 0.0, 1.0);
+    let v = max(hsv.z, 0.0);
+    let c = v * s;
+    let x = c * (1.0 - abs(((h / 60.0) % 2.0) - 1.0));
+    let m = v - c;
+    var rgb = vec3<f32>(0.0);
+    if (h < 60.0) {
+        rgb = vec3<f32>(c, x, 0.0);
+    } else if (h < 120.0) {
+        rgb = vec3<f32>(x, c, 0.0);
+    } else if (h < 180.0) {
+        rgb = vec3<f32>(0.0, c, x);
+    } else if (h < 240.0) {
+        rgb = vec3<f32>(0.0, x, c);
+    } else if (h < 300.0) {
+        rgb = vec3<f32>(x, 0.0, c);
+    } else {
+        rgb = vec3<f32>(c, 0.0, x);
+    }
+    return rgb + vec3<f32>(m);
+}
+
+fn angle_dist(a: f32, b: f32) -> f32 {
+    let d = abs(a - b) % 360.0;
+    return min(d, 360.0 - d);
+}
+
+fn band_weight(h: f32, target: f32) -> f32 {
+    let d = angle_dist(h, target);
+    return max(0.0, 1.0 - d / 40.0);
+}
+
+fn apply_color_eq(rgb: vec3<f32>) -> vec3<f32> {
+    var hsv = rgb_to_hsv(rgb);
+    let h = hsv.x;
+    let w_red = band_weight(h, 0.0);
+    let w_orange = band_weight(h, 30.0);
+    let w_yellow = band_weight(h, 60.0);
+    let w_green = band_weight(h, 120.0);
+    let w_aqua = band_weight(h, 180.0);
+    let w_blue = band_weight(h, 240.0);
+    let w_purple = band_weight(h, 280.0);
+    let w_magenta = band_weight(h, 320.0);
+
+    let dh = w_red * u.eq_red.x + w_orange * u.eq_orange.x + w_yellow * u.eq_yellow.x
+           + w_green * u.eq_green.x + w_aqua * u.eq_aqua.x + w_blue * u.eq_blue.x
+           + w_purple * u.eq_purple.x + w_magenta * u.eq_magenta.x;
+
+    let ds = (w_red * u.eq_red.y + w_orange * u.eq_orange.y + w_yellow * u.eq_yellow.y
+            + w_green * u.eq_green.y + w_aqua * u.eq_aqua.y + w_blue * u.eq_blue.y
+            + w_purple * u.eq_purple.y + w_magenta * u.eq_magenta.y) * 0.01;
+
+    let dl = (w_red * u.eq_red.z + w_orange * u.eq_orange.z + w_yellow * u.eq_yellow.z
+            + w_green * u.eq_green.z + w_aqua * u.eq_aqua.z + w_blue * u.eq_blue.z
+            + w_purple * u.eq_purple.z + w_magenta * u.eq_magenta.z) * 0.01;
+
+    hsv.x = (hsv.x + dh + 360.0) % 360.0;
+    hsv.y = clamp(hsv.y * (1.0 + ds), 0.0, 1.0);
+    hsv.z = max(0.0, hsv.z * (1.0 + dl));
+
+    return hsv_to_rgb(hsv);
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // The target is either the full-resolution export or a reduced preview. Everything
@@ -190,6 +301,16 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
     }
 
+    if (enabled(FLAG_CLARITY)) {
+        let s1 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 1.0, 5.0));
+        let s2 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 2.0, 5.0));
+        let s4 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 4.0, 5.0));
+        let d_texture = s1 - s2;
+        let d_clarity = s2 - s4;
+        let boost = d_texture * (u.detail.y * 0.005) + d_clarity * (u.detail.x * 0.005);
+        s = clamp(s + boost, vec4<f32>(0.0), vec4<f32>(4.0));
+    }
+
     let split_pos = u.split.x;
     let is_split = split_pos >= 0.0;
     if (is_split) {
@@ -215,7 +336,21 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     c = vec3<f32>(dot(u.cam0.rgb, c), dot(u.cam1.rgb, c), dot(u.cam2.rgb, c));
 
     if (enabled(FLAG_EXPOSURE)) {
-        c = (c - vec3<f32>(u.exposure.y)) * u.exposure.x;
+        c = apply_exposure_with_rolloff(c, u.exposure.x, u.exposure.y, u.exposure.z, u.exposure.w);
+    }
+
+    if (enabled(FLAG_DEHAZE)) {
+        let airlight = vec3<f32>(0.85, 0.90, 0.95);
+        let dark_channel = min(c.r, min(c.g, c.b));
+        let transmission = clamp(1.0 - (dark_channel / 0.95), 0.1, 1.0);
+        let dehaze_amount = u.detail.z * 0.01;
+        if (dehaze_amount >= 0.0) {
+            let t = mix(1.0, transmission, dehaze_amount);
+            c = (c - airlight * dehaze_amount * (1.0 - t)) / max(vec3<f32>(t), vec3<f32>(0.1));
+        } else {
+            c = mix(c, airlight, -dehaze_amount * 0.5);
+        }
+        c = max(vec3<f32>(0.0), c);
     }
 
     if (enabled(FLAG_TONAL)) {
@@ -247,6 +382,10 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             balance_channel(c.g, u.lift.g, u.gamma.g, u.gain.g, u.offset.g),
             balance_channel(c.b, u.lift.b, u.gamma.b, u.gain.b, u.offset.b),
         );
+    }
+
+    if (enabled(FLAG_COLOR_EQ)) {
+        c = apply_color_eq(c);
     }
 
     if (enabled(FLAG_VIBRANCE)) {

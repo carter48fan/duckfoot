@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use wgpu::util::DeviceExt;
 
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
-use crate::decode::CfaImage;
+use crate::decode::{CfaImage, RasterImage};
 use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::params::{Crop, Geometry, PhotoStack};
@@ -84,8 +84,16 @@ struct AdjustUniforms {
     vibrance: [f32; 4],
     vignette: [f32; 4],
     sharpen: [f32; 4],
-    /// xy = render target size, z = sensor mip level to sample.
     dest: [f32; 4],
+    detail: [f32; 4],
+    eq_red: [f32; 4],
+    eq_orange: [f32; 4],
+    eq_yellow: [f32; 4],
+    eq_green: [f32; 4],
+    eq_aqua: [f32; 4],
+    eq_blue: [f32; 4],
+    eq_purple: [f32; 4],
+    eq_magenta: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -567,7 +575,8 @@ impl Engine {
                 dimension: wgpu::TextureDimension::D2,
                 format: SENSOR_FORMAT,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             }),
         };
@@ -723,6 +732,153 @@ impl Engine {
         // Only linear RGB survives as the image, and it is immutable from here
         // (invariant 5). The upload planes are kept for the next photo's upload.
         self.scratch = Some(scratch);
+        Ok(())
+    }
+
+    /// Upload a decoded raster image (JPEG, PNG, TIFF, WebP) directly to the sensor texture.
+    ///
+    /// Skips Bayer demosaic passes and uploads linear float data directly, building the mip chain.
+    pub fn load_raster(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raster: RasterImage,
+    ) -> Result<()> {
+        let limit = device.limits().max_texture_dimension_2d;
+        if raster.width > limit || raster.height > limit {
+            bail!(
+                "{}×{} exceeds this GPU's {}px texture limit",
+                raster.width,
+                raster.height,
+                limit
+            );
+        }
+
+        let extent = wgpu::Extent3d {
+            width: raster.width,
+            height: raster.height,
+            depth_or_array_layers: 1,
+        };
+
+        let mip_levels = mip_count(raster.width, raster.height);
+        let sensor = match self.retired_sensor.take() {
+            Some((e, m, texture)) if e == extent && m == mip_levels => texture,
+            _ => device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("sensor rgb (raster)"),
+                size: extent,
+                mip_level_count: mip_levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SENSOR_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }),
+        };
+
+        // Write linear half-floats directly to mip level 0 (4 half-floats = 8 bytes per pixel)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &sensor,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &raster.data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raster.width * 8),
+                rows_per_image: Some(raster.height),
+            },
+            extent,
+        );
+
+        let level_view = |level: u32| {
+            sensor.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("raster downsample encoder"),
+        });
+
+        for level in 1..mip_levels {
+            let parent = level_view(level - 1);
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sensor downsample bind"),
+                layout: &self.mip_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&parent),
+                }],
+            });
+            draw_fullscreen(
+                &mut encoder,
+                "sensor downsample pass",
+                &self.mip_pipeline,
+                &bind,
+                &level_view(level),
+            );
+        }
+        queue.submit([encoder.finish()]);
+
+        let geometry = raster.orientation;
+        let (out_w, out_h) = geometry.output_size(raster.width, raster.height);
+        let preview_level = self.preview_level.min(mip_levels - 1);
+        let (preview_w, preview_h) = scaled(out_w, out_h, preview_level);
+        let output_texture = output_texture(device, preview_w, preview_h);
+        let output_view = output_texture.create_view(&Default::default());
+
+        let sensor_view = sensor.create_view(&Default::default());
+        let adjust_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adjust bind"),
+            layout: &self.adjust_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sensor_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.adjust_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                },
+            ],
+        });
+
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
+
+        self.image = Some(LoadedImage {
+            width: out_w,
+            height: out_h,
+            sensor_width: raster.width,
+            sensor_height: raster.height,
+            geometry,
+            make: raster.make,
+            model: raster.model,
+            wb: [1.0, 1.0, 1.0],
+            cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            mip_levels,
+            preview_level,
+            sensor_extent: extent,
+            sensor,
+            output_view,
+            output_texture,
+            adjust_bind,
+        });
+
         Ok(())
     }
 
@@ -1041,8 +1197,8 @@ impl Engine {
                 exposure: [
                     2f32.powf(stack.exposure.params.ev),
                     stack.exposure.params.black,
-                    0.0,
-                    0.0,
+                    stack.exposure.params.rolloff,
+                    0.75, // tau: knee threshold
                 ],
                 filmic: [f.white_ev, f.black_ev, f.latitude, f.contrast],
                 lift: cb.lift.to_array(),
@@ -1086,6 +1242,60 @@ impl Engine {
                 ],
                 sharpen: [stack.sharpen.params.amount, 0.0, 0.0, 0.0],
                 dest: [target.0 as f32, target.1 as f32, level as f32, 0.0],
+                detail: [
+                    stack.clarity.params.clarity,
+                    stack.clarity.params.texture,
+                    stack.dehaze.params.amount,
+                    0.0,
+                ],
+                eq_red: [
+                    stack.color_eq.params.red.hue,
+                    stack.color_eq.params.red.saturation,
+                    stack.color_eq.params.red.luminance,
+                    0.0,
+                ],
+                eq_orange: [
+                    stack.color_eq.params.orange.hue,
+                    stack.color_eq.params.orange.saturation,
+                    stack.color_eq.params.orange.luminance,
+                    0.0,
+                ],
+                eq_yellow: [
+                    stack.color_eq.params.yellow.hue,
+                    stack.color_eq.params.yellow.saturation,
+                    stack.color_eq.params.yellow.luminance,
+                    0.0,
+                ],
+                eq_green: [
+                    stack.color_eq.params.green.hue,
+                    stack.color_eq.params.green.saturation,
+                    stack.color_eq.params.green.luminance,
+                    0.0,
+                ],
+                eq_aqua: [
+                    stack.color_eq.params.aqua.hue,
+                    stack.color_eq.params.aqua.saturation,
+                    stack.color_eq.params.aqua.luminance,
+                    0.0,
+                ],
+                eq_blue: [
+                    stack.color_eq.params.blue.hue,
+                    stack.color_eq.params.blue.saturation,
+                    stack.color_eq.params.blue.luminance,
+                    0.0,
+                ],
+                eq_purple: [
+                    stack.color_eq.params.purple.hue,
+                    stack.color_eq.params.purple.saturation,
+                    stack.color_eq.params.purple.luminance,
+                    0.0,
+                ],
+                eq_magenta: [
+                    stack.color_eq.params.magenta.hue,
+                    stack.color_eq.params.magenta.saturation,
+                    stack.color_eq.params.magenta.luminance,
+                    0.0,
+                ],
             }),
         );
     }

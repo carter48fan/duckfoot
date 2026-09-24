@@ -59,19 +59,27 @@ pub const MODES: [(InspectorMapMode, &str, &str); 4] = [
         "surface",
         "3D continuous spectral density surface",
     ),
-    (InspectorMapMode::Cube3D, "cube", "3D RGB gamut distribution cube"),
+    (
+        InspectorMapMode::Cube3D,
+        "cube",
+        "3D RGB gamut distribution cube",
+    ),
 ];
 
 /// Draws the scope itself. The mode switch lives in the caller's header band — see [`MODES`].
-pub fn render_inspector_map(
-    ui: &mut egui::Ui,
-    state: &mut InspectorMapState,
-    hist: &Histogram,
-) {
+pub fn render_inspector_map(ui: &mut egui::Ui, state: &mut InspectorMapState, hist: &Histogram) {
     let view_height = if state.mode == InspectorMapMode::Plot2D {
-        if state.large_view { 140.0 } else { 96.0 }
+        if state.large_view {
+            140.0
+        } else {
+            96.0
+        }
     } else {
-        if state.large_view { 240.0 } else { 165.0 }
+        if state.large_view {
+            240.0
+        } else {
+            165.0
+        }
     };
 
     let (rect, response) = ui.allocate_exact_size(
@@ -209,7 +217,12 @@ fn render_2d_plot(painter: &egui::Painter, rect: Rect, hist: &Histogram) {
         let points: Vec<Pos2> = data
             .iter()
             .enumerate()
-            .map(|(i, v)| Pos2::new(rect.left() + i as f32 * step, rect.bottom() - height(*v) - 2.0))
+            .map(|(i, v)| {
+                Pos2::new(
+                    rect.left() + i as f32 * step,
+                    rect.bottom() - height(*v) - 2.0,
+                )
+            })
             .collect();
         painter.add(egui::Shape::line(points, Stroke::new(1.0, colour)));
     }
@@ -251,12 +264,7 @@ fn render_3d_scope(
     );
 }
 
-fn draw_3d_grid(
-    painter: &egui::Painter,
-    center: Pos2,
-    scale: f32,
-    state: &InspectorMapState,
-) {
+fn draw_3d_grid(painter: &egui::Painter, center: Pos2, scale: f32, state: &InspectorMapState) {
     // Floor boundary
     let floor_pts = [
         [-1.0, -1.0, -1.0],
@@ -281,18 +289,63 @@ fn draw_3d_grid(
 
     // Floor grid lines along tonal levels (Shadows, Midtones, Highlights)
     for frac in [-0.5, 0.0, 0.5] {
-        let p_start = project_3d([frac, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-        let p_end = project_3d([frac, 1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
+        let p_start = project_3d(
+            [frac, -1.0, -1.0],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        );
+        let p_end = project_3d(
+            [frac, 1.0, -1.0],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        );
         if let (Some((s, _)), Some((e, _))) = (p_start, p_end) {
-            painter.line_segment([s, e], Stroke::new(0.8, theme::BORDER.linear_multiply(0.35)));
+            painter.line_segment(
+                [s, e],
+                Stroke::new(0.8, theme::BORDER.linear_multiply(0.35)),
+            );
         }
     }
 
     // 3D Axis indicators
-    let origin_proj = project_3d([-1.0, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let x_proj = project_3d([1.25, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let y_proj = project_3d([-1.0, 1.25, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let z_proj = project_3d([-1.0, -1.0, 1.15], center, scale, state.yaw, state.pitch, state.zoom);
+    let origin_proj = project_3d(
+        [-1.0, -1.0, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let x_proj = project_3d(
+        [1.25, -1.0, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let y_proj = project_3d(
+        [-1.0, 1.25, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let z_proj = project_3d(
+        [-1.0, -1.0, 1.15],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
 
     if let (Some((o, _)), Some((x, _))) = (origin_proj, x_proj) {
         painter.line_segment([o, x], Stroke::new(1.1, Color32::from_rgb(180, 70, 70)));
@@ -351,9 +404,24 @@ fn render_3d_channels(
 
     let channel_defs = [
         (&hist.red, -0.65, Color32::from_rgb(0xe0, 0x48, 0x40), "RED"),
-        (&hist.green, -0.22, Color32::from_rgb(0x40, 0xb8, 0x50), "GREEN"),
-        (&hist.blue, 0.22, Color32::from_rgb(0x45, 0x85, 0xe5), "BLUE"),
-        (&hist.luma, 0.65, Color32::from_rgb(0xdf, 0xd0, 0xb5), "LUMA"),
+        (
+            &hist.green,
+            -0.22,
+            Color32::from_rgb(0x40, 0xb8, 0x50),
+            "GREEN",
+        ),
+        (
+            &hist.blue,
+            0.22,
+            Color32::from_rgb(0x45, 0x85, 0xe5),
+            "BLUE",
+        ),
+        (
+            &hist.luma,
+            0.65,
+            Color32::from_rgb(0xdf, 0xd0, 0xb5),
+            "LUMA",
+        ),
     ];
 
     let mut depth_items: Vec<DepthPoly> = Vec::new();
@@ -375,16 +443,37 @@ fn render_3d_channels(
             let z_top = -1.0 + norm_height * 1.95;
             let z_bot = -1.0;
 
-            if let Some(pt) = project_3d([x, y_coord, z_top], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some(pt) = project_3d(
+                [x, y_coord, z_top],
+                center,
+                scale,
+                state.yaw,
+                state.pitch,
+                state.zoom,
+            ) {
                 top_pts.push(pt);
             }
-            if let Some(pt) = project_3d([x, y_coord, z_bot], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some(pt) = project_3d(
+                [x, y_coord, z_bot],
+                center,
+                scale,
+                state.yaw,
+                state.pitch,
+                state.zoom,
+            ) {
                 bot_pts.push(pt);
             }
         }
 
         // Add channel label in 3D near the ribbon start
-        if let Some((lbl_pos, _)) = project_3d([-1.1, y_coord, -0.95], center, scale, state.yaw, state.pitch, state.zoom) {
+        if let Some((lbl_pos, _)) = project_3d(
+            [-1.1, y_coord, -0.95],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        ) {
             channel_labels.push((lbl_pos, label, stroke_col));
         }
 
@@ -409,7 +498,11 @@ fn render_3d_channels(
     }
 
     // Sort descending by depth (Painter's algorithm: farthest first)
-    depth_items.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
+    depth_items.sort_by(|a, b| {
+        b.depth
+            .partial_cmp(&a.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for item in depth_items {
         painter.add(egui::Shape::convex_polygon(
@@ -419,7 +512,10 @@ fn render_3d_channels(
         ));
         // Top curve stroke
         if item.points.len() == 4 {
-            painter.line_segment([item.points[1], item.points[2]], Stroke::new(item.stroke_width, item.stroke_col));
+            painter.line_segment(
+                [item.points[1], item.points[2]],
+                Stroke::new(item.stroke_width, item.stroke_col),
+            );
         }
     }
 
@@ -471,7 +567,9 @@ fn render_3d_surface(
             let val = (channel_data[j][bin_idx] as f32 / peak).clamp(0.0, 1.0);
             let z = -1.0 + val * 1.95;
 
-            if let Some((sp, depth)) = project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some((sp, depth)) =
+                project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom)
+            {
                 // Color blended from spectrum and channel position
                 let vertex_col = match j {
                     0 => Color32::from_rgb((160.0 + r_val * 95.0) as u8, 60, 50),
@@ -501,9 +599,15 @@ fn render_3d_surface(
                 let p3 = grid[i][j + 1];
                 let avg_depth = (p0.1 + p1.1 + p2.1 + p3.1) * 0.25;
 
-                let r_avg = ((p0.2.r() as u16 + p1.2.r() as u16 + p2.2.r() as u16 + p3.2.r() as u16) / 4) as u8;
-                let g_avg = ((p0.2.g() as u16 + p1.2.g() as u16 + p2.2.g() as u16 + p3.2.g() as u16) / 4) as u8;
-                let b_avg = ((p0.2.b() as u16 + p1.2.b() as u16 + p2.2.b() as u16 + p3.2.b() as u16) / 4) as u8;
+                let r_avg =
+                    ((p0.2.r() as u16 + p1.2.r() as u16 + p2.2.r() as u16 + p3.2.r() as u16) / 4)
+                        as u8;
+                let g_avg =
+                    ((p0.2.g() as u16 + p1.2.g() as u16 + p2.2.g() as u16 + p3.2.g() as u16) / 4)
+                        as u8;
+                let b_avg =
+                    ((p0.2.b() as u16 + p1.2.b() as u16 + p2.2.b() as u16 + p3.2.b() as u16) / 4)
+                        as u8;
 
                 let quad_col = Color32::from_rgb(r_avg, g_avg, b_avg).linear_multiply(0.45);
                 quads.push(SurfaceQuad {
@@ -515,7 +619,11 @@ fn render_3d_surface(
         }
     }
 
-    quads.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
+    quads.sort_by(|a, b| {
+        b.depth
+            .partial_cmp(&a.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for q in quads {
         painter.add(egui::Shape::convex_polygon(
@@ -551,9 +659,18 @@ fn render_3d_cube(
     ];
 
     let edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0), // Bottom
-        (4, 5), (5, 6), (6, 7), (7, 4), // Top
-        (0, 4), (1, 5), (2, 6), (3, 7), // Verticals
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0), // Bottom
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4), // Top
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // Verticals
     ];
 
     let mut proj_corners = [None; 8];
@@ -563,7 +680,10 @@ fn render_3d_cube(
 
     for (a, b) in edges {
         if let (Some((p1, _)), Some((p2, _))) = (proj_corners[a], proj_corners[b]) {
-            painter.line_segment([p1, p2], Stroke::new(1.0, theme::BORDER.linear_multiply(0.6)));
+            painter.line_segment(
+                [p1, p2],
+                Stroke::new(1.0, theme::BORDER.linear_multiply(0.6)),
+            );
         }
     }
 
@@ -611,7 +731,14 @@ fn render_3d_cube(
             ((b_norm * 0.5 + 0.5) * 255.0) as u8,
         );
 
-        if let Some((sp, depth)) = project_3d([r_norm, g_norm, b_norm], center, scale, state.yaw, state.pitch, state.zoom) {
+        if let Some((sp, depth)) = project_3d(
+            [r_norm, g_norm, b_norm],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        ) {
             curve_pts.push(sp);
             points_3d.push((sp, depth, dot_color, density));
         }
@@ -619,7 +746,10 @@ fn render_3d_cube(
 
     // Connect 3D trajectory
     for pair in curve_pts.windows(2) {
-        painter.line_segment([pair[0], pair[1]], Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)));
+        painter.line_segment(
+            [pair[0], pair[1]],
+            Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)),
+        );
     }
 
     // Depth sort points

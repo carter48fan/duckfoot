@@ -50,6 +50,94 @@ impl CfaImage {
     }
 }
 
+/// A decoded raster image (JPEG, PNG, TIFF, WebP) converted to linear camera-RGB half-floats.
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    /// 4 half-floats per pixel (R, G, B, A=0.0) in linear space (8 bytes per pixel).
+    pub data: Vec<u8>,
+    pub orientation: Geometry,
+    pub make: String,
+    pub model: String,
+}
+
+impl RasterImage {
+    pub fn megapixels(&self) -> f32 {
+        (self.width as f32 * self.height as f32) / 1_000_000.0
+    }
+}
+
+/// Quickly extract an embedded JPEG preview from a RAW or raster file.
+/// Takes < 2 ms on modern CPUs, avoiding expensive full Bayer demosaicing.
+pub fn extract_embedded_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+    // Check if the file is itself a JPEG:
+    if bytes.len() > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some(bytes.to_vec());
+    }
+
+    // Search for embedded JPEG signatures in TIFF/RAW container (SOI: 0xFF, 0xD8, 0xFF)
+    let limit = bytes.len().min(8 * 1024 * 1024); // search first 8 MB
+    let mut i = 0;
+    while i + 3 < limit {
+        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF {
+            let start = i;
+            let mut j = start + 2;
+            let end_search = bytes.len().min(start + 4 * 1024 * 1024);
+            while j + 1 < end_search {
+                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
+                    let len = j + 2 - start;
+                    if len > 8192 {
+                        return Some(bytes[start..j + 2].to_vec());
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Decode standard raster image formats into linear camera space.
+pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
+    let img = image::load_from_memory(bytes).context("decoding raster image format")?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+
+    // Precomputed sRGB byte (0..=255) -> linear f32 LUT
+    let mut lut = [0.0f32; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *v = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+    }
+
+    // 4 half-floats per pixel = 8 bytes per pixel
+    let mut data = Vec::with_capacity(width as usize * height as usize * 8);
+    for pixel in rgba.pixels() {
+        let r = half::f16::from_f32(lut[pixel[0] as usize]);
+        let g = half::f16::from_f32(lut[pixel[1] as usize]);
+        let b = half::f16::from_f32(lut[pixel[2] as usize]);
+        let a = half::f16::ZERO; // highlight reconstruction neutral is 0.0
+        data.extend_from_slice(&r.to_le_bytes());
+        data.extend_from_slice(&g.to_le_bytes());
+        data.extend_from_slice(&b.to_le_bytes());
+        data.extend_from_slice(&a.to_le_bytes());
+    }
+
+    Ok(RasterImage {
+        width,
+        height,
+        data,
+        orientation: Geometry::default(),
+        make: "Raster".to_string(),
+        model: "Image".to_string(),
+    })
+}
+
 /// Behind a trait so `rawler` (~2500 cameras, same LGPL-2.1 licence) is a drop-in later.
 /// See DESIGN.md — the licence is a wash, so this is about camera coverage, not legals.
 pub trait RawDecoder {

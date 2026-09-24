@@ -5,27 +5,45 @@
 //! back over a channel. The GPU upload stays on the UI thread — it has to, the device is
 //! the UI's — but it is a copy, not a decode.
 //!
-//! Thumbnails are built on the CPU straight from the mosaic: a block average per colour,
-//! the camera's own white balance and matrix, and the sRGB curve. No GPU readback is
-//! involved (DESIGN.md invariant 4), and none of the user's edits are applied — a
+//! Thumbnails are built on the CPU straight from the mosaic or embedded fast JPEG preview:
+//! a block average per colour, the camera's own white balance and matrix, and the sRGB curve.
+//! No GPU readback is involved (DESIGN.md invariant 4), and none of the user's edits are applied — a
 //! thumbnail shows the file as shot. Only the open photo's tile shows the live render.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use photo_engine::{CfaImage, Geometry, RawDecoder, RawloaderBackend};
+use photo_engine::{
+    decode_raster, extract_embedded_thumbnail, is_raster_path, CfaImage, Geometry, RasterImage,
+    RawDecoder, RawloaderBackend,
+};
 
 /// Long side of a thumbnail, in pixels. A tile is 112×70 points; this covers it at 2×.
 const THUMB_SIDE: usize = 256;
+
+pub enum LoadedSource {
+    Raw(CfaImage),
+    Raster(RasterImage),
+}
+
+impl LoadedSource {
+    pub fn orientation(&self) -> Geometry {
+        match self {
+            Self::Raw(c) => c.orientation,
+            Self::Raster(r) => r.orientation,
+        }
+    }
+}
 
 pub enum Done {
     Opened {
         path: PathBuf,
         /// Matches the request that asked for it; anything older is stale and dropped.
         generation: u64,
-        result: Result<CfaImage, String>,
+        result: Result<LoadedSource, String>,
         decode_ms: f32,
     },
     Thumbnail {
@@ -63,9 +81,22 @@ impl Loader {
                         }
                         let (path, generation) = job;
                         let started = Instant::now();
-                        let result = RawloaderBackend
-                            .decode_file(&path)
-                            .map_err(|e| format!("{e:#}"));
+
+                        let result: Result<LoadedSource, String> = if is_raster_path(&path) {
+                            fs::read(&path)
+                                .map_err(|e| format!("{e:#}"))
+                                .and_then(|bytes| {
+                                    decode_raster(&bytes)
+                                        .map(LoadedSource::Raster)
+                                        .map_err(|e| format!("{e:#}"))
+                                })
+                        } else {
+                            RawloaderBackend
+                                .decode_file(&path)
+                                .map(LoadedSource::Raw)
+                                .map_err(|e| format!("{e:#}"))
+                        };
+
                         let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
                         let _ = done_tx.send(Done::Opened {
                             path,
@@ -86,10 +117,7 @@ impl Loader {
                 .name("duckfoot-thumbs".into())
                 .spawn(move || {
                     while let Ok(path) = thumb_rx.recv() {
-                        // A file that will not decode simply keeps its placeholder; the
-                        // open path is where decode errors are reported.
-                        if let Ok(cfa) = RawloaderBackend.decode_file(&path) {
-                            let image = thumbnail(&cfa);
+                        if let Some(image) = generate_thumbnail(&path) {
                             let _ = done_tx.send(Done::Thumbnail { path, image });
                             wake(&repaint);
                         }
@@ -129,6 +157,51 @@ fn wake(repaint: &Mutex<Option<egui::Context>>) {
             ctx.request_repaint();
         }
     }
+}
+
+fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
+    if is_raster_path(path) {
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                return Some(downsample_to_thumb(img));
+            }
+        }
+    } else {
+        // First try fast embedded thumbnail extraction (< 2ms)
+        if let Ok(bytes) = fs::read(path) {
+            if let Some(jpeg_bytes) = extract_embedded_thumbnail(&bytes) {
+                if let Ok(img) = image::load_from_memory(&jpeg_bytes) {
+                    return Some(downsample_to_thumb(img));
+                }
+            }
+        }
+        // Fall back to CFA block-average if embedded preview is absent
+        if let Ok(cfa) = RawloaderBackend.decode_file(path) {
+            return Some(thumbnail(&cfa));
+        }
+    }
+    None
+}
+
+fn downsample_to_thumb(img: image::DynamicImage) -> egui::ColorImage {
+    let (orig_w, orig_h) = (img.width(), img.height());
+    let max_dim = orig_w.max(orig_h);
+    let (tw, th) = if max_dim > THUMB_SIDE as u32 {
+        let scale = THUMB_SIDE as f32 / max_dim as f32;
+        (
+            ((orig_w as f32 * scale).round() as u32).max(1),
+            ((orig_h as f32 * scale).round() as u32).max(1),
+        )
+    } else {
+        (orig_w.max(1), orig_h.max(1))
+    };
+    let resized = img.resize(tw, th, image::imageops::FilterType::Triangle);
+    let rgba = resized.to_rgba8();
+    let pixels: Vec<egui::Color32> = rgba
+        .pixels()
+        .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+        .collect();
+    egui::ColorImage::new([tw as usize, th as usize], pixels)
 }
 
 /// A small sRGB rendering of the mosaic as shot: block-averaged per CFA colour, white
