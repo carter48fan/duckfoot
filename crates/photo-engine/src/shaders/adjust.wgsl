@@ -232,8 +232,8 @@ fn angle_dist(a: f32, b: f32) -> f32 {
     return min(d, 360.0 - d);
 }
 
-fn band_weight(h: f32, target: f32) -> f32 {
-    let d = angle_dist(h, target);
+fn band_weight(h: f32, center_hue: f32) -> f32 {
+    let d = angle_dist(h, center_hue);
     return max(0.0, 1.0 - d / 40.0);
 }
 

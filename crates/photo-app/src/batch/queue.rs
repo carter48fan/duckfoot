@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
-use photo_engine::{
-    decode_raster, is_raster_path, Crop, Engine, PhotoStack, RawDecoder, RawloaderBackend,
-};
+use photo_engine::{decode_raster, decode_raw, is_raster_path, Crop, Engine, PhotoStack};
 
 use super::recipe::{ExportImageFormat, ExportRecipe};
 
@@ -243,7 +241,7 @@ fn process_single_job(
         let raster = decode_raster(&bytes)?;
         engine.load_raster(device, queue, raster)?;
     } else {
-        let cfa = RawloaderBackend.decode_file(&job.source_path)?;
+        let cfa = decode_raw(&job.source_path)?;
         engine.load(device, queue, cfa)?;
     }
 
