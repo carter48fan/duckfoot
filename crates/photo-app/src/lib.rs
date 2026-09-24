@@ -2,27 +2,32 @@
 //!
 //! The desktop bootstrap and the eventual Android bootstrap both drive this same type.
 
+pub mod inspector_map_3d;
+mod loader;
 pub mod theme;
 pub mod tonemap_3d;
-pub mod inspector_map_3d;
+pub mod widgets;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use std::sync::RwLock;
 
+use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Rect, RichText, Sense, Stroke};
+use photo_engine::params::Module;
 use photo_engine::{
-    find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
-    RawDecoder, RawloaderBackend,
+    find_sidecar, identity_nodes, load_sidecar, save_sidecar, CfaImage, Crop, CurveNode, Engine,
+    PhotoStack,
 };
+use widgets::Kind;
 
 /// Sections available in the Inspector sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum InspectorSectionId {
     Scope,
     Geometry,
-    Snapshots,
     WhiteBalance,
     Exposure,
     Tonal,
@@ -39,7 +44,6 @@ impl InspectorSectionId {
         &[
             Self::Scope,
             Self::Geometry,
-            Self::Snapshots,
             Self::WhiteBalance,
             Self::Exposure,
             Self::Tonal,
@@ -54,17 +58,16 @@ impl InspectorSectionId {
 
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Scope => "inspector map & scope",
-            Self::Geometry => "geometry",
-            Self::Snapshots => "snapshots",
+            Self::Scope => "scope",
+            Self::Geometry => "crop & rotate",
             Self::WhiteBalance => "white balance",
             Self::Exposure => "exposure",
-            Self::Tonal => "highlights & shadows",
+            Self::Tonal => "shadows & highlights",
             Self::ToneCurve => "tone curve",
-            Self::Filmic3D => "filmic rgb / 3d tonemap",
+            Self::Filmic3D => "filmic rgb",
             Self::ColorBalance => "colour balance",
-            Self::Vibrance => "vibrance & saturation",
-            Self::Sharpen => "capture sharpen",
+            Self::Vibrance => "vibrance",
+            Self::Sharpen => "sharpen",
             Self::Vignette => "vignette",
         }
     }
@@ -85,7 +88,15 @@ impl InspectorSectionConfig {
             .map(|&id| Self {
                 id,
                 visible: true,
-                collapsed: id == InspectorSectionId::Snapshots,
+                // Open what nearly every edit touches; the rest show their value in the
+                // header and open on click.
+                collapsed: !matches!(
+                    id,
+                    InspectorSectionId::Scope
+                        | InspectorSectionId::WhiteBalance
+                        | InspectorSectionId::Exposure
+                        | InspectorSectionId::ToneCurve
+                ),
             })
             .collect()
     }
@@ -98,6 +109,20 @@ pub struct ShelfItem {
     pub name: String,
     pub is_edited: bool,
     pub has_sidecar: bool,
+    /// Size on disk, read once when the item is shelved.
+    pub bytes: u64,
+}
+
+impl ShelfItem {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            name: file_name(&path),
+            is_edited: false,
+            has_sidecar: find_sidecar(&path).is_some(),
+            bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            path,
+        }
+    }
 }
 
 /// Everything the app needs from the GPU, supplied by whichever shell is running.
@@ -157,6 +182,9 @@ enum Export {
 struct History {
     past: Vec<PhotoStack>,
     future: Vec<PhotoStack>,
+    /// The oldest state has been dropped to stay under the cap, so `past[0]` is no longer
+    /// the stack the file opened with.
+    truncated: bool,
 }
 
 impl History {
@@ -164,6 +192,7 @@ impl History {
         Self {
             past: Vec::new(),
             future: Vec::new(),
+            truncated: false,
         }
     }
 
@@ -173,6 +202,7 @@ impl History {
         self.past.push(current.clone());
         if self.past.len() > 256 {
             self.past.remove(0);
+            self.truncated = true;
         }
         self.future.clear();
     }
@@ -192,6 +222,54 @@ impl History {
         self.past.push(std::mem::replace(current, next));
         true
     }
+
+    /// Every state, oldest first: the undo stack, then `current`, then the redo stack.
+    /// `current` sits at index `past.len()`.
+    fn timeline<'a>(&'a self, current: &'a PhotoStack) -> Vec<&'a PhotoStack> {
+        self.past
+            .iter()
+            .chain(std::iter::once(current))
+            .chain(self.future.iter().rev())
+            .collect()
+    }
+
+    /// Walk the stack to a timeline index, as clicking a row in the History list does.
+    fn jump_to(&mut self, current: &mut PhotoStack, target: usize) -> bool {
+        let mut moved = false;
+        while self.past.len() > target && self.undo(current) {
+            moved = true;
+        }
+        while self.past.len() < target && self.redo(current) {
+            moved = true;
+        }
+        moved
+    }
+}
+
+/// Where the current edit stands relative to the sidecar on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidecarState {
+    NoImage,
+    /// Default stack, nothing saved.
+    Pristine,
+    /// Edited, never saved.
+    Unsaved,
+    /// Saved, and the stack still matches what was saved.
+    Synced,
+    /// Saved, then edited since.
+    Modified,
+}
+
+impl SidecarState {
+    fn describe(self) -> (&'static str, Color32) {
+        match self {
+            Self::NoImage => ("no image", theme::TEXT_FAINT),
+            Self::Pristine => ("no edits", theme::TEXT_FAINT),
+            Self::Unsaved => ("unsaved edits", theme::ACCENT),
+            Self::Synced => ("sidecar synced", theme::LIME),
+            Self::Modified => ("sidecar modified", theme::ACCENT),
+        }
+    }
 }
 
 pub struct PhotoApp {
@@ -203,6 +281,9 @@ pub struct PhotoApp {
     needs_render: bool,
     error: Option<String>,
     loaded_path: Option<PathBuf>,
+    /// The stack as last written to (or read from) the sidecar, so "modified" means
+    /// modified relative to disk rather than relative to defaults.
+    saved_stack: Option<PhotoStack>,
     decode_ms: f32,
     render_ms: f32,
     export: Export,
@@ -229,9 +310,31 @@ pub struct PhotoApp {
     pub tonemap_3d_state: tonemap_3d::Tonemap3DState,
     pub inspector_map_state: inspector_map_3d::InspectorMapState,
     pub inspector_sections: Vec<InspectorSectionConfig>,
+    /// The Inspector is showing its Customize tab rather than the pipeline.
     pub customize_open: bool,
     pub inspector_width: f32,
     pub inspector_force_width: Option<f32>,
+    /// The module card the user last touched; its border goes amber.
+    focused_section: Option<InspectorSectionId>,
+    /// Opening a module closes the others, so the inspector stays one screen tall.
+    /// Shift-click opens one alongside.
+    pub single_open: bool,
+    /// What "no edits" means for the open photo: default modules, oriented the way the
+    /// camera said. Reset returns here, and a stack equal to it is unedited.
+    baseline: PhotoStack,
+    loader: loader::Loader,
+    /// Bumped per open request, so a slow decode that finishes after a newer request is
+    /// recognised as stale and dropped.
+    open_generation: u64,
+    /// A photo being decoded in the background, and since when.
+    loading: Option<(PathBuf, Instant)>,
+    thumbs: HashMap<PathBuf, egui::TextureHandle>,
+    thumbs_requested: HashSet<PathBuf>,
+    /// The before/after divider is being dragged; the image must not pan meanwhile.
+    split_dragging: bool,
+    /// A module just opened while the others closed; scroll it into view next frame,
+    /// once the layout has settled.
+    reveal_section: Option<InspectorSectionId>,
 }
 
 impl PhotoApp {
@@ -244,6 +347,7 @@ impl PhotoApp {
             needs_render: false,
             error: None,
             loaded_path: None,
+            saved_stack: None,
             decode_ms: 0.0,
             render_ms: 0.0,
             export: Export::Idle,
@@ -263,26 +367,36 @@ impl PhotoApp {
             inspector_map_state: inspector_map_3d::InspectorMapState::default(),
             inspector_sections: InspectorSectionConfig::default_sections(),
             customize_open: false,
-            inspector_width: 288.0,
+            inspector_width: 300.0,
             inspector_force_width: None,
+            focused_section: None,
+            single_open: true,
+            baseline: PhotoStack::default(),
+            loader: loader::Loader::new(),
+            open_generation: 0,
+            loading: None,
+            thumbs: HashMap::new(),
+            thumbs_requested: HashSet::new(),
+            split_dragging: false,
+            reveal_section: None,
         }
     }
 
     /// Read the current frame back and write it, encoding off the UI thread.
     fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
-        // Make sure what we are about to copy reflects the current stack (export never splits).
-        self.engine.render(gpu.device, gpu.queue, &self.stack, None);
-
-        let exported = match self
-            .engine
-            .export(gpu.device, gpu.queue, self.stack.geometry.crop)
-        {
-            Ok(e) => e,
-            Err(e) => {
-                self.export = Export::Failed(format!("{e:#}"));
-                return;
-            }
-        };
+        // Renders the current stack at full resolution, whatever the preview is at, and
+        // never with the split.
+        let exported =
+            match self
+                .engine
+                .export(gpu.device, gpu.queue, &self.stack, self.stack.geometry.crop)
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    self.export = Export::Failed(format!("{e:#}"));
+                    return;
+                }
+            };
 
         let (tx, rx) = mpsc::channel();
         let target = path.clone();
@@ -297,6 +411,8 @@ impl PhotoApp {
             started: Instant::now(),
             result: rx,
         };
+        // The export overwrote the preview's uniforms; put the preview back.
+        self.needs_render = true;
     }
 
     /// Default filename beside the source: DSC08450.ARW -> DSC08450.png
@@ -341,8 +457,60 @@ impl PhotoApp {
         }
     }
 
+    fn pick_and_open(&mut self, gpu: &Gpu) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+            // A fallback the filter cannot lock the user out of: the
+            // extension list will never cover every camera.
+            .add_filter("All files", &["*"])
+            .pick_file()
+        {
+            self.open_path(gpu, path);
+        }
+    }
+
+    fn pick_and_shelve(&mut self, gpu: &Gpu) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+            .add_filter("All files", &["*"])
+            .pick_files()
+        {
+            self.add_to_shelf(gpu, paths);
+        }
+    }
+
+    fn pick_and_export(&mut self, gpu: &Gpu) {
+        let (dir, name) = self.export_suggestion();
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .set_directory(dir)
+            .set_file_name(name)
+            .save_file()
+        {
+            self.export_to(gpu, path);
+        }
+    }
+
     pub fn is_stack_edited(&self) -> bool {
-        self.stack != PhotoStack::default()
+        self.stack != self.baseline
+    }
+
+    /// A decode is running, or thumbnails are still being built.
+    pub fn is_busy(&self) -> bool {
+        self.loading.is_some() || self.thumbs_requested.len() > self.thumbs.len()
+    }
+
+    fn sidecar_state(&self) -> SidecarState {
+        if self.loaded_path.is_none() {
+            return SidecarState::NoImage;
+        }
+        match &self.saved_stack {
+            Some(saved) if *saved == self.stack => SidecarState::Synced,
+            Some(_) => SidecarState::Modified,
+            None if self.is_stack_edited() => SidecarState::Unsaved,
+            None => SidecarState::Pristine,
+        }
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -359,6 +527,7 @@ impl PhotoApp {
                     item.has_sidecar = true;
                     item.is_edited = false;
                 }
+                self.saved_stack = Some(self.stack.clone());
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("sidecar");
                 self.set_status(format!("Saved sidecar: {name}"));
             }
@@ -375,6 +544,7 @@ impl PhotoApp {
         match load_sidecar(path) {
             Ok(Some(saved)) => {
                 self.history.checkpoint(&self.stack);
+                self.saved_stack = Some(saved.clone());
                 self.stack = saved;
                 self.needs_render = true;
                 if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
@@ -393,7 +563,7 @@ impl PhotoApp {
 
     pub fn reset_to_default(&mut self) {
         self.history.checkpoint(&self.stack);
-        self.stack = PhotoStack::default();
+        self.stack = self.baseline.clone();
         self.needs_render = true;
         self.set_status("Reset all adjustments to default");
     }
@@ -429,6 +599,9 @@ impl PhotoApp {
             if save_sidecar(&item.path, copied).is_ok() {
                 item.has_sidecar = true;
                 count += 1;
+                if self.loaded_path.as_ref() == Some(&item.path) {
+                    self.saved_stack = Some(copied.clone());
+                }
             }
         }
         self.set_status(format!("Applied adjustments to {count} photos in shelf"));
@@ -438,22 +611,12 @@ impl PhotoApp {
         let open_first = self.loaded_path.is_none();
         let mut to_open = None;
         for path in paths {
-            let has_sidecar = find_sidecar(&path).is_some();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("RAW")
-                .to_string();
             if !self.shelf.iter().any(|it| it.path == path) {
                 if open_first && to_open.is_none() {
                     to_open = Some(path.clone());
                 }
-                self.shelf.push(ShelfItem {
-                    path,
-                    name,
-                    is_edited: false,
-                    has_sidecar,
-                });
+                self.request_thumbnail(&path);
+                self.shelf.push(ShelfItem::new(path));
             }
         }
         if let Some(first) = to_open {
@@ -461,67 +624,123 @@ impl PhotoApp {
         }
     }
 
-    pub fn open_path(&mut self, gpu: &Gpu, path: PathBuf) {
-        // Auto-save sidecar for previous photo if it was edited
+    fn request_thumbnail(&mut self, path: &std::path::Path) {
+        if self.thumbs_requested.insert(path.to_path_buf()) {
+            self.loader.thumbnail(path.to_path_buf());
+        }
+    }
+
+    /// Step to the previous (-1) or next (+1) photo on the shelf.
+    fn step_photo(&mut self, gpu: &Gpu, dir: isize) {
+        if self.shelf.is_empty() {
+            return;
+        }
+        let current = self
+            .loading
+            .as_ref()
+            .map(|(p, _)| p)
+            .or(self.loaded_path.as_ref())
+            .and_then(|p| self.shelf.iter().position(|it| &it.path == p));
+        let n = self.shelf.len() as isize;
+        let next = match current {
+            Some(i) => (i as isize + dir).rem_euclid(n) as usize,
+            None => 0,
+        };
+        let path = self.shelf[next].path.clone();
+        self.open_path(gpu, path);
+    }
+
+    /// Start opening a photo. The decode runs in the background (see `loader`); the
+    /// current photo stays on screen and editable until the new one is ready.
+    pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
+        if self.loaded_path.as_ref() == Some(&path) && self.loading.is_none() {
+            return;
+        }
+        self.open_generation += 1;
+        self.loading = Some((path.clone(), Instant::now()));
+        self.loader.open(path, self.open_generation);
+    }
+
+    /// Collect whatever the workers have finished.
+    fn poll_loader(&mut self, ctx: &egui::Context, gpu: &Gpu) {
+        while let Ok(done) = self.loader.done.try_recv() {
+            match done {
+                loader::Done::Opened {
+                    path,
+                    generation,
+                    result,
+                    decode_ms,
+                } if generation == self.open_generation => {
+                    self.loading = None;
+                    match result {
+                        Ok(cfa) => {
+                            self.decode_ms = decode_ms;
+                            self.finish_open(gpu, path, cfa);
+                        }
+                        // DESIGN.md: failures surface in the UI, with the filename.
+                        Err(e) => self.error = Some(e),
+                    }
+                }
+                // Superseded by a newer request while it was decoding.
+                loader::Done::Opened { .. } => {}
+                loader::Done::Thumbnail { path, image } => {
+                    let name = format!("thumb:{}", path.display());
+                    let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                    self.thumbs.insert(path, texture);
+                }
+            }
+        }
+    }
+
+    fn finish_open(&mut self, gpu: &Gpu, path: PathBuf, cfa: CfaImage) {
+        // Save the photo being left, including anything edited while this one decoded.
         if let Some(current) = &self.loaded_path {
-            if self.is_stack_edited() {
-                let _ = save_sidecar(current, &self.stack);
+            if self.is_stack_edited() && save_sidecar(current, &self.stack).is_ok() {
+                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == current) {
+                    item.has_sidecar = true;
+                }
             }
         }
 
         self.error = None;
-        let started = Instant::now();
+        let orientation = cfa.orientation;
+        self.release_texture(gpu);
 
-        match RawloaderBackend.decode_file(&path) {
-            Ok(cfa) => {
-                self.decode_ms = started.elapsed().as_secs_f32() * 1000.0;
-                self.release_texture(gpu);
-
-                if let Err(e) = self.engine.load(gpu.device, gpu.queue, cfa) {
-                    // DESIGN.md: failures surface in the UI, with the filename.
-                    self.error = Some(format!("{}: {e:#}", path.display()));
-                    self.loaded_path = None;
-                    return;
-                }
-
-                let has_sidecar = find_sidecar(&path).is_some();
-                let initial_stack = match load_sidecar(&path) {
-                    Ok(Some(s)) => {
-                        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                        self.set_status(format!("Loaded sidecar for {fname}"));
-                        s
-                    }
-                    _ => PhotoStack::default(),
-                };
-
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("RAW")
-                    .to_string();
-                if let Some(existing) = self.shelf.iter_mut().find(|it| it.path == path) {
-                    existing.has_sidecar = has_sidecar;
-                    existing.is_edited = false;
-                } else {
-                    self.shelf.push(ShelfItem {
-                        path: path.clone(),
-                        name,
-                        is_edited: false,
-                        has_sidecar,
-                    });
-                }
-
-                self.loaded_path = Some(path);
-                self.stack = initial_stack;
-                self.history = History::new();
-                self.view = View::default();
-                self.needs_render = true;
-            }
-            Err(e) => {
-                self.error = Some(format!("{e:#}"));
-                self.loaded_path = None;
-            }
+        if let Err(e) = self.engine.load(gpu.device, gpu.queue, cfa) {
+            // DESIGN.md: failures surface in the UI, with the filename.
+            self.error = Some(format!("{}: {e:#}", path.display()));
+            self.loaded_path = None;
+            return;
         }
+
+        let saved = match load_sidecar(&path) {
+            Ok(Some(s)) => {
+                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+                self.set_status(format!("Loaded sidecar for {fname}"));
+                Some(s)
+            }
+            _ => None,
+        };
+
+        let item = ShelfItem::new(path.clone());
+        if let Some(existing) = self.shelf.iter_mut().find(|it| it.path == path) {
+            existing.has_sidecar = item.has_sidecar;
+            existing.is_edited = false;
+        } else {
+            self.request_thumbnail(&path);
+            self.shelf.push(item);
+        }
+
+        self.baseline = PhotoStack {
+            geometry: orientation,
+            ..PhotoStack::default()
+        };
+        self.loaded_path = Some(path);
+        self.stack = saved.clone().unwrap_or_else(|| self.baseline.clone());
+        self.saved_stack = saved;
+        self.history = History::new();
+        self.view = View::default();
+        self.needs_render = true;
     }
 
     fn release_texture(&mut self, gpu: &Gpu) {
@@ -531,8 +750,32 @@ impl PhotoApp {
         self.engine.unload();
     }
 
+    /// The coarsest preview level still at least as dense as the screen: each level
+    /// halves the resolution, so level L is right while one image pixel covers less than
+    /// 1/2^L of a screen pixel.
+    fn wanted_preview_level(&self, pixels_per_point: f32) -> u32 {
+        let Some(fit) = self.fit_scale() else {
+            return 0;
+        };
+        let density = fit * self.view.zoom * pixels_per_point;
+        if density >= 1.0 || density <= 0.0 {
+            return 0;
+        }
+        ((1.0 / density).log2().floor() as u32).min(photo_engine::MAX_PREVIEW_LEVEL)
+    }
+
     /// Runs the GPU work for this frame, if anything changed.
-    fn sync(&mut self, gpu: &Gpu) {
+    fn sync(&mut self, gpu: &Gpu, pixels_per_point: f32) {
+        // Zooming changes how much resolution the screen can show; the preview follows,
+        // and a new preview texture needs registering with egui like a turned one does.
+        let level = self.wanted_preview_level(pixels_per_point);
+        if self.engine.set_preview_level(gpu.device, level) {
+            if let Some(id) = self.texture_id.take() {
+                renderer_write(gpu).free_texture(&id);
+            }
+            self.needs_render = true;
+        }
+
         // A right-angle turn replaces the output texture, so the id egui holds becomes
         // stale and has to be re-registered. Straighten, mirror and crop never resize.
         if self.engine.set_geometry(gpu.device, self.stack.geometry) {
@@ -569,22 +812,41 @@ impl PhotoApp {
     }
 
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        self.handle_keys(ui.ctx());
-        self.poll_export(ui.ctx());
+        let ctx = ui.ctx().clone();
+        self.loader.set_context(&ctx);
+        self.poll_loader(&ctx, gpu);
+        self.handle_keys(&ctx, gpu);
+        self.poll_export(&ctx);
         self.engine.poll_histogram(gpu.device);
-        self.sync(gpu);
+        self.sync(gpu, ctx.pixels_per_point());
 
+        // Panel order is layout order: full-width bars first, then the side panels, then
+        // the filmstrip and stage toolbar, which only span the space left between them.
         self.top_bar(ui, gpu);
+        self.status_bar(ui);
         self.shelf(ui, gpu);
         self.inspector(ui);
-        self.status_bar(ui);
-        self.workspace(ui);
+        self.filmstrip(ui, gpu);
+        self.stage_toolbar(ui);
+        self.workspace(ui, gpu);
     }
 
-    fn handle_keys(&mut self, ctx: &egui::Context) {
+    fn handle_keys(&mut self, ctx: &egui::Context, gpu: &Gpu) {
         // DESIGN.md: hotkeys never fire while a text field has focus.
         if ctx.memory(|m| m.focused().is_some()) {
             return;
+        }
+        let (prev, next) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        if prev {
+            self.step_photo(gpu, -1);
+        }
+        if next {
+            self.step_photo(gpu, 1);
         }
         let (undo, redo) = ctx.input(|i| {
             (
@@ -631,14 +893,7 @@ impl PhotoApp {
             self.view = View::default();
         }
         if actual {
-            // 1:1 is expressed relative to fit, which depends on the panel size, so it is
-            // resolved against the screen rect the workspace actually got last frame.
-            if let Some(percent) = self.zoom_percent(self.last_panel) {
-                if percent > 0.0 {
-                    self.view.zoom *= 100.0 / percent;
-                    self.view.zoom = self.view.zoom.max(1.0);
-                }
-            }
+            self.zoom_actual();
         }
 
         let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc) = ctx.input(|i| {
@@ -683,198 +938,322 @@ impl PhotoApp {
         }
     }
 
+    /// Scale at which the whole frame fits the panel it had last frame.
+    fn fit_scale(&self) -> Option<f32> {
+        let image = self.engine.image()?;
+        let panel = self.last_panel;
+        if panel.x < 1.0 || panel.y < 1.0 {
+            return None;
+        }
+        Some((panel.x / image.width as f32).min(panel.y / image.height as f32))
+    }
+
+    fn zoom_by(&mut self, factor: f32) {
+        let max_zoom = self
+            .fit_scale()
+            .map_or(1.0, |fit| (MAX_ZOOM_SCALE / fit).max(1.0));
+        self.view.zoom = (self.view.zoom * factor).clamp(1.0, max_zoom);
+    }
+
+    fn zoom_actual(&mut self) {
+        // 1:1 is expressed relative to fit, which depends on the panel size, so it is
+        // resolved against the screen rect the workspace actually got last frame.
+        if let Some(percent) = self.zoom_percent(self.last_panel) {
+            if percent > 0.0 {
+                self.view.zoom *= 100.0 / percent;
+                self.view.zoom = self.view.zoom.max(1.0);
+            }
+        }
+    }
+
+    // ── Top bar ─────────────────────────────────────────────────────────────────────────
+
     fn top_bar(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         egui::Panel::top("top")
-            .frame(bare_frame(theme::BG_900))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::symmetric(14, 9)),
+            )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("DUCKFOOT")
-                            .monospace()
-                            .color(theme::ACCENT)
-                            .strong(),
-                    );
+                    widgets::brand_mark(ui, 26.0);
+                    ui.add_space(2.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(
+                            RichText::new("DUCKFOOT")
+                                .family(theme::display())
+                                .size(15.0)
+                                .extra_letter_spacing(1.4)
+                                .color(theme::TEXT_HI),
+                        );
+                        ui.label(
+                            RichText::new("THREE BARRELS, ONE STOCK")
+                                .monospace()
+                                .size(9.0)
+                                .extra_letter_spacing(0.6)
+                                .color(Color32::from_gray(0xcc)),
+                        );
+                    });
                     ui.add_space(12.0);
 
                     // The other two barrels exist in the design, not in the code. Showing
                     // them disabled is honest; showing them clickable would not be.
-                    let _ = ui.selectable_label(true, "Photo");
-                    ui.add_enabled(false, egui::Button::new(theme::dim("Audio")));
-                    ui.add_enabled(false, egui::Button::new(theme::dim("Video")));
+                    pod(ui, |ui| {
+                        let _ = widgets::chip(ui, true, "photo");
+                        ui.add_enabled_ui(false, |ui| {
+                            widgets::chip(ui, false, "audio")
+                                .on_disabled_hover_text("Barrel 2 is design only — see DESIGN.md");
+                            widgets::chip(ui, false, "video")
+                                .on_disabled_hover_text("Barrel 3 is design only — see DESIGN.md");
+                        });
+                    });
 
-                    ui.separator();
-                    if ui.selectable_label(self.shelf_open, "Shelf").clicked() {
-                        self.shelf_open = !self.shelf_open;
-                    }
-
-                    if ui.button("Open RAW…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-                            // A fallback the filter cannot lock the user out of: the
-                            // extension list will never cover every camera.
-                            .add_filter("All files", &["*"])
-                            .pick_file()
-                        {
-                            self.open_path(gpu, path);
-                        }
-                    }
-
-                    let busy = matches!(self.export, Export::Writing { .. });
-                    let ready = self.engine.image().is_some() && !busy;
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Export…"))
-                        .clicked()
-                    {
-                        let (dir, name) = self.export_suggestion();
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("PNG", &["png"])
-                            .add_filter("JPEG", &["jpg", "jpeg"])
-                            .set_directory(dir)
-                            .set_file_name(name)
-                            .save_file()
-                        {
-                            self.export_to(gpu, path);
-                        }
-                    }
-
-                    ui.separator();
-
-                    // Before / After split view toggle and control
-                    if ui
-                        .selectable_label(self.split_active, "Split (\\)")
-                        .on_hover_text("Toggle Before/After split view (\\)")
-                        .clicked()
-                    {
-                        self.split_active = !self.split_active;
-                        self.needs_render = true;
-                    }
-
-                    if self.split_active {
-                        let slider = ui.add(
-                            egui::Slider::new(&mut self.split_pos, 0.0..=1.0)
-                                .text("divider")
-                                .show_value(false),
-                        );
-                        if slider.changed() {
-                            self.needs_render = true;
-                        }
-                        if ui
-                            .small_button("50%")
-                            .on_hover_text("Reset split to center")
-                            .clicked()
-                        {
-                            self.split_pos = 0.5;
-                            self.needs_render = true;
-                        }
-                    }
-
-                    if ui
-                        .add_enabled(
-                            self.loaded_path.is_some(),
-                            egui::Button::new("Save Sidecar"),
-                        )
-                        .on_hover_text("Save adjustments to companion sidecar file (Ctrl+S)")
-                        .clicked()
-                    {
-                        self.save_current_sidecar();
+                    if ui.available_width() > 720.0 {
+                        ui.add_space(10.0);
+                        self.telemetry_pill(ui);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(image) = self.engine.image() {
-                            ui.label(theme::dim(format!("{} {}", image.make, image.model)));
+                        let busy = matches!(self.export, Export::Writing { .. });
+                        let ready = self.engine.image().is_some() && !busy;
+                        let export = ui
+                            .add_enabled_ui(ready, |ui| {
+                                widgets::button(ui, Kind::Primary, "Export", 84.0)
+                                    .on_hover_text("Write the full-resolution image as PNG or JPEG")
+                            })
+                            .inner;
+                        if export.clicked() {
+                            self.pick_and_export(gpu);
                         }
+                        if widgets::button(ui, Kind::Secondary, "Open RAW…", 0.0).clicked() {
+                            self.pick_and_open(gpu);
+                        }
+                        ui.add_space(4.0);
+
+                        // Right-to-left, so these read shelf · split · inspector on screen.
+                        pod(ui, |ui| {
+                            let wide = self.inspector_width >= 400.0;
+                            if widgets::icon(
+                                ui,
+                                "◨",
+                                wide,
+                                if wide {
+                                    "Narrow the inspector (300px)"
+                                } else {
+                                    "Widen the inspector for the 3D views (460px)"
+                                },
+                            )
+                            .clicked()
+                            {
+                                let target = if wide { 300.0 } else { 460.0 };
+                                self.inspector_width = target;
+                                self.inspector_force_width = Some(target);
+                            }
+                            if widgets::icon(
+                                ui,
+                                "◫",
+                                self.split_active,
+                                "Before / after split (\\)",
+                            )
+                            .clicked()
+                            {
+                                self.split_active = !self.split_active;
+                                self.needs_render = true;
+                            }
+                            if widgets::icon(ui, "◧", self.shelf_open, "Show or hide the shelf")
+                                .clicked()
+                            {
+                                self.shelf_open = !self.shelf_open;
+                            }
+                        });
                     });
                 });
             });
     }
+
+    /// The session readout: camera, dimensions, undo depth. Real values only.
+    fn telemetry_pill(&self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .stroke(Stroke::new(1.0, Color32::from_gray(0x2a)))
+            .corner_radius(theme::RADIUS)
+            .inner_margin(Margin::symmetric(12, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let sep = |ui: &mut egui::Ui| {
+                        ui.label(
+                            RichText::new("|")
+                                .monospace()
+                                .color(Color32::from_gray(0x33)),
+                        );
+                    };
+                    match self.engine.image() {
+                        Some(image) => {
+                            widgets::dot(ui, theme::ACCENT);
+                            let camera = format!("{} {}", image.make, image.model);
+                            ui.label(
+                                RichText::new(camera.trim())
+                                    .family(theme::mono_bold())
+                                    .size(11.5)
+                                    .color(theme::ACCENT),
+                            );
+                            sep(ui);
+                            ui.label(
+                                theme::num(format!("{} × {}", image.width, image.height))
+                                    .size(11.5),
+                            );
+                            sep(ui);
+                            ui.label(
+                                theme::num(format!("{:.1} MP", image.megapixels()))
+                                    .size(11.5)
+                                    .color(Color32::from_gray(0xcc)),
+                            );
+                            sep(ui);
+                            ui.label(
+                                theme::num(format!("undo ({})", self.history.past.len()))
+                                    .size(11.5)
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
+                        None => {
+                            widgets::dot(ui, theme::TEXT_FAINT);
+                            ui.label(
+                                theme::num("no image loaded")
+                                    .size(11.5)
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
+                    }
+                });
+            });
+    }
+
+    // ── Shelf bin (left) ────────────────────────────────────────────────────────────────
 
     fn shelf(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         if !self.shelf_open {
             return;
         }
         egui::Panel::left("shelf")
-            .frame(bare_frame(theme::BG_950))
+            .frame(egui::Frame::new().fill(theme::BG_950))
             .resizable(true)
-            .default_size(216.0)
-            .min_size(160.0)
-            .max_size(360.0)
+            .default_size(272.0)
+            .min_size(220.0)
+            .max_size(400.0)
             .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(theme::head("SHELF"));
-                    ui.label(theme::dim(format!("({})", self.shelf.len())));
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                // Footer first, so it pins to the bottom of the panel.
+                egui::Panel::bottom("shelf_footer")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(theme::BG_925)
+                            .inner_margin(Margin::symmetric(12, 8)),
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::tag("shelf total").color(Color32::from_gray(0xcc)));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let total: u64 = self.shelf.iter().map(|it| it.bytes).sum();
+                                    ui.label(
+                                        RichText::new(format_bytes(total))
+                                            .family(theme::mono_bold())
+                                            .size(12.0)
+                                            .color(theme::ACCENT),
+                                    );
+                                },
+                            );
+                        });
+                    });
+
+                widgets::band(ui, |ui| {
+                    ui.label(RichText::new("🗁").size(15.0).color(theme::ACCENT));
+                    ui.label(theme::head("Shelf bin"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button("+ Add…")
-                            .on_hover_text("Add RAW photos to shelf")
-                            .clicked()
+                        if widgets::icon(ui, "✚", false, "Add RAW photos to the shelf").clicked()
                         {
-                            if let Some(paths) = rfd::FileDialog::new()
-                                .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-                                .add_filter("All files", &["*"])
-                                .pick_files()
-                            {
-                                self.add_to_shelf(gpu, paths);
-                            }
+                            self.pick_and_shelve(gpu);
                         }
                     });
                 });
-                ui.separator();
+
+                // Drop target. Dropping works anywhere in the window; this is where it's
+                // advertised, and clicking it is the same as the + above.
+                egui::Frame::new()
+                    .inner_margin(Margin {
+                        left: 10,
+                        right: 10,
+                        top: 10,
+                        bottom: 6,
+                    })
+                    .show(ui, |ui| {
+                        let (rect, response) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+                        let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+                        let hot = response.hovered() || dragging_in;
+                        widgets::dashed_rect(
+                            ui.painter(),
+                            rect,
+                            if hot {
+                                theme::ACCENT
+                            } else {
+                                Color32::from_gray(0x2a)
+                            },
+                        );
+                        let painter = ui.painter();
+                        let label = painter.layout_no_wrap(
+                            "Drop RAW files".to_owned(),
+                            FontId::proportional(12.5),
+                            if hot {
+                                theme::TEXT_HI
+                            } else {
+                                Color32::from_gray(0xcc)
+                            },
+                        );
+                        // Arrow + gap + label, centred as one unit.
+                        let left = rect.center().x - (label.size().x + 20.0) / 2.0;
+                        painter.text(
+                            pos2(left + 6.0, rect.center().y),
+                            Align2::CENTER_CENTER,
+                            "⬆",
+                            FontId::proportional(14.0),
+                            theme::ACCENT,
+                        );
+                        painter.galley(
+                            pos2(left + 20.0, rect.center().y - label.size().y / 2.0),
+                            label,
+                            theme::TEXT,
+                        );
+                        if hot {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if response.clicked() {
+                            self.pick_and_shelve(gpu);
+                        }
+                    });
 
                 let mut to_open = None;
                 let mut to_remove = None;
-
                 egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 70.0)
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .show(ui, |ui| {
-                        for (i, item) in self.shelf.iter().enumerate() {
-                            let is_active = self.loaded_path.as_ref() == Some(&item.path);
-                            ui.horizontal(|ui| {
-                                let text_color = if is_active {
-                                    theme::ACCENT
-                                } else {
-                                    theme::TEXT
-                                };
-                                let label_text = egui::RichText::new(&item.name).color(text_color);
-                                let btn = ui.selectable_label(is_active, label_text);
-                                if btn.clicked() && !is_active {
-                                    to_open = Some(item.path.clone());
-                                }
-
-                                if item.has_sidecar {
-                                    ui.label(
-                                        egui::RichText::new("●").color(theme::ACCENT).size(9.0),
-                                    )
-                                    .on_hover_text("Sidecar saved on disk");
-                                } else if item.is_edited {
-                                    ui.label(
-                                        egui::RichText::new("●").color(theme::TEXT_DIM).size(9.0),
-                                    )
-                                    .on_hover_text("Edits in memory");
-                                }
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .small_button("×")
-                                            .on_hover_text("Remove from shelf")
-                                            .clicked()
-                                        {
-                                            to_remove = Some(i);
-                                        }
-                                    },
-                                );
+                        egui::Frame::new()
+                            .inner_margin(Margin {
+                                left: 10,
+                                right: 10,
+                                top: 4,
+                                bottom: 10,
+                            })
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 10.0;
+                                self.shelf_group(ui, &mut to_open, &mut to_remove);
+                                self.snapshots_group(ui);
+                                self.history_group(ui);
                             });
-                        }
-
-                        if self.shelf.is_empty() {
-                            ui.add_space(20.0);
-                            ui.label(theme::dim(
-                                "Shelf is empty.\nClick '+ Add…' or drag\nRAW files onto window.",
-                            ));
-                        }
                     });
 
                 if let Some(path) = to_open {
@@ -883,135 +1262,462 @@ impl PhotoApp {
                 if let Some(idx) = to_remove {
                     self.shelf.remove(idx);
                 }
+            });
+    }
 
-                ui.separator();
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("Copy Stack")
-                            .on_hover_text("Copy current adjustments (Ctrl+C)")
-                            .clicked()
-                        {
-                            self.copy_adjustments();
+    fn shelf_group(
+        &self,
+        ui: &mut egui::Ui,
+        to_open: &mut Option<PathBuf>,
+        to_remove: &mut Option<usize>,
+    ) {
+        let total: u64 = self.shelf.iter().map(|it| it.bytes).sum();
+        let title = format!("RAW stills ({})", self.shelf.len());
+        group(
+            ui,
+            &title,
+            |ui| {
+                ui.label(
+                    theme::num(format_bytes(total))
+                        .size(11.0)
+                        .color(theme::TEXT_DIM),
+                );
+            },
+            |ui| {
+                if self.shelf.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(theme::dim("Nothing shelved yet.").size(12.0));
+                    ui.add_space(6.0);
+                    return;
+                }
+                for (i, item) in self.shelf.iter().enumerate() {
+                    let active = self.loaded_path.as_ref() == Some(&item.path);
+                    let status = if active {
+                        match self.sidecar_state() {
+                            SidecarState::Synced => Some(theme::LIME),
+                            SidecarState::Unsaved | SidecarState::Modified => Some(theme::ACCENT),
+                            _ => None,
                         }
-                        let has_clip = self.clipboard_stack.is_some();
-                        if ui
-                            .add_enabled(has_clip, egui::Button::new("Paste Stack"))
-                            .on_hover_text("Paste adjustments (Ctrl+V)")
-                            .clicked()
-                        {
-                            self.paste_adjustments();
+                    } else if item.has_sidecar {
+                        Some(theme::LIME)
+                    } else if item.is_edited {
+                        Some(theme::ACCENT)
+                    } else {
+                        None
+                    };
+                    let (open, remove) = shelf_row(ui, item, active, status);
+                    if open && !active {
+                        *to_open = Some(item.path.clone());
+                    }
+                    if remove {
+                        *to_remove = Some(i);
+                    }
+                }
+            },
+        );
+    }
+
+    fn snapshots_group(&mut self, ui: &mut egui::Ui) {
+        let count = self.snapshots.len();
+        let mut restore = None;
+        let mut delete = None;
+        let mut add = false;
+        group(
+            ui,
+            "Snapshots",
+            |ui| {
+                ui.label(theme::tag(count.to_string()).color(theme::TEXT_DIM));
+            },
+            |ui| {
+                list_row(ui, "current", RowStyle::Now, Some(("LIVE", theme::LIME)));
+                for (i, (name, stack)) in self.snapshots.iter().enumerate() {
+                    let key = snapshot_key(i);
+                    let style = if *stack == self.stack {
+                        RowStyle::Match
+                    } else {
+                        RowStyle::Normal
+                    };
+                    let row = list_row(ui, name, style, Some((&key, theme::TEXT_DIM)));
+                    if row.clicked() {
+                        restore = Some(i);
+                    }
+                    row.context_menu(|ui| {
+                        if ui.button("Delete snapshot").clicked() {
+                            delete = Some(i);
+                            ui.close();
                         }
                     });
-                    if self.clipboard_stack.is_some()
-                        && !self.shelf.is_empty()
-                        && ui
-                            .button("Apply to All in Shelf")
-                            .on_hover_text("Save copied adjustments to sidecar for all shelf items")
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    // `desired_width` is the text area alone; the field's own margin and
+                    // the gap to the button come on top of it.
+                    let field_w = ui.available_width()
+                        - 52.0
+                        - ui.spacing().item_spacing.x
+                        - 2.0 * ui.spacing().button_padding.x;
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_snapshot_name)
+                            .hint_text("name this state…")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(field_w.max(40.0)),
+                    );
+                    let submitted =
+                        edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if widgets::button(ui, Kind::Secondary, "+ save", 52.0)
+                        .on_hover_text("Save the current stack as a snapshot")
+                        .clicked()
+                        || submitted
+                    {
+                        add = true;
+                    }
+                });
+                ui.add_space(2.0);
+            },
+        );
+
+        if add {
+            let name = if self.new_snapshot_name.trim().is_empty() {
+                format!("snapshot {}", self.snapshots.len() + 1)
+            } else {
+                self.new_snapshot_name.trim().to_string()
+            };
+            self.snapshots.push((name, self.stack.clone()));
+            self.new_snapshot_name.clear();
+        }
+        if let Some(i) = restore {
+            self.history.checkpoint(&self.stack);
+            self.stack = self.snapshots[i].1.clone();
+            self.needs_render = true;
+        }
+        if let Some(i) = delete {
+            self.snapshots.remove(i);
+        }
+    }
+
+    fn history_group(&mut self, ui: &mut egui::Ui) {
+        let now = self.history.past.len();
+        let mut jump = None;
+        {
+            let timeline = self.history.timeline(&self.stack);
+            let steps = timeline.len() - 1;
+            group(
+                ui,
+                "History",
+                |ui| {
+                    ui.label(theme::tag(format!("{steps} steps")).color(theme::ACCENT));
+                },
+                |ui| {
+                    // Newest first. Rows above NOW are redo steps: not applied, so faint.
+                    for k in (0..timeline.len()).rev() {
+                        let label = if k == 0 {
+                            if self.history.truncated {
+                                "oldest kept"
+                            } else {
+                                "opened"
+                            }
+                            .to_string()
+                        } else {
+                            describe_change(timeline[k - 1], timeline[k])
+                        };
+                        let (style, right) = if k == now {
+                            (RowStyle::Now, "NOW".to_string())
+                        } else if k > now {
+                            (RowStyle::Faint, k.to_string())
+                        } else {
+                            (RowStyle::Normal, k.to_string())
+                        };
+                        let colour = if k == now {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_FAINT
+                        };
+                        if list_row(ui, &label, style, Some((&right, colour))).clicked() && k != now
+                        {
+                            jump = Some(k);
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(k) = jump {
+            if self.history.jump_to(&mut self.stack, k) {
+                self.needs_render = true;
+            }
+        }
+    }
+
+    // ── Stage toolbar, canvas and filmstrip (centre) ────────────────────────────────────
+
+    fn stage_toolbar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("stage_toolbar")
+            .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin::symmetric(14, 7)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let loaded = self.engine.image().is_some();
+                    ui.add_enabled_ui(loaded, |ui| {
+                        if widgets::chip(ui, self.cropping, "crop")
+                            .on_hover_text("Drag on the image to frame a crop (C, Esc to leave)")
                             .clicked()
+                        {
+                            self.cropping = !self.cropping;
+                        }
+                        if widgets::chip(ui, self.split_active, "a / b")
+                            .on_hover_text("Before / after split (\\). Drag the divider; double-click it to centre")
+                            .clicked()
+                        {
+                            self.split_active = !self.split_active;
+                            self.needs_render = true;
+                        }
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(loaded, |ui| {
+                            if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
+                                .on_hover_text("Actual pixels (1)")
+                                .clicked()
+                            {
+                                self.zoom_actual();
+                            }
+                            if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
+                                .on_hover_text("Fit to window (0)")
+                                .clicked()
+                            {
+                                self.view = View::default();
+                            }
+                            // Right-to-left: + then the readout then −.
+                            pod(ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                if widgets::icon(ui, "+", false, "Zoom in").clicked() {
+                                    self.zoom_by(1.25);
+                                }
+                                let percent = self
+                                    .zoom_percent(self.last_panel)
+                                    .map_or("—".to_string(), |p| format!("{p:.0}%"));
+                                ui.add_sized(
+                                    [44.0, 20.0],
+                                    egui::Label::new(
+                                        RichText::new(percent)
+                                            .family(theme::mono_bold())
+                                            .size(11.0)
+                                            .color(theme::TEXT_HI),
+                                    ),
+                                );
+                                if widgets::icon(ui, "−", false, "Zoom out").clicked() {
+                                    self.zoom_by(0.8);
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+    }
+
+    fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        let mut to_open = None;
+        egui::Panel::bottom("filmstrip")
+            .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
+                left: 14,
+                right: 14,
+                top: 8,
+                bottom: 10,
+            }))
+            .show(ui, |ui| {
+                // Six actions need ~560px. Below that they get their own row rather than
+                // being painted over the title.
+                let compact = ui.available_width() < 660.0;
+                ui.horizontal(|ui| {
+                    ui.label(theme::head("Filmstrip").color(theme::ACCENT));
+                    let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
+                    ui.label(
+                        theme::num(format!(
+                            "{} RAW · {developed} with sidecar",
+                            self.shelf.len()
+                        ))
+                        .size(11.0)
+                        .color(Color32::from_gray(0xcc)),
+                    );
+                    if !compact {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.filmstrip_actions(ui, true);
+                        });
+                    }
+                });
+                if compact {
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| self.filmstrip_actions(ui, false));
+                }
+                ui.add_space(8.0);
+
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if self.shelf.is_empty() {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 70.0),
+                                    Sense::hover(),
+                                );
+                                ui.painter().text(
+                                    rect.left_center() + vec2(4.0, 0.0),
+                                    Align2::LEFT_CENTER,
+                                    "Drop RAW files anywhere in the window to start a roll.",
+                                    FontId::proportional(12.0),
+                                    theme::TEXT_DIM,
+                                );
+                                return;
+                            }
+                            let loading = self.loading.as_ref().map(|(p, _)| p);
+                            for item in &self.shelf {
+                                let active = self.loaded_path.as_ref() == Some(&item.path);
+                                // The open photo shows its live render; the rest show the
+                                // file as shot, once its thumbnail has been built.
+                                let picture = if active {
+                                    self.texture_id.zip(
+                                        self.engine
+                                            .image()
+                                            .map(|img| img.width as f32 / img.height.max(1) as f32),
+                                    )
+                                } else {
+                                    self.thumbs.get(&item.path).map(|t| {
+                                        let [w, h] = t.size();
+                                        (t.id(), w as f32 / h.max(1) as f32)
+                                    })
+                                };
+                                let pending = loading == Some(&item.path);
+                                if film_tile(ui, item, active, pending, picture).clicked()
+                                    && !active
+                                {
+                                    to_open = Some(item.path.clone());
+                                }
+                            }
+                        });
+                    });
+            });
+        if let Some(path) = to_open {
+            self.open_path(gpu, path);
+        }
+    }
+
+    /// Undo · Redo | Reset all · Copy stack · Paste · Paste to all. `right_to_left` callers
+    /// get them reversed, so they read the same way on screen either way.
+    fn filmstrip_actions(&mut self, ui: &mut egui::Ui, right_to_left: bool) {
+        #[derive(Clone, Copy)]
+        enum Action {
+            Undo,
+            Redo,
+            Sep,
+            Reset,
+            Copy,
+            Paste,
+            PasteAll,
+        }
+        let mut order = [
+            Action::Undo,
+            Action::Redo,
+            Action::Sep,
+            Action::Reset,
+            Action::Copy,
+            Action::Paste,
+            Action::PasteAll,
+        ];
+        if right_to_left {
+            order.reverse();
+        }
+
+        let loaded = self.loaded_path.is_some();
+        let has_clip = self.clipboard_stack.is_some();
+        let n = self.shelf.len();
+        for action in order {
+            use widgets::button_enabled as button;
+            match action {
+                Action::Undo => {
+                    if button(
+                        ui,
+                        !self.history.past.is_empty(),
+                        Kind::Secondary,
+                        "Undo",
+                        0.0,
+                    )
+                    .on_hover_text("Ctrl+Z")
+                    .clicked()
+                        && self.history.undo(&mut self.stack)
+                    {
+                        self.needs_render = true;
+                    }
+                }
+                Action::Redo => {
+                    if button(
+                        ui,
+                        !self.history.future.is_empty(),
+                        Kind::Secondary,
+                        "Redo",
+                        0.0,
+                    )
+                    .on_hover_text("Ctrl+Shift+Z")
+                    .clicked()
+                        && self.history.redo(&mut self.stack)
+                    {
+                        self.needs_render = true;
+                    }
+                }
+                Action::Sep => vsep(ui),
+                Action::Reset => {
+                    if button(ui, loaded, Kind::Secondary, "Reset all", 0.0)
+                        .on_hover_text("Every module back to default (undoable)")
+                        .clicked()
+                    {
+                        self.reset_to_default();
+                    }
+                }
+                Action::Copy => {
+                    if button(ui, loaded, Kind::Secondary, "Copy stack", 0.0)
+                        .on_hover_text("Copy this image's adjustments (Ctrl+C)")
+                        .clicked()
+                    {
+                        self.copy_adjustments();
+                    }
+                }
+                Action::Paste => {
+                    if button(ui, has_clip && loaded, Kind::Secondary, "Paste", 0.0)
+                        .on_hover_text("Paste the copied stack onto this image (Ctrl+V)")
+                        .clicked()
+                    {
+                        self.paste_adjustments();
+                    }
+                }
+                Action::PasteAll => {
+                    if button(
+                        ui,
+                        has_clip && n > 0,
+                        Kind::Accent,
+                        &format!("Paste to all {n}"),
+                        0.0,
+                    )
+                    .on_hover_text("Write the copied stack to the sidecar of every shelf item")
+                    .clicked()
                     {
                         self.paste_to_all_in_shelf();
                     }
-                });
-            });
+                }
+            }
+        }
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status")
-            .frame(bare_frame(theme::BG_900))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if let Some(err) = &self.error {
-                        ui.colored_label(theme::DANGER, err);
-                        return;
-                    }
-                    match self.engine.image() {
-                        Some(image) => {
-                            ui.label(theme::num(format!("{}×{}", image.width, image.height)));
-                            ui.separator();
-                            ui.label(theme::num(format!("{:.1} MP", image.megapixels())));
-                            ui.separator();
-                            ui.label(theme::dim("decode"));
-                            ui.label(theme::num(format!("{:.0} ms", self.decode_ms)));
-                            ui.separator();
-                            ui.label(theme::dim("adjust submit"));
-                            ui.label(theme::num(format!("{:.2} ms", self.render_ms)));
-                            if let Some(percent) = self.zoom_percent(self.last_panel) {
-                                ui.separator();
-                                ui.label(theme::dim("zoom"));
-                                ui.label(theme::num(format!("{percent:.0}%")));
-                            }
-
-                            match &self.export {
-                                Export::Idle => {}
-                                Export::Writing { path, started, .. } => {
-                                    ui.separator();
-                                    ui.label(theme::dim("writing"));
-                                    ui.label(theme::num(format!(
-                                        "{}  {:.1}s",
-                                        file_name(path),
-                                        started.elapsed().as_secs_f32()
-                                    )));
-                                }
-                                Export::Done { path, seconds } => {
-                                    ui.separator();
-                                    ui.label(theme::dim("exported"));
-                                    ui.label(theme::num(format!(
-                                        "{}  {seconds:.1}s",
-                                        file_name(path)
-                                    )));
-                                }
-                                Export::Failed(e) => {
-                                    ui.separator();
-                                    ui.colored_label(theme::DANGER, e);
-                                }
-                            }
-
-                            if let Some((msg, when)) = &self.status_notification {
-                                if when.elapsed().as_secs_f32() < 4.0 {
-                                    ui.separator();
-                                    ui.colored_label(theme::ACCENT, msg);
-                                }
-                            }
-
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if let Some(path) = &self.loaded_path {
-                                        let sidecar_label = if find_sidecar(path).is_some() {
-                                            if self.is_stack_edited() {
-                                                theme::dim("● sidecar (modified)")
-                                            } else {
-                                                theme::dim("● sidecar (synced)")
-                                            }
-                                        } else if self.is_stack_edited() {
-                                            theme::dim("○ unsaved edits")
-                                        } else {
-                                            theme::dim("○ default")
-                                        };
-                                        ui.label(sidecar_label);
-                                        ui.separator();
-                                        ui.label(theme::num(file_name(path)));
-                                    }
-                                },
-                            );
-                        }
-                        None => {
-                            ui.label(theme::dim("no image — Open RAW to begin"));
-                        }
-                    }
-                });
-            });
-    }
-
-    fn workspace(&mut self, ui: &mut egui::Ui) {
+    fn workspace(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         egui::CentralPanel::default()
-            .frame(bare_frame(theme::BG_950))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::same(16)),
+            )
             .show(ui, |ui| {
+                if self.texture_id.is_none() || self.engine.image().is_none() {
+                    self.empty_stage(ui, gpu);
+                    return;
+                }
                 let (Some(id), Some(image)) = (self.texture_id, self.engine.image()) else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(theme::dim("Open a camera RAW file"));
-                    });
                     return;
                 };
 
@@ -1033,6 +1739,46 @@ impl PhotoApp {
                     rect.center() - self.view.pan * scale_now,
                     img * scale_now,
                 );
+                // At fit the whole frame is visible and there is nothing to pan to.
+                let at_fit = self.view.zoom <= 1.0 + 1e-3;
+
+                // The before/after divider is its own widget, registered after the image so
+                // it sits on top: grabbing it can never start a pan. The hit strip is wider
+                // than the line it draws.
+                let divider = (self.split_active && !self.cropping).then(|| {
+                    let x = dest_now.left() + self.split_pos * dest_now.width();
+                    let strip = Rect::from_x_y_ranges(x - 12.0..=x + 12.0, dest_now.y_range())
+                        .intersect(rect);
+                    ui.interact(
+                        strip,
+                        ui.id().with("split_divider"),
+                        Sense::click_and_drag(),
+                    )
+                });
+                let mut move_divider_to = None;
+                if let Some(div) = &divider {
+                    if div.hovered() || div.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if div.double_clicked() {
+                        self.split_pos = 0.5;
+                        self.needs_render = true;
+                    } else if div.is_pointer_button_down_on() {
+                        move_divider_to = div.interact_pointer_pos();
+                    }
+                }
+                // With nothing to pan at fit, a drag anywhere on the image moves the divider.
+                if self.split_active && !self.cropping && at_fit && response.dragged() {
+                    move_divider_to = response.interact_pointer_pos();
+                }
+                self.split_dragging = move_divider_to.is_some();
+                if let Some(p) = move_divider_to {
+                    let fraction = ((p.x - dest_now.left()) / dest_now.width()).clamp(0.0, 1.0);
+                    if (fraction - self.split_pos).abs() > 1e-4 {
+                        self.split_pos = fraction;
+                        self.needs_render = true;
+                    }
+                }
 
                 if self.cropping {
                     // In crop mode a drag frames the picture instead of moving it.
@@ -1069,20 +1815,23 @@ impl PhotoApp {
                     if response.drag_stopped() {
                         self.crop_anchor = None;
                     }
-                } else if response.dragged() {
+                } else if response.dragged() && !at_fit && !self.split_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
                 }
 
                 if let Some(pointer) = response.hover_pos() {
-                    let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
+                    // Wheel, plus pinch / Ctrl+wheel, which egui reports as a zoom factor.
+                    let (scroll, pinch) = ui
+                        .ctx()
+                        .input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+                    let factor = (scroll * 0.004).exp() * pinch;
+                    if factor != 1.0 {
                         let before = fit * self.view.zoom;
                         let centre = rect.center() - self.view.pan * before;
                         // The image point under the cursor, in image pixels from centre.
                         let anchor = (pointer - centre) / before;
 
-                        self.view.zoom =
-                            (self.view.zoom * (scroll * 0.004).exp()).clamp(1.0, max_zoom);
+                        self.view.zoom = (self.view.zoom * factor).clamp(1.0, max_zoom);
 
                         // Keep that point under the cursor rather than zooming to centre.
                         let after = fit * self.view.zoom;
@@ -1091,19 +1840,29 @@ impl PhotoApp {
                 }
 
                 let scale = fit * self.view.zoom;
-                // Never let the image be dragged entirely out of view.
-                let limit = img * 0.5;
-                self.view.pan = self.view.pan.clamp(-limit, limit);
+                // Pan only as far as the image still covers the view: at fit that is
+                // nowhere, so the frame cannot be knocked off-centre by a stray drag.
+                let slack = ((img * scale - rect.size()) * 0.5).max(egui::Vec2::ZERO) / scale;
+                self.view.pan = self.view.pan.clamp(-slack, slack);
 
                 let dest = egui::Rect::from_center_size(
                     rect.center() - self.view.pan * scale,
                     img * scale,
                 );
-                ui.painter().with_clip_rect(rect).image(
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.image(
                     id,
                     dest,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
+                );
+                // The frame the image sits in: a hairline, not a shadow.
+                let framed_view = dest.intersect(rect);
+                painter.rect_stroke(
+                    framed_view,
+                    0.0,
+                    Stroke::new(1.0, theme::RAIL),
+                    egui::StrokeKind::Outside,
                 );
 
                 // The crop is not baked into the texture, so it is drawn: everything
@@ -1114,8 +1873,7 @@ impl PhotoApp {
                         dest.min + egui::vec2(crop.x * dest.width(), crop.y * dest.height()),
                         egui::vec2(crop.width * dest.width(), crop.height * dest.height()),
                     );
-                    let painter = ui.painter().with_clip_rect(rect);
-                    let veil = egui::Color32::from_black_alpha(150);
+                    let veil = egui::Color32::from_black_alpha(170);
                     // Four bands rather than a stencil: cheap, exact, and no extra pass.
                     painter.rect_filled(
                         egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), framed.top())),
@@ -1171,53 +1929,286 @@ impl PhotoApp {
                 }
 
                 if self.split_active {
-                    let painter = ui.painter().with_clip_rect(rect);
-                    let font = egui::FontId::monospace(11.0);
-                    if self.split_pos > 0.12 {
-                        painter.text(
-                            dest.left_top() + egui::vec2(12.0, 12.0),
-                            egui::Align2::LEFT_TOP,
-                            "BEFORE (RAW)",
-                            font.clone(),
-                            theme::TEXT_DIM,
+                    let split_screen_x = dest.left() + self.split_pos * dest.width();
+                    let (top, bottom) = (framed_view.top(), framed_view.bottom());
+                    painter.vline(
+                        split_screen_x,
+                        top..=bottom,
+                        Stroke::new(2.0, theme::ACCENT),
+                    );
+
+                    let badge_y = top + 14.0;
+                    if self.split_pos > 0.08 {
+                        hud_badge(
+                            &painter,
+                            pos2(split_screen_x - 8.0, badge_y),
+                            Align2::RIGHT_TOP,
+                            "BEFORE",
+                            theme::TEXT_HI,
+                            Color32::from_gray(0x2a),
                         );
                     }
-                    if self.split_pos < 0.88 {
-                        painter.text(
-                            dest.right_top() + egui::vec2(-12.0, 12.0),
-                            egui::Align2::RIGHT_TOP,
-                            "AFTER (ADJUSTED)",
-                            font,
+                    if self.split_pos < 0.92 {
+                        hud_badge(
+                            &painter,
+                            pos2(split_screen_x + 8.0, badge_y),
+                            Align2::LEFT_TOP,
+                            "AFTER",
+                            theme::ACCENT,
                             theme::ACCENT,
                         );
                     }
 
-                    let split_screen_x = dest.left() + self.split_pos * dest.width();
-                    if let Some(pointer) = response.hover_pos() {
-                        if (pointer.x - split_screen_x).abs() < 14.0
-                            && dest.contains(pointer)
-                            && !self.cropping
-                        {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                            if ui.input(|i| i.pointer.primary_down()) {
-                                let new_fraction =
-                                    ((pointer.x - dest.left()) / dest.width()).clamp(0.0, 1.0);
-                                if (new_fraction - self.split_pos).abs() > 0.001 {
-                                    self.split_pos = new_fraction;
-                                    self.needs_render = true;
-                                }
-                            }
-                        }
-                    }
+                    let handle = pos2(split_screen_x, (top + bottom) / 2.0);
+                    painter.circle(handle, 15.0, theme::BG_950, Stroke::new(2.0, theme::ACCENT));
+                    painter.text(
+                        handle,
+                        Align2::CENTER_CENTER,
+                        "⇆",
+                        FontId::proportional(15.0),
+                        theme::ACCENT,
+                    );
+                }
+
+                // Corner readouts. What exports is exactly this texture, cropped; only the
+                // display scale differs.
+                if framed_view.width() > 420.0 {
+                    let (_, _, w, h) = crop.to_pixels(image.width, image.height);
+                    hud_badge(
+                        &painter,
+                        framed_view.left_bottom() + vec2(12.0, -12.0),
+                        Align2::LEFT_BOTTOM,
+                        &format!(
+                            "exports these pixels · {w} × {h} · shown at {:.0}%",
+                            scale * 100.0
+                        ),
+                        Color32::from_gray(0xcc),
+                        theme::RAIL,
+                    );
+                }
+                if let Some((path, _)) = &self.loading {
+                    hud_badge(
+                        &painter,
+                        framed_view.left_top() + vec2(12.0, 12.0),
+                        Align2::LEFT_TOP,
+                        &format!("opening {}…", file_name(path)),
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+                let hist = self.engine.histogram();
+                if hist.peak > 0 {
+                    let clipped = hist.clipped_high().max(hist.clipped_low()) * 100.0;
+                    let (text, colour) = if clipped >= 0.1 {
+                        (format!("●  clipped {clipped:.1}%"), theme::DANGER)
+                    } else {
+                        (format!("clipped {clipped:.1}%"), theme::TEXT_DIM)
+                    };
+                    hud_badge(
+                        &painter,
+                        framed_view.right_bottom() + vec2(-12.0, -12.0),
+                        Align2::RIGHT_BOTTOM,
+                        &text,
+                        colour,
+                        theme::RAIL,
+                    );
                 }
 
                 if self.cropping {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                } else if response.dragged() {
+                } else if self.split_dragging {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                } else if !at_fit && response.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                } else if self.view.zoom > 1.0 && response.hovered() {
+                } else if !at_fit && response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
+            });
+    }
+
+    /// No image yet: a drop target that is also the Open button, and the reason the last
+    /// file failed, in place (DESIGN.md: failures surface in the UI, with the filename).
+    fn empty_stage(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        let area = ui.available_rect_before_wrap();
+        let zone = Rect::from_center_size(
+            area.center(),
+            vec2((area.width() - 32.0).clamp(160.0, 440.0), 180.0),
+        );
+        let response = ui.interact(zone, ui.id().with("drop_zone"), Sense::click());
+        let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        let hot = response.hovered() || dragging_in;
+
+        let painter = ui.painter();
+        widgets::dashed_rect(
+            painter,
+            zone,
+            if hot {
+                theme::ACCENT
+            } else {
+                Color32::from_gray(0x2a)
+            },
+        );
+        if let Some((path, _)) = &self.loading {
+            painter.text(
+                zone.center(),
+                Align2::CENTER_CENTER,
+                format!("decoding {}…", file_name(path)),
+                FontId::new(13.0, theme::mono_bold()),
+                theme::ACCENT,
+            );
+            return;
+        }
+        let c = zone.center();
+        painter.text(
+            c - vec2(0.0, 44.0),
+            Align2::CENTER_CENTER,
+            "⬆",
+            FontId::proportional(22.0),
+            theme::ACCENT,
+        );
+        painter.text(
+            c - vec2(0.0, 12.0),
+            Align2::CENTER_CENTER,
+            "Drop a camera RAW file",
+            FontId::new(15.0, theme::sans_strong()),
+            theme::TEXT_HI,
+        );
+        painter.text(
+            c + vec2(0.0, 10.0),
+            Align2::CENTER_CENTER,
+            "or click to open one",
+            FontId::proportional(12.5),
+            theme::TEXT_DIM,
+        );
+        painter.text(
+            c + vec2(0.0, 40.0),
+            Align2::CENTER_CENTER,
+            "ARW · CR2 · CR3 · NEF · RAF · ORF · RW2 · DNG",
+            FontId::monospace(10.5),
+            theme::TEXT_FAINT,
+        );
+        if let Some(err) = &self.error {
+            let galley = painter.layout(
+                err.clone(),
+                FontId::monospace(11.5),
+                theme::DANGER,
+                zone.width(),
+            );
+            painter.galley(
+                pos2(
+                    zone.center().x - galley.size().x / 2.0,
+                    zone.bottom() + 16.0,
+                ),
+                galley,
+                theme::DANGER,
+            );
+        }
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            self.pick_and_open(gpu);
+        }
+    }
+
+    // ── Status bar ──────────────────────────────────────────────────────────────────────
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::symmetric(14, 6)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(path) = &self.loaded_path {
+                            ui.label(
+                                theme::num(file_name(path))
+                                    .size(11.5)
+                                    .color(Color32::from_gray(0xcc)),
+                            );
+                            let (state, colour) = self.sidecar_state().describe();
+                            ui.label(theme::tag(state).color(colour));
+                            widgets::dot(ui, colour);
+                            vsep(ui);
+                        }
+
+                        match &self.export {
+                            Export::Idle => {}
+                            Export::Writing { path, started, .. } => {
+                                readout(
+                                    ui,
+                                    "writing",
+                                    &format!(
+                                        "{}  {:.1}s",
+                                        file_name(path),
+                                        started.elapsed().as_secs_f32()
+                                    ),
+                                    theme::ACCENT,
+                                );
+                            }
+                            Export::Done { path, seconds } => {
+                                readout(
+                                    ui,
+                                    "exported",
+                                    &format!("{}  {seconds:.1}s", file_name(path)),
+                                    theme::LIME,
+                                );
+                            }
+                            Export::Failed(e) => {
+                                ui.label(theme::num(e).size(11.5).color(theme::DANGER));
+                            }
+                        }
+
+                        if self.engine.image().is_some() {
+                            if let Some(percent) = self.zoom_percent(self.last_panel) {
+                                readout(ui, "zoom", &format!("{percent:.0}%"), theme::TEXT_HI);
+                            }
+                            readout(
+                                ui,
+                                "submit",
+                                &format!("{:.2} ms", self.render_ms),
+                                theme::TEXT_HI,
+                            );
+                            readout(
+                                ui,
+                                "decode",
+                                &format!("{:.0} ms", self.decode_ms),
+                                theme::TEXT_HI,
+                            );
+                        }
+
+                        // Whatever width is left, from the left edge: errors win, then the
+                        // latest notification.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            if let Some(err) = &self.error {
+                                widgets::dot(ui, theme::DANGER);
+                                ui.add(
+                                    egui::Label::new(
+                                        theme::num(err).size(11.5).color(theme::DANGER),
+                                    )
+                                    .truncate(),
+                                );
+                            } else if let Some((msg, when)) = &self.status_notification {
+                                if when.elapsed().as_secs_f32() < 4.0 {
+                                    widgets::dot(ui, theme::ACCENT);
+                                    ui.add(
+                                        egui::Label::new(
+                                            theme::num(msg).size(11.5).color(theme::ACCENT),
+                                        )
+                                        .truncate(),
+                                    );
+                                } else {
+                                    ui.label(theme::tag("ready").color(theme::TEXT_FAINT));
+                                }
+                            } else {
+                                ui.label(theme::tag("ready").color(theme::TEXT_FAINT));
+                            }
+                        });
+                    });
+                });
             });
     }
 
@@ -1232,12 +2223,14 @@ impl PhotoApp {
         Some(fit * self.view.zoom * 100.0)
     }
 
+    // ── Inspector (right) ───────────────────────────────────────────────────────────────
+
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let mut panel = egui::Panel::right("inspector")
-            .frame(bare_frame(theme::BG_900))
+            .frame(egui::Frame::new().fill(theme::BG_950))
             .resizable(true)
             .default_size(self.inspector_width)
-            .min_size(240.0)
+            .min_size(270.0)
             .max_size(850.0);
 
         if let Some(target_w) = self.inspector_force_width.take() {
@@ -1245,758 +2238,1437 @@ impl PhotoApp {
         }
 
         let inner = panel.show(ui, |ui| {
-            // Header pinned at top
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(theme::head("INSPECTOR"));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            self.inspector_footer(ui);
 
+            let loaded = self.engine.image().is_some();
+            if loaded {
+                self.scope_block(ui);
+            }
+
+            // One slim header: what the list below is, and the two things you do to it.
+            widgets::band(ui, |ui| {
+                let title = if self.customize_open {
+                    "Modules"
+                } else {
+                    "Pipeline"
+                };
+                ui.label(theme::head(title));
+                if !self.customize_open && loaded {
+                    let on = InspectorSectionId::all()
+                        .iter()
+                        .filter(|id| {
+                            // Scope and geometry have no on/off; everything else does.
+                            !matches!(id, InspectorSectionId::Scope | InspectorSectionId::Geometry)
+                                && module_on(&self.stack, **id)
+                        })
+                        .count();
+                    ui.label(theme::tag(format!("{on} on")).color(theme::TEXT_DIM));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let cust_label = if self.customize_open { "Done" } else { "⚙ Custom" };
-                    if ui
-                        .selectable_label(self.customize_open, cust_label)
-                        .on_hover_text("Customize visible modules and change ordering")
-                        .clicked()
-                    {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let tip = if self.customize_open {
+                        "Back to the pipeline"
+                    } else {
+                        "Choose which modules show, and their order"
+                    };
+                    if widgets::icon(ui, "⚙", self.customize_open, tip).clicked() {
                         self.customize_open = !self.customize_open;
                     }
-
-                    if ui
-                        .small_button("↕ All")
-                        .on_hover_text("Expand all or collapse all sidebar sections")
-                        .clicked()
+                    if !self.customize_open
+                        && widgets::icon(ui, "↕", false, "Expand or collapse every module")
+                            .clicked()
                     {
-                        let any_collapsed = self.inspector_sections.iter().any(|s| s.collapsed);
+                        let any_collapsed = self
+                            .inspector_sections
+                            .iter()
+                            .any(|s| s.collapsed && s.id != InspectorSectionId::Scope);
                         for s in &mut self.inspector_sections {
-                            s.collapsed = !any_collapsed;
+                            if s.id != InspectorSectionId::Scope {
+                                s.collapsed = !any_collapsed;
+                            }
                         }
-                    }
-
-                    let is_wide = self.inspector_width >= 400.0;
-                    let width_label = if is_wide { "⤹ Narrow" } else { "⤢ Expand" };
-                    if ui
-                        .small_button(width_label)
-                        .on_hover_text(if is_wide {
-                            "Compact sidebar width (288px)"
-                        } else {
-                            "Expand sidebar for large 3D views & precise control (460px)"
-                        })
-                        .clicked()
-                    {
-                        let target = if is_wide { 288.0 } else { 460.0 };
-                        self.inspector_width = target;
-                        self.inspector_force_width = Some(target);
                     }
                 });
             });
-            ui.add_space(4.0);
 
-            // Customize drawer when open
-            if self.customize_open {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("CUSTOMIZE SIDEBAR").size(10.5).color(theme::ACCENT));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Reset Order").on_hover_text("Restore default pipeline ordering").clicked() {
-                                self.inspector_sections = InspectorSectionConfig::default_sections();
-                            }
-                            if ui.small_button("Show All").on_hover_text("Show all modules").clicked() {
-                                for s in &mut self.inspector_sections {
-                                    s.visible = true;
-                                }
-                            }
-                            if ui.small_button("Essentials").on_hover_text("Show only essential modules").clicked() {
-                                for s in &mut self.inspector_sections {
-                                    s.visible = matches!(
-                                        s.id,
-                                        InspectorSectionId::Scope
-                                            | InspectorSectionId::Geometry
-                                            | InspectorSectionId::WhiteBalance
-                                            | InspectorSectionId::Exposure
-                                            | InspectorSectionId::Filmic3D
-                                    );
-                                }
-                            }
-                        });
-                    });
-                    ui.separator();
-
-                    let mut move_act = None;
-                    let total = self.inspector_sections.len();
-                    for (i, sec) in self.inspector_sections.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut sec.visible, "");
-                            let title_text = if sec.visible {
-                                egui::RichText::new(sec.id.title()).color(theme::TEXT)
-                            } else {
-                                theme::dim(sec.id.title())
-                            };
-                            ui.label(title_text);
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_enabled(i + 1 < total, egui::Button::new("▼").small()).clicked() {
-                                    move_act = Some((i, 1));
-                                }
-                                if ui.add_enabled(i > 0, egui::Button::new("▲").small()).clicked() {
-                                    move_act = Some((i, -1));
-                                }
-                            });
-                        });
-                    }
-
-                    if let Some((idx, dir)) = move_act {
-                        let new_idx = (idx as isize + dir) as usize;
-                        if new_idx < self.inspector_sections.len() {
-                            self.inspector_sections.swap(idx, new_idx);
-                        }
-                    }
-                });
-                ui.add_space(4.0);
-            }
-
-            ui.separator();
-
-            if self.engine.image().is_none() {
-                ui.label(theme::dim("no image"));
-                return;
-            }
-
-            // ScrollArea for the entire inspector sidebar:
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
-                    let mut move_action: Option<(usize, isize)> = None;
-                    let total = self.inspector_sections.len();
-
-                    let mut before: Option<PhotoStack> = None;
-                    let mut changed = false;
-                    let mut started = false;
-
-                    macro_rules! track {
-                        ($r:expr) => {{
-                            let r = $r;
-                            if r.drag_started() || (r.changed() && !r.dragged()) {
-                                started = true;
+                    egui::Frame::new()
+                        .inner_margin(Margin::symmetric(10, 10))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            if self.customize_open {
+                                self.customize_body(ui);
+                            } else if loaded {
+                                self.pipeline_body(ui);
+                            } else {
+                                ui.add_space(8.0);
+                                ui.label(theme::dim("Open a RAW to see its pipeline.").size(12.0));
                             }
-                            if r.changed() {
-                                changed = true;
-                            }
-                        }};
-                    }
-
-                    before.get_or_insert_with(|| self.stack.clone());
-                    let snapshot = before.take().unwrap();
-                    let before_geometry = self.stack.clone();
-                    let mut geometry_changed = false;
-
-                    let section_metas: Vec<(usize, InspectorSectionId, bool, bool)> = self
-                        .inspector_sections
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| (i, s.id, s.visible, s.collapsed))
-                        .collect();
-
-                    for (idx, id, visible, mut collapsed) in section_metas {
-                        if !visible {
-                            continue;
-                        }
-
-                        let can_up = idx > 0;
-                        let can_down = idx + 1 < total;
-
-                        match id {
-                            InspectorSectionId::Scope => {
-                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed {
-                                    ui.add_space(2.0);
-                                    inspector_map_3d::render_inspector_map(
-                                        ui,
-                                        &mut self.inspector_map_state,
-                                        self.engine.histogram(),
-                                    );
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Geometry => {
-                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed {
-                                    ui.add_space(2.0);
-                                    let g = &mut self.stack.geometry;
-                                    ui.horizontal(|ui| {
-                                        if geometry_icon_button(ui, GeometryIcon::RotateLeft, false, "Rotate 90° CCW ([)").clicked() {
-                                            g.rotate_left();
-                                            geometry_changed = true;
-                                        }
-                                        if geometry_icon_button(ui, GeometryIcon::RotateRight, false, "Rotate 90° CW (])").clicked() {
-                                            g.rotate_right();
-                                            geometry_changed = true;
-                                        }
-                                        if geometry_icon_button(ui, GeometryIcon::MirrorH, g.mirror_h, "Flip horizontally (H)").clicked() {
-                                            g.flip_h();
-                                            geometry_changed = true;
-                                        }
-                                        if geometry_icon_button(ui, GeometryIcon::MirrorV, g.mirror_v, "Flip vertically (V)").clicked() {
-                                            g.flip_v();
-                                            geometry_changed = true;
-                                        }
-                                    });
-
-                                    let straighten = ui.add(
-                                        egui::Slider::new(&mut g.straighten_deg, -15.0..=15.0)
-                                            .text("straighten°")
-                                            .fixed_decimals(2),
-                                    );
-                                    if straighten.drag_started() {
-                                        self.history.checkpoint(&before_geometry);
-                                    }
-                                    if straighten.changed() {
-                                        self.needs_render = true;
-                                    }
-
-                                    ui.horizontal(|ui| {
-                                        let cropping = self.cropping;
-                                        if ui.selectable_label(cropping, "crop").clicked() {
-                                            self.cropping = !cropping;
-                                        }
-                                        let g = &mut self.stack.geometry;
-                                        if ui
-                                            .add_enabled(!g.crop.is_full_frame(), egui::Button::new("reset"))
-                                            .clicked()
-                                        {
-                                            g.crop = Crop::default();
-                                            geometry_changed = true;
-                                        }
-                                    });
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Snapshots => {
-                                let (up, down) = section_header_row(ui, id.title(), &mut collapsed, None, can_up, can_down);
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed {
-                                    ui.add_space(2.0);
-                                    ui.horizontal(|ui| {
-                                        ui.text_edit_singleline(&mut self.new_snapshot_name);
-                                        if ui
-                                            .button("+ Add")
-                                            .on_hover_text("Save current stack as a snapshot")
-                                            .clicked()
-                                        {
-                                            let name = if self.new_snapshot_name.trim().is_empty() {
-                                                format!("Snapshot {}", self.snapshots.len() + 1)
-                                            } else {
-                                                self.new_snapshot_name.trim().to_string()
-                                            };
-                                            self.snapshots.push((name, self.stack.clone()));
-                                            self.new_snapshot_name.clear();
-                                        }
-                                    });
-                                    let mut restore_idx = None;
-                                    let mut delete_idx = None;
-                                    for (s_i, (name, _)) in self.snapshots.iter().enumerate() {
-                                        ui.horizontal(|ui| {
-                                            if ui
-                                                .button(name)
-                                                .on_hover_text("Restore this snapshot")
-                                                .clicked()
-                                            {
-                                                restore_idx = Some(s_i);
-                                            }
-                                            if ui
-                                                .small_button("×")
-                                                .on_hover_text("Delete snapshot")
-                                                .clicked()
-                                            {
-                                                delete_idx = Some(s_i);
-                                            }
-                                        });
-                                    }
-                                    if let Some(s_i) = restore_idx {
-                                        self.history.checkpoint(&self.stack);
-                                        self.stack = self.snapshots[s_i].1.clone();
-                                        self.needs_render = true;
-                                    }
-                                    if let Some(s_i) = delete_idx {
-                                        self.snapshots.remove(s_i);
-                                    }
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::WhiteBalance => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.white_balance.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.white_balance.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.white_balance.params;
-                                    let (mut kelvin, mut tint) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
-                                    let mut kt_changed = false;
-                                    let k_slider = ui.add(
-                                        egui::Slider::new(&mut kelvin, 2000.0..=12000.0)
-                                            .text("temp (K)")
-                                            .fixed_decimals(0),
-                                    );
-                                    if k_slider.drag_started() {
-                                        started = true;
-                                    }
-                                    if k_slider.changed() {
-                                        kt_changed = true;
-                                    }
-
-                                    let t_slider = ui.add(
-                                        egui::Slider::new(&mut tint, -50.0..=50.0)
-                                            .text("tint")
-                                            .fixed_decimals(1),
-                                    );
-                                    if t_slider.drag_started() {
-                                        started = true;
-                                    }
-                                    if t_slider.changed() {
-                                        kt_changed = true;
-                                    }
-
-                                    if kt_changed {
-                                        let (r, b) = kelvin_tint_to_rgb(kelvin, tint);
-                                        p.tint_r = r;
-                                        p.tint_b = b;
-                                        changed = true;
-                                    }
-
-                                    ui.horizontal_wrapped(|ui| {
-                                        if ui.small_button("As-Shot").clicked() {
-                                            p.tint_r = 1.0;
-                                            p.tint_b = 1.0;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                        if ui
-                                            .small_button("Daylight")
-                                            .on_hover_text("5500K daylight")
-                                            .clicked()
-                                        {
-                                            p.tint_r = 1.05;
-                                            p.tint_b = 0.95;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                        if ui
-                                            .small_button("Cloudy")
-                                            .on_hover_text("6500K overcast")
-                                            .clicked()
-                                        {
-                                            p.tint_r = 1.15;
-                                            p.tint_b = 0.88;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                        if ui
-                                            .small_button("Shade")
-                                            .on_hover_text("7500K deep shade")
-                                            .clicked()
-                                        {
-                                            p.tint_r = 1.28;
-                                            p.tint_b = 0.80;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                        if ui
-                                            .small_button("Tungsten")
-                                            .on_hover_text("3200K incandescent")
-                                            .clicked()
-                                        {
-                                            p.tint_r = 0.75;
-                                            p.tint_b = 1.35;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                        if ui
-                                            .small_button("Fluorescent")
-                                            .on_hover_text("4000K fluorescent")
-                                            .clicked()
-                                        {
-                                            p.tint_r = 0.88;
-                                            p.tint_b = 1.12;
-                                            changed = true;
-                                            started = true;
-                                        }
-                                    });
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Exposure => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.exposure.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.exposure.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.exposure.params;
-                                    track!(ui.add(egui::Slider::new(&mut p.ev, -4.0..=4.0).text("EV")));
-                                    track!(
-                                        ui.add(
-                                            egui::Slider::new(&mut p.black, -0.1..=0.1)
-                                                .text("black")
-                                                .fixed_decimals(4)
-                                        )
-                                    );
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Tonal => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.tonal.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.tonal.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.tonal.params;
-                                    track!(ui.add(egui::Slider::new(&mut p.highlights, -1.0..=1.0).text("highlights")));
-                                    track!(ui.add(egui::Slider::new(&mut p.shadows, -1.0..=1.0).text("shadows")));
-                                    track!(ui.add(egui::Slider::new(&mut p.whites, -1.0..=1.0).text("whites")));
-                                    track!(ui.add(egui::Slider::new(&mut p.blacks, -1.0..=1.0).text("blacks")));
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::ToneCurve => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.tone_curve.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.tone_curve.enabled {
-                                    ui.add_space(2.0);
-                                    let curve_response = curve_editor(ui, &mut self.stack.tone_curve.params);
-                                    if curve_response.drag_started() {
-                                        started = true;
-                                    }
-                                    if curve_response.changed() {
-                                        changed = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            self.stack.tone_curve.params != identity_nodes(),
-                                            egui::Button::new("reset"),
-                                        )
-                                        .clicked()
-                                    {
-                                        started = true;
-                                        self.stack.tone_curve.params = identity_nodes();
-                                        changed = true;
-                                    }
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Filmic3D => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.filmic.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.filmic.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.filmic.params;
-                                    tonemap_3d::render_tonemap_3d(
-                                        ui,
-                                        &mut self.tonemap_3d_state,
-                                        p,
-                                        &mut changed,
-                                        &mut started,
-                                    );
-                                    ui.add_space(4.0);
-                                    track!(ui.add(egui::Slider::new(&mut p.white_ev, 0.0..=8.0).text("white EV")));
-                                    track!(
-                                        ui.add(egui::Slider::new(&mut p.black_ev, -16.0..=-1.0).text("black EV"))
-                                    );
-                                    track!(
-                                        ui.add(egui::Slider::new(&mut p.latitude, 5.0..=80.0).text("latitude %"))
-                                    );
-                                    track!(ui.add(egui::Slider::new(&mut p.contrast, 0.1..=3.0).text("contrast")));
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::ColorBalance => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.color_balance.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.color_balance.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.color_balance.params;
-                                    for (label, rgb) in [
-                                        ("lift", &mut p.lift),
-                                        ("gamma", &mut p.gamma),
-                                        ("gain", &mut p.gain),
-                                        ("offset", &mut p.offset),
-                                    ] {
-                                        ui.label(theme::dim(label));
-                                        track!(ui.add(egui::Slider::new(&mut rgb.r, -0.5..=0.5).text("r")));
-                                        track!(ui.add(egui::Slider::new(&mut rgb.g, -0.5..=0.5).text("g")));
-                                        track!(ui.add(egui::Slider::new(&mut rgb.b, -0.5..=0.5).text("b")));
-                                    }
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Vibrance => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.vibrance.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.vibrance.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.vibrance.params;
-                                    track!(ui.add(
-                                        egui::Slider::new(&mut p.vibrance, -1.0..=1.0)
-                                            .text("vibrance")
-                                            .fixed_decimals(2)
-                                    ));
-                                    track!(ui.add(
-                                        egui::Slider::new(&mut p.saturation, -1.0..=1.0)
-                                            .text("saturation")
-                                            .fixed_decimals(2)
-                                    ));
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Sharpen => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.sharpen.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.sharpen.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.sharpen.params;
-                                    track!(ui.add(
-                                        egui::Slider::new(&mut p.amount, 0.0..=2.0)
-                                            .text("amount")
-                                            .fixed_decimals(2)
-                                    ));
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                            InspectorSectionId::Vignette => {
-                                let (up, down) = section_header_row(
-                                    ui,
-                                    id.title(),
-                                    &mut collapsed,
-                                    Some((&mut self.stack.vignette.enabled, &mut changed)),
-                                    can_up,
-                                    can_down,
-                                );
-                                if up { move_action = Some((idx, -1)); }
-                                if down { move_action = Some((idx, 1)); }
-                                if !collapsed && self.stack.vignette.enabled {
-                                    ui.add_space(2.0);
-                                    let p = &mut self.stack.vignette.params;
-                                    track!(ui.add(
-                                        egui::Slider::new(&mut p.amount, -1.0..=1.0)
-                                            .text("amount")
-                                            .fixed_decimals(2)
-                                    ));
-                                    track!(ui.add(
-                                        egui::Slider::new(&mut p.radius, 0.1..=1.5)
-                                            .text("radius")
-                                            .fixed_decimals(2)
-                                    ));
-                                    ui.add_space(4.0);
-                                }
-                                ui.separator();
-                            }
-                        }
-
-                        self.inspector_sections[idx].collapsed = collapsed;
-                    }
-
-                    if let Some((idx, dir)) = move_action {
-                        let new_idx = (idx as isize + dir) as usize;
-                        if new_idx < self.inspector_sections.len() {
-                            self.inspector_sections.swap(idx, new_idx);
-                        }
-                    }
-
-                    if started {
-                        self.history.checkpoint(&snapshot);
-                    }
-                    if changed {
-                        self.needs_render = true;
-                    }
-                    if geometry_changed {
-                        self.history.checkpoint(&before_geometry);
-                        self.needs_render = true;
-                    }
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("undo").clicked() && self.history.undo(&mut self.stack) {
-                            self.needs_render = true;
-                        }
-                        if ui.button("redo").clicked() && self.history.redo(&mut self.stack) {
-                            self.needs_render = true;
-                        }
-                    });
+                        });
                 });
         });
 
         self.inspector_width = inner.response.rect.width();
     }
-}
 
-fn section_header_row(
-    ui: &mut egui::Ui,
-    title: &str,
-    collapsed: &mut bool,
-    mut enabled: Option<(&mut bool, &mut bool)>,
-    can_up: bool,
-    can_down: bool,
-) -> (bool, bool) {
-    let mut move_up = false;
-    let mut move_down = false;
+    fn section_mut(&mut self, id: InspectorSectionId) -> Option<&mut InspectorSectionConfig> {
+        self.inspector_sections.iter_mut().find(|s| s.id == id)
+    }
 
-    ui.horizontal(|ui| {
-        let arrow = if *collapsed { "▶" } else { "▼" };
-        if ui
-            .small_button(arrow)
-            .on_hover_text(if *collapsed { "Expand section" } else { "Collapse section" })
-            .clicked()
-        {
-            *collapsed = !*collapsed;
+    /// The scope, pinned above the tabs as in every darkroom: it is what you watch while
+    /// you drag everything below it. Its visibility still comes from Customize.
+    fn scope_block(&mut self, ui: &mut egui::Ui) {
+        let Some(cfg) = self.section_mut(InspectorSectionId::Scope) else {
+            return;
+        };
+        if !cfg.visible {
+            return;
         }
+        let mut collapsed = cfg.collapsed;
 
-        let is_active = match enabled {
-            Some((ref mut en, ref mut chg)) => {
-                if ui.checkbox(en, "").changed() {
-                    **chg = true;
+        widgets::band(ui, |ui| {
+            let title = ui
+                .add(egui::Label::new(theme::head("Scope")).sense(Sense::click()))
+                .on_hover_text(if collapsed {
+                    "Show the scope"
+                } else {
+                    "Hide the scope"
+                });
+            if title.clicked() {
+                collapsed = !collapsed;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (mode, label, tip) in inspector_map_3d::MODES.iter().rev() {
+                    let on = self.inspector_map_state.mode == *mode;
+                    if widgets::chip(ui, on, label).on_hover_text(*tip).clicked() {
+                        self.inspector_map_state.mode = *mode;
+                        collapsed = false;
+                    }
                 }
-                **en
+            });
+        });
+        if !collapsed {
+            egui::Frame::new()
+                .inner_margin(Margin {
+                    left: 12,
+                    right: 12,
+                    top: 10,
+                    bottom: 6,
+                })
+                .show(ui, |ui| {
+                    inspector_map_3d::render_inspector_map(
+                        ui,
+                        &mut self.inspector_map_state,
+                        self.engine.histogram(),
+                    );
+                });
+            let r = ui.min_rect();
+            ui.painter()
+                .hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::BORDER));
+        }
+        if let Some(cfg) = self.section_mut(InspectorSectionId::Scope) {
+            cfg.collapsed = collapsed;
+        }
+    }
+
+    fn pipeline_body(&mut self, ui: &mut egui::Ui) {
+        // Everything that happens this frame is checkpointed against this one snapshot.
+        let snapshot = self.stack.clone();
+        // "Modified" means changed from how this photo opened — so the camera's own
+        // orientation is not an edit.
+        let defaults = self.baseline.clone();
+        let mut changed = false;
+        let mut started = false;
+        let mut close_others = None;
+
+        for idx in 0..self.inspector_sections.len() {
+            let InspectorSectionConfig {
+                id,
+                visible,
+                mut collapsed,
+            } = self.inspector_sections[idx].clone();
+            if !visible || id == InspectorSectionId::Scope {
+                continue;
             }
-            None => true,
-        };
 
-        let label_text = if is_active {
-            egui::RichText::new(title).color(theme::TEXT)
-        } else {
-            theme::dim(title)
-        };
+            let (summary, modified) = summarise(id, &self.stack, &defaults);
+            let on = module_on(&self.stack, id);
+            let summary_colour = if !on {
+                theme::TEXT_FAINT
+            } else if modified {
+                theme::ACCENT
+            } else {
+                theme::TEXT_DIM
+            };
+            let focused = self.focused_section == Some(id);
 
-        if ui
-            .selectable_label(false, label_text)
-            .on_hover_text("Click to collapse/expand")
-            .clicked()
-        {
-            *collapsed = !*collapsed;
+            let mut card_changed = false;
+            let mut card_started = false;
+            let card = widgets::card(ui, focused, |ui| {
+                let head = widgets::module_header(
+                    ui,
+                    id.title(),
+                    module_enabled(&mut self.stack, id),
+                    &summary,
+                    summary_colour,
+                    focused,
+                );
+                if head.toggled {
+                    // A toggle is a mutation like any other: DESIGN.md invariant 3.
+                    card_changed = true;
+                    card_started = true;
+                }
+                if head.clicked {
+                    let opening = collapsed;
+                    collapsed = !collapsed;
+                    // One open at a time keeps the list one screen tall; Shift opens this
+                    // one alongside whatever is already open.
+                    if opening && self.single_open && !ui.input(|i| i.modifiers.shift) {
+                        close_others = Some(id);
+                    }
+                }
+                if !collapsed {
+                    // Controls show whether or not the module is on, and touching one turns
+                    // it on — no need to tick the box before you can try it.
+                    ui.add_space(2.0);
+                    let mut body_changed = false;
+                    self.module_body(ui, id, &mut body_changed, &mut card_started);
+                    if body_changed {
+                        if let Some(on) = module_enabled(&mut self.stack, id) {
+                            *on = true;
+                        }
+                    }
+                    card_changed |= body_changed;
+                    ui.add_space(4.0);
+                }
+                head.clicked || head.toggled
+            });
+            let touched = card.inner;
+
+            if touched || card_changed {
+                self.focused_section = Some(id);
+            }
+            if self.reveal_section == Some(id) {
+                // The cards above it just collapsed; bring this one fully into view.
+                card.response.scroll_to_me(None);
+                self.reveal_section = None;
+            }
+            changed |= card_changed;
+            started |= card_started;
+            self.inspector_sections[idx].collapsed = collapsed;
         }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(can_down, egui::Button::new("▼").small())
-                .on_hover_text("Move section down in sidebar")
-                .clicked()
-            {
-                move_down = true;
+        if let Some(open) = close_others {
+            for s in &mut self.inspector_sections {
+                if s.id != open && s.id != InspectorSectionId::Scope {
+                    s.collapsed = true;
+                }
             }
-            if ui
-                .add_enabled(can_up, egui::Button::new("▲").small())
-                .on_hover_text("Move section up in sidebar")
+            self.reveal_section = Some(open);
+        }
+
+        if started {
+            self.history.checkpoint(&snapshot);
+        }
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
+    /// The controls inside one module card.
+    fn module_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: InspectorSectionId,
+        changed: &mut bool,
+        started: &mut bool,
+    ) {
+        macro_rules! track {
+            ($r:expr) => {{
+                let r: egui::Response = $r;
+                if r.drag_started() || (r.changed() && !r.dragged()) {
+                    *started = true;
+                }
+                if r.changed() {
+                    *changed = true;
+                }
+            }};
+        }
+        // A click, not a drag: checkpoint and re-render in one go.
+        macro_rules! discrete {
+            () => {{
+                *started = true;
+                *changed = true;
+            }};
+        }
+
+        // Where each control returns to on double-click.
+        let d = PhotoStack::default();
+
+        match id {
+            InspectorSectionId::Scope => {}
+            InspectorSectionId::Geometry => {
+                let g = &mut self.stack.geometry;
+                let mut edited = false;
+                ui.horizontal(|ui| {
+                    if geometry_icon_button(
+                        ui,
+                        GeometryIcon::RotateLeft,
+                        false,
+                        "Rotate 90° CCW ([)",
+                    )
+                    .clicked()
+                    {
+                        g.rotate_left();
+                        edited = true;
+                    }
+                    if geometry_icon_button(
+                        ui,
+                        GeometryIcon::RotateRight,
+                        false,
+                        "Rotate 90° CW (])",
+                    )
+                    .clicked()
+                    {
+                        g.rotate_right();
+                        edited = true;
+                    }
+                    if geometry_icon_button(
+                        ui,
+                        GeometryIcon::MirrorH,
+                        g.mirror_h,
+                        "Flip horizontally (H)",
+                    )
+                    .clicked()
+                    {
+                        g.flip_h();
+                        edited = true;
+                    }
+                    if geometry_icon_button(
+                        ui,
+                        GeometryIcon::MirrorV,
+                        g.mirror_v,
+                        "Flip vertically (V)",
+                    )
+                    .clicked()
+                    {
+                        g.flip_v();
+                        edited = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(!g.crop.is_full_frame(), |ui| {
+                            if widgets::chip(ui, false, "reset crop").clicked() {
+                                g.crop = Crop::default();
+                                edited = true;
+                            }
+                        });
+                        if widgets::chip(ui, self.cropping, "crop")
+                            .on_hover_text("Drag on the image to frame a crop (C)")
+                            .clicked()
+                        {
+                            self.cropping = !self.cropping;
+                        }
+                    });
+                });
+                if edited {
+                    discrete!();
+                }
+                track!(widgets::param_slider(
+                    ui,
+                    "straighten",
+                    &mut self.stack.geometry.straighten_deg,
+                    -15.0..=15.0,
+                    2,
+                    d.geometry.straighten_deg,
+                ));
+            }
+            InspectorSectionId::WhiteBalance => {
+                let p = &mut self.stack.white_balance.params;
+                let dp = d.white_balance.params;
+                let (mut kelvin, mut tint) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
+                let (home_k, home_t) = rgb_to_kelvin_tint(dp.tint_r, dp.tint_b);
+                let k =
+                    widgets::param_slider(ui, "temp (K)", &mut kelvin, 2000.0..=12000.0, 0, home_k);
+                let t = widgets::param_slider(ui, "tint", &mut tint, -50.0..=50.0, 1, home_t);
+                let both = k | t;
+                if both.changed() {
+                    let (r, b) = kelvin_tint_to_rgb(kelvin, tint);
+                    p.tint_r = r;
+                    p.tint_b = b;
+                }
+                track!(both);
+
+                // Presets as chips; the one matching the current multipliers is lit.
+                let mut preset = None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    for (label, tip, r, b) in [
+                        ("as shot", "The camera's own multipliers", 1.0, 1.0),
+                        ("daylight", "5500K daylight", 1.05, 0.95),
+                        ("cloudy", "6500K overcast", 1.15, 0.88),
+                        ("shade", "7500K deep shade", 1.28, 0.80),
+                        ("tungsten", "3200K incandescent", 0.75, 1.35),
+                        ("fluoro", "4000K fluorescent", 0.88, 1.12),
+                    ] {
+                        let lit = (p.tint_r - r).abs() < 1e-4 && (p.tint_b - b).abs() < 1e-4;
+                        if widgets::chip(ui, lit, label).on_hover_text(tip).clicked() {
+                            preset = Some((r, b));
+                        }
+                    }
+                });
+                if let Some((r, b)) = preset {
+                    p.tint_r = r;
+                    p.tint_b = b;
+                    discrete!();
+                }
+            }
+            InspectorSectionId::Exposure => {
+                let p = &mut self.stack.exposure.params;
+                let dp = d.exposure.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "EV",
+                    &mut p.ev,
+                    -4.0..=4.0,
+                    2,
+                    dp.ev
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "black",
+                    &mut p.black,
+                    -0.1..=0.1,
+                    4,
+                    dp.black
+                ));
+            }
+            InspectorSectionId::Tonal => {
+                let p = &mut self.stack.tonal.params;
+                let dp = d.tonal.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "highlights",
+                    &mut p.highlights,
+                    -1.0..=1.0,
+                    2,
+                    dp.highlights
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "shadows",
+                    &mut p.shadows,
+                    -1.0..=1.0,
+                    2,
+                    dp.shadows
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "whites",
+                    &mut p.whites,
+                    -1.0..=1.0,
+                    2,
+                    dp.whites
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "blacks",
+                    &mut p.blacks,
+                    -1.0..=1.0,
+                    2,
+                    dp.blacks
+                ));
+            }
+            InspectorSectionId::ToneCurve => {
+                track!(curve_editor(ui, &mut self.stack.tone_curve.params));
+                let is_linear = self.stack.tone_curve.params == identity_nodes();
+                ui.horizontal(|ui| {
+                    ui.label(theme::tag("drag a node").color(theme::TEXT_FAINT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(!is_linear, |ui| {
+                            if widgets::chip(ui, false, "reset").clicked() {
+                                self.stack.tone_curve.params = identity_nodes();
+                                discrete!();
+                            }
+                        });
+                    });
+                });
+            }
+            InspectorSectionId::Filmic3D => {
+                let p = &mut self.stack.filmic.params;
+                let dp = d.filmic.params;
+                tonemap_3d::render_tonemap_3d(ui, &mut self.tonemap_3d_state, p, changed, started);
+                ui.add_space(4.0);
+                track!(widgets::param_slider(
+                    ui,
+                    "white EV",
+                    &mut p.white_ev,
+                    0.0..=8.0,
+                    2,
+                    dp.white_ev
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "black EV",
+                    &mut p.black_ev,
+                    -16.0..=-1.0,
+                    2,
+                    dp.black_ev
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "latitude %",
+                    &mut p.latitude,
+                    5.0..=80.0,
+                    1,
+                    dp.latitude
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "contrast",
+                    &mut p.contrast,
+                    0.1..=3.0,
+                    2,
+                    dp.contrast
+                ));
+            }
+            InspectorSectionId::ColorBalance => {
+                let p = &mut self.stack.color_balance.params;
+                let dp = d.color_balance.params;
+                for (label, rgb, home) in [
+                    ("lift", &mut p.lift, dp.lift),
+                    ("gamma", &mut p.gamma, dp.gamma),
+                    ("gain", &mut p.gain, dp.gain),
+                    ("offset", &mut p.offset, dp.offset),
+                ] {
+                    ui.add_space(2.0);
+                    ui.label(theme::tag(label).color(theme::TEXT_DIM));
+                    let range = -0.5..=0.5;
+                    track!(widgets::param_slider(
+                        ui,
+                        "red",
+                        &mut rgb.r,
+                        range.clone(),
+                        3,
+                        home.r
+                    ));
+                    track!(widgets::param_slider(
+                        ui,
+                        "green",
+                        &mut rgb.g,
+                        range.clone(),
+                        3,
+                        home.g
+                    ));
+                    track!(widgets::param_slider(
+                        ui, "blue", &mut rgb.b, range, 3, home.b
+                    ));
+                }
+            }
+            InspectorSectionId::Vibrance => {
+                let p = &mut self.stack.vibrance.params;
+                let dp = d.vibrance.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "vibrance",
+                    &mut p.vibrance,
+                    -1.0..=1.0,
+                    2,
+                    dp.vibrance
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "saturation",
+                    &mut p.saturation,
+                    -1.0..=1.0,
+                    2,
+                    dp.saturation
+                ));
+            }
+            InspectorSectionId::Sharpen => {
+                let p = &mut self.stack.sharpen.params;
+                let dp = d.sharpen.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "amount",
+                    &mut p.amount,
+                    0.0..=2.0,
+                    2,
+                    dp.amount
+                ));
+            }
+            InspectorSectionId::Vignette => {
+                let p = &mut self.stack.vignette.params;
+                let dp = d.vignette.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "amount",
+                    &mut p.amount,
+                    -1.0..=1.0,
+                    2,
+                    dp.amount
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "radius",
+                    &mut p.radius,
+                    0.1..=1.5,
+                    2,
+                    dp.radius
+                ));
+            }
+        }
+    }
+
+    fn customize_body(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if widgets::button(ui, Kind::Secondary, "Reset order", 0.0)
+                .on_hover_text("Restore the default pipeline order")
                 .clicked()
             {
-                move_up = true;
+                self.inspector_sections = InspectorSectionConfig::default_sections();
+            }
+            if widgets::button(ui, Kind::Secondary, "Show all", 0.0).clicked() {
+                for s in &mut self.inspector_sections {
+                    s.visible = true;
+                }
+            }
+            if widgets::button(ui, Kind::Secondary, "Essentials", 0.0)
+                .on_hover_text("Scope, crop, white balance, exposure and filmic only")
+                .clicked()
+            {
+                for s in &mut self.inspector_sections {
+                    s.visible = matches!(
+                        s.id,
+                        InspectorSectionId::Scope
+                            | InspectorSectionId::Geometry
+                            | InspectorSectionId::WhiteBalance
+                            | InspectorSectionId::Exposure
+                            | InspectorSectionId::Filmic3D
+                    );
+                }
             }
         });
-    });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            widgets::checkbox(ui, &mut self.single_open);
+            ui.label(
+                RichText::new("One module open at a time")
+                    .size(12.5)
+                    .color(theme::TEXT),
+            );
+        })
+        .response
+        .on_hover_text("Opening a module closes the others. Shift-click to open one alongside.");
+        ui.add_space(2.0);
+        ui.label(
+            theme::tag("order is display only · the pipeline itself is fixed")
+                .color(theme::TEXT_FAINT),
+        );
+        ui.add_space(2.0);
 
-    (move_up, move_down)
+        let mut move_act = None;
+        let total = self.inspector_sections.len();
+        for (i, sec) in self.inspector_sections.iter_mut().enumerate() {
+            widgets::card(ui, false, |ui| {
+                ui.horizontal(|ui| {
+                    widgets::checkbox(ui, &mut sec.visible);
+                    let colour = if sec.visible {
+                        theme::TEXT_HI
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    ui.label(
+                        RichText::new(sec.id.title())
+                            .family(theme::sans_strong())
+                            .size(13.0)
+                            .color(colour),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if sec.id == InspectorSectionId::Scope {
+                            ui.label(theme::tag("pinned").color(theme::TEXT_FAINT));
+                            return;
+                        }
+                        ui.add_enabled_ui(i + 1 < total, |ui| {
+                            if widgets::icon(ui, "↓", false, "Move down").clicked() {
+                                move_act = Some((i, 1));
+                            }
+                        });
+                        ui.add_enabled_ui(i > 1, |ui| {
+                            if widgets::icon(ui, "↑", false, "Move up").clicked() {
+                                move_act = Some((i, -1));
+                            }
+                        });
+                    });
+                });
+            });
+        }
+
+        if let Some((idx, dir)) = move_act {
+            let new_idx = (idx as isize + dir) as usize;
+            if new_idx < self.inspector_sections.len() {
+                self.inspector_sections.swap(idx, new_idx);
+            }
+        }
+    }
+
+    fn inspector_footer(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("inspector_footer")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::symmetric(12, 10)),
+            )
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.horizontal(|ui| {
+                    // Not `theme::tag`: that uppercases, and it is sRGB, not SRGB.
+                    ui.label(
+                        RichText::new("PNG / JPEG · 8-BIT · sRGB")
+                            .family(theme::mono_bold())
+                            .size(10.5)
+                            .extra_letter_spacing(0.3)
+                            .color(theme::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(image) = self.engine.image() {
+                            let (_, _, w, h) = self
+                                .stack
+                                .geometry
+                                .crop
+                                .sanitised()
+                                .to_pixels(image.width, image.height);
+                            ui.label(
+                                RichText::new(format!("{w} × {h}"))
+                                    .family(theme::mono_bold())
+                                    .size(11.5)
+                                    .color(theme::ACCENT),
+                            );
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    let loaded = self.loaded_path.is_some();
+                    let has_sidecar = self.saved_stack.is_some();
+                    let w = ui.available_width() - 76.0 - ui.spacing().item_spacing.x;
+                    ui.add_enabled_ui(loaded, |ui| {
+                        if widgets::button(ui, Kind::Accent, "SAVE SIDECAR  →", w)
+                            .on_hover_text("Write this stack beside the RAW (Ctrl+S)")
+                            .clicked()
+                        {
+                            self.save_current_sidecar();
+                        }
+                    });
+                    ui.add_enabled_ui(loaded && has_sidecar, |ui| {
+                        if widgets::button(ui, Kind::Secondary, "REVERT", 76.0)
+                            .on_hover_text("Reload the saved sidecar (undoable)")
+                            .clicked()
+                        {
+                            self.revert_to_sidecar();
+                        }
+                    });
+                });
+                ui.label(
+                    RichText::new("edits are non-destructive · the RAW is never written")
+                        .monospace()
+                        .size(10.0)
+                        .color(theme::TEXT_DIM),
+                );
+            });
+    }
 }
 
-#[allow(dead_code)]
-fn module_header(ui: &mut egui::Ui, label: &str, enabled: &mut bool, changed: &mut bool) {
-    ui.horizontal(|ui| {
-        if ui.checkbox(enabled, "").changed() {
-            *changed = true;
+// ── Summaries ───────────────────────────────────────────────────────────────────────────
+
+fn module_enabled(stack: &mut PhotoStack, id: InspectorSectionId) -> Option<&mut bool> {
+    use InspectorSectionId as S;
+    match id {
+        S::Scope | S::Geometry => None,
+        S::WhiteBalance => Some(&mut stack.white_balance.enabled),
+        S::Exposure => Some(&mut stack.exposure.enabled),
+        S::Tonal => Some(&mut stack.tonal.enabled),
+        S::ToneCurve => Some(&mut stack.tone_curve.enabled),
+        S::Filmic3D => Some(&mut stack.filmic.enabled),
+        S::ColorBalance => Some(&mut stack.color_balance.enabled),
+        S::Vibrance => Some(&mut stack.vibrance.enabled),
+        S::Sharpen => Some(&mut stack.sharpen.enabled),
+        S::Vignette => Some(&mut stack.vignette.enabled),
+    }
+}
+
+fn module_on(stack: &PhotoStack, id: InspectorSectionId) -> bool {
+    use InspectorSectionId as S;
+    match id {
+        S::Scope | S::Geometry => true,
+        S::WhiteBalance => stack.white_balance.enabled,
+        S::Exposure => stack.exposure.enabled,
+        S::Tonal => stack.tonal.enabled,
+        S::ToneCurve => stack.tone_curve.enabled,
+        S::Filmic3D => stack.filmic.enabled,
+        S::ColorBalance => stack.color_balance.enabled,
+        S::Vibrance => stack.vibrance.enabled,
+        S::Sharpen => stack.sharpen.enabled,
+        S::Vignette => stack.vignette.enabled,
+    }
+}
+
+/// A module's current value, for its collapsed header, and whether it differs from default.
+/// DESIGN.md: every control that changes the image shows its current numeric value.
+fn summarise(id: InspectorSectionId, s: &PhotoStack, d: &PhotoStack) -> (String, bool) {
+    use InspectorSectionId as S;
+    let signed = |label: &str, v: f32| format!("{label} {v:+.2}");
+    match id {
+        S::Scope => (String::new(), false),
+        S::Geometry => {
+            let g = &s.geometry;
+            let mut parts = Vec::new();
+            if g.quarter_turns != 0 {
+                parts.push(format!("{}°", u32::from(g.quarter_turns) * 90));
+            }
+            if g.mirror_h {
+                parts.push("flip h".to_string());
+            }
+            if g.mirror_v {
+                parts.push("flip v".to_string());
+            }
+            if !g.crop.is_full_frame() {
+                let c = g.crop.sanitised();
+                parts.push(format!(
+                    "crop {:.0}×{:.0}%",
+                    c.width * 100.0,
+                    c.height * 100.0
+                ));
+            }
+            if g.straighten_deg != 0.0 {
+                parts.push(format!("{:+.1}°", g.straighten_deg));
+            }
+            let text = if parts.is_empty() {
+                "none".to_string()
+            } else {
+                parts.join(" · ")
+            };
+            (text, *g != d.geometry)
         }
-        let text = if *enabled {
-            egui::RichText::new(label).color(theme::TEXT)
+        S::WhiteBalance => {
+            let p = &s.white_balance.params;
+            let modified = *p != d.white_balance.params;
+            if !modified {
+                return ("as shot".to_string(), false);
+            }
+            let (k, t) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
+            (format!("{k:.0} K · {t:+.0} tint"), true)
+        }
+        S::Exposure => {
+            let p = &s.exposure.params;
+            (format!("{:+.2} EV", p.ev), *p != d.exposure.params)
+        }
+        S::Tonal => {
+            let p = &s.tonal.params;
+            let set: Vec<String> = [
+                ("hl", p.highlights),
+                ("sh", p.shadows),
+                ("wh", p.whites),
+                ("bl", p.blacks),
+            ]
+            .into_iter()
+            .filter(|(_, v)| *v != 0.0)
+            .map(|(l, v)| signed(l, v))
+            .collect();
+            let text = if set.is_empty() {
+                "neutral".to_string()
+            } else {
+                set.join(" · ")
+            };
+            (text, *p != d.tonal.params)
+        }
+        S::ToneCurve => {
+            let nodes = &s.tone_curve.params;
+            let modified = *nodes != d.tone_curve.params;
+            let text = if modified {
+                format!("{} pts", nodes.len())
+            } else {
+                "linear".to_string()
+            };
+            (text, modified)
+        }
+        S::Filmic3D => {
+            let p = &s.filmic.params;
+            (
+                format!("latitude {:.0}%", p.latitude),
+                *p != d.filmic.params,
+            )
+        }
+        S::ColorBalance => {
+            let p = &s.color_balance.params;
+            let zero = |c: &photo_engine::params::Rgb| c.r == 0.0 && c.g == 0.0 && c.b == 0.0;
+            let set: Vec<&str> = [
+                ("lift", &p.lift),
+                ("gamma", &p.gamma),
+                ("gain", &p.gain),
+                ("offset", &p.offset),
+            ]
+            .into_iter()
+            .filter(|(_, c)| !zero(c))
+            .map(|(l, _)| l)
+            .collect();
+            let text = if set.is_empty() {
+                "neutral".to_string()
+            } else {
+                set.join(" · ")
+            };
+            (text, *p != d.color_balance.params)
+        }
+        S::Vibrance => {
+            let p = &s.vibrance.params;
+            (
+                format!(
+                    "{} · {}",
+                    signed("vib", p.vibrance),
+                    signed("sat", p.saturation)
+                ),
+                *p != d.vibrance.params,
+            )
+        }
+        S::Sharpen => {
+            let p = &s.sharpen.params;
+            (format!("amount {:.2}", p.amount), *p != d.sharpen.params)
+        }
+        S::Vignette => {
+            let p = &s.vignette.params;
+            (
+                format!("{:+.2} · r {:.2}", p.amount, p.radius),
+                *p != d.vignette.params,
+            )
+        }
+    }
+}
+
+/// What changed between two adjacent undo states, for the History list.
+fn describe_change(a: &PhotoStack, b: &PhotoStack) -> String {
+    let mut names: Vec<String> = Vec::new();
+    let (ga, gb) = (&a.geometry, &b.geometry);
+    if ga.quarter_turns != gb.quarter_turns {
+        names.push("rotate".into());
+    }
+    if ga.mirror_h != gb.mirror_h || ga.mirror_v != gb.mirror_v {
+        names.push("flip".into());
+    }
+    if ga.straighten_deg != gb.straighten_deg {
+        names.push("straighten".into());
+    }
+    if ga.crop != gb.crop {
+        names.push("crop".into());
+    }
+
+    fn module<T: PartialEq>(names: &mut Vec<String>, name: &str, a: &Module<T>, b: &Module<T>) {
+        if a.enabled != b.enabled {
+            names.push(format!("{name} {}", if b.enabled { "on" } else { "off" }));
+        } else if a.params != b.params {
+            names.push(name.to_string());
+        }
+    }
+    module(
+        &mut names,
+        "white balance",
+        &a.white_balance,
+        &b.white_balance,
+    );
+    module(&mut names, "exposure", &a.exposure, &b.exposure);
+    module(&mut names, "shadows & highlights", &a.tonal, &b.tonal);
+    module(&mut names, "tone curve", &a.tone_curve, &b.tone_curve);
+    module(&mut names, "filmic rgb", &a.filmic, &b.filmic);
+    module(
+        &mut names,
+        "colour balance",
+        &a.color_balance,
+        &b.color_balance,
+    );
+    module(&mut names, "vibrance", &a.vibrance, &b.vibrance);
+    module(&mut names, "sharpen", &a.sharpen, &b.sharpen);
+    module(&mut names, "vignette", &a.vignette, &b.vignette);
+
+    match names.len() {
+        0 => "no change".to_string(),
+        1 => names.remove(0),
+        2 => names.join(" + "),
+        n => format!("{n} modules"),
+    }
+}
+
+// ── Small pieces of layout used above ───────────────────────────────────────────────────
+
+/// A hairline-bordered pod that groups a few controls, as in the top bar.
+fn pod<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .stroke(Stroke::new(1.0, Color32::from_gray(0x2a)))
+        .corner_radius(5)
+        .inner_margin(Margin::same(2))
+        .show(ui, |ui| ui.horizontal(add).inner)
+        .inner
+}
+
+/// A short vertical hairline between groups in a row.
+fn vsep(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 16.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0, theme::RAIL),
+    );
+}
+
+/// `LABEL value` in the status bar.
+fn readout(ui: &mut egui::Ui, label: &str, value: &str, colour: Color32) {
+    // Right-to-left callers, so the value goes in first.
+    ui.label(
+        RichText::new(value)
+            .family(theme::mono_bold())
+            .size(11.5)
+            .color(colour),
+    );
+    ui.label(theme::tag(label).color(theme::TEXT_DIM));
+    ui.add_space(8.0);
+}
+
+/// A bordered card with a heading band, for the Shelf bin's groups.
+fn group(
+    ui: &mut egui::Ui,
+    title: &str,
+    right: impl FnOnce(&mut egui::Ui),
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::new()
+        .fill(theme::BG_925)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(theme::RADIUS)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let head = egui::Frame::new()
+                .fill(theme::BG_900)
+                .corner_radius(egui::CornerRadius {
+                    nw: theme::RADIUS - 1,
+                    ne: theme::RADIUS - 1,
+                    sw: 0,
+                    se: 0,
+                })
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    widgets::card_title(ui, title, right);
+                });
+            let r = head.response.rect;
+            ui.painter().hline(
+                r.x_range(),
+                r.bottom(),
+                Stroke::new(1.0, Color32::from_gray(0x1f)),
+            );
+            egui::Frame::new()
+                .inner_margin(Margin::same(4))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    body(ui);
+                });
+        });
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowStyle {
+    Normal,
+    /// Redo steps: not applied.
+    Faint,
+    /// The live state.
+    Now,
+    /// A snapshot identical to the live state.
+    Match,
+}
+
+/// One row of a Shelf-bin list: mono label on the left, a short tag on the right.
+fn list_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    style: RowStyle,
+    right: Option<(&str, Color32)>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let hovered = response.hovered() && style != RowStyle::Now;
+    let painter = ui.painter();
+    match style {
+        RowStyle::Now => {
+            painter.rect(
+                rect,
+                3.0,
+                theme::BG_950,
+                Stroke::new(1.0, theme::ACCENT.linear_multiply(0.6)),
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+                egui::CornerRadius {
+                    nw: 3,
+                    sw: 3,
+                    ne: 0,
+                    se: 0,
+                },
+                theme::ACCENT,
+            );
+        }
+        RowStyle::Match => {
+            painter.rect_stroke(
+                rect,
+                3.0,
+                Stroke::new(1.0, theme::LIME.linear_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        _ if hovered => {
+            painter.rect_filled(rect, 3.0, theme::BG_850);
+        }
+        _ => {}
+    }
+    let (family, colour) = match style {
+        RowStyle::Now => (theme::mono_bold(), theme::ACCENT),
+        RowStyle::Faint => (egui::FontFamily::Monospace, theme::TEXT_FAINT),
+        _ if hovered => (egui::FontFamily::Monospace, theme::TEXT_HI),
+        _ => (egui::FontFamily::Monospace, Color32::from_gray(0xcc)),
+    };
+    painter.text(
+        rect.left_center() + vec2(9.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::new(11.5, family),
+        colour,
+    );
+    if let Some((tag, tag_colour)) = right {
+        painter.text(
+            rect.right_center() - vec2(8.0, 0.0),
+            Align2::RIGHT_CENTER,
+            tag,
+            FontId::new(10.0, theme::mono_bold()),
+            tag_colour,
+        );
+    }
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// A shelved file: icon, name, size badge, and a status dot. The size badge turns into a
+/// remove button under the pointer. Returns `(open, remove)`.
+fn shelf_row(
+    ui: &mut egui::Ui,
+    item: &ShelfItem,
+    active: bool,
+    status: Option<Color32>,
+) -> (bool, bool) {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let hovered = ui.rect_contains_pointer(rect);
+
+    let badge_text = format_bytes(item.bytes);
+    let badge_font = FontId::monospace(10.5);
+    let badge_galley = ui
+        .painter()
+        .layout_no_wrap(badge_text, badge_font, Color32::PLACEHOLDER);
+    let badge = Rect::from_min_size(
+        pos2(
+            rect.right() - 6.0 - badge_galley.size().x - 10.0,
+            rect.center().y - 9.0,
+        ),
+        vec2(badge_galley.size().x + 10.0, 18.0),
+    );
+    let remove = ui.interact(badge, response.id.with("remove"), Sense::click());
+
+    let painter = ui.painter();
+    let border = if active {
+        theme::ACCENT
+    } else if hovered {
+        theme::BORDER_HI
+    } else {
+        Color32::from_gray(0x20)
+    };
+    let fill = if hovered && !active {
+        Color32::from_gray(0x0c)
+    } else {
+        theme::BG_950
+    };
+    painter.rect(
+        rect,
+        3.0,
+        fill,
+        Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+
+    painter.text(
+        rect.left_center() + vec2(14.0, 0.0),
+        Align2::CENTER_CENTER,
+        "📷",
+        FontId::proportional(13.0),
+        if active {
+            theme::ACCENT
         } else {
-            theme::dim(label)
-        };
-        ui.label(text);
-    });
+            Color32::from_gray(0x88)
+        },
+    );
+
+    let mut name_right = badge.left() - 6.0;
+    if let Some(colour) = status {
+        painter.circle_filled(pos2(badge.left() - 9.0, rect.center().y), 3.0, colour);
+        name_right -= 12.0;
+    }
+
+    let (family, colour) = if active {
+        (theme::mono_bold(), theme::ACCENT)
+    } else {
+        (egui::FontFamily::Monospace, theme::TEXT)
+    };
+    let mut job = egui::text::LayoutJob::single_section(
+        item.name.clone(),
+        egui::TextFormat::simple(FontId::new(12.0, family), colour),
+    );
+    let name_left = rect.left() + 30.0;
+    job.wrap = egui::text::TextWrapping::truncate_at_width((name_right - name_left).max(10.0));
+    let galley = painter.layout_job(job);
+    painter.galley(
+        pos2(name_left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        colour,
+    );
+
+    if hovered {
+        let hot = remove.hovered();
+        painter.rect(
+            badge,
+            3.0,
+            if hot {
+                theme::DANGER.linear_multiply(0.2)
+            } else {
+                theme::BG_850
+            },
+            Stroke::new(1.0, if hot { theme::DANGER } else { theme::RAIL }),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            "✕ remove",
+            FontId::monospace(10.0),
+            if hot { theme::DANGER } else { theme::TEXT_DIM },
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    } else {
+        painter.rect(
+            badge,
+            3.0,
+            theme::BG_850,
+            Stroke::new(1.0, theme::RAIL),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(
+            badge.center() - badge_galley.size() / 2.0,
+            badge_galley,
+            if active {
+                theme::TEXT
+            } else {
+                Color32::from_gray(0x88)
+            },
+        );
+    }
+
+    let removed = remove.clicked();
+    (response.clicked() && !removed, removed)
+}
+
+/// A filmstrip frame. Only the open image has pixels to show — the others would need a
+/// decode each — so it alone gets the live render as its thumbnail.
+fn film_tile(
+    ui: &mut egui::Ui,
+    item: &ShelfItem,
+    active: bool,
+    pending: bool,
+    picture: Option<(egui::TextureId, f32)>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(112.0, 70.0), Sense::click());
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, theme::BG_900);
+
+    let inner = rect.shrink(if active { 3.0 } else { 1.0 });
+    match picture {
+        Some((id, aspect)) => {
+            // Cover-fit: crop the texture's UVs to the tile's aspect.
+            let tile_aspect = inner.width() / inner.height();
+            let uv = if aspect > tile_aspect {
+                let w = tile_aspect / aspect;
+                Rect::from_min_max(pos2(0.5 - w / 2.0, 0.0), pos2(0.5 + w / 2.0, 1.0))
+            } else {
+                let h = aspect / tile_aspect;
+                Rect::from_min_max(pos2(0.0, 0.5 - h / 2.0), pos2(1.0, 0.5 + h / 2.0))
+            };
+            painter.image(id, inner, uv, Color32::from_white_alpha(220));
+        }
+        None => {
+            painter.text(
+                inner.center() - vec2(0.0, 6.0),
+                Align2::CENTER_CENTER,
+                "📷",
+                FontId::proportional(16.0),
+                theme::RAIL,
+            );
+        }
+    }
+
+    // File stem on a black strip, bottom-left, as the frame number.
+    let stem = item
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&item.name)
+        .to_string();
+    let mut job = egui::text::LayoutJob::single_section(
+        stem,
+        egui::TextFormat::simple(
+            FontId::new(
+                10.5,
+                if active {
+                    theme::mono_bold()
+                } else {
+                    egui::FontFamily::Monospace
+                },
+            ),
+            if active {
+                theme::TEXT_HI
+            } else {
+                Color32::from_gray(0xcc)
+            },
+        ),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width() - 14.0);
+    let galley = painter.layout_job(job);
+    let strip = Rect::from_min_max(
+        pos2(inner.left(), inner.bottom() - galley.size().y - 6.0),
+        inner.right_bottom(),
+    );
+    painter.rect_filled(strip, 0.0, Color32::from_black_alpha(200));
+    painter.galley(
+        pos2(strip.left() + 6.0, strip.top() + 3.0),
+        galley,
+        theme::TEXT,
+    );
+
+    let status = if item.has_sidecar {
+        Some(theme::LIME)
+    } else if item.is_edited {
+        Some(theme::ACCENT)
+    } else {
+        None
+    };
+    if let Some(colour) = status {
+        painter.circle_filled(inner.right_top() + vec2(-8.0, 8.0), 3.0, colour);
+    }
+
+    if pending {
+        painter.rect_filled(inner, 0.0, Color32::from_black_alpha(140));
+        painter.text(
+            inner.center(),
+            Align2::CENTER_CENTER,
+            "loading…",
+            FontId::new(10.5, theme::mono_bold()),
+            theme::ACCENT,
+        );
+    }
+    let border = if active {
+        Stroke::new(2.0, theme::ACCENT)
+    } else if pending {
+        Stroke::new(2.0, theme::ACCENT.linear_multiply(0.5))
+    } else if hovered {
+        Stroke::new(1.0, theme::BORDER_HI)
+    } else {
+        Stroke::new(1.0, theme::BORDER)
+    };
+    painter.rect_stroke(rect, 3.0, border, egui::StrokeKind::Inside);
+    if hovered && !active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response.on_hover_text(&item.name)
+}
+
+/// Text on a black pill with a hairline, for readouts drawn over the image.
+fn hud_badge(
+    painter: &egui::Painter,
+    anchor: egui::Pos2,
+    align: Align2,
+    text: &str,
+    colour: Color32,
+    border: Color32,
+) {
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        FontId::new(11.0, theme::mono_bold()),
+        colour,
+    );
+    let size = galley.size() + vec2(16.0, 8.0);
+    let rect = align.anchor_size(anchor, size);
+    painter.rect(
+        rect,
+        3.0,
+        Color32::from_black_alpha(235),
+        Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + vec2(8.0, 4.0), galley, colour);
+}
+
+/// A, B, … Z, then 27, 28, … — a short handle for each snapshot.
+fn snapshot_key(i: usize) -> String {
+    if i < 26 {
+        char::from(b'A' + i as u8).to_string()
+    } else {
+        (i + 1).to_string()
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.2} GB", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else if b >= 1e3 {
+        format!("{:.0} KB", b / 1e3)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// A minimal draggable curve editor. Endpoints are locked in x so the curve always spans
 /// the full range.
 fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
-    let size = egui::vec2(ui.available_width().min(240.0), 160.0);
+    let width = ui.available_width();
+    let size = egui::vec2(width, (width * 0.62).clamp(120.0, 220.0));
     let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
-    painter.rect_filled(rect, 2.0, theme::BG_950);
-    painter.rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect_filled(rect, 3.0, theme::BG_950);
+    // Quarter reticle and the identity diagonal, so a move reads against neutral.
+    let grid = egui::Stroke::new(1.0, egui::Color32::from_gray(0x1a));
+    for i in 1..4 {
+        let t = i as f32 / 4.0;
+        painter.vline(rect.left() + t * rect.width(), rect.y_range(), grid);
+        painter.hline(rect.x_range(), rect.top() + t * rect.height(), grid);
+    }
+    painter.extend(egui::Shape::dashed_line(
+        &[rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(1.0, theme::BORDER_HI),
+        4.0,
+        4.0,
+    ));
 
     let to_screen = |n: &CurveNode| {
         egui::pos2(
@@ -2031,9 +3703,9 @@ fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
     }
 
     let lut = photo_engine::curve::build_lut(nodes);
-    let points: Vec<egui::Pos2> = (0..64)
+    let points: Vec<egui::Pos2> = (0..96)
         .map(|i| {
-            let t = i as f32 / 63.0;
+            let t = i as f32 / 95.0;
             let v = lut[(t * (lut.len() - 1) as f32) as usize];
             egui::pos2(
                 rect.left() + t * rect.width(),
@@ -2043,19 +3715,27 @@ fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
         .collect();
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(1.5, theme::ACCENT),
+        egui::Stroke::new(1.75, theme::ACCENT),
     ));
 
     for n in nodes.iter() {
-        painter.circle_filled(to_screen(n), 3.0, theme::TEXT);
+        painter.circle(
+            to_screen(n),
+            3.5,
+            theme::TEXT_HI,
+            egui::Stroke::new(1.5, theme::ACCENT),
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     response
-}
-
-fn bare_frame(fill: egui::Color32) -> egui::Frame {
-    egui::Frame::new()
-        .fill(fill)
-        .inner_margin(egui::Margin::symmetric(10, 6))
 }
 
 fn renderer_write<'a>(gpu: &Gpu<'a>) -> std::sync::RwLockWriteGuard<'a, egui_wgpu::Renderer> {

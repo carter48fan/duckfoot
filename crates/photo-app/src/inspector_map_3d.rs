@@ -7,7 +7,7 @@
 //! - 3D RGB Cube: Color gamut distribution volume inside a 3D coordinate cube.
 //! - 2D Plot: Classic 2D histogram plot.
 //!
-//! Features an interactive orbit camera (drag to rotate, scroll to zoom, double-click
+//! Features an interactive orbit camera (drag to rotate, Ctrl+scroll to zoom, double-click
 //! or button to reset) with depth-sorted immediate-mode rendering.
 
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
@@ -45,69 +45,29 @@ impl Default for InspectorMapState {
     }
 }
 
+/// The scope's modes, in display order, for the header band that switches between them:
+/// `(mode, chip label, tooltip)`.
+pub const MODES: [(InspectorMapMode, &str, &str); 4] = [
+    (InspectorMapMode::Plot2D, "hist", "Classic 2D histogram"),
+    (
+        InspectorMapMode::Channels3D,
+        "ribbon",
+        "3D layered channel ribbons (red, green, blue, luma)",
+    ),
+    (
+        InspectorMapMode::Surface3D,
+        "surface",
+        "3D continuous spectral density surface",
+    ),
+    (InspectorMapMode::Cube3D, "cube", "3D RGB gamut distribution cube"),
+];
+
+/// Draws the scope itself. The mode switch lives in the caller's header band — see [`MODES`].
 pub fn render_inspector_map(
     ui: &mut egui::Ui,
     state: &mut InspectorMapState,
     hist: &Histogram,
 ) {
-    // Mode toolbar & controls
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Channels3D, "3D Ribbons")
-            .on_hover_text("3D Layered Color Channel Ribbons (Red, Green, Blue, Luma)")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Channels3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Surface3D, "3D Surface")
-            .on_hover_text("3D Continuous Spectral Density Surface")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Surface3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Cube3D, "3D Cube")
-            .on_hover_text("3D RGB Gamut Color Distribution Cube")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Cube3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Plot2D, "2D")
-            .on_hover_text("Classic 2D Histogram Plot")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Plot2D;
-        }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if state.mode != InspectorMapMode::Plot2D {
-                if ui
-                    .small_button("↺ 3D")
-                    .on_hover_text("Reset 3D camera angle and zoom")
-                    .clicked()
-                {
-                    state.yaw = -0.65;
-                    state.pitch = 0.38;
-                    state.zoom = 1.0;
-                }
-            }
-            let expand_icon = if state.large_view { "⤡" } else { "⤢" };
-            if ui
-                .small_button(expand_icon)
-                .on_hover_text(if state.large_view {
-                    "Standard scope view height"
-                } else {
-                    "Enlarge scope view height"
-                })
-                .clicked()
-            {
-                state.large_view = !state.large_view;
-            }
-        });
-    });
-
     let view_height = if state.mode == InspectorMapMode::Plot2D {
         if state.large_view { 140.0 } else { 96.0 }
     } else {
@@ -136,10 +96,12 @@ pub fn render_inspector_map(
             state.pitch = (state.pitch - delta.y * 0.012).clamp(-1.45, 1.45);
         }
 
+        // Ctrl+wheel or pinch, which egui reports as a zoom factor. A plain wheel is left
+        // alone: this view sits in a scrolling sidebar, and one gesture must not do both.
         if response.hovered() {
-            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                state.zoom = (state.zoom * (1.0 + scroll * 0.005)).clamp(0.5, 2.8);
+            let zoom = ui.ctx().input(|i| i.zoom_delta());
+            if zoom != 1.0 {
+                state.zoom = (state.zoom * zoom).clamp(0.5, 2.8);
             }
         }
 
@@ -159,11 +121,11 @@ pub fn render_inspector_map(
         egui::StrokeKind::Inside,
     );
 
-    // Readout line: Clipping and peak stats
+    // Readout line: clipping, then the view controls.
     let low = hist.clipped_low() * 100.0;
     let high = hist.clipped_high() * 100.0;
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(theme::dim("clipped"));
         let warn = |v: f32| {
             if v >= 0.1 {
                 theme::num(format!("{v:.2}%")).color(theme::DANGER)
@@ -171,16 +133,35 @@ pub fn render_inspector_map(
                 theme::num(format!("{v:.2}%"))
             }
         };
-        ui.label(theme::dim("lo"));
+        ui.label(theme::tag("clip lo").color(theme::TEXT_DIM));
         ui.label(warn(low));
-        ui.label(theme::dim("hi"));
+        ui.label(theme::tag("hi").color(theme::TEXT_DIM));
         ui.label(warn(high));
 
-        if hist.peak > 0 {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::dim(format!("peak {}", hist.peak)));
-            });
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let expand_icon = if state.large_view { "⊟" } else { "⊞" };
+            let expand_tip = if state.large_view {
+                "Standard scope height"
+            } else {
+                "Taller scope"
+            };
+            if crate::widgets::icon(ui, expand_icon, state.large_view, expand_tip).clicked() {
+                state.large_view = !state.large_view;
+            }
+            if state.mode != InspectorMapMode::Plot2D
+                && crate::widgets::icon(
+                    ui,
+                    "⟲",
+                    false,
+                    "Reset the 3D camera (or double-click the view)",
+                )
+                .clicked()
+            {
+                state.yaw = -0.65;
+                state.pitch = 0.38;
+                state.zoom = 1.0;
+            }
+        });
     });
 }
 
@@ -264,7 +245,7 @@ fn render_3d_scope(
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 12.0),
         egui::Align2::LEFT_BOTTOM,
-        "Drag to rotate 3D view • Scroll to zoom • Double-click to reset",
+        "Drag to rotate 3D view • Ctrl+scroll to zoom • Double-click to reset",
         egui::FontId::proportional(9.5),
         theme::TEXT_DIM.linear_multiply(0.75),
     );

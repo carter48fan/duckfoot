@@ -156,19 +156,26 @@ You can also **drag a RAW file onto the window**.
 | `C` / `Esc` | toggle crop tool / cancel crop gesture |
 | `[` / `]` | rotate 90° CCW / CW |
 | `H` / `V` | mirror / flip horizontal / vertical |
-| Scroll wheel | zoom about the cursor |
-| Drag the image | pan |
+| Scroll wheel / pinch over the image | zoom about the cursor |
+| Drag the image | pan, once zoomed in (at fit there is nothing to pan) |
+| `←` / `→` | previous / next photo on the shelf |
 | `0` / `1` | fit to window / 100% (1:1) |
 | Drag a slider | live re-render; one undo step per gesture, not per frame |
+| `Shift` while dragging a slider | ten times finer |
+| Double-click a slider or its label | back to default (the tick on the rail) |
 | Drag in the curve box | move the nearest node; endpoints keep their x |
 | Drag in 3D Map / Tonemap | interactive 3D orbit camera (yaw & pitch) |
-| Scroll on 3D viewport | zoom 3D camera view (0.5x..=2.8x) |
+| `Ctrl`+scroll on a 3D view | zoom its camera (a plain wheel scrolls the sidebar) |
 | Double-click on 3D view | reset 3D camera angle and zoom |
-| `▲` / `▼` on module header | reorder module up / down in sidebar |
-| `⚙ Custom` | show/hide modules and manage pipeline ordering |
-| `⤢ Expand` / `⤹ Narrow` | toggle sidebar width between compact (288px) and wide (460px) |
-| `↕ All` | expand all / collapse all inspector sections |
+| Click a module's header | open it and close the others; `Shift`+click opens it alongside |
+| Touch a control in a module that's off | turns the module on |
 | Checkbox by a module name | enable/disable that stage of the chain |
+| `⚙` in the Pipeline header | show/hide and reorder modules; the one-open-at-a-time switch |
+| `↕` in the Pipeline header | expand all / collapse all modules |
+| `◧` / `◫` / `◨` in the top bar | shelf on/off · split view · inspector width (300px ↔ 460px) |
+| Click a History row | jump to that step — undoes or redoes to it |
+| Drag the split divider | move it; at fit, dragging anywhere on the image moves it |
+| Double-click the split divider | centre it |
 
 Hotkeys deliberately do not fire while a text field has focus.
 
@@ -338,13 +345,16 @@ duckfoot/
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
     │   ├── src/params.rs        #   the adjustment stack (plain data + serde)
     │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
-    │   ├── src/shaders/         #   demosaic.wgsl, adjust.wgsl
+    │   ├── src/shaders/         #   demosaic, downsample (preview mips), adjust, histogram
     │   └── examples/            #   probe.rs, bench.rs
     ├── photo-app/               # egui UI — no windowing dependency
-    │   ├── src/lib.rs           #   inspector, undo, shelf, crop, split view
+    │   ├── src/lib.rs           #   layout: shelf, stage, filmstrip, inspector, undo
     │   ├── src/inspector_map_3d.rs # 3D rotatable inspector map & scopes
     │   ├── src/tonemap_3d.rs    #   interactive 3D filmic tonemap & RGB cube
-    │   └── src/theme.rs         #   DESIGN.md look and feel
+    │   ├── src/theme.rs         #   pitch-black palette, fonts, egui visuals
+    │   ├── src/widgets.rs       #   painted controls: chips, rails, module cards
+    │   ├── src/loader.rs        #   background decode: opening photos, thumbnails
+    │   └── assets/fonts/        #   JetBrains Mono, Space Grotesk, Hanken Grotesk (OFL)
     └── duckfoot/                # bootstrap: winit. The only platform crate
 ```
 
@@ -360,6 +370,9 @@ DESIGN.md invariant 8.
 | Area | Symbol | Status | Notes |
 |---|---|---|---|
 | **Decode** | `RawloaderBackend` | Working | Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
+| **Decode** | measured white level | Working | Finds the real clip plateau in the data; Canon's per-ISO saturation no longer turns highlights magenta |
+| **Decode** | DNG `AsShotWhiteXY` | Working | Pixel-style DNGs; matrices interpolated by colour temperature per the DNG spec |
+| **Decode** | EXIF orientation | Working | Opens upright; the camera's turn is the starting geometry, not an edit |
 | **Decode** | `RawDecoder` trait | Working | `rawler` is a drop-in behind it |
 | **Decode** | non-mosaic (`cpp != 1`) | `@stub` | Refuses loudly rather than mis-indexing |
 | **Decode** | float-encoded RAW | `@stub` | Some DNGs; refuses loudly |
@@ -380,16 +393,18 @@ DESIGN.md invariant 8.
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
 | **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
-| **App** | inspector sidebar | Working | Smooth scrolling, module reorder (`▲`/`▼`), customizer, width toggle |
+| **App** | inspector sidebar | Working | Module cards with live values, Customize tab (show/hide, reorder), width toggle |
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
-| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop |
+| **App** | history list | Working | Every undo step labelled by what changed; click a row to jump to it |
+| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded off the UI thread |
+| **App** | filmstrip thumbnails | Working | Built in the background from the mosaic, as shot; the open photo shows its live render |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
-| **App** | before / after split view | Working | Draggable brass divider (`\`), raw baseline vs active stack |
+| **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
 | **App** | export | Working | Export… button, format from the filename |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
-| **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
+| **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
 | **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
 
 ### Measured
@@ -468,12 +483,12 @@ Checked items are done **and verified**, not merely written.
 
 - [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
       near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
-- [ ] Preview at fit-to-window scale; full resolution reserved for export
+- [x] Preview at fit-to-window scale; full resolution reserved for export
 - [x] PNG/JPEG export through the same shader — the real test of invariant 2
 - [x] Live histogram via a compute pass and a 4 KB readback
 - [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
 - [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)
-- [x] Before/after split view with draggable brass divider
+- [x] Before/after split view with draggable divider
 
 ### Stage 3 — Platforms
 
@@ -545,6 +560,10 @@ MIT — see [LICENSE](./LICENSE).
 settled before any binary is distributed. This does not block local development or building
 from source. The alternative, `rawler`, is LGPL-2.1 as well — so this is a question about
 distribution, not about which crate to pick.
+
+The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono,
+Space Grotesk and Hanken Grotesk. Their licences sit beside the files in
+`crates/photo-app/assets/fonts/`.
 
 Duckfoot previously contained code derived from
 [OpenCut](https://github.com/OpenCut-app/OpenCut) (MIT); that code is superseded, and their

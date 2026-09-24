@@ -12,7 +12,7 @@
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use photo_engine::params::Filmic;
 
-use crate::theme;
+use crate::{theme, widgets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tonemap3DMode {
@@ -108,15 +108,13 @@ pub fn render_tonemap_3d(
 ) {
     // Mode switcher and toolbar
     ui.horizontal(|ui| {
-        if ui
-            .selectable_label(state.mode == Tonemap3DMode::Surface, "Surface 3D")
+        if widgets::chip(ui, state.mode == Tonemap3DMode::Surface, "surface")
             .on_hover_text("3D Dynamic Range & Tone Response Surface")
             .clicked()
         {
             state.mode = Tonemap3DMode::Surface;
         }
-        if ui
-            .selectable_label(state.mode == Tonemap3DMode::RgbCube, "RGB Cube 3D")
+        if widgets::chip(ui, state.mode == Tonemap3DMode::RgbCube, "rgb cube")
             .on_hover_text("3D Color Gamut Compression Volume")
             .clicked()
         {
@@ -124,10 +122,13 @@ pub fn render_tonemap_3d(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("↺ 3D")
-                .on_hover_text("Reset 3D camera angle and zoom")
-                .clicked()
+            if widgets::icon(
+                ui,
+                "⟲",
+                false,
+                "Reset the 3D camera (or double-click the view)",
+            )
+            .clicked()
             {
                 state.yaw = -0.65;
                 state.pitch = 0.42;
@@ -138,9 +139,8 @@ pub fn render_tonemap_3d(
 
     // 1-Click Tonemap Presets
     ui.horizontal_wrapped(|ui| {
-        ui.label(theme::dim("presets:"));
-        if ui
-            .small_button("Neutral")
+        ui.label(theme::tag("presets").color(theme::TEXT_DIM));
+        if widgets::chip(ui, false, "neutral")
             .on_hover_text("Balanced photographic tone curve")
             .clicked()
         {
@@ -151,8 +151,7 @@ pub fn render_tonemap_3d(
             filmic.contrast = 1.1;
             *changed = true;
         }
-        if ui
-            .small_button("Dynamic")
+        if widgets::chip(ui, false, "dynamic")
             .on_hover_text("Wide dynamic range with highlight & shadow preservation")
             .clicked()
         {
@@ -163,8 +162,7 @@ pub fn render_tonemap_3d(
             filmic.contrast = 1.0;
             *changed = true;
         }
-        if ui
-            .small_button("Punchy")
+        if widgets::chip(ui, false, "punchy")
             .on_hover_text("High-contrast commercial look with crisp blacks")
             .clicked()
         {
@@ -175,8 +173,7 @@ pub fn render_tonemap_3d(
             filmic.contrast = 1.35;
             *changed = true;
         }
-        if ui
-            .small_button("Film Flat")
+        if widgets::chip(ui, false, "film flat")
             .on_hover_text("Soft shoulder and toe for cinematic film grading")
             .clicked()
         {
@@ -336,11 +333,12 @@ pub fn render_tonemap_3d(
         state.active_handle = None;
     }
 
-    // Scroll zoom
+    // Ctrl+wheel or pinch, which egui reports as a zoom factor. A plain wheel is left
+    // alone: this view sits in a scrolling sidebar, and one gesture must not do both.
     if response.hovered() {
-        let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            state.zoom = (state.zoom * (1.0 + scroll * 0.005)).clamp(0.6, 2.5);
+        let zoom = ui.ctx().input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            state.zoom = (state.zoom * zoom).clamp(0.6, 2.5);
         }
     }
 
@@ -479,7 +477,7 @@ pub fn render_tonemap_3d(
     } else if hovered_handle.is_some() {
         "Click & drag handle to adjust parameter"
     } else {
-        "Drag to rotate 3D view • Scroll to zoom • Double-click to reset"
+        "Drag to rotate 3D view • Ctrl+scroll to zoom • Double-click to reset"
     };
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 14.0),

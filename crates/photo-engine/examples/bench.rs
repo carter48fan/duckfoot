@@ -101,6 +101,26 @@ fn main() -> anyhow::Result<()> {
     let per_frame = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
     println!("slider drag  {per_frame:.2} ms/frame over {N} frames at FULL resolution");
 
+    // The same drag at the preview levels a window actually shows. Level 2 (1/4 per axis)
+    // is what a 24 MP frame gets at fit-to-window on a 1080p–1440p screen.
+    for level in 1..=3 {
+        engine.set_preview_level(&device, level);
+        engine.render(&device, &queue, &stack, None);
+        wait(&device)?;
+        let t = Instant::now();
+        for i in 0..N {
+            stack.exposure.params.ev = (i as f32) * 0.01;
+            engine.render(&device, &queue, &stack, None);
+        }
+        wait(&device)?;
+        let per_frame = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
+        let (w, h) = engine.image().expect("image loaded").preview_size();
+        println!("slider drag  {per_frame:.2} ms/frame at preview level {level} ({w}×{h})");
+    }
+    engine.set_preview_level(&device, 0);
+    engine.render(&device, &queue, &stack, None);
+    wait(&device)?;
+
     // --- read pixels back and prove they are real -------------------------------------
     let image = engine.image().expect("image loaded");
     let bytes = (PATCH * PATCH * 4) as u64;
@@ -176,7 +196,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- export the full frame and read it back off disk --------------------------------
     let t = Instant::now();
-    let exported = engine.export(&device, &queue, Crop::default())?;
+    let exported = engine.export(&device, &queue, &stack, Crop::default())?;
     println!(
         "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -293,13 +313,14 @@ fn main() -> anyhow::Result<()> {
             [-0.5488, 2.4177, -0.8689],
             [0.0203, -0.2783, 1.2581],
         ],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "clipped-green".into(),
     };
     engine.load(&device, &queue, clipped)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let blown = engine.export(&device, &queue, Crop::default())?;
+    let blown = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
     // Sample away from the border so the demosaic has full neighbourhoods.
     let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
     let px = &blown.rgba[mid..mid + 3];
@@ -340,13 +361,14 @@ fn main() -> anyhow::Result<()> {
         white: [white as f32; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "neutral-stripes".into(),
     };
     engine.load(&device, &queue, stripes)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let out = engine.export(&device, &queue, Crop::default())?;
+    let out = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
 
     // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
     let mut worst = 0i32;
@@ -389,6 +411,7 @@ fn main() -> anyhow::Result<()> {
         white: [4095.0; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "flat".into(),
     };
@@ -404,9 +427,9 @@ fn main() -> anyhow::Result<()> {
             break;
         }
     }
-    let hist = engine.histogram();
+    let hist = engine.histogram().clone();
     let expected = {
-        let flat_px = engine.export(&device, &queue, Crop::default())?;
+        let flat_px = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
         flat_px.rgba[1] as usize
     };
     let populated: Vec<usize> = hist
