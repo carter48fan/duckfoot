@@ -5,24 +5,35 @@
 //! back over a channel. The GPU upload stays on the UI thread — it has to, the device is
 //! the UI's — but it is a copy, not a decode.
 //!
-//! Thumbnails are built on the CPU straight from the mosaic or embedded fast JPEG preview:
-//! a block average per colour, the camera's own white balance and matrix, and the sRGB curve.
-//! No GPU readback is involved (DESIGN.md invariant 4), and none of the user's edits are applied — a
-//! thumbnail shows the file as shot. Only the open photo's tile shows the live render.
+//! Thumbnails come from the JPEG preview the camera embedded, decoded at reduced size
+//! straight out of the DCT (`photo_engine::preview`) — a few milliseconds, against tens to
+//! hundreds for the mosaic. Only a file with no usable preview is built from the mosaic:
+//! a block average per colour, the camera's own white balance and matrix, and the sRGB
+//! curve. No GPU readback is involved (DESIGN.md invariant 4), and none of the user's
+//! edits are applied — a thumbnail shows the file as shot. Only the open photo's tile
+//! shows the live render.
+//!
+//! Opening a photo does two things at once: the full decode, and the same embedded
+//! preview at stage size, which is on screen long before the decode lands.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use photo_engine::{
-    decode_raster, decode_raw, extract_embedded_thumbnail, is_raster_path, CfaImage, Geometry,
-    RasterImage,
+    decode_jpeg_scaled, decode_raster, decode_raw, is_raster_path, load_embedded_preview, CfaImage,
+    Geometry, Preview, RasterImage,
 };
 
 /// Long side of a thumbnail, in pixels. A tile is 112×70 points; this covers it at 2×.
 const THUMB_SIDE: usize = 256;
+
+/// Long side of the stand-in shown on the stage while a photo decodes. Most cameras embed
+/// something between 1600 px and full resolution; this takes the former as it is and
+/// decodes the latter at 1/2 or 1/4.
+const STAGE_PREVIEW_SIDE: u32 = 2048;
 
 pub enum LoadedSource {
     Raw(CfaImage),
@@ -46,9 +57,18 @@ pub enum Done {
         result: Result<LoadedSource, String>,
         decode_ms: f32,
     },
+    /// The camera's embedded rendering of a photo still being opened, to show until the
+    /// decode lands. Arrives before `Opened` for the same generation, or not at all.
+    Preview {
+        path: PathBuf,
+        generation: u64,
+        image: egui::ColorImage,
+    },
     Thumbnail {
         path: PathBuf,
-        image: egui::ColorImage,
+        /// `None` if nothing could be built; the request is still answered, so the UI
+        /// knows it is no longer outstanding.
+        image: Option<egui::ColorImage>,
     },
 }
 
@@ -61,15 +81,47 @@ pub struct Loader {
     repaint: Arc<Mutex<Option<egui::Context>>>,
 }
 
+/// Closed while a photo is being opened. Thumbnail workers wait at it between jobs, so
+/// the photo the user asked for never shares the CPU, the disk or rawler's thread pool
+/// with a filmstrip full of photos they did not.
+#[derive(Default)]
+struct Gate {
+    opening: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Gate {
+    fn set_opening(&self, opening: bool) {
+        if let Ok(mut state) = self.opening.lock() {
+            *state = opening;
+        }
+        self.changed.notify_all();
+    }
+
+    fn wait_until_idle(&self) {
+        let Ok(mut state) = self.opening.lock() else {
+            return;
+        };
+        while *state {
+            state = match self.changed.wait(state) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+        }
+    }
+}
+
 impl Loader {
     pub fn new() -> Self {
         let (done_tx, done) = mpsc::channel();
         let repaint: Arc<Mutex<Option<egui::Context>>> = Arc::default();
+        let gate = Arc::new(Gate::default());
 
         let (open_tx, open_rx) = mpsc::channel::<(PathBuf, u64)>();
         {
             let done_tx = done_tx.clone();
             let repaint = repaint.clone();
+            let gate = gate.clone();
             std::thread::Builder::new()
                 .name("duckfoot-open".into())
                 .spawn(move || {
@@ -80,49 +132,88 @@ impl Loader {
                             job = newer;
                         }
                         let (path, generation) = job;
+                        gate.set_opening(true);
                         let started = Instant::now();
 
-                        let result: Result<LoadedSource, String> = if is_raster_path(&path) {
-                            fs::read(&path)
-                                .map_err(|e| format!("{e:#}"))
-                                .and_then(|bytes| {
-                                    decode_raster(&bytes)
-                                        .map(LoadedSource::Raster)
-                                        .map_err(|e| format!("{e:#}"))
-                                })
-                        } else {
-                            decode_raw(&path)
-                                .map(LoadedSource::Raw)
-                                .map_err(|e| format!("{e:#}"))
-                        };
+                        std::thread::scope(|scope| {
+                            // The stand-in, alongside the decode rather than ahead of it:
+                            // it is only worth showing if it beats the real thing.
+                            if !is_raster_path(&path) {
+                                let (path, done_tx, repaint) = (&path, &done_tx, &repaint);
+                                scope.spawn(move || {
+                                    let preview = load_embedded_preview(path, STAGE_PREVIEW_SIDE);
+                                    if let Some(preview) = preview {
+                                        let _ = done_tx.send(Done::Preview {
+                                            path: path.clone(),
+                                            generation,
+                                            image: preview_image(preview, None),
+                                        });
+                                        wake(repaint);
+                                    }
+                                });
+                            }
 
-                        let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
-                        let _ = done_tx.send(Done::Opened {
-                            path,
-                            generation,
-                            result,
-                            decode_ms,
+                            let result: Result<LoadedSource, String> = if is_raster_path(&path) {
+                                fs::read(&path)
+                                    .map_err(|e| format!("{e:#}"))
+                                    .and_then(|bytes| {
+                                        decode_raster(&bytes)
+                                            .map(LoadedSource::Raster)
+                                            .map_err(|e| format!("{e:#}"))
+                                    })
+                            } else {
+                                decode_raw(&path)
+                                    .map(LoadedSource::Raw)
+                                    .map_err(|e| format!("{e:#}"))
+                            };
+
+                            let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
+                            let _ = done_tx.send(Done::Opened {
+                                path: path.clone(),
+                                generation,
+                                result,
+                                decode_ms,
+                            });
+                            wake(&repaint);
                         });
-                        wake(&repaint);
+                        gate.set_opening(false);
                     }
                 })
                 .expect("could not start the decode thread");
         }
 
+        // Thumbnails are independent small jobs: one worker per spare core. A preview is
+        // a few milliseconds of mostly single-threaded JPEG work, so a single worker
+        // leaves every other core idle while a folder's filmstrip fills in one by one.
         let (thumb_tx, thumb_rx) = mpsc::channel::<PathBuf>();
-        {
-            let repaint = repaint.clone();
+        let thumb_rx = Arc::new(Mutex::new(thumb_rx));
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1))
+            .unwrap_or(1)
+            .clamp(1, 8);
+        for i in 0..workers {
+            let (done_tx, repaint, gate, thumb_rx) = (
+                done_tx.clone(),
+                repaint.clone(),
+                gate.clone(),
+                thumb_rx.clone(),
+            );
             std::thread::Builder::new()
-                .name("duckfoot-thumbs".into())
-                .spawn(move || {
-                    while let Ok(path) = thumb_rx.recv() {
-                        if let Some(image) = generate_thumbnail(&path) {
-                            let _ = done_tx.send(Done::Thumbnail { path, image });
-                            wake(&repaint);
-                        }
-                    }
+                .name(format!("duckfoot-thumbs-{i}"))
+                .spawn(move || loop {
+                    gate.wait_until_idle();
+                    let job = match thumb_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(path) = job else { return };
+                    // An open may have started while this worker sat waiting for a job.
+                    gate.wait_until_idle();
+                    let image = generate_thumbnail(&path);
+                    let _ = done_tx.send(Done::Thumbnail { path, image });
+                    wake(&repaint);
                 })
-                .expect("could not start the thumbnail thread");
+                .expect("could not start a thumbnail thread");
         }
 
         Self {
@@ -160,47 +251,69 @@ fn wake(repaint: &Mutex<Option<egui::Context>>) {
 
 fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
     if is_raster_path(path) {
-        if let Ok(bytes) = fs::read(path) {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                return Some(downsample_to_thumb(img));
-            }
+        let bytes = fs::read(path).ok()?;
+        // A JPEG is decoded at reduced size in the DCT, like a RAW's preview is; a 24 MP
+        // camera JPEG decoded at full size and then shrunk is ~10× the work.
+        if let Some((width, height, rgb)) = decode_jpeg_scaled(&bytes, THUMB_SIDE as u32) {
+            let preview = Preview {
+                width,
+                height,
+                rgb,
+                orientation: Geometry::default(),
+            };
+            return Some(preview_image(preview, Some(THUMB_SIDE)));
         }
-    } else {
-        // First try fast embedded thumbnail extraction (< 2ms)
-        if let Ok(bytes) = fs::read(path) {
-            if let Some(jpeg_bytes) = extract_embedded_thumbnail(&bytes) {
-                if let Ok(img) = image::load_from_memory(&jpeg_bytes) {
-                    return Some(downsample_to_thumb(img));
-                }
-            }
-        }
-        // Fall back to CFA block-average if embedded preview is absent
-        if let Ok(cfa) = decode_raw(path) {
-            return Some(thumbnail(&cfa));
-        }
+        let img = image::load_from_memory(&bytes).ok()?;
+        return Some(downsample_to_thumb(img));
     }
-    None
+    if let Some(preview) = load_embedded_preview(path, THUMB_SIDE as u32) {
+        return Some(preview_image(preview, Some(THUMB_SIDE)));
+    }
+    // No preview this can read: build one from the mosaic.
+    decode_raw(path).ok().map(|cfa| thumbnail(&cfa))
+}
+
+/// A camera preview as an egui image, shrunk to `side` on its long edge if given, and
+/// turned the way the camera says to view it.
+fn preview_image(preview: Preview, side: Option<usize>) -> egui::ColorImage {
+    let Preview {
+        width,
+        height,
+        rgb,
+        orientation,
+    } = preview;
+    let img = image::RgbImage::from_raw(width, height, rgb)
+        .map(image::DynamicImage::ImageRgb8)
+        .unwrap_or_else(|| image::DynamicImage::new_rgb8(1, 1));
+    let img = match side {
+        Some(side) => downsample_to_thumb_side(img, side),
+        None => to_color_image(&img),
+    };
+    orient(img, &orientation)
 }
 
 fn downsample_to_thumb(img: image::DynamicImage) -> egui::ColorImage {
+    downsample_to_thumb_side(img, THUMB_SIDE)
+}
+
+fn downsample_to_thumb_side(img: image::DynamicImage, side: usize) -> egui::ColorImage {
     let (orig_w, orig_h) = (img.width(), img.height());
     let max_dim = orig_w.max(orig_h);
-    let (tw, th) = if max_dim > THUMB_SIDE as u32 {
-        let scale = THUMB_SIDE as f32 / max_dim as f32;
-        (
-            ((orig_w as f32 * scale).round() as u32).max(1),
-            ((orig_h as f32 * scale).round() as u32).max(1),
-        )
-    } else {
-        (orig_w.max(1), orig_h.max(1))
-    };
-    let resized = img.resize(tw, th, image::imageops::FilterType::Triangle);
-    let rgba = resized.to_rgba8();
-    let pixels: Vec<egui::Color32> = rgba
-        .pixels()
-        .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-        .collect();
-    egui::ColorImage::new([tw as usize, th as usize], pixels)
+    if max_dim <= side as u32 {
+        return to_color_image(&img);
+    }
+    let scale = side as f32 / max_dim as f32;
+    let (tw, th) = (
+        ((orig_w as f32 * scale).round() as u32).max(1),
+        ((orig_h as f32 * scale).round() as u32).max(1),
+    );
+    to_color_image(&img.resize_exact(tw, th, image::imageops::FilterType::Triangle))
+}
+
+fn to_color_image(img: &image::DynamicImage) -> egui::ColorImage {
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
 }
 
 /// A small sRGB rendering of the mosaic as shot: block-averaged per CFA colour, white
@@ -328,6 +441,40 @@ mod tests {
         assert_eq!(img.pixels[1].r(), 0);
         // Source bottom-left (0,1) = index 3 ends up top-left.
         assert_eq!(img.pixels[0].r(), 3);
+    }
+
+    /// A TIFF-structured "RAW": IFD0 holds only an orientation, and an ordinary JPEG
+    /// preview of `w × h` follows, the way cameras lay out their files.
+    fn tiff_raw_with_preview(orientation: u16, w: u32, h: u32) -> Vec<u8> {
+        let mut file = b"II*\0".to_vec();
+        file.extend(8u32.to_le_bytes());
+        file.extend(1u16.to_le_bytes());
+        file.extend(0x0112u16.to_le_bytes());
+        file.extend(3u16.to_le_bytes());
+        file.extend(1u32.to_le_bytes());
+        file.extend((orientation as u32).to_le_bytes());
+        file.extend(0u32.to_le_bytes());
+        let img = image::RgbImage::from_fn(w, h, |x, _| image::Rgb([x as u8, 90, 200]));
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 85)
+            .encode_image(&img)
+            .unwrap();
+        file
+    }
+
+    #[test]
+    fn a_raw_thumbnail_comes_from_its_preview_turned_upright() {
+        let dir = std::env::temp_dir().join(format!("duckfoot-thumb-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (landscape, portrait) = (dir.join("a.arw"), dir.join("b.arw"));
+        fs::write(&landscape, tiff_raw_with_preview(1, 1616, 1080)).unwrap();
+        // EXIF 6: shot with the camera turned, viewed after a clockwise quarter turn.
+        fs::write(&portrait, tiff_raw_with_preview(6, 1616, 1080)).unwrap();
+
+        let thumb = generate_thumbnail(&landscape).expect("no thumbnail");
+        assert_eq!(thumb.size, [THUMB_SIDE, 171]);
+        let thumb = generate_thumbnail(&portrait).expect("no thumbnail");
+        assert_eq!(thumb.size, [171, THUMB_SIDE]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

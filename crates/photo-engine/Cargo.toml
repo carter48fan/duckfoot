@@ -15,6 +15,14 @@ image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 half = { version = "2", features = ["bytemuck"] }
+# Parallel white-level histogram. Already in the tree through rawler.
+rayon = "1"
+# Finding embedded JPEG previews inside a RAW container.
+memchr = "2"
+# The one JPEG decoder that can scale in the DCT domain: a 45 MP embedded preview decoded
+# at 1/8 skips nearly all of the IDCT, which is most of the cost of a thumbnail.
+jpeg-decoder = { version = "0.3", default-features = false }
+memmap2 = "0.9"
 
 [dev-dependencies]
 pollster = "1"

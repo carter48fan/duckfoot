@@ -164,7 +164,7 @@ fn main() -> anyhow::Result<()> {
     wait(&device)?;
 
     let data = slice.get_mapped_range()?;
-    let px = data.chunks_exact(4);
+    let px = data.as_chunks::<4>().0;
     let n = px.len() as f64;
     let (mut r, mut g, mut b) = (0.0f64, 0.0, 0.0);
     let mut black = 0usize;
@@ -261,7 +261,9 @@ fn main() -> anyhow::Result<()> {
     //   no filmic:                    stddev ~33
     let luma: Vec<f64> = exported
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64)
         .collect();
     let mean_luma = luma.iter().sum::<f64>() / luma.len() as f64;

@@ -357,6 +357,11 @@ pub struct PhotoApp {
     loading: Option<(PathBuf, Instant)>,
     thumbs: HashMap<PathBuf, egui::TextureHandle>,
     thumbs_requested: HashSet<PathBuf>,
+    /// Thumbnail requests the workers have answered, including those that failed.
+    thumbs_answered: usize,
+    /// The camera's embedded preview of the photo being opened, shown on the stage until
+    /// its decode lands.
+    stage_preview: Option<(PathBuf, egui::TextureHandle)>,
     /// The before/after divider is being dragged; the image must not pan meanwhile.
     split_dragging: bool,
     /// A module just opened while the others closed; scroll it into view next frame,
@@ -414,6 +419,8 @@ impl PhotoApp {
             loading: None,
             thumbs: HashMap::new(),
             thumbs_requested: HashSet::new(),
+            thumbs_answered: 0,
+            stage_preview: None,
             split_dragging: false,
             reveal_section: None,
             selection: dam::SelectionModel::new(),
@@ -876,7 +883,7 @@ impl PhotoApp {
 
     /// A decode is running, or thumbnails are still being built.
     pub fn is_busy(&self) -> bool {
-        self.loading.is_some() || self.thumbs_requested.len() > self.thumbs.len()
+        self.loading.is_some() || self.thumbs_requested.len() > self.thumbs_answered
     }
 
     fn sidecar_state(&self) -> SidecarState {
@@ -1134,6 +1141,7 @@ impl PhotoApp {
                     decode_ms,
                 } if generation == self.open_generation => {
                     self.loading = None;
+                    self.stage_preview = None;
                     match result {
                         Ok(source) => {
                             self.decode_ms = decode_ms;
@@ -1145,10 +1153,27 @@ impl PhotoApp {
                 }
                 // Superseded by a newer request while it was decoding.
                 loader::Done::Opened { .. } => {}
+                loader::Done::Preview {
+                    path,
+                    generation,
+                    image,
+                } => {
+                    // Only while its own decode is still running; a preview that loses the
+                    // race to the real image has nothing left to stand in for.
+                    let current = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
+                    if generation == self.open_generation && current {
+                        let texture =
+                            ctx.load_texture("stage preview", image, egui::TextureOptions::LINEAR);
+                        self.stage_preview = Some((path, texture));
+                    }
+                }
                 loader::Done::Thumbnail { path, image } => {
-                    let name = format!("thumb:{}", path.display());
-                    let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
-                    self.thumbs.insert(path, texture);
+                    self.thumbs_answered += 1;
+                    if let Some(image) = image {
+                        let name = format!("thumb:{}", path.display());
+                        let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                        self.thumbs.insert(path, texture);
+                    }
                 }
             }
         }
@@ -2797,6 +2822,12 @@ impl PhotoApp {
                     .inner_margin(Margin::same(16)),
             )
             .show(ui, |ui| {
+                if let Some((path, preview)) = &self.stage_preview {
+                    if self.loading.as_ref().is_some_and(|(p, _)| p == path) {
+                        stage_preview(ui, preview, path);
+                        return;
+                    }
+                }
                 if self.texture_id.is_none() || self.engine.image().is_none() {
                     self.empty_stage(ui, gpu);
                     return;
@@ -4849,6 +4880,40 @@ fn shelf_row(
     }
 
     (response, remove.clicked())
+}
+
+/// The camera's own rendering of the photo being opened, fitted to the stage, until the
+/// real decode replaces it. Not interactive: there is nothing to edit yet.
+fn stage_preview(ui: &mut egui::Ui, preview: &egui::TextureHandle, path: &std::path::Path) {
+    let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+    let [w, h] = preview.size();
+    if rect.width() < 1.0 || rect.height() < 1.0 || w == 0 || h == 0 {
+        return;
+    }
+    let img = egui::vec2(w as f32, h as f32);
+    let fit = (rect.width() / img.x).min(rect.height() / img.y);
+    let dest = egui::Rect::from_center_size(rect.center(), img * fit);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.image(
+        preview.id(),
+        dest,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    painter.rect_stroke(
+        dest,
+        0.0,
+        Stroke::new(1.0, theme::RAIL),
+        egui::StrokeKind::Outside,
+    );
+    hud_badge(
+        &painter,
+        dest.left_top() + vec2(12.0, 12.0),
+        Align2::LEFT_TOP,
+        &format!("opening {}…", file_name(path)),
+        theme::ACCENT,
+        theme::ACCENT,
+    );
 }
 
 /// A filmstrip frame with thumbnail preview, rating stars, flag badge, and selection border.

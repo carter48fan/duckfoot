@@ -70,65 +70,43 @@ impl RasterImage {
     }
 }
 
-/// Quickly extract an embedded JPEG preview from a RAW or raster file.
-/// Takes < 2 ms on modern CPUs, avoiding expensive full Bayer demosaicing.
-pub fn extract_embedded_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
-    // Check if the file is itself a JPEG:
-    if bytes.len() > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-        return Some(bytes.to_vec());
-    }
-
-    // Search for embedded JPEG signatures in TIFF/RAW container (SOI: 0xFF, 0xD8, 0xFF)
-    let limit = bytes.len().min(8 * 1024 * 1024); // search first 8 MB
-    let mut i = 0;
-    while i + 3 < limit {
-        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF {
-            let start = i;
-            let mut j = start + 2;
-            let end_search = bytes.len().min(start + 4 * 1024 * 1024);
-            while j + 1 < end_search {
-                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
-                    let len = j + 2 - start;
-                    if len > 8192 {
-                        return Some(bytes[start..j + 2].to_vec());
-                    }
-                }
-                j += 1;
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
 /// Decode standard raster image formats into linear camera space.
 pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
-    let img = image::load_from_memory(bytes).context("decoding raster image format")?;
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
+    use rayon::prelude::*;
 
-    // Precomputed sRGB byte (0..=255) -> linear f32 LUT
-    let mut lut = [0.0f32; 256];
-    for (i, v) in lut.iter_mut().enumerate() {
+    let img = image::load_from_memory(bytes).context("decoding raster image format")?;
+    // Free for the JPEG case, which decodes to RGB8 already. Alpha is not carried: the
+    // sensor texture's alpha is the highlight-reconstruction neutral, not coverage.
+    let rgb = img.into_rgb8();
+    let (width, height) = rgb.dimensions();
+
+    // sRGB byte → linear, already as half-float bits: one table lookup per channel instead
+    // of a transfer function and a float conversion per channel per pixel.
+    let lut: [[u8; 2]; 256] = std::array::from_fn(|i| {
         let c = i as f32 / 255.0;
-        *v = if c <= 0.04045 {
+        let linear = if c <= 0.04045 {
             c / 12.92
         } else {
             ((c + 0.055) / 1.055).powf(2.4)
         };
-    }
+        half::f16::from_f32(linear).to_le_bytes()
+    });
 
-    // 4 half-floats per pixel = 8 bytes per pixel
-    let mut data = Vec::with_capacity(width as usize * height as usize * 8);
-    for pixel in rgba.pixels() {
-        let r = half::f16::from_f32(lut[pixel[0] as usize]);
-        let g = half::f16::from_f32(lut[pixel[1] as usize]);
-        let b = half::f16::from_f32(lut[pixel[2] as usize]);
-        let a = half::f16::ZERO; // highlight reconstruction neutral is 0.0
-        data.extend_from_slice(&r.to_le_bytes());
-        data.extend_from_slice(&g.to_le_bytes());
-        data.extend_from_slice(&b.to_le_bytes());
-        data.extend_from_slice(&a.to_le_bytes());
+    // 4 half-floats per pixel = 8 bytes per pixel; A = 0.0, the reconstruction neutral.
+    let mut data = vec![0u8; width as usize * height as usize * 8];
+    let row_in = width as usize * 3;
+    let row_out = width as usize * 8;
+    if row_in > 0 {
+        data.par_chunks_mut(row_out)
+            .zip(rgb.as_raw().par_chunks(row_in))
+            .for_each(|(out, src)| {
+                let (texels, pixels) = (out.as_chunks_mut::<8>().0, src.as_chunks::<3>().0);
+                for (o, p) in texels.iter_mut().zip(pixels) {
+                    o[0..2].copy_from_slice(&lut[p[0] as usize]);
+                    o[2..4].copy_from_slice(&lut[p[1] as usize]);
+                    o[4..6].copy_from_slice(&lut[p[2] as usize]);
+                }
+            });
     }
 
     Ok(RasterImage {
@@ -158,29 +136,28 @@ pub struct RawlerBackend;
 
 impl RawDecoder for RawlerBackend {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        let mut img = decode_reader_rawler(bytes, None)?;
-        if img.wb_missing {
-            if let Some(dng) = dng::colour(bytes) {
-                img.cfa.wb = dng.wb;
-                img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
-            }
-        }
-        Ok(img.cfa)
+        decode_source_rawler(&RawSource::new_from_slice(bytes))
     }
 
+    /// Memory-mapped, not read: `fs::read` followed by `RawSource::new_from_slice` holds
+    /// the whole file in memory twice and copies it twice before decoding starts, which
+    /// on a 60 MB RAW is several times the cost of an uncompressed decode itself.
     fn decode_file(&self, path: &Path) -> Result<CfaImage> {
-        let bytes = std::fs::read(path)
+        let source = RawSource::new(path)
             .with_context(|| format!("{}: could not be read", path.display()))?;
-        let mut img = decode_reader_rawler(&bytes, Some(path))
-            .with_context(|| format!("{}", path.display()))?;
-        if img.wb_missing {
-            if let Some(dng) = dng::colour(&bytes) {
-                img.cfa.wb = dng.wb;
-                img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
-            }
-        }
-        Ok(img.cfa)
+        decode_source_rawler(&source).with_context(|| format!("{}", path.display()))
     }
+}
+
+fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
+    let mut img = decode_reader_rawler(source)?;
+    if img.wb_missing {
+        if let Some(dng) = dng::colour(source.buf()) {
+            img.cfa.wb = dng.wb;
+            img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+        }
+    }
+    Ok(img.cfa)
 }
 
 /// Default decoder: tries `rawler` first (~2,500 modern cameras including Sony A7 IV),
@@ -238,7 +215,8 @@ struct Decoded {
 }
 
 fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
-    let raw = rawloader::decode(reader).map_err(|e| anyhow!("not a supported RAW file: {e:?}"))?;
+    let mut raw =
+        rawloader::decode(reader).map_err(|e| anyhow!("not a supported RAW file: {e:?}"))?;
 
     // `cpp == 3` means the file is already demosaiced RGB (Foveon, some DNGs). Indexing it
     // as a mosaic is exactly the bug the last decoder shipped, so refuse loudly instead.
@@ -251,14 +229,15 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
         );
     }
 
-    let samples = match raw.data {
-        rawloader::RawImageData::Integer(ref d) => d,
-        rawloader::RawImageData::Float(_) => bail!(
-            "{} {}: float-encoded RAW is not supported yet (@stub)",
-            raw.make,
-            raw.model
-        ),
-    };
+    let samples =
+        match std::mem::replace(&mut raw.data, rawloader::RawImageData::Integer(Vec::new())) {
+            rawloader::RawImageData::Integer(d) => d,
+            rawloader::RawImageData::Float(_) => bail!(
+                "{} {}: float-encoded RAW is not supported yet (@stub)",
+                raw.make,
+                raw.model
+            ),
+        };
 
     // crops are [top, right, bottom, left]. Skipping this leaves the masked black sensor
     // border in the frame.
@@ -282,11 +261,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
         );
     }
 
-    let mut data = Vec::with_capacity(width * height);
-    for row in 0..height {
-        let start = (row + ct) * src_w + cl;
-        data.extend_from_slice(&samples[start..start + width]);
-    }
+    let data = crop_in_place(samples, src_w, cl, ct, width, height);
 
     // Cropping by a non-even offset rotates the mosaic phase. `shift` is rawloader's own
     // correction for exactly this; guessing RGGB here swaps red and blue on any BGGR,
@@ -370,6 +345,16 @@ fn orientation_geometry(o: rawloader::Orientation) -> Geometry {
     }
 }
 
+/// The EXIF orientation of a TIFF-structured RAW (most of them: ARW, NEF, CR2, DNG,
+/// PEF…), read without decoding anything. `None` for other containers.
+pub(crate) fn tiff_orientation(bytes: &[u8]) -> Option<Geometry> {
+    const ORIENTATION: u16 = 0x0112;
+    let v = dng::tag(bytes, ORIENTATION)?;
+    Some(orientation_geometry_rawler(rawler::Orientation::from_u16(
+        v as u16,
+    )))
+}
+
 fn orientation_geometry_rawler(o: rawler::Orientation) -> Geometry {
     use rawler::Orientation as O;
     let (quarter_turns, mirror_h, mirror_v) = match o {
@@ -421,12 +406,8 @@ fn extract_xyz_to_cam_rawler(raw: &rawler::RawImage) -> [[f32; 3]; 4] {
     [[0.0; 3]; 4]
 }
 
-fn decode_reader_rawler(bytes: &[u8], path: Option<&Path>) -> Result<Decoded> {
-    let mut raw_source = RawSource::new_from_slice(bytes);
-    if let Some(p) = path {
-        raw_source = raw_source.with_path(p);
-    }
-    let raw = rawler::decode(&raw_source, &RawDecodeParams::default())
+fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
+    let mut raw = rawler::decode(raw_source, &RawDecodeParams::default())
         .map_err(|e| anyhow!("not a supported RAW file (rawler): {e:?}"))?;
 
     if raw.cpp != 1 {
@@ -438,8 +419,9 @@ fn decode_reader_rawler(bytes: &[u8], path: Option<&Path>) -> Result<Decoded> {
         );
     }
 
-    let samples = match raw.data {
-        rawler::RawImageData::Integer(ref d) => d,
+    let samples = match std::mem::replace(&mut raw.data, rawler::RawImageData::Integer(Vec::new()))
+    {
+        rawler::RawImageData::Integer(d) => d,
         rawler::RawImageData::Float(_) => bail!(
             "{} {}: float-encoded RAW is not supported yet (@stub)",
             raw.make,
@@ -472,11 +454,7 @@ fn decode_reader_rawler(bytes: &[u8], path: Option<&Path>) -> Result<Decoded> {
         bail!("empty sensor dimensions after crop: {width}x{height}");
     }
 
-    let mut data = Vec::with_capacity(width * height);
-    for row in 0..height {
-        let start = (row + ct) * src_w + cl;
-        data.extend_from_slice(&samples[start..start + width]);
-    }
+    let data = crop_in_place(samples, src_w, cl, ct, width, height);
 
     let raw_cfa = match &raw.photometric {
         rawler::rawimage::RawPhotometricInterpretation::Cfa(cfg) => cfg.cfa.clone(),
@@ -550,6 +528,30 @@ fn decode_reader_rawler(bytes: &[u8], path: Option<&Path>) -> Result<Decoded> {
     })
 }
 
+/// Cut the `width × height` window at (`left`, `top`) out of a `src_w`-wide mosaic,
+/// reusing its buffer. Each row only ever moves toward the front, so a forward pass of
+/// overlapping moves is safe, and a full-frame "crop" costs nothing at all — rather than
+/// a second sensor-sized allocation and copy per open.
+fn crop_in_place(
+    mut samples: Vec<u16>,
+    src_w: usize,
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u16> {
+    if left == 0 && top == 0 && width == src_w {
+        samples.truncate(width * height);
+        return samples;
+    }
+    for row in 0..height {
+        let from = (row + top) * src_w + left;
+        samples.copy_within(from..from + width, row * width);
+    }
+    samples.truncate(width * height);
+    samples
+}
+
 /// The level the sensor actually clipped at, where the data shows one.
 ///
 /// A camera database gives one white level per model, but sensors do not clip at one
@@ -570,14 +572,69 @@ fn measured_white(
     black: &[f32; 4],
     declared: &[f32; 4],
 ) -> [f32; 4] {
-    let mut hist = vec![[0u32; 3]; 65536];
-    for (row, line) in data.chunks_exact(width).enumerate() {
-        let pattern = [cfa2x2[(row & 1) * 2], cfa2x2[(row & 1) * 2 + 1]];
-        for (col, &v) in line.iter().enumerate() {
-            hist[v as usize][pattern[col & 1] as usize] += 1;
-        }
-    }
+    let hist = top_histogram(data, width, cfa2x2, black, declared);
+    plateau_white(&hist, black, declared)
+}
 
+/// Photosite counts per value and CFA colour, for the values the plateau search in
+/// `plateau_white` can ever look at; zero below that.
+///
+/// That search gives up on any colour whose top sits in the bottom half of its range, and
+/// then looks at most 8 tolerances (≤ 8 × 66 values) below the top. So nothing under the
+/// lowest half-range mark, less that margin, can change its answer — and in a normally
+/// exposed photo that is nearly every photosite. Skipping them avoids a scattered
+/// increment per photosite, and rows are split across threads; together this takes the
+/// pass from the single largest CPU cost of an open to a small one.
+fn top_histogram(
+    data: &[u16],
+    width: usize,
+    cfa2x2: &[u32; 4],
+    black: &[f32; 4],
+    declared: &[f32; 4],
+) -> Vec<[u32; 3]> {
+    use rayon::prelude::*;
+
+    let floor = (0..3)
+        .map(|c| black[c] + 0.5 * (declared[c] - black[c]))
+        .fold(f32::MAX, f32::min);
+    let lo = (floor.floor() as i64 - 8 * 66 - 2).clamp(0, 65535) as u16;
+    let bins = 65536 - lo as usize;
+
+    // Even row counts per job, so every job starts on the same CFA row phase.
+    let rows_per_job = 64;
+    let mut top = data
+        .par_chunks((width * rows_per_job).max(1))
+        .fold(
+            || vec![[0u32; 3]; bins],
+            |mut hist, block| {
+                for (row, line) in block.chunks_exact(width).enumerate() {
+                    let pattern = [cfa2x2[(row & 1) * 2], cfa2x2[(row & 1) * 2 + 1]];
+                    for (col, &v) in line.iter().enumerate() {
+                        if v >= lo {
+                            hist[(v - lo) as usize][pattern[col & 1] as usize] += 1;
+                        }
+                    }
+                }
+                hist
+            },
+        )
+        .reduce_with(|mut a, b| {
+            for (x, y) in a.iter_mut().zip(&b) {
+                for c in 0..3 {
+                    x[c] += y[c];
+                }
+            }
+            a
+        })
+        .unwrap_or_else(|| vec![[0u32; 3]; bins]);
+
+    let mut hist = vec![[0u32; 3]; lo as usize];
+    hist.append(&mut top);
+    hist
+}
+
+/// The white level per CFA colour, given a histogram of the mosaic.
+fn plateau_white(hist: &[[u32; 3]], black: &[f32; 4], declared: &[f32; 4]) -> [f32; 4] {
     let mut plateau = [None::<f32>; 3];
     for (c, found) in plateau.iter_mut().enumerate() {
         let count = |v: usize| hist[v][c] as u64;
@@ -696,6 +753,11 @@ mod dng {
     const CALIBRATION_ILLUMINANT_1: u16 = 0xC65A;
     const CALIBRATION_ILLUMINANT_2: u16 = 0xC65B;
     const SUB_IFDS: u16 = 0x014A;
+
+    /// The first value of a numeric tag in any TIFF-structured file, DNG or not.
+    pub fn tag(bytes: &[u8], tag: u16) -> Option<f64> {
+        Tiff::new(bytes)?.find(tag)?.first().copied()
+    }
 
     /// As-shot white balance and a matching colour matrix, if the file has
     /// `AsShotWhiteXY` and at least one `ColorMatrix`.
@@ -991,6 +1053,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raster_pixels_become_linear_half_floats() {
+        let img = image::RgbImage::from_fn(3, 2, |x, y| {
+            image::Rgb([(x * 100) as u8, (y * 255) as u8, 188])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img.clone())
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let out = decode_raster(&png).unwrap();
+        assert_eq!((out.width, out.height), (3, 2));
+        let to_linear = |v: u8| {
+            let c = v as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for (i, p) in img.pixels().enumerate() {
+            let texel = &out.data[i * 8..i * 8 + 8];
+            let half = |k: usize| half::f16::from_le_bytes([texel[k], texel[k + 1]]).to_f32();
+            for c in 0..3 {
+                assert!(
+                    (half(c * 2) - to_linear(p[c])).abs() < 1e-3,
+                    "pixel {i} channel {c}"
+                );
+            }
+            assert_eq!(half(6), 0.0);
+        }
+    }
+
+    #[test]
     fn inverts_a_known_matrix() {
         let m = [[2.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 8.0]];
         let inv = invert3(&m).unwrap();
@@ -1123,6 +1217,59 @@ mod tests {
         assert_eq!(white[0], 13583.0);
         assert_eq!(white[1], 13583.0);
         assert_eq!(white[2], 13583.0);
+    }
+
+    /// The histogram as it was built before `top_histogram`: every photosite, one thread.
+    fn full_histogram(data: &[u16], width: usize, cfa2x2: &[u32; 4]) -> Vec<[u32; 3]> {
+        let mut hist = vec![[0u32; 3]; 65536];
+        for (row, line) in data.chunks_exact(width).enumerate() {
+            let pattern = [cfa2x2[(row & 1) * 2], cfa2x2[(row & 1) * 2 + 1]];
+            for (col, &v) in line.iter().enumerate() {
+                hist[v as usize][pattern[col & 1] as usize] += 1;
+            }
+        }
+        hist
+    }
+
+    #[test]
+    fn the_partial_histogram_measures_exactly_what_the_full_one_does() {
+        // Tall enough to span several parallel jobs, with a clip, a hot pixel, a
+        // dark frame and a frame that clips only just above the half-range mark.
+        let (w, h) = (130, 500);
+        let cases: Vec<Vec<u16>> = vec![
+            flat_mosaic(w, h, |i| match i {
+                555 => 16383,
+                _ if i % 10 == 0 => 11000,
+                _ => 2048 + (i % 7919) as u16,
+            }),
+            flat_mosaic(w, h, |i| 2048 + (i % 97) as u16),
+            flat_mosaic(w, h, |i| {
+                if i % 3 == 0 {
+                    7200
+                } else {
+                    2048 + (i % 5000) as u16
+                }
+            }),
+            flat_mosaic(w, h, |i| (i % 65536) as u16),
+        ];
+        for data in cases {
+            let (black, declared) = ([2048.0; 4], [12277.0; 4]);
+            let full = plateau_white(&full_histogram(&data, w, &RGGB), &black, &declared);
+            let part = measured_white(&data, w, &RGGB, &black, &declared);
+            assert_eq!(full, part);
+        }
+    }
+
+    #[test]
+    fn cropping_in_place_matches_a_copy() {
+        let (src_w, src_h) = (9, 7);
+        let src: Vec<u16> = (0..(src_w * src_h) as u16).collect();
+        for (left, top, w, h) in [(0, 0, 9, 7), (1, 2, 6, 4), (0, 1, 9, 6), (3, 0, 6, 7)] {
+            let want: Vec<u16> = (0..h)
+                .flat_map(|r| src[(r + top) * src_w + left..][..w].to_vec())
+                .collect();
+            assert_eq!(crop_in_place(src.clone(), src_w, left, top, w, h), want);
+        }
     }
 
     #[test]

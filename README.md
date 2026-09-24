@@ -269,6 +269,27 @@ copies a 256×256 patch back and **fails** if the pipeline produced a black fram
 channel. "The window opened without crashing" is not evidence the pipeline is correct;
 this is.
 
+### Where the time goes when a photo opens
+
+```bash
+cargo run --release -p photo-engine --example open_profile -- ~/Pictures/DSC08450.ARW
+```
+
+Times each stage of what the app does on open (read, rawler decode, the full `decode_raw`
+the loader runs) and the embedded-preview path thumbnails and the stage stand-in use. Each
+stage runs five times and the fastest is reported, so the first cold read does not
+dominate. Unlike `probe` and `bench`, which go through rawloader, this measures the
+decoder the app actually uses.
+
+No camera files to hand? `synth_raw` writes a camera-sized DNG with a clipped highlight
+and an embedded preview, so every stage has real work to do:
+
+```bash
+cargo run --release -p photo-engine --example synth_raw -- /tmp/a7iv.dng                    # 33 MP, uncompressed, ~66 MB
+cargo run --release -p photo-engine --example synth_raw -- /tmp/big.dng 9728 6656 --lossless # 65 MP, LJ92, ~56 MB
+cargo run --release -p photo-engine --example synth_raw -- /tmp/cam.jpg 6000 4000            # 24 MP JPEG
+```
+
 ### Stub audit
 
 ```bash
@@ -340,13 +361,14 @@ duckfoot/
 ├── Cargo.toml                   # workspace root
 └── crates/
     ├── photo-engine/            # wgpu device, textures, shaders, RAW decode
-    │   ├── src/decode.rs        #   rawloader → cropped CFA mosaic + metadata
+    │   ├── src/decode.rs        #   rawler/rawloader → cropped CFA mosaic + metadata
+    │   ├── src/preview.rs       #   embedded JPEG previews: found, then decoded scaled
     │   ├── src/engine.rs        #   textures, pipelines, uniforms, GPU dispatch
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
     │   ├── src/params.rs        #   the adjustment stack (plain data + serde)
     │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
     │   ├── src/shaders/         #   demosaic, downsample (preview mips), adjust, histogram
-    │   └── examples/            #   probe.rs, bench.rs
+    │   └── examples/            #   probe.rs, bench.rs, open_profile.rs, synth_raw.rs
     ├── photo-app/               # egui UI — no windowing dependency
     │   ├── src/lib.rs           #   layout: shelf, stage, filmstrip, inspector, undo
     │   ├── src/inspector_map_3d.rs # 3D rotatable inspector map & scopes
@@ -397,7 +419,8 @@ DESIGN.md invariant 8.
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
 | **App** | history list | Working | Every undo step labelled by what changed; click a row to jump to it |
 | **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded off the UI thread |
-| **App** | filmstrip thumbnails | Working | Built in the background from the mosaic, as shot; the open photo shows its live render |
+| **App** | filmstrip thumbnails | Working | The camera's embedded preview, decoded at reduced size on a worker per spare core; from the mosaic only when a file has none. The open photo shows its live render |
+| **App** | open stand-in | Working | The embedded preview is on the stage in ~20–35 ms while the full decode runs |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
