@@ -8,12 +8,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use photo_app::{Gpu, PhotoApp};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
+
+/// Sent by egui, from whatever thread asked for a repaint, to wake the event loop.
+#[derive(Debug)]
+enum UserEvent {
+    Repaint(Duration),
+}
 
 /// Everything that only exists while there is a live surface. On Android this whole
 /// struct is dropped on suspend and rebuilt on resume; the `PhotoApp` outlives it.
@@ -29,7 +36,7 @@ struct Surface {
 }
 
 impl Surface {
-    fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
@@ -83,6 +90,14 @@ impl Surface {
 
         let egui_ctx = egui::Context::default();
         photo_app::theme::apply(&egui_ctx);
+        // Under `ControlFlow::Wait` the loop sleeps until the OS has an event for it. A
+        // decode or thumbnail finishing on a worker thread is not one: without this its
+        // `request_repaint` is recorded and nothing wakes up, so the photo appears only
+        // when the mouse next moves. Delayed repaints (tooltips, animations) likewise
+        // need the loop told when to wake.
+        egui_ctx.set_request_repaint_callback(move |info| {
+            let _ = proxy.send_event(UserEvent::Repaint(info.delay));
+        });
 
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
@@ -265,19 +280,56 @@ impl Surface {
     }
 }
 
-#[derive(Default)]
 struct Duckfoot {
     surface: Option<Surface>,
     app: Option<PhotoApp>,
     pending_open: Option<std::path::PathBuf>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// The earliest delayed repaint egui has asked for, if any.
+    repaint_at: Option<Instant>,
 }
 
-impl ApplicationHandler for Duckfoot {
+impl Duckfoot {
+    fn schedule_repaint(&mut self, event_loop: &ActiveEventLoop, delay: Duration) {
+        if delay.is_zero() {
+            if let Some(surface) = &self.surface {
+                surface.window.request_redraw();
+            }
+            return;
+        }
+        // egui uses Duration::MAX for "never"; that does not fit in an Instant.
+        let Some(when) = Instant::now().checked_add(delay) else {
+            return;
+        };
+        if self.repaint_at.is_none_or(|t| when < t) {
+            self.repaint_at = Some(when);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for Duckfoot {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            self.repaint_at = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(surface) = &self.surface {
+                surface.window.request_redraw();
+            }
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Repaint(delay) => self.schedule_repaint(event_loop, delay),
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.surface.is_some() {
             return;
         }
-        match Surface::new(event_loop) {
+        match Surface::new(event_loop, self.proxy.clone()) {
             Ok(surface) => {
                 // The app is rebuilt with the new device: GPU resources cannot outlive a
                 // surface loss, and on Android that is a routine event, not an error.
@@ -334,13 +386,16 @@ impl ApplicationHandler for Duckfoot {
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     // Redraw only when something asks for it. A photo editor at rest should use no GPU.
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut duckfoot = Duckfoot {
+        surface: None,
+        app: None,
         pending_open: std::env::args().nth(1).map(Into::into),
-        ..Default::default()
+        proxy: event_loop.create_proxy(),
+        repaint_at: None,
     };
     event_loop.run_app(&mut duckfoot)?;
     Ok(())
