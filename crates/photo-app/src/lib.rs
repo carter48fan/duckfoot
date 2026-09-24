@@ -2,6 +2,8 @@
 //!
 //! The desktop bootstrap and the eventual Android bootstrap both drive this same type.
 
+pub mod batch;
+pub mod dam;
 pub mod inspector_map_3d;
 mod loader;
 pub mod theme;
@@ -9,7 +11,7 @@ pub mod tonemap_3d;
 pub mod widgets;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
@@ -18,10 +20,17 @@ use std::sync::RwLock;
 use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Rect, RichText, Sense, Stroke};
 use photo_engine::params::Module;
 use photo_engine::{
-    find_sidecar, identity_nodes, load_sidecar, save_sidecar, CfaImage, Crop, CurveNode, Engine,
-    PhotoStack,
+    find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
 };
 use widgets::Kind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorEqTab {
+    #[default]
+    Hue,
+    Saturation,
+    Luminance,
+}
 
 /// Sections available in the Inspector sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -32,6 +41,9 @@ pub enum InspectorSectionId {
     Exposure,
     Tonal,
     ToneCurve,
+    Clarity,
+    Dehaze,
+    ColorEq,
     Filmic3D,
     ColorBalance,
     Vibrance,
@@ -48,6 +60,9 @@ impl InspectorSectionId {
             Self::Exposure,
             Self::Tonal,
             Self::ToneCurve,
+            Self::Clarity,
+            Self::Dehaze,
+            Self::ColorEq,
             Self::Filmic3D,
             Self::ColorBalance,
             Self::Vibrance,
@@ -64,6 +79,9 @@ impl InspectorSectionId {
             Self::Exposure => "exposure",
             Self::Tonal => "shadows & highlights",
             Self::ToneCurve => "tone curve",
+            Self::Clarity => "clarity & texture",
+            Self::Dehaze => "dehaze",
+            Self::ColorEq => "color eq (8-band)",
             Self::Filmic3D => "filmic rgb",
             Self::ColorBalance => "colour balance",
             Self::Vibrance => "vibrance",
@@ -109,16 +127,25 @@ pub struct ShelfItem {
     pub name: String,
     pub is_edited: bool,
     pub has_sidecar: bool,
+    pub metadata: photo_engine::AssetMetadata,
     /// Size on disk, read once when the item is shelved.
     pub bytes: u64,
 }
 
 impl ShelfItem {
     fn new(path: PathBuf) -> Self {
+        let (metadata, has_sidecar) = match photo_engine::load_sidecar_full(&path) {
+            Ok(Some(sc)) => (sc.metadata, true),
+            _ => (
+                photo_engine::AssetMetadata::default(),
+                find_sidecar(&path).is_some(),
+            ),
+        };
         Self {
             name: file_name(&path),
             is_edited: false,
-            has_sidecar: find_sidecar(&path).is_some(),
+            has_sidecar,
+            metadata,
             bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
             path,
         }
@@ -335,6 +362,16 @@ pub struct PhotoApp {
     /// A module just opened while the others closed; scroll it into view next frame,
     /// once the layout has settled.
     reveal_section: Option<InspectorSectionId>,
+    pub selection: dam::SelectionModel,
+    pub filter: dam::FilterState,
+    pub folder_tree: dam::FolderTree,
+    pub folder_browser_open: bool,
+    pub batch_renamer: batch::Renamer,
+    pub export_recipes: Vec<batch::ExportRecipe>,
+    pub export_queue: Option<batch::ExportQueue>,
+    pub batch_dialog_open: bool,
+    pub batch_output_dir: Option<PathBuf>,
+    pub color_eq_tab: ColorEqTab,
 }
 
 impl PhotoApp {
@@ -379,6 +416,19 @@ impl PhotoApp {
             thumbs_requested: HashSet::new(),
             split_dragging: false,
             reveal_section: None,
+            selection: dam::SelectionModel::new(),
+            filter: dam::FilterState::default(),
+            folder_tree: dam::FolderTree::default(),
+            folder_browser_open: false,
+            batch_renamer: batch::Renamer::default(),
+            export_recipes: batch::ExportRecipe::default_recipes(),
+            export_queue: Some(batch::ExportQueue::new(
+                gpu.device.clone(),
+                gpu.queue.clone(),
+            )),
+            batch_dialog_open: false,
+            batch_output_dir: None,
+            color_eq_tab: ColorEqTab::default(),
         }
     }
 
@@ -457,11 +507,334 @@ impl PhotoApp {
         }
     }
 
+    fn poll_batch_export(&mut self) {
+        if let Some(queue) = &mut self.export_queue {
+            let status = queue.poll().clone();
+            if let batch::ExportStatus::Finished {
+                total,
+                success,
+                errors,
+            } = status
+            {
+                if errors.is_empty() {
+                    self.set_status(format!(
+                        "Batch export complete: {success}/{total} photos rendered."
+                    ));
+                } else {
+                    self.error = Some(format!(
+                        "Batch export finished with {} errors out of {total} jobs",
+                        errors.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn batch_export_dialog(&mut self, ui: &mut egui::Ui) {
+        if !self.batch_dialog_open {
+            return;
+        }
+
+        let mut open = self.batch_dialog_open;
+        let mut close_dialog = false;
+        let mut start_export = false;
+
+        egui::Window::new("Batch Multi-Export & Recipes")
+            .open(&mut open)
+            .resizable(true)
+            .default_size(vec2(520.0, 480.0))
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+
+                // Selection Info
+                let count = if !self.selection.is_empty() {
+                    self.selection.count()
+                } else if self.loaded_path.is_some() {
+                    1
+                } else {
+                    self.shelf.len()
+                };
+                let target_desc = if !self.selection.is_empty() {
+                    format!("{count} selected photos")
+                } else if self.loaded_path.is_some() {
+                    "Currently open photo".to_string()
+                } else {
+                    format!("All {count} photos on shelf")
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(theme::head("Export Source:"));
+                    ui.label(
+                        RichText::new(target_desc)
+                            .family(theme::mono_bold())
+                            .color(theme::ACCENT),
+                    );
+                });
+
+                ui.separator();
+
+                // Destination Folder
+                ui.label(theme::head("Destination Folder"));
+                let default_dir = self
+                    .loaded_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("Export"))
+                    .unwrap_or_else(|| PathBuf::from("Export"));
+
+                if self.batch_output_dir.is_none() {
+                    self.batch_output_dir = Some(default_dir);
+                }
+
+                ui.horizontal(|ui| {
+                    let dir_str = self
+                        .batch_output_dir
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ui.label(RichText::new(dir_str).monospace().color(theme::TEXT));
+                    if widgets::button(ui, Kind::Secondary, "Browse...", 80.0).clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.batch_output_dir = Some(folder);
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                // Recipes (Multi-Export Targets)
+                ui.label(theme::head("Process Recipes (Multi-Export)"));
+                ui.label(
+                    RichText::new(
+                        "Select multiple export formats to generate concurrently from a single decode pass:",
+                    )
+                    .size(11.0)
+                    .color(theme::TEXT_FAINT),
+                );
+
+                for recipe in &mut self.export_recipes {
+                    ui.horizontal(|ui| {
+                        widgets::checkbox(ui, &mut recipe.enabled);
+                        let fmt_tag = match recipe.format {
+                            batch::ExportImageFormat::Jpeg => "JPEG",
+                            batch::ExportImageFormat::Png => "PNG",
+                            batch::ExportImageFormat::Tiff => "TIFF",
+                            batch::ExportImageFormat::Webp => "WEBP",
+                        };
+                        ui.label(
+                            RichText::new(format!("[{fmt_tag}]"))
+                                .family(theme::mono_bold())
+                                .color(theme::ACCENT),
+                        );
+                        ui.label(RichText::new(&recipe.name).color(if recipe.enabled {
+                            theme::TEXT_HI
+                        } else {
+                            theme::TEXT_DIM
+                        }));
+                        if let Some(sub) = &recipe.subfolder {
+                            ui.label(
+                                RichText::new(format!("↳ /{sub}"))
+                                    .monospace()
+                                    .color(theme::TEXT_FAINT),
+                            );
+                        }
+                    });
+                }
+
+                ui.separator();
+
+                // Renaming Pattern
+                ui.label(theme::head("Batch Renaming Pattern"));
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.batch_renamer.pattern);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(theme::tag("Tokens:").color(theme::TEXT_FAINT));
+                    for token in ["{filename}", "{seq:3}", "{date}", "{camera}", "{rating}"] {
+                        if widgets::chip(ui, false, token).clicked() {
+                            self.batch_renamer.pattern.push_str(token);
+                        }
+                    }
+                });
+
+                // Renaming Preview
+                let sample_path = self
+                    .loaded_path
+                    .as_ref()
+                    .or_else(|| self.shelf.first().map(|it| &it.path))
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("DSC08450.ARW"));
+
+                let sample_ctx = batch::RenameContext {
+                    source_path: &sample_path,
+                    sequence_index: 0,
+                    camera_model: Some("Camera"),
+                    rating: 5,
+                    custom_text: "",
+                    target_extension: "jpg",
+                    date_override: None,
+                };
+                let preview_name = self.batch_renamer.format_filename(&sample_ctx);
+                ui.horizontal(|ui| {
+                    ui.label(theme::tag("Preview:").color(theme::TEXT_FAINT));
+                    ui.label(
+                        RichText::new(preview_name)
+                            .family(theme::mono_bold())
+                            .color(theme::LIME),
+                    );
+                });
+
+                ui.separator();
+
+                // Progress or Action buttons
+                let is_running = self
+                    .export_queue
+                    .as_ref()
+                    .map(|q| q.is_running())
+                    .unwrap_or(false);
+
+                if is_running {
+                    if let Some(queue) = &mut self.export_queue {
+                        if let batch::ExportStatus::Running {
+                            total,
+                            completed,
+                            current_file,
+                        } = queue.poll()
+                        {
+                            let frac = if *total > 0 {
+                                *completed as f32 / *total as f32
+                            } else {
+                                0.0
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(frac)
+                                    .text(format!("{completed}/{total} - {current_file}")),
+                            );
+                        }
+                    }
+                    if widgets::button(ui, Kind::Secondary, "Cancel Export", 120.0).clicked() {
+                        if let Some(queue) = &mut self.export_queue {
+                            queue.cancel();
+                        }
+                    }
+                } else {
+                    let active_recipes_count =
+                        self.export_recipes.iter().filter(|r| r.enabled).count();
+                    let total_outputs = count * active_recipes_count;
+
+                    ui.horizontal(|ui| {
+                        let btn_text = format!("START EXPORT ({total_outputs} files)");
+                        let can_start = total_outputs > 0;
+                        ui.add_enabled_ui(can_start, |ui| {
+                            if widgets::button(ui, Kind::Primary, &btn_text, 180.0).clicked() {
+                                start_export = true;
+                            }
+                        });
+                        if widgets::button(ui, Kind::Secondary, "Close", 80.0).clicked() {
+                            close_dialog = true;
+                        }
+                    });
+                }
+            });
+
+        self.batch_dialog_open = open && !close_dialog;
+
+        if start_export {
+            self.execute_batch_export();
+        }
+    }
+
+    fn execute_batch_export(&mut self) {
+        let Some(out_dir) = self.batch_output_dir.clone() else {
+            return;
+        };
+
+        let selected_paths: Vec<PathBuf> = if !self.selection.is_empty() {
+            self.selection.selected.iter().cloned().collect()
+        } else if let Some(p) = &self.loaded_path {
+            vec![p.clone()]
+        } else {
+            self.shelf.iter().map(|it| it.path.clone()).collect()
+        };
+
+        let active_recipes: Vec<batch::ExportRecipe> = self
+            .export_recipes
+            .iter()
+            .filter(|r| r.enabled)
+            .cloned()
+            .collect();
+
+        if selected_paths.is_empty() || active_recipes.is_empty() {
+            return;
+        }
+
+        let mut jobs = Vec::new();
+
+        for (seq_idx, src_path) in selected_paths.iter().enumerate() {
+            let (stack, crop, rating) = if Some(src_path) == self.loaded_path.as_ref() {
+                let rating = self
+                    .shelf
+                    .iter()
+                    .find(|it| &it.path == src_path)
+                    .map(|it| it.metadata.rating)
+                    .unwrap_or(0);
+                (self.stack.clone(), self.stack.geometry.crop, rating)
+            } else {
+                let (stack, meta) = match photo_engine::load_sidecar_full(src_path) {
+                    Ok(Some(sc)) => (sc.stack, sc.metadata),
+                    _ => (
+                        PhotoStack::default(),
+                        photo_engine::AssetMetadata::default(),
+                    ),
+                };
+                let crop = stack.geometry.crop;
+                (stack, crop, meta.rating)
+            };
+
+            for recipe in &active_recipes {
+                let target_dir = if let Some(sub) = &recipe.subfolder {
+                    out_dir.join(sub)
+                } else {
+                    out_dir.clone()
+                };
+
+                let ctx = batch::RenameContext {
+                    source_path: src_path,
+                    sequence_index: seq_idx,
+                    camera_model: None,
+                    rating,
+                    custom_text: "",
+                    target_extension: recipe.format.extension(),
+                    date_override: None,
+                };
+
+                if let Some(target_path) = self.batch_renamer.resolve_target_path(&target_dir, &ctx)
+                {
+                    jobs.push(batch::ExportJob {
+                        source_path: src_path.clone(),
+                        stack: stack.clone(),
+                        crop,
+                        output_path: target_path,
+                        recipe: recipe.clone(),
+                    });
+                }
+            }
+        }
+
+        if let Some(queue) = &mut self.export_queue {
+            queue.start_batch(jobs);
+        }
+    }
+
     fn pick_and_open(&mut self, gpu: &Gpu) {
         if let Some(path) = rfd::FileDialog::new()
+            .add_filter(
+                "All Supported Images",
+                &photo_engine::all_image_dialog_extensions(),
+            )
             .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-            // A fallback the filter cannot lock the user out of: the
-            // extension list will never cover every camera.
+            .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
             .add_filter("All files", &["*"])
             .pick_file()
         {
@@ -471,7 +844,12 @@ impl PhotoApp {
 
     fn pick_and_shelve(&mut self, gpu: &Gpu) {
         if let Some(paths) = rfd::FileDialog::new()
+            .add_filter(
+                "All Supported Images",
+                &photo_engine::all_image_dialog_extensions(),
+            )
             .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+            .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
             .add_filter("All files", &["*"])
             .pick_files()
         {
@@ -521,7 +899,13 @@ impl PhotoApp {
         let Some(path) = &self.loaded_path else {
             return;
         };
-        match save_sidecar(path, &self.stack) {
+        let metadata = self
+            .shelf
+            .iter()
+            .find(|it| &it.path == path)
+            .map(|it| it.metadata.clone())
+            .unwrap_or_default();
+        match photo_engine::save_sidecar_full(path, &self.stack, &metadata) {
             Ok(p) => {
                 if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
                     item.has_sidecar = true;
@@ -534,6 +918,84 @@ impl PhotoApp {
             Err(e) => {
                 self.error = Some(format!("Failed to save sidecar: {e:#}"));
             }
+        }
+    }
+
+    pub fn set_rating_for_path(&mut self, p: &Path, rating: u8) {
+        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) {
+            item.metadata.rating = rating;
+            item.has_sidecar = true;
+            let stack = if Some(p) == self.loaded_path.as_deref() {
+                self.stack.clone()
+            } else {
+                photo_engine::load_sidecar(p)
+                    .unwrap_or(None)
+                    .unwrap_or_default()
+            };
+            let _ = photo_engine::save_sidecar_full(p, &stack, &item.metadata);
+        }
+    }
+
+    pub fn set_flag_for_path(&mut self, p: &Path, flag: photo_engine::Flag) {
+        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) {
+            item.metadata.flag = flag;
+            item.has_sidecar = true;
+            let stack = if Some(p) == self.loaded_path.as_deref() {
+                self.stack.clone()
+            } else {
+                photo_engine::load_sidecar(p)
+                    .unwrap_or(None)
+                    .unwrap_or_default()
+            };
+            let _ = photo_engine::save_sidecar_full(p, &stack, &item.metadata);
+        }
+    }
+
+    pub fn set_rating_for_selection(&mut self, rating: u8) {
+        let paths: Vec<PathBuf> = if !self.selection.is_empty() {
+            self.selection.selected.iter().cloned().collect()
+        } else if let Some(p) = &self.loaded_path {
+            vec![p.clone()]
+        } else {
+            return;
+        };
+
+        let count = paths.len();
+        for p in &paths {
+            self.set_rating_for_path(p, rating);
+        }
+        self.set_status(format!("Set {rating}★ on {count} photo(s)"));
+    }
+
+    pub fn set_flag_for_selection(&mut self, flag: photo_engine::Flag) {
+        let paths: Vec<PathBuf> = if !self.selection.is_empty() {
+            self.selection.selected.iter().cloned().collect()
+        } else if let Some(p) = &self.loaded_path {
+            vec![p.clone()]
+        } else {
+            return;
+        };
+
+        let count = paths.len();
+        let flag_str = match flag {
+            photo_engine::Flag::Pick => "Pick",
+            photo_engine::Flag::Reject => "Reject",
+            photo_engine::Flag::Unflagged => "Unflagged",
+        };
+        for p in &paths {
+            self.set_flag_for_path(p, flag);
+        }
+        self.set_status(format!("Set {flag_str} on {count} photo(s)"));
+    }
+
+    pub fn open_session_folder(&mut self, gpu: &Gpu, folder: PathBuf) {
+        let images = dam::FolderTree::scan_supported_images(&folder);
+        if !images.is_empty() {
+            self.folder_tree.current_folder = Some(folder);
+            self.add_to_shelf(gpu, images);
+            self.folder_browser_open = false;
+        } else {
+            self.set_status("No supported images found in folder");
         }
     }
 
@@ -673,9 +1135,9 @@ impl PhotoApp {
                 } if generation == self.open_generation => {
                     self.loading = None;
                     match result {
-                        Ok(cfa) => {
+                        Ok(source) => {
                             self.decode_ms = decode_ms;
-                            self.finish_open(gpu, path, cfa);
+                            self.finish_open(gpu, path, source);
                         }
                         // DESIGN.md: failures surface in the UI, with the filename.
                         Err(e) => self.error = Some(e),
@@ -692,7 +1154,7 @@ impl PhotoApp {
         }
     }
 
-    fn finish_open(&mut self, gpu: &Gpu, path: PathBuf, cfa: CfaImage) {
+    fn finish_open(&mut self, gpu: &Gpu, path: PathBuf, source: loader::LoadedSource) {
         // Save the photo being left, including anything edited while this one decoded.
         if let Some(current) = &self.loaded_path {
             if self.is_stack_edited() && save_sidecar(current, &self.stack).is_ok() {
@@ -703,34 +1165,44 @@ impl PhotoApp {
         }
 
         self.error = None;
-        let orientation = cfa.orientation;
+        let orientation = source.orientation();
         self.release_texture(gpu);
 
-        if let Err(e) = self.engine.load(gpu.device, gpu.queue, cfa) {
+        let load_res = match source {
+            loader::LoadedSource::Raw(cfa) => self.engine.load(gpu.device, gpu.queue, cfa),
+            loader::LoadedSource::Raster(raster) => {
+                self.engine.load_raster(gpu.device, gpu.queue, raster)
+            }
+        };
+
+        if let Err(e) = load_res {
             // DESIGN.md: failures surface in the UI, with the filename.
             self.error = Some(format!("{}: {e:#}", path.display()));
             self.loaded_path = None;
             return;
         }
 
-        let saved = match load_sidecar(&path) {
-            Ok(Some(s)) => {
+        let (saved, metadata) = match photo_engine::load_sidecar_full(&path) {
+            Ok(Some(sc)) => {
                 let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
                 self.set_status(format!("Loaded sidecar for {fname}"));
-                Some(s)
+                (Some(sc.stack), sc.metadata)
             }
-            _ => None,
+            _ => (None, photo_engine::AssetMetadata::default()),
         };
 
-        let item = ShelfItem::new(path.clone());
+        let mut item = ShelfItem::new(path.clone());
+        item.metadata = metadata;
         if let Some(existing) = self.shelf.iter_mut().find(|it| it.path == path) {
             existing.has_sidecar = item.has_sidecar;
             existing.is_edited = false;
+            existing.metadata = item.metadata.clone();
         } else {
             self.request_thumbnail(&path);
             self.shelf.push(item);
         }
 
+        self.selection.select_single(path.clone());
         self.baseline = PhotoStack {
             geometry: orientation,
             ..PhotoStack::default()
@@ -817,6 +1289,7 @@ impl PhotoApp {
         self.poll_loader(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);
+        self.poll_batch_export();
         self.engine.poll_histogram(gpu.device);
         self.sync(gpu, ctx.pixels_per_point());
 
@@ -829,6 +1302,7 @@ impl PhotoApp {
         self.filmstrip(ui, gpu);
         self.stage_toolbar(ui);
         self.workspace(ui, gpu);
+        self.batch_export_dialog(ui);
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context, gpu: &Gpu) {
@@ -861,12 +1335,14 @@ impl PhotoApp {
             self.needs_render = true;
         }
 
-        let (save, copy, paste, split_toggle) = ctx.input(|i| {
+        let (save, copy, paste, split_toggle, ctrl_a, batch_export) = ctx.input(|i| {
             (
-                i.modifiers.command && i.key_pressed(egui::Key::S),
-                i.modifiers.command && i.key_pressed(egui::Key::C),
-                i.modifiers.command && i.key_pressed(egui::Key::V),
+                i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+                i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::C),
+                i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::V),
                 i.key_pressed(egui::Key::Backslash),
+                i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::A),
+                i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E),
             )
         });
         if save {
@@ -882,11 +1358,61 @@ impl PhotoApp {
             self.split_active = !self.split_active;
             self.needs_render = true;
         }
+        if ctrl_a {
+            let all_paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
+            self.selection.select_all(&all_paths);
+        }
+        if batch_export {
+            self.batch_dialog_open = true;
+        }
 
-        let (fit, actual) = ctx.input(|i| {
+        let (pick, reject, unflag) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::Num0),
-                i.key_pressed(egui::Key::Num1),
+                !i.modifiers.command && i.key_pressed(egui::Key::P),
+                !i.modifiers.command && i.key_pressed(egui::Key::X),
+                !i.modifiers.command && i.key_pressed(egui::Key::U),
+            )
+        });
+        if pick {
+            self.set_flag_for_selection(photo_engine::Flag::Pick);
+        }
+        if reject {
+            self.set_flag_for_selection(photo_engine::Flag::Reject);
+        }
+        if unflag {
+            self.set_flag_for_selection(photo_engine::Flag::Unflagged);
+        }
+
+        let rating_cmd = ctx.input(|i| {
+            if !i.modifiers.command {
+                if i.key_pressed(egui::Key::Num1) {
+                    Some(1)
+                } else if i.key_pressed(egui::Key::Num2) {
+                    Some(2)
+                } else if i.key_pressed(egui::Key::Num3) {
+                    Some(3)
+                } else if i.key_pressed(egui::Key::Num4) {
+                    Some(4)
+                } else if i.key_pressed(egui::Key::Num5) {
+                    Some(5)
+                } else if i.key_pressed(egui::Key::Num0) {
+                    Some(0)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        if let Some(r) = rating_cmd {
+            self.set_rating_for_selection(r);
+        }
+
+        let (fit, actual, zoom_toggle) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::Num0),
+                i.modifiers.command && i.key_pressed(egui::Key::Num1),
+                !i.modifiers.command && i.key_pressed(egui::Key::Z),
             )
         });
         if fit {
@@ -894,6 +1420,13 @@ impl PhotoApp {
         }
         if actual {
             self.zoom_actual();
+        }
+        if zoom_toggle {
+            if (self.view.zoom - 1.0).abs() < 0.05 {
+                self.zoom_actual();
+            } else {
+                self.view = View::default();
+            }
         }
 
         let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc) = ctx.input(|i| {
@@ -1173,88 +1706,129 @@ impl PhotoApp {
                     ui.label(RichText::new("🗁").size(15.0).color(theme::ACCENT));
                     ui.label(theme::head("Shelf bin"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon(ui, "✚", false, "Add RAW photos to the shelf").clicked()
-                        {
+                        if widgets::icon(ui, "✚", false, "Add photos to the shelf").clicked() {
                             self.pick_and_shelve(gpu);
                         }
                     });
                 });
 
-                // Drop target. Dropping works anywhere in the window; this is where it's
-                // advertised, and clicking it is the same as the + above.
-                egui::Frame::new()
-                    .inner_margin(Margin {
-                        left: 10,
-                        right: 10,
-                        top: 10,
-                        bottom: 6,
-                    })
-                    .show(ui, |ui| {
-                        let (rect, response) = ui
-                            .allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
-                        let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-                        let hot = response.hovered() || dragging_in;
-                        widgets::dashed_rect(
-                            ui.painter(),
-                            rect,
-                            if hot {
-                                theme::ACCENT
-                            } else {
-                                Color32::from_gray(0x2a)
-                            },
-                        );
-                        let painter = ui.painter();
-                        let label = painter.layout_no_wrap(
-                            "Drop RAW files".to_owned(),
-                            FontId::proportional(12.5),
-                            if hot {
-                                theme::TEXT_HI
-                            } else {
-                                Color32::from_gray(0xcc)
-                            },
-                        );
-                        // Arrow + gap + label, centred as one unit.
-                        let left = rect.center().x - (label.size().x + 20.0) / 2.0;
-                        painter.text(
-                            pos2(left + 6.0, rect.center().y),
-                            Align2::CENTER_CENTER,
-                            "⬆",
-                            FontId::proportional(14.0),
-                            theme::ACCENT,
-                        );
-                        painter.galley(
-                            pos2(left + 20.0, rect.center().y - label.size().y / 2.0),
-                            label,
-                            theme::TEXT,
-                        );
-                        if hot {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if response.clicked() {
-                            self.pick_and_shelve(gpu);
-                        }
-                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let total_shelf = self.shelf.len();
+                    if widgets::chip(
+                        ui,
+                        !self.folder_browser_open,
+                        &format!("Stills ({total_shelf})"),
+                    )
+                    .clicked()
+                    {
+                        self.folder_browser_open = false;
+                    }
+                    if widgets::chip(ui, self.folder_browser_open, "Folders").clicked() {
+                        self.folder_browser_open = true;
+                    }
+                });
+                ui.add_space(4.0);
 
                 let mut to_open = None;
                 let mut to_remove = None;
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                    .show(ui, |ui| {
-                        egui::Frame::new()
-                            .inner_margin(Margin {
-                                left: 10,
-                                right: 10,
-                                top: 4,
-                                bottom: 10,
-                            })
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 10.0;
-                                self.shelf_group(ui, &mut to_open, &mut to_remove);
-                                self.snapshots_group(ui);
-                                self.history_group(ui);
-                            });
-                    });
+
+                if self.folder_browser_open {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .inner_margin(Margin {
+                                    left: 10,
+                                    right: 10,
+                                    top: 4,
+                                    bottom: 10,
+                                })
+                                .show(ui, |ui| {
+                                    self.shelf_folders(ui, gpu);
+                                });
+                        });
+                } else {
+                    // Drop target. Dropping works anywhere in the window; this is where it's
+                    // advertised, and clicking it is the same as the + above.
+                    egui::Frame::new()
+                        .inner_margin(Margin {
+                            left: 10,
+                            right: 10,
+                            top: 6,
+                            bottom: 6,
+                        })
+                        .show(ui, |ui| {
+                            let (rect, response) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 34.0),
+                                Sense::click(),
+                            );
+                            let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+                            let hot = response.hovered() || dragging_in;
+                            widgets::dashed_rect(
+                                ui.painter(),
+                                rect,
+                                if hot {
+                                    theme::ACCENT
+                                } else {
+                                    Color32::from_gray(0x2a)
+                                },
+                            );
+                            let painter = ui.painter();
+                            let label = painter.layout_no_wrap(
+                                "Drop Photos (RAW / Raster)".to_owned(),
+                                FontId::proportional(12.5),
+                                if hot {
+                                    theme::TEXT_HI
+                                } else {
+                                    Color32::from_gray(0xcc)
+                                },
+                            );
+                            let left = rect.center().x - (label.size().x + 20.0) / 2.0;
+                            painter.text(
+                                pos2(left + 6.0, rect.center().y),
+                                Align2::CENTER_CENTER,
+                                "⬆",
+                                FontId::proportional(14.0),
+                                theme::ACCENT,
+                            );
+                            painter.galley(
+                                pos2(left + 20.0, rect.center().y - label.size().y / 2.0),
+                                label,
+                                theme::TEXT,
+                            );
+                            if hot {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if response.clicked() {
+                                self.pick_and_shelve(gpu);
+                            }
+                        });
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .inner_margin(Margin {
+                                    left: 10,
+                                    right: 10,
+                                    top: 4,
+                                    bottom: 10,
+                                })
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 10.0;
+                                    self.shelf_group(ui, &mut to_open, &mut to_remove);
+                                    self.snapshots_group(ui);
+                                    self.history_group(ui);
+                                });
+                        });
+                }
 
                 if let Some(path) = to_open {
                     self.open_path(gpu, path);
@@ -1265,14 +1839,138 @@ impl PhotoApp {
             });
     }
 
+    fn shelf_folders(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        let mut load_folder = None;
+        let mut change_folder = None;
+
+        group(
+            ui,
+            "Bookmarks",
+            |_ui| {},
+            |ui| {
+                for bm in &self.folder_tree.bookmarks {
+                    let is_cur = self.folder_tree.current_folder.as_ref() == Some(&bm.path);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                    let painter = ui.painter();
+                    if resp.hovered() {
+                        painter.rect_filled(rect, 3.0, Color32::from_gray(0x18));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let col = if is_cur { theme::ACCENT } else { theme::TEXT };
+                    painter.text(
+                        pos2(rect.left() + 8.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        format!("📁 {}", bm.name),
+                        FontId::new(12.0, theme::sans_strong()),
+                        col,
+                    );
+                    if resp.clicked() {
+                        change_folder = Some(bm.path.clone());
+                    }
+                }
+
+                ui.add_space(4.0);
+                if widgets::button(ui, Kind::Secondary, "Browse Folder…", 0.0).clicked() {
+                    if let Some(picked) = rfd::FileDialog::new().pick_folder() {
+                        change_folder = Some(picked);
+                    }
+                }
+            },
+        );
+
+        if let Some(cur) = &self.folder_tree.current_folder.clone() {
+            ui.add_space(8.0);
+            let folder_name = cur.file_name().and_then(|n| n.to_str()).unwrap_or("Folder");
+            let title = format!("Folder: {folder_name}");
+            group(
+                ui,
+                &title,
+                |_ui| {},
+                |ui| {
+                    ui.label(
+                        RichText::new(cur.display().to_string())
+                            .family(egui::FontFamily::Monospace)
+                            .size(10.5)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if widgets::button(ui, Kind::Primary, "Scan & Load", 0.0)
+                            .on_hover_text(
+                                "Load all supported images from this folder into the shelf",
+                            )
+                            .clicked()
+                        {
+                            load_folder = Some(cur.clone());
+                        }
+                        if let Some(parent) = cur.parent() {
+                            if widgets::button(ui, Kind::Secondary, "⬆ Parent", 0.0).clicked() {
+                                change_folder = Some(parent.to_path_buf());
+                            }
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    ui.label(theme::dim("Subfolders:"));
+                    let subs = dam::FolderTree::list_subfolders(cur);
+                    if subs.is_empty() {
+                        ui.label(theme::dim("No subdirectories").size(11.0));
+                    } else {
+                        for sub in subs {
+                            let name = sub.file_name().and_then(|n| n.to_str()).unwrap_or("dir");
+                            let (rect, resp) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 24.0),
+                                Sense::click(),
+                            );
+                            let painter = ui.painter();
+                            if resp.hovered() {
+                                painter.rect_filled(rect, 2.0, Color32::from_gray(0x18));
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            painter.text(
+                                pos2(rect.left() + 8.0, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                format!("📁 {name}"),
+                                FontId::proportional(11.5),
+                                theme::TEXT,
+                            );
+                            if resp.clicked() {
+                                change_folder = Some(sub);
+                            }
+                        }
+                    }
+                },
+            );
+        } else {
+            ui.add_space(8.0);
+            ui.label(theme::dim(
+                "Select a bookmark or browse to a session folder to scan photos.",
+            ));
+        }
+
+        if let Some(cf) = change_folder {
+            self.folder_tree.current_folder = Some(cf);
+        }
+        if let Some(lf) = load_folder {
+            self.open_session_folder(gpu, lf);
+        }
+    }
+
     fn shelf_group(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         to_open: &mut Option<PathBuf>,
         to_remove: &mut Option<usize>,
     ) {
         let total: u64 = self.shelf.iter().map(|it| it.bytes).sum();
-        let title = format!("RAW stills ({})", self.shelf.len());
+        let title = format!("Photos ({})", self.shelf.len());
+        let mut row_shift = None;
+        let mut row_ctrl = None;
+        let mut row_single = None;
+        let mut row_rating = None;
+        let mut row_flag = None;
+
         group(
             ui,
             &title,
@@ -1290,8 +1988,22 @@ impl PhotoApp {
                     ui.add_space(6.0);
                     return;
                 }
+                let mut any_visible = false;
                 for (i, item) in self.shelf.iter().enumerate() {
                     let active = self.loaded_path.as_ref() == Some(&item.path);
+                    let is_edited = if active {
+                        self.is_stack_edited()
+                    } else {
+                        item.is_edited
+                    };
+                    if !self
+                        .filter
+                        .matches(&item.path, &item.metadata, is_edited, item.has_sidecar)
+                    {
+                        continue;
+                    }
+                    any_visible = true;
+                    let selected = self.selection.is_selected(&item.path);
                     let status = if active {
                         match self.sidecar_state() {
                             SidecarState::Synced => Some(theme::LIME),
@@ -1305,16 +2017,96 @@ impl PhotoApp {
                     } else {
                         None
                     };
-                    let (open, remove) = shelf_row(ui, item, active, status);
-                    if open && !active {
-                        *to_open = Some(item.path.clone());
+                    let (resp, remove) = shelf_row(ui, item, active, selected, status);
+                    if resp.clicked() && !remove {
+                        let (ctrl, shift) = ui.input(|i| {
+                            (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
+                        });
+                        if shift {
+                            row_shift = Some(item.path.clone());
+                        } else if ctrl {
+                            row_ctrl = Some(item.path.clone());
+                        } else {
+                            row_single = Some((item.path.clone(), active));
+                        }
                     }
                     if remove {
                         *to_remove = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        ui.label(
+                            RichText::new(&item.name)
+                                .family(theme::mono_bold())
+                                .color(theme::ACCENT),
+                        );
+                        ui.separator();
+                        ui.label(theme::dim("Flags:"));
+                        ui.horizontal(|ui| {
+                            if ui.button("Pick (P)").clicked() {
+                                row_flag = Some((item.path.clone(), photo_engine::Flag::Pick));
+                                ui.close();
+                            }
+                            if ui.button("Reject (X)").clicked() {
+                                row_flag = Some((item.path.clone(), photo_engine::Flag::Reject));
+                                ui.close();
+                            }
+                            if ui.button("Clear (U)").clicked() {
+                                row_flag = Some((item.path.clone(), photo_engine::Flag::Unflagged));
+                                ui.close();
+                            }
+                        });
+                        ui.label(theme::dim("Rating:"));
+                        ui.horizontal(|ui| {
+                            for r in 0..=5 {
+                                let label = if r == 0 {
+                                    "0★".to_string()
+                                } else {
+                                    format!("{r}★")
+                                };
+                                if ui.button(label).clicked() {
+                                    row_rating = Some((item.path.clone(), r));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                }
+
+                if !any_visible {
+                    ui.add_space(6.0);
+                    ui.label(theme::dim("No photos match filters.").size(12.0));
+                    ui.add_space(6.0);
                 }
             },
         );
+
+        if let Some(target) = row_shift {
+            let all_paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
+            self.selection.select_range(target, &all_paths);
+        }
+        if let Some(target) = row_ctrl {
+            self.selection.toggle_select(target);
+        }
+        if let Some((target, active)) = row_single {
+            self.selection.select_single(target.clone());
+            if !active {
+                *to_open = Some(target);
+            }
+        }
+        if let Some((path, rating)) = row_rating {
+            if self.selection.is_selected(&path) {
+                self.set_rating_for_selection(rating);
+            } else {
+                self.set_rating_for_path(&path, rating);
+            }
+        }
+        if let Some((path, flag)) = row_flag {
+            if self.selection.is_selected(&path) {
+                self.set_flag_for_selection(flag);
+            } else {
+                self.set_flag_for_path(&path, flag);
+            }
+        }
     }
 
     fn snapshots_group(&mut self, ui: &mut egui::Ui) {
@@ -1515,6 +2307,63 @@ impl PhotoApp {
 
     fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let mut to_open = None;
+        let mut action_shift = None;
+        let mut action_ctrl = None;
+        let mut action_single = None;
+        let mut action_rating = None;
+        let mut action_flag = None;
+        let mut action_export = false;
+
+        let is_stack_edited = self.is_stack_edited();
+        let loaded_path = self.loaded_path.clone();
+
+        let mut displayed_items: Vec<ShelfItem> = self
+            .shelf
+            .iter()
+            .filter(|it| {
+                let is_edited = if loaded_path.as_ref() == Some(&it.path) {
+                    is_stack_edited
+                } else {
+                    it.is_edited
+                };
+                self.filter
+                    .matches(&it.path, &it.metadata, is_edited, it.has_sidecar)
+            })
+            .cloned()
+            .collect();
+
+        match self.filter.sort_by {
+            dam::SortBy::FileName => {
+                displayed_items.sort_by(|a, b| {
+                    if self.filter.sort_descending {
+                        b.name.cmp(&a.name)
+                    } else {
+                        a.name.cmp(&b.name)
+                    }
+                });
+            }
+            dam::SortBy::Rating => {
+                displayed_items.sort_by(|a, b| {
+                    let ord = a.metadata.rating.cmp(&b.metadata.rating);
+                    if self.filter.sort_descending {
+                        ord.reverse()
+                    } else {
+                        ord
+                    }
+                });
+            }
+            dam::SortBy::FileSize => {
+                displayed_items.sort_by(|a, b| {
+                    let ord = a.bytes.cmp(&b.bytes);
+                    if self.filter.sort_descending {
+                        ord.reverse()
+                    } else {
+                        ord
+                    }
+                });
+            }
+        }
+
         egui::Panel::bottom("filmstrip")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
                 left: 14,
@@ -1523,15 +2372,14 @@ impl PhotoApp {
                 bottom: 10,
             }))
             .show(ui, |ui| {
-                // Six actions need ~560px. Below that they get their own row rather than
-                // being painted over the title.
-                let compact = ui.available_width() < 660.0;
+                let compact = ui.available_width() < 700.0;
                 ui.horizontal(|ui| {
                     ui.label(theme::head("Filmstrip").color(theme::ACCENT));
                     let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
+                    let visible_count = displayed_items.len();
                     ui.label(
                         theme::num(format!(
-                            "{} RAW · {developed} with sidecar",
+                            "{visible_count}/{} stills · {developed} with sidecar",
                             self.shelf.len()
                         ))
                         .size(11.0)
@@ -1544,10 +2392,134 @@ impl PhotoApp {
                     }
                 });
                 if compact {
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| self.filmstrip_actions(ui, false));
                 }
-                ui.add_space(8.0);
+                ui.add_space(6.0);
+
+                // Filter & Sort bar
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+
+                    // Rating filter chips
+                    ui.label(theme::dim("Rating:"));
+                    pod(ui, |ui| {
+                        let is_all = matches!(self.filter.rating, dam::RatingFilter::All);
+                        if widgets::chip(ui, is_all, "All").clicked() {
+                            self.filter.rating = dam::RatingFilter::All;
+                        }
+                        for min in 1..=5 {
+                            let active =
+                                matches!(self.filter.rating, dam::RatingFilter::MinStars(m) if m == min);
+                            let label = if min == 5 {
+                                "5★".to_string()
+                            } else {
+                                format!("{min}★+")
+                            };
+                            if widgets::chip(ui, active, &label).clicked() {
+                                self.filter.rating = if active {
+                                    dam::RatingFilter::All
+                                } else {
+                                    dam::RatingFilter::MinStars(min)
+                                };
+                            }
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Flag filter chips
+                    ui.label(theme::dim("Flags:"));
+                    pod(ui, |ui| {
+                        let f = self.filter.flag;
+                        if widgets::chip(ui, f == dam::FlagFilter::All, "All").clicked() {
+                            self.filter.flag = dam::FlagFilter::All;
+                        }
+                        if widgets::chip(ui, f == dam::FlagFilter::PicksOnly, "Picks").clicked() {
+                            self.filter.flag = if f == dam::FlagFilter::PicksOnly {
+                                dam::FlagFilter::All
+                            } else {
+                                dam::FlagFilter::PicksOnly
+                            };
+                        }
+                        if widgets::chip(ui, f == dam::FlagFilter::HideRejects, "Hide Rej").clicked()
+                        {
+                            self.filter.flag = if f == dam::FlagFilter::HideRejects {
+                                dam::FlagFilter::All
+                            } else {
+                                dam::FlagFilter::HideRejects
+                            };
+                        }
+                        if widgets::chip(ui, f == dam::FlagFilter::RejectsOnly, "Rejects").clicked() {
+                            self.filter.flag = if f == dam::FlagFilter::RejectsOnly {
+                                dam::FlagFilter::All
+                            } else {
+                                dam::FlagFilter::RejectsOnly
+                            };
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Search box
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter.search_query)
+                            .hint_text("Search…")
+                            .desired_width(75.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if !self.filter.search_query.is_empty()
+                        && ui.button("✕").on_hover_text("Clear search").clicked()
+                    {
+                        self.filter.search_query.clear();
+                    }
+
+                    // Sort & Batch Actions (right aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let arrow = if self.filter.sort_descending { "↓" } else { "↑" };
+                        if widgets::button(ui, Kind::Secondary, arrow, 22.0)
+                            .on_hover_text(if self.filter.sort_descending {
+                                "Descending order"
+                            } else {
+                                "Ascending order"
+                            })
+                            .clicked()
+                        {
+                            self.filter.sort_descending = !self.filter.sort_descending;
+                        }
+
+                        pod(ui, |ui| {
+                            let s = self.filter.sort_by;
+                            if widgets::chip(ui, s == dam::SortBy::FileSize, "Size").clicked() {
+                                self.filter.sort_by = dam::SortBy::FileSize;
+                            }
+                            if widgets::chip(ui, s == dam::SortBy::Rating, "Rating").clicked() {
+                                self.filter.sort_by = dam::SortBy::Rating;
+                            }
+                            if widgets::chip(ui, s == dam::SortBy::FileName, "Name").clicked() {
+                                self.filter.sort_by = dam::SortBy::FileName;
+                            }
+                        });
+                        ui.label(theme::dim("Sort:"));
+
+                        if !self.selection.is_empty() {
+                            if widgets::button(
+                                ui,
+                                Kind::Primary,
+                                &format!("Export Batch ({})", self.selection.count()),
+                                0.0,
+                            )
+                            .clicked()
+                            {
+                                action_export = true;
+                            }
+                            if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
+                                self.selection.clear();
+                            }
+                        }
+                    });
+                });
+                ui.add_space(6.0);
 
                 egui::ScrollArea::horizontal()
                     .auto_shrink([false, true])
@@ -1562,17 +2534,32 @@ impl PhotoApp {
                                 ui.painter().text(
                                     rect.left_center() + vec2(4.0, 0.0),
                                     Align2::LEFT_CENTER,
-                                    "Drop RAW files anywhere in the window to start a roll.",
+                                    "Drop photos anywhere in the window to start a roll.",
                                     FontId::proportional(12.0),
                                     theme::TEXT_DIM,
                                 );
                                 return;
                             }
+
+                            if displayed_items.is_empty() {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 70.0),
+                                    Sense::hover(),
+                                );
+                                ui.painter().text(
+                                    rect.left_center() + vec2(4.0, 0.0),
+                                    Align2::LEFT_CENTER,
+                                    "No photos match the active filter criteria.",
+                                    FontId::proportional(12.0),
+                                    theme::TEXT_DIM,
+                                );
+                                return;
+                            }
+
                             let loading = self.loading.as_ref().map(|(p, _)| p);
-                            for item in &self.shelf {
+                            for item in &displayed_items {
                                 let active = self.loaded_path.as_ref() == Some(&item.path);
-                                // The open photo shows its live render; the rest show the
-                                // file as shot, once its thumbnail has been built.
+                                let selected = self.selection.is_selected(&item.path);
                                 let picture = if active {
                                     self.texture_id.zip(
                                         self.engine
@@ -1586,15 +2573,112 @@ impl PhotoApp {
                                     })
                                 };
                                 let pending = loading == Some(&item.path);
-                                if film_tile(ui, item, active, pending, picture).clicked()
-                                    && !active
-                                {
-                                    to_open = Some(item.path.clone());
+                                let tile_resp =
+                                    film_tile(ui, item, active, selected, pending, picture);
+                                if tile_resp.clicked() {
+                                    let (ctrl, shift) = ui.input(|i| {
+                                        (
+                                            i.modifiers.command || i.modifiers.ctrl,
+                                            i.modifiers.shift,
+                                        )
+                                    });
+                                    if shift {
+                                        let all_paths: Vec<PathBuf> = displayed_items
+                                            .iter()
+                                            .map(|it| it.path.clone())
+                                            .collect();
+                                        action_shift = Some((item.path.clone(), all_paths));
+                                    } else if ctrl {
+                                        action_ctrl = Some(item.path.clone());
+                                    } else {
+                                        action_single = Some((item.path.clone(), active));
+                                    }
                                 }
+
+                                tile_resp.context_menu(|ui| {
+                                    ui.label(
+                                        RichText::new(&item.name)
+                                            .family(theme::mono_bold())
+                                            .color(theme::ACCENT),
+                                    );
+                                    ui.separator();
+                                    ui.label(theme::dim("Flags:"));
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Pick (P)").clicked() {
+                                            action_flag = Some((
+                                                item.path.clone(),
+                                                photo_engine::Flag::Pick,
+                                            ));
+                                            ui.close();
+                                        }
+                                        if ui.button("Reject (X)").clicked() {
+                                            action_flag = Some((
+                                                item.path.clone(),
+                                                photo_engine::Flag::Reject,
+                                            ));
+                                            ui.close();
+                                        }
+                                        if ui.button("Clear (U)").clicked() {
+                                            action_flag = Some((
+                                                item.path.clone(),
+                                                photo_engine::Flag::Unflagged,
+                                            ));
+                                            ui.close();
+                                        }
+                                    });
+                                    ui.label(theme::dim("Rating:"));
+                                    ui.horizontal(|ui| {
+                                        for r in 0..=5 {
+                                            let label = if r == 0 {
+                                                "0★".to_string()
+                                            } else {
+                                                format!("{r}★")
+                                            };
+                                            if ui.button(label).clicked() {
+                                                action_rating = Some((item.path.clone(), r));
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                    if ui.button("Batch Multi-Export…").clicked() {
+                                        action_export = true;
+                                        ui.close();
+                                    }
+                                });
                             }
                         });
                     });
             });
+
+        if let Some((target, all_paths)) = action_shift {
+            self.selection.select_range(target, &all_paths);
+        }
+        if let Some(target) = action_ctrl {
+            self.selection.toggle_select(target);
+        }
+        if let Some((target, active)) = action_single {
+            self.selection.select_single(target.clone());
+            if !active {
+                to_open = Some(target);
+            }
+        }
+        if let Some((path, rating)) = action_rating {
+            if self.selection.is_selected(&path) {
+                self.set_rating_for_selection(rating);
+            } else {
+                self.set_rating_for_path(&path, rating);
+            }
+        }
+        if let Some((path, flag)) = action_flag {
+            if self.selection.is_selected(&path) {
+                self.set_flag_for_selection(flag);
+            } else {
+                self.set_flag_for_path(&path, flag);
+            }
+        }
+        if action_export {
+            self.batch_dialog_open = true;
+        }
         if let Some(path) = to_open {
             self.open_path(gpu, path);
         }
@@ -2630,11 +3714,54 @@ impl PhotoApp {
             InspectorSectionId::Exposure => {
                 let p = &mut self.stack.exposure.params;
                 let dp = d.exposure.params;
+
+                ui.horizontal(|ui| {
+                    ui.label(theme::tag("mode").color(theme::TEXT_DIM));
+                    let modes = [
+                        (
+                            photo_engine::params::ExposureMode::ClassicLinear,
+                            "Classic",
+                            "Pure linear gain without highlight compression. Matches Lightroom Classic's punchy, direct sensor response.",
+                        ),
+                        (
+                            photo_engine::params::ExposureMode::ModernSoft,
+                            "Modern",
+                            "Soft highlight shoulder (similar to Lightroom 2026). Compresses extreme highlights to preserve detail in blown areas.",
+                        ),
+                        (
+                            photo_engine::params::ExposureMode::FilmicShoulder,
+                            "Filmic",
+                            "Cinematic filmic shoulder. Gentle logarithmic knee simulating analog film highlight latitude.",
+                        ),
+                        (
+                            photo_engine::params::ExposureMode::Custom,
+                            "Custom",
+                            "Fine-tune the compression shoulder rolloff manually.",
+                        ),
+                    ];
+                    for (m, label, tip) in modes {
+                        let sel = p.mode == m;
+                        if widgets::chip(ui, sel, label).on_hover_text(tip).clicked() {
+                            p.mode = m;
+                            match m {
+                                photo_engine::params::ExposureMode::ClassicLinear => p.rolloff = 0.0,
+                                photo_engine::params::ExposureMode::ModernSoft => p.rolloff = 0.25,
+                                photo_engine::params::ExposureMode::FilmicShoulder => p.rolloff = 0.50,
+                                photo_engine::params::ExposureMode::Custom => {}
+                            }
+                            discrete!();
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                let max_ev = if p.extended_range { 8.0 } else { 4.0 };
                 track!(widgets::param_slider(
                     ui,
                     "EV",
                     &mut p.ev,
-                    -4.0..=4.0,
+                    -max_ev..=max_ev,
                     2,
                     dp.ev
                 ));
@@ -2646,6 +3773,40 @@ impl PhotoApp {
                     4,
                     dp.black
                 ));
+
+                if p.mode == photo_engine::params::ExposureMode::Custom {
+                    track!(widgets::param_slider(
+                        ui,
+                        "rolloff",
+                        &mut p.rolloff,
+                        0.0..=1.0,
+                        2,
+                        0.0
+                    ));
+                }
+
+                ui.horizontal(|ui| {
+                    if widgets::chip(
+                        ui,
+                        p.extended_range,
+                        if p.extended_range {
+                            "±8 EV (Extended)"
+                        } else {
+                            "±4 EV (Standard)"
+                        },
+                    )
+                    .on_hover_text(
+                        "Toggle between standard ±4 EV range and extended ±8 EV extreme range",
+                    )
+                    .clicked()
+                    {
+                        p.extended_range = !p.extended_range;
+                        discrete!();
+                    }
+                });
+
+                ui.add_space(4.0);
+                widgets::mini_knee_curve(ui, p.ev, p.rolloff);
             }
             InspectorSectionId::Tonal => {
                 let p = &mut self.stack.tonal.params;
@@ -2697,6 +3858,91 @@ impl PhotoApp {
                         });
                     });
                 });
+            }
+            InspectorSectionId::Clarity => {
+                let p = &mut self.stack.clarity.params;
+                let dp = d.clarity.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "clarity",
+                    &mut p.clarity,
+                    -100.0..=100.0,
+                    1,
+                    dp.clarity
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "texture",
+                    &mut p.texture,
+                    -100.0..=100.0,
+                    1,
+                    dp.texture
+                ));
+            }
+            InspectorSectionId::Dehaze => {
+                let p = &mut self.stack.dehaze.params;
+                let dp = d.dehaze.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "amount",
+                    &mut p.amount,
+                    -100.0..=100.0,
+                    1,
+                    dp.amount
+                ));
+            }
+            InspectorSectionId::ColorEq => {
+                let p = &mut self.stack.color_eq.params;
+                let dp = d.color_eq.params;
+
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (ColorEqTab::Hue, "Hue"),
+                        (ColorEqTab::Saturation, "Saturation"),
+                        (ColorEqTab::Luminance, "Luminance"),
+                    ] {
+                        let sel = self.color_eq_tab == tab;
+                        if widgets::chip(ui, sel, label).clicked() {
+                            self.color_eq_tab = tab;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+
+                for ((name, band), (_, home_band)) in p.bands_mut().into_iter().zip(dp.bands()) {
+                    match self.color_eq_tab {
+                        ColorEqTab::Hue => {
+                            track!(widgets::param_slider(
+                                ui,
+                                name,
+                                &mut band.hue,
+                                -30.0..=30.0,
+                                1,
+                                home_band.hue
+                            ));
+                        }
+                        ColorEqTab::Saturation => {
+                            track!(widgets::param_slider(
+                                ui,
+                                name,
+                                &mut band.saturation,
+                                -100.0..=100.0,
+                                1,
+                                home_band.saturation
+                            ));
+                        }
+                        ColorEqTab::Luminance => {
+                            track!(widgets::param_slider(
+                                ui,
+                                name,
+                                &mut band.luminance,
+                                -100.0..=100.0,
+                                1,
+                                home_band.luminance
+                            ));
+                        }
+                    }
+                }
             }
             InspectorSectionId::Filmic3D => {
                 let p = &mut self.stack.filmic.params;
@@ -2992,6 +4238,9 @@ fn module_enabled(stack: &mut PhotoStack, id: InspectorSectionId) -> Option<&mut
         S::Exposure => Some(&mut stack.exposure.enabled),
         S::Tonal => Some(&mut stack.tonal.enabled),
         S::ToneCurve => Some(&mut stack.tone_curve.enabled),
+        S::Clarity => Some(&mut stack.clarity.enabled),
+        S::Dehaze => Some(&mut stack.dehaze.enabled),
+        S::ColorEq => Some(&mut stack.color_eq.enabled),
         S::Filmic3D => Some(&mut stack.filmic.enabled),
         S::ColorBalance => Some(&mut stack.color_balance.enabled),
         S::Vibrance => Some(&mut stack.vibrance.enabled),
@@ -3008,6 +4257,9 @@ fn module_on(stack: &PhotoStack, id: InspectorSectionId) -> bool {
         S::Exposure => stack.exposure.enabled,
         S::Tonal => stack.tonal.enabled,
         S::ToneCurve => stack.tone_curve.enabled,
+        S::Clarity => stack.clarity.enabled,
+        S::Dehaze => stack.dehaze.enabled,
+        S::ColorEq => stack.color_eq.enabled,
         S::Filmic3D => stack.filmic.enabled,
         S::ColorBalance => stack.color_balance.enabled,
         S::Vibrance => stack.vibrance.enabled,
@@ -3064,7 +4316,16 @@ fn summarise(id: InspectorSectionId, s: &PhotoStack, d: &PhotoStack) -> (String,
         }
         S::Exposure => {
             let p = &s.exposure.params;
-            (format!("{:+.2} EV", p.ev), *p != d.exposure.params)
+            let mode_tag = match p.mode {
+                photo_engine::params::ExposureMode::ClassicLinear => "",
+                photo_engine::params::ExposureMode::ModernSoft => " · modern",
+                photo_engine::params::ExposureMode::FilmicShoulder => " · filmic",
+                photo_engine::params::ExposureMode::Custom => " · custom",
+            };
+            (
+                format!("{:+.2} EV{mode_tag}", p.ev),
+                *p != d.exposure.params,
+            )
         }
         S::Tonal => {
             let p = &s.tonal.params;
@@ -3094,6 +4355,46 @@ fn summarise(id: InspectorSectionId, s: &PhotoStack, d: &PhotoStack) -> (String,
                 "linear".to_string()
             };
             (text, modified)
+        }
+        S::Clarity => {
+            let p = &s.clarity.params;
+            let mut parts = Vec::new();
+            if p.clarity != 0.0 {
+                parts.push(format!("clr {:+.0}", p.clarity));
+            }
+            if p.texture != 0.0 {
+                parts.push(format!("tex {:+.0}", p.texture));
+            }
+            let text = if parts.is_empty() {
+                "neutral".to_string()
+            } else {
+                parts.join(" · ")
+            };
+            (text, *p != d.clarity.params)
+        }
+        S::Dehaze => {
+            let p = &s.dehaze.params;
+            let text = if p.amount != 0.0 {
+                format!("{:+.0}", p.amount)
+            } else {
+                "neutral".to_string()
+            };
+            (text, *p != d.dehaze.params)
+        }
+        S::ColorEq => {
+            let active_bands = s
+                .color_eq
+                .params
+                .bands()
+                .iter()
+                .filter(|(_, b)| b.hue != 0.0 || b.saturation != 0.0 || b.luminance != 0.0)
+                .count();
+            let text = if active_bands > 0 {
+                format!("{active_bands} active")
+            } else {
+                "neutral".to_string()
+            };
+            (text, s.color_eq.params != d.color_eq.params)
         }
         S::Filmic3D => {
             let p = &s.filmic.params;
@@ -3360,13 +4661,14 @@ fn list_row(
 }
 
 /// A shelved file: icon, name, size badge, and a status dot. The size badge turns into a
-/// remove button under the pointer. Returns `(open, remove)`.
+/// remove button under the pointer. Returns `(response, removed)`.
 fn shelf_row(
     ui: &mut egui::Ui,
     item: &ShelfItem,
     active: bool,
+    selected: bool,
     status: Option<Color32>,
-) -> (bool, bool) {
+) -> (egui::Response, bool) {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
 
@@ -3387,12 +4689,18 @@ fn shelf_row(
     let painter = ui.painter();
     let border = if active {
         theme::ACCENT
+    } else if selected {
+        theme::ACCENT.linear_multiply(0.8)
     } else if hovered {
         theme::BORDER_HI
     } else {
         Color32::from_gray(0x20)
     };
-    let fill = if hovered && !active {
+    let fill = if active {
+        theme::BG_900
+    } else if selected {
+        theme::ACCENT.linear_multiply(0.12)
+    } else if hovered {
         Color32::from_gray(0x0c)
     } else {
         theme::BG_950
@@ -3401,14 +4709,15 @@ fn shelf_row(
         rect,
         3.0,
         fill,
-        Stroke::new(1.0, border),
+        Stroke::new(if active || selected { 1.5 } else { 1.0 }, border),
         egui::StrokeKind::Inside,
     );
 
+    let is_raster = photo_engine::is_raster_path(&item.path);
     painter.text(
         rect.left_center() + vec2(14.0, 0.0),
         Align2::CENTER_CENTER,
-        "📷",
+        if is_raster { "🖼" } else { "📷" },
         FontId::proportional(13.0),
         if active {
             theme::ACCENT
@@ -3417,10 +4726,68 @@ fn shelf_row(
         },
     );
 
-    let mut name_right = badge.left() - 6.0;
+    let mut right_cursor = badge.left() - 6.0;
+
     if let Some(colour) = status {
-        painter.circle_filled(pos2(badge.left() - 9.0, rect.center().y), 3.0, colour);
-        name_right -= 12.0;
+        painter.circle_filled(pos2(right_cursor - 4.0, rect.center().y), 3.0, colour);
+        right_cursor -= 12.0;
+    }
+
+    if item.metadata.rating > 0 {
+        let r_text = format!("★{}", item.metadata.rating);
+        let r_galley =
+            painter.layout_no_wrap(r_text, FontId::new(10.5, theme::mono_bold()), theme::ACCENT);
+        painter.galley(
+            pos2(
+                right_cursor - r_galley.size().x,
+                rect.center().y - r_galley.size().y / 2.0,
+            ),
+            r_galley.clone(),
+            theme::ACCENT,
+        );
+        right_cursor -= r_galley.size().x + 6.0;
+    }
+
+    match item.metadata.flag {
+        photo_engine::Flag::Pick => {
+            let f_rect =
+                Rect::from_center_size(pos2(right_cursor - 7.0, rect.center().y), vec2(14.0, 14.0));
+            painter.rect(
+                f_rect,
+                2.0,
+                theme::BG_850,
+                Stroke::new(1.0, theme::LIME),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                f_rect.center(),
+                Align2::CENTER_CENTER,
+                "P",
+                FontId::new(9.0, theme::mono_bold()),
+                theme::LIME,
+            );
+            right_cursor -= 18.0;
+        }
+        photo_engine::Flag::Reject => {
+            let f_rect =
+                Rect::from_center_size(pos2(right_cursor - 7.0, rect.center().y), vec2(14.0, 14.0));
+            painter.rect(
+                f_rect,
+                2.0,
+                theme::BG_850,
+                Stroke::new(1.0, theme::DANGER),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                f_rect.center(),
+                Align2::CENTER_CENTER,
+                "X",
+                FontId::new(9.0, theme::mono_bold()),
+                theme::DANGER,
+            );
+            right_cursor -= 18.0;
+        }
+        photo_engine::Flag::Unflagged => {}
     }
 
     let (family, colour) = if active {
@@ -3433,7 +4800,7 @@ fn shelf_row(
         egui::TextFormat::simple(FontId::new(12.0, family), colour),
     );
     let name_left = rect.left() + 30.0;
-    job.wrap = egui::text::TextWrapping::truncate_at_width((name_right - name_left).max(10.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((right_cursor - name_left).max(10.0));
     let galley = painter.layout_job(job);
     painter.galley(
         pos2(name_left, rect.center().y - galley.size().y / 2.0),
@@ -3481,16 +4848,15 @@ fn shelf_row(
         );
     }
 
-    let removed = remove.clicked();
-    (response.clicked() && !removed, removed)
+    (response, remove.clicked())
 }
 
-/// A filmstrip frame. Only the open image has pixels to show — the others would need a
-/// decode each — so it alone gets the live render as its thumbnail.
+/// A filmstrip frame with thumbnail preview, rating stars, flag badge, and selection border.
 fn film_tile(
     ui: &mut egui::Ui,
     item: &ShelfItem,
     active: bool,
+    selected: bool,
     pending: bool,
     picture: Option<(egui::TextureId, f32)>,
 ) -> egui::Response {
@@ -3514,14 +4880,19 @@ fn film_tile(
             painter.image(id, inner, uv, Color32::from_white_alpha(220));
         }
         None => {
+            let is_raster = photo_engine::is_raster_path(&item.path);
             painter.text(
                 inner.center() - vec2(0.0, 6.0),
                 Align2::CENTER_CENTER,
-                "📷",
+                if is_raster { "🖼" } else { "📷" },
                 FontId::proportional(16.0),
                 theme::RAIL,
             );
         }
+    }
+
+    if selected && !active {
+        painter.rect_filled(inner, 0.0, theme::ACCENT.linear_multiply(0.12));
     }
 
     // File stem on a black strip, bottom-left, as the frame number.
@@ -3562,6 +4933,53 @@ fn film_tile(
         theme::TEXT,
     );
 
+    // Rating badge (top-right)
+    if item.metadata.rating > 0 {
+        let stars_text = format!("★{}", item.metadata.rating);
+        let star_galley = painter.layout_no_wrap(
+            stars_text,
+            FontId::new(9.5, theme::mono_bold()),
+            theme::ACCENT,
+        );
+        let star_rect = Rect::from_min_size(
+            inner.right_top() + vec2(-star_galley.size().x - 6.0, 3.0),
+            star_galley.size() + vec2(4.0, 2.0),
+        );
+        painter.rect_filled(star_rect, 2.0, Color32::from_black_alpha(200));
+        painter.galley(
+            star_rect.center() - star_galley.size() / 2.0,
+            star_galley,
+            theme::ACCENT,
+        );
+    }
+
+    // Flag badge (top-left)
+    match item.metadata.flag {
+        photo_engine::Flag::Pick => {
+            let p_rect = Rect::from_min_size(inner.left_top() + vec2(3.0, 3.0), vec2(14.0, 14.0));
+            painter.rect_filled(p_rect, 2.0, theme::LIME.linear_multiply(0.85));
+            painter.text(
+                p_rect.center(),
+                Align2::CENTER_CENTER,
+                "P",
+                FontId::new(9.0, theme::mono_bold()),
+                Color32::BLACK,
+            );
+        }
+        photo_engine::Flag::Reject => {
+            let x_rect = Rect::from_min_size(inner.left_top() + vec2(3.0, 3.0), vec2(14.0, 14.0));
+            painter.rect_filled(x_rect, 2.0, theme::DANGER.linear_multiply(0.85));
+            painter.text(
+                x_rect.center(),
+                Align2::CENTER_CENTER,
+                "X",
+                FontId::new(9.0, theme::mono_bold()),
+                Color32::WHITE,
+            );
+        }
+        photo_engine::Flag::Unflagged => {}
+    }
+
     let status = if item.has_sidecar {
         Some(theme::LIME)
     } else if item.is_edited {
@@ -3570,7 +4988,12 @@ fn film_tile(
         None
     };
     if let Some(colour) = status {
-        painter.circle_filled(inner.right_top() + vec2(-8.0, 8.0), 3.0, colour);
+        let dot_pos = if item.metadata.rating > 0 {
+            inner.right_top() + vec2(-6.0, 18.0)
+        } else {
+            inner.right_top() + vec2(-6.0, 6.0)
+        };
+        painter.circle_filled(dot_pos, 3.0, colour);
     }
 
     if pending {
@@ -3585,6 +5008,8 @@ fn film_tile(
     }
     let border = if active {
         Stroke::new(2.0, theme::ACCENT)
+    } else if selected {
+        Stroke::new(2.0, Color32::from_rgb(220, 220, 220))
     } else if pending {
         Stroke::new(2.0, theme::ACCENT.linear_multiply(0.5))
     } else if hovered {

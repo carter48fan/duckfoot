@@ -533,3 +533,166 @@ pub fn brand_mark(ui: &mut Ui, size: f32) {
     }
     painter.circle_filled(at(256.0, 288.0), 36.0 * scale, ACCENT);
 }
+
+/// Interactive 1-5 star rating widget.
+pub fn star_rating(ui: &mut Ui, rating: &mut u8) -> Response {
+    let desired_size = vec2(75.0, 16.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let painter = ui.painter();
+    let star_width = rect.width() / 5.0;
+
+    let hover_pos = response.hover_pos();
+    let hovered_star = hover_pos.map(|p| {
+        let x = (p.x - rect.left()).clamp(0.0, rect.width() - 0.1);
+        (x / star_width).floor() as u8 + 1
+    });
+
+    if response.clicked() {
+        if let Some(star) = hovered_star {
+            if *rating == star {
+                *rating = 0; // Click same star to clear
+            } else {
+                *rating = star;
+            }
+        }
+    }
+
+    for i in 1..=5 {
+        let star_rect = Rect::from_min_size(
+            pos2(rect.left() + (i as f32 - 1.0) * star_width, rect.top()),
+            vec2(star_width, rect.height()),
+        );
+        let is_filled = if let Some(h) = hovered_star {
+            i <= h
+        } else {
+            i <= *rating
+        };
+
+        let col = if is_filled { ACCENT } else { BORDER_HI };
+
+        let text = if is_filled { "★" } else { "☆" };
+        painter.text(
+            star_rect.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(13.0),
+            col,
+        );
+    }
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    response
+}
+
+/// Pick/Reject flag badge: cycles Unflagged -> Pick -> Reject -> Unflagged on click.
+pub fn flag_badge(ui: &mut Ui, flag: &mut photo_engine::Flag) -> Response {
+    let (text, col, fill) = match flag {
+        photo_engine::Flag::Pick => ("PICK", LIME, BG_850),
+        photo_engine::Flag::Reject => ("REJ", DANGER, BG_850),
+        photo_engine::Flag::Unflagged => ("--", TEXT_FAINT, Color32::TRANSPARENT),
+    };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), FontId::new(9.5, theme::mono_bold()), col);
+    let size = vec2(galley.size().x + 10.0, 16.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        *flag = match flag {
+            photo_engine::Flag::Unflagged => photo_engine::Flag::Pick,
+            photo_engine::Flag::Pick => photo_engine::Flag::Reject,
+            photo_engine::Flag::Reject => photo_engine::Flag::Unflagged,
+        };
+    }
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        2.0,
+        fill,
+        Stroke::new(1.0, col.linear_multiply(0.6)),
+        StrokeKind::Inside,
+    );
+    painter.galley(rect.center() - galley.size() / 2.0, galley, col);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// Visualizes the exposure response curve knee live in real-time.
+/// Shows input EV on x-axis (-3..+3) and output intensity on y-axis (0..1+).
+pub fn mini_knee_curve(ui: &mut Ui, ev: f32, rolloff: f32) {
+    let size = vec2(ui.available_width().min(240.0), 48.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+
+    // Background & border
+    painter.rect(
+        rect,
+        3.0,
+        BG_900,
+        Stroke::new(1.0, BORDER),
+        StrokeKind::Inside,
+    );
+
+    // Grid lines: 100% clip line
+    let clip_y = rect.top() + rect.height() * 0.25;
+    painter.line_segment(
+        [pos2(rect.left(), clip_y), pos2(rect.right(), clip_y)],
+        Stroke::new(0.5, BORDER),
+    );
+
+    // Compute curve points
+    let points_count = 48;
+    let mut points = Vec::with_capacity(points_count);
+
+    let gain = 2.0f32.powf(ev);
+
+    for i in 0..points_count {
+        let t = i as f32 / (points_count - 1) as f32; // 0..1
+        let in_val = t * 2.0; // 0..2 linear sensor signal
+
+        let scaled = in_val * gain;
+        let out_val = if rolloff <= 0.001 {
+            scaled
+        } else {
+            let tau = 1.0 - rolloff;
+            if scaled <= tau {
+                scaled
+            } else {
+                let d = scaled - tau;
+                tau + (d * rolloff) / (rolloff + d)
+            }
+        };
+
+        let px = rect.left() + t * rect.width();
+        let py =
+            rect.bottom() - 4.0 - (out_val.clamp(0.0, 2.0) / 1.0) * (rect.bottom() - 4.0 - clip_y);
+        points.push(pos2(px, py.clamp(rect.top() + 2.0, rect.bottom() - 2.0)));
+    }
+
+    // Draw curve
+    for w in points.windows(2) {
+        painter.line_segment([w[0], w[1]], Stroke::new(1.5, ACCENT));
+    }
+
+    // Legend
+    let label = if rolloff <= 0.001 {
+        "Classic (Linear Gain)"
+    } else if (rolloff - 0.25).abs() < 0.05 {
+        "Modern (Soft Shoulder)"
+    } else if (rolloff - 0.50).abs() < 0.05 {
+        "Filmic (Wide Rolloff)"
+    } else {
+        "Custom Rolloff"
+    };
+    painter.text(
+        pos2(rect.left() + 6.0, rect.top() + 4.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::new(9.0, FontFamily::Monospace),
+        TEXT_FAINT,
+    );
+}

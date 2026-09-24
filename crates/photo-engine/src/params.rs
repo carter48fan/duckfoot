@@ -32,10 +32,45 @@ pub struct WhiteBalance {
     pub tint_b: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExposureMode {
+    /// Pure linear physical gain (C_out = C_in * 2^EV).
+    /// Highlights stay crisp and punchy with no automatic compression (Lightroom Classic behavior).
+    #[default]
+    ClassicLinear,
+    /// Smooth highlight compression knee.
+    /// Automatically rolls off bright highlights as exposure increases (Modern Lightroom CC behavior).
+    ModernSoft,
+    /// Organic S-curve highlight latitude matching traditional analog negative film stocks.
+    FilmicShoulder,
+    /// Custom user-defined roll-off and knee threshold.
+    Custom,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Exposure {
     pub ev: f32,
     pub black: f32,
+    #[serde(default)]
+    pub mode: ExposureMode,
+    /// Highlight shoulder compression (0.0 = linear / Classic, 0.5 = Modern, 1.0 = Filmic).
+    #[serde(default)]
+    pub rolloff: f32,
+    /// Toggle between standard +/-4 EV and studio extended +/-8 EV range.
+    #[serde(default)]
+    pub extended_range: bool,
+}
+
+impl Default for Exposure {
+    fn default() -> Self {
+        Self {
+            ev: 0.0,
+            black: 0.0,
+            mode: ExposureMode::ClassicLinear,
+            rolloff: 0.0,
+            extended_range: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -263,6 +298,99 @@ impl Default for Sharpen {
     }
 }
 
+/// Multi-band local contrast and texture enhancement.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Clarity {
+    /// Mid-low frequency local contrast boost (-100.0..=100.0).
+    pub clarity: f32,
+    /// Mid-high frequency texture boost (-100.0..=100.0).
+    pub texture: f32,
+}
+
+impl Default for Clarity {
+    fn default() -> Self {
+        Self {
+            clarity: 0.0,
+            texture: 0.0,
+        }
+    }
+}
+
+/// Atmospheric haze reduction or enhancement.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Dehaze {
+    /// Atmospheric haze reduction (-100.0..=100.0).
+    pub amount: f32,
+}
+
+impl Default for Dehaze {
+    fn default() -> Self {
+        Self { amount: 0.0 }
+    }
+}
+
+/// Single color band adjustments for 8-band Color EQ.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ColorBand {
+    /// Hue shift (-30.0..=30.0 degrees).
+    pub hue: f32,
+    /// Saturation adjustment (-100.0..=100.0%).
+    pub saturation: f32,
+    /// Luminance adjustment (-100.0..=100.0%).
+    pub luminance: f32,
+}
+
+impl Default for ColorBand {
+    fn default() -> Self {
+        Self {
+            hue: 0.0,
+            saturation: 0.0,
+            luminance: 0.0,
+        }
+    }
+}
+
+/// 8-band HSL color equalizer for fine-tuned color grading (especially portrait skin tones).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ColorEq {
+    pub red: ColorBand,
+    pub orange: ColorBand,
+    pub yellow: ColorBand,
+    pub green: ColorBand,
+    pub aqua: ColorBand,
+    pub blue: ColorBand,
+    pub purple: ColorBand,
+    pub magenta: ColorBand,
+}
+
+impl ColorEq {
+    pub fn bands_mut(&mut self) -> [(&'static str, &mut ColorBand); 8] {
+        [
+            ("Red", &mut self.red),
+            ("Orange", &mut self.orange),
+            ("Yellow", &mut self.yellow),
+            ("Green", &mut self.green),
+            ("Aqua", &mut self.aqua),
+            ("Blue", &mut self.blue),
+            ("Purple", &mut self.purple),
+            ("Magenta", &mut self.magenta),
+        ]
+    }
+
+    pub fn bands(&self) -> [(&'static str, &ColorBand); 8] {
+        [
+            ("Red", &self.red),
+            ("Orange", &self.orange),
+            ("Yellow", &self.yellow),
+            ("Green", &self.green),
+            ("Aqua", &self.aqua),
+            ("Blue", &self.blue),
+            ("Purple", &self.purple),
+            ("Magenta", &self.magenta),
+        ]
+    }
+}
+
 /// One module: its parameters plus whether it runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module<T> {
@@ -303,6 +431,12 @@ pub struct PhotoStack {
     pub vignette: Module<Vignette>,
     #[serde(default)]
     pub sharpen: Module<Sharpen>,
+    #[serde(default)]
+    pub clarity: Module<Clarity>,
+    #[serde(default)]
+    pub dehaze: Module<Dehaze>,
+    #[serde(default)]
+    pub color_eq: Module<ColorEq>,
 }
 
 impl Default for PhotoStack {
@@ -316,13 +450,7 @@ impl Default for PhotoStack {
                     tint_b: 1.0,
                 },
             ),
-            exposure: Module::new(
-                true,
-                Exposure {
-                    ev: 0.0,
-                    black: 0.0,
-                },
-            ),
+            exposure: Module::new(true, Exposure::default()),
             tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
             filmic: Module::new(
@@ -346,6 +474,9 @@ impl Default for PhotoStack {
             vibrance: Module::new(false, Vibrance::default()),
             vignette: Module::new(false, Vignette::default()),
             sharpen: Module::new(false, Sharpen::default()),
+            clarity: Module::new(false, Clarity::default()),
+            dehaze: Module::new(false, Dehaze::default()),
+            color_eq: Module::new(false, ColorEq::default()),
         }
     }
 }
@@ -360,6 +491,9 @@ pub(crate) mod flags {
     pub const VIBRANCE: u32 = 64;
     pub const VIGNETTE: u32 = 128;
     pub const SHARPEN: u32 = 256;
+    pub const CLARITY: u32 = 512;
+    pub const DEHAZE: u32 = 1024;
+    pub const COLOR_EQ: u32 = 2048;
 }
 
 impl PhotoStack {
@@ -391,6 +525,15 @@ impl PhotoStack {
         }
         if self.sharpen.enabled {
             m |= flags::SHARPEN;
+        }
+        if self.clarity.enabled {
+            m |= flags::CLARITY;
+        }
+        if self.dehaze.enabled {
+            m |= flags::DEHAZE;
+        }
+        if self.color_eq.enabled {
+            m |= flags::COLOR_EQ;
         }
         m
     }
@@ -540,5 +683,53 @@ mod tests {
             s.bitmask(),
             base_mask | flags::TONAL | flags::VIBRANCE | flags::VIGNETTE | flags::SHARPEN
         );
+        s.clarity.enabled = true;
+        assert_eq!(
+            s.bitmask(),
+            base_mask
+                | flags::TONAL
+                | flags::VIBRANCE
+                | flags::VIGNETTE
+                | flags::SHARPEN
+                | flags::CLARITY
+        );
+        s.dehaze.enabled = true;
+        assert_eq!(
+            s.bitmask(),
+            base_mask
+                | flags::TONAL
+                | flags::VIBRANCE
+                | flags::VIGNETTE
+                | flags::SHARPEN
+                | flags::CLARITY
+                | flags::DEHAZE
+        );
+        s.color_eq.enabled = true;
+        assert_eq!(
+            s.bitmask(),
+            base_mask
+                | flags::TONAL
+                | flags::VIBRANCE
+                | flags::VIGNETTE
+                | flags::SHARPEN
+                | flags::CLARITY
+                | flags::DEHAZE
+                | flags::COLOR_EQ
+        );
+    }
+
+    #[test]
+    fn exposure_mode_defaults_and_serialization() {
+        let exp = Exposure::default();
+        assert_eq!(exp.mode, ExposureMode::ClassicLinear);
+        assert_eq!(exp.rolloff, 0.0);
+        assert!(!exp.extended_range);
+
+        // Deserializing older sidecar json without mode/rolloff succeeds with defaults
+        let json = r#"{"ev": 1.5, "black": 0.01}"#;
+        let deserialized: Exposure = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.ev, 1.5);
+        assert_eq!(deserialized.mode, ExposureMode::ClassicLinear);
+        assert_eq!(deserialized.rolloff, 0.0);
     }
 }

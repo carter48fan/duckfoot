@@ -6,10 +6,41 @@
 
 use crate::params::PhotoStack;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const SIDECAR_EXT: &str = "duckfoot";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Flag {
+    #[default]
+    Unflagged,
+    Pick,
+    Reject,
+}
+
+/// Asset metadata stored in the sidecar (ratings, flags, color tags).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AssetMetadata {
+    /// Rating from 0 to 5 stars (0 = unrated).
+    #[serde(default)]
+    pub rating: u8,
+    /// Culling flag status (Unflagged, Pick, Reject).
+    #[serde(default)]
+    pub flag: Flag,
+    /// Color label (e.g. "red", "yellow", "green", "blue", "purple").
+    #[serde(default)]
+    pub color_label: Option<String>,
+}
+
+/// Complete sidecar container containing both edit parameters and asset metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SidecarData {
+    pub stack: PhotoStack,
+    #[serde(default)]
+    pub metadata: AssetMetadata,
+}
 
 /// Returns the primary sidecar path for a RAW file: `<raw_path>.duckfoot`.
 /// E.g. `DSC08450.ARW` -> `DSC08450.ARW.duckfoot`.
@@ -40,11 +71,19 @@ pub fn find_sidecar(raw_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Serializes and writes a `PhotoStack` to the primary sidecar file.
-pub fn save_sidecar(raw_path: &Path, stack: &PhotoStack) -> Result<PathBuf> {
+/// Serializes and writes a `PhotoStack` and optional `AssetMetadata` to the primary sidecar file.
+pub fn save_sidecar_full(
+    raw_path: &Path,
+    stack: &PhotoStack,
+    metadata: &AssetMetadata,
+) -> Result<PathBuf> {
     let target = sidecar_path(raw_path);
+    let data = SidecarData {
+        stack: stack.clone(),
+        metadata: metadata.clone(),
+    };
     let json =
-        serde_json::to_string_pretty(stack).context("failed to serialize photo stack to JSON")?;
+        serde_json::to_string_pretty(&data).context("failed to serialize sidecar data to JSON")?;
 
     // Write via temp file beside the target to ensure atomic update.
     let tmp = target.with_extension("tmp");
@@ -55,17 +94,42 @@ pub fn save_sidecar(raw_path: &Path, stack: &PhotoStack) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Reads a `PhotoStack` from an existing sidecar if present.
-/// Returns `Ok(None)` if no sidecar file exists.
-pub fn load_sidecar(raw_path: &Path) -> Result<Option<PhotoStack>> {
+/// Serializes and writes a `PhotoStack` to the primary sidecar file (preserving existing metadata if present).
+pub fn save_sidecar(raw_path: &Path, stack: &PhotoStack) -> Result<PathBuf> {
+    let existing_metadata = load_sidecar_full(raw_path)
+        .ok()
+        .flatten()
+        .map(|d| d.metadata)
+        .unwrap_or_default();
+    save_sidecar_full(raw_path, stack, &existing_metadata)
+}
+
+/// Reads full `SidecarData` (stack + metadata) from an existing sidecar if present.
+pub fn load_sidecar_full(raw_path: &Path) -> Result<Option<SidecarData>> {
     let Some(path) = find_sidecar(raw_path) else {
         return Ok(None);
     };
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read sidecar file {}", path.display()))?;
+
+    // First attempt decoding as modern SidecarData container:
+    if let Ok(data) = serde_json::from_str::<SidecarData>(&content) {
+        return Ok(Some(data));
+    }
+
+    // Backward compatibility: attempt decoding as raw legacy PhotoStack:
     let stack: PhotoStack = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse sidecar file {}", path.display()))?;
-    Ok(Some(stack))
+    Ok(Some(SidecarData {
+        stack,
+        metadata: AssetMetadata::default(),
+    }))
+}
+
+/// Reads a `PhotoStack` from an existing sidecar if present.
+/// Returns `Ok(None)` if no sidecar file exists.
+pub fn load_sidecar(raw_path: &Path) -> Result<Option<PhotoStack>> {
+    Ok(load_sidecar_full(raw_path)?.map(|d| d.stack))
 }
 
 #[cfg(test)]

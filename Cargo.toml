@@ -21,12 +21,12 @@ egui-wgpu = { version = "0.36", features = ["winit"] }
 # Driving winit directly is also what the Android bootstrap will need, so this is not a
 # detour taken under protest.
 egui-winit = { version = "0.36", default-features = false, features = ["x11", "wayland"] }
-winit = "0.30"
+winit = { version = "0.30", features = ["x11", "wayland"] }
 bytemuck = { version = "1", features = ["derive"] }
 rawloader = "0.37"
 # Only the encoders we actually write; the default feature set pulls a dozen decoders
 # we will never use, since RAW decoding is rawloader's job.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
 anyhow = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

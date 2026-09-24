@@ -16,28 +16,49 @@ pub mod params;
 pub mod sidecar;
 
 pub use curve::{identity_nodes, CurveNode};
-pub use decode::{CfaImage, RawDecoder, RawloaderBackend};
+pub use decode::{
+    decode_raster, extract_embedded_thumbnail, CfaImage, RasterImage, RawDecoder, RawloaderBackend,
+};
 pub use engine::{Engine, LoadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT};
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
 pub use params::{
-    ColorBalance, Crop, Exposure, Filmic, Geometry, Module, PhotoStack, Rgb, WhiteBalance,
+    Clarity, ColorBalance, ColorBand, ColorEq, Crop, Dehaze, Exposure, ExposureMode, Filmic,
+    Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
 };
-pub use sidecar::{find_sidecar, load_sidecar, save_sidecar, sidecar_path, SIDECAR_EXT};
+pub use sidecar::{
+    find_sidecar, load_sidecar, load_sidecar_full, save_sidecar, save_sidecar_full, sidecar_path,
+    AssetMetadata, Flag, SidecarData, SIDECAR_EXT,
+};
 
-/// File extensions the decoder will attempt.
+/// File extensions the RAW decoder will attempt.
 pub const RAW_EXTENSIONS: &[&str] = &[
     "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "dng", "orf", "rw2", "raf", "pef", "raw",
 ];
 
-/// Extensions for a file-dialog filter, in both cases.
-///
-/// XDG desktop portal filters are literal globs (`*.arw`) and are matched
-/// case-sensitively, so a lowercase-only list hides `DSC08450.ARW` — which is exactly what
-/// cameras actually write. Windows and macOS are case-insensitive here; listing both costs
-/// nothing there and is the difference between a usable and an empty picker on Linux.
+/// File extensions for standard raster formats supported directly.
+pub const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "webp"];
+
+/// Extensions for a RAW-only file-dialog filter, in both cases.
 pub fn raw_dialog_extensions() -> Vec<String> {
     RAW_EXTENSIONS
+        .iter()
+        .flat_map(|e| [e.to_string(), e.to_uppercase()])
+        .collect()
+}
+
+/// Extensions for all supported image formats (RAW + Raster) in both cases.
+pub fn all_image_dialog_extensions() -> Vec<String> {
+    RAW_EXTENSIONS
+        .iter()
+        .chain(RASTER_EXTENSIONS.iter())
+        .flat_map(|e| [e.to_string(), e.to_uppercase()])
+        .collect()
+}
+
+/// Extensions for raster image formats (JPEG, PNG, TIFF, WebP) in both cases.
+pub fn raster_dialog_extensions() -> Vec<String> {
+    RASTER_EXTENSIONS
         .iter()
         .flat_map(|e| [e.to_string(), e.to_uppercase()])
         .collect()
@@ -50,6 +71,17 @@ pub fn is_raw_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_raster_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| RASTER_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+pub fn is_supported_image(path: &std::path::Path) -> bool {
+    is_raw_path(path) || is_raster_path(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,18 +90,31 @@ mod tests {
     #[test]
     fn dialog_filter_covers_both_cases() {
         let exts = raw_dialog_extensions();
-        // The regression: cameras write uppercase, portal globs are case-sensitive.
         assert!(exts.contains(&"arw".to_string()));
         assert!(exts.contains(&"ARW".to_string()));
         assert!(exts.contains(&"CR3".to_string()));
         assert_eq!(exts.len(), RAW_EXTENSIONS.len() * 2);
+
+        let all_exts = all_image_dialog_extensions();
+        assert!(all_exts.contains(&"jpg".to_string()));
+        assert!(all_exts.contains(&"PNG".to_string()));
+        assert!(all_exts.contains(&"webp".to_string()));
+        assert_eq!(
+            all_exts.len(),
+            (RAW_EXTENSIONS.len() + RASTER_EXTENSIONS.len()) * 2
+        );
     }
 
     #[test]
-    fn recognises_raw_extensions_regardless_of_case() {
+    fn recognises_raw_and_raster_extensions_regardless_of_case() {
         assert!(is_raw_path(Path::new("/tmp/IMG_0001.CR3")));
         assert!(is_raw_path(Path::new("/tmp/shot.nef")));
         assert!(!is_raw_path(Path::new("/tmp/shot.jpg")));
-        assert!(!is_raw_path(Path::new("/tmp/noextension")));
+        assert!(is_raster_path(Path::new("/tmp/shot.jpg")));
+        assert!(is_raster_path(Path::new("/tmp/photo.PNG")));
+        assert!(is_raster_path(Path::new("/tmp/scan.TIFF")));
+        assert!(is_supported_image(Path::new("/tmp/shot.ARW")));
+        assert!(is_supported_image(Path::new("/tmp/shot.jpg")));
+        assert!(!is_supported_image(Path::new("/tmp/noextension")));
     }
 }
