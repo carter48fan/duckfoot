@@ -350,8 +350,11 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s duckfoot          # the app's log
 ```
 
-Every push also builds the APK in the **Android** workflow; download it from the run's
-artifacts (`duckfoot-debug-apk`).
+Every push builds an optimised Linux binary and a release APK in the **Build** workflow
+(artifacts `duckfoot-linux-x86_64` and `duckfoot-android`). Every push to `main` also
+refreshes the **nightly** release with both; a `v…` tag, or a hand-run given a version,
+drafts a versioned one. A signing key in the repository's secrets lets each APK install
+over the last — see [android/README.md](./android/README.md).
 
 How it differs from the desktop, for now:
 
