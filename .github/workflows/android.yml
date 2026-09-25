@@ -1,7 +1,8 @@
 name: Android
 
 # On every branch, not only main: the job's product is an APK to install and try, and
-# that is most useful for work that has not merged yet.
+# that is most useful for work that has not merged yet. A tag starting with v (v0.1.0,
+# v0.2.0-alpha.1) also drafts a GitHub release with the APK attached.
 on:
   push:
   pull_request:
@@ -13,6 +14,11 @@ env:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    permissions:
+      # Only the release step writes, and only for a version tag.
+      contents: write
+    env:
+      DUCKFOOT_KEYSTORE_BASE64: ${{ secrets.DUCKFOOT_KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +43,50 @@ jobs:
       # Clippy needs no linker, so it runs before the (slower) NDK build.
       - run: cargo clippy -p duckfoot-android --target aarch64-linux-android -- -D warnings
 
+      # With a signing key in the repository's secrets (android/README.md), every build is
+      # signed with it and installs over the last; without one, each uses a throwaway key.
+      - name: Use the repository's signing key
+        if: env.DUCKFOOT_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$DUCKFOOT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/duckfoot.jks"
+          echo "DUCKFOOT_KEYSTORE=$RUNNER_TEMP/duckfoot.jks" >> "$GITHUB_ENV"
+
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "DUCKFOOT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - run: android/build-apk.sh
+        env:
+          DUCKFOOT_KEYSTORE_PASSWORD: ${{ secrets.DUCKFOOT_KEYSTORE_PASSWORD }}
+          DUCKFOOT_KEY_ALIAS: ${{ secrets.DUCKFOOT_KEY_ALIAS }}
+          DUCKFOOT_KEY_PASSWORD: ${{ secrets.DUCKFOOT_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: duckfoot-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      # A draft: visible to the repository's collaborators, who can download the APK from
+      # it, and public only once someone presses Publish. The README's licence note says
+      # why binaries are not distributed yet.
+      - name: Draft a release for a version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          apk="duckfoot-$TAG.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$apk"
+          if [ -n "$DUCKFOOT_KEYSTORE" ]; then
+            signing="Signed with the repository's key: installs over earlier releases."
+          else
+            signing="Signed with a one-off key: uninstall any earlier Duckfoot build before installing this one."
+          fi
+          gh release create "$TAG" "$apk" \
+            --draft --prerelease \
+            --title "Duckfoot $TAG (Android)" \
+            --generate-notes \
+            --notes "Android test build: Android 11+, a Vulkan GPU, arm64.
+          $signing
+          Install: download the .apk on the phone and open it, allowing installs from that app when asked; or \`adb install -r $apk\`."
