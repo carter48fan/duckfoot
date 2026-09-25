@@ -13,7 +13,7 @@ android {
         minSdk = 30
         targetSdk = 35
         // CI numbers builds so each release installs over the one before; a version tag
-        // names it (see .github/workflows/android.yml).
+        // names it (see .github/workflows/build.yml).
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionName = System.getenv("DUCKFOOT_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.1.0"
         ndk {
