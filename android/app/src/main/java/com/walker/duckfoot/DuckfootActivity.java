@@ -1,4 +1,4 @@
-package com.goldtone.duckfoot;
+package com.walker.duckfoot;
 
 import android.app.NativeActivity;
 import android.content.ActivityNotFoundException;

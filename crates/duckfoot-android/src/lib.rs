@@ -3,7 +3,7 @@
 //!
 //! Storage model, for now: Android hands out `content://` documents rather than paths,
 //! and the app keys everything — shelf, thumbnails, sidecars — on a path. So the Java
-//! activity (`android/app/src/main/java/org/duckfoot/app/DuckfootActivity.java`) *imports*
+//! activity (`android/app/src/main/java/com/walker/duckfoot/DuckfootActivity.java`) *imports*
 //! what the user picks into the app's private library directory and passes the copies'
 //! paths here. Sidecars then work unchanged, beside the copies. Exports go straight to
 //! the shared `Pictures/Duckfoot`, which apps may write to without a permission from
