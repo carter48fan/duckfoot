@@ -159,26 +159,9 @@ jobs:
           cp "$dir/duckfoot" "$appdir/usr/bin/"
           cp brand/duckfoot-1024.png "$appdir/duckfoot.png"
           cp brand/duckfoot-1024.png "$appdir/usr/share/icons/hicolor/256x256/apps/duckfoot.png"
-          cat << 'EOF' > "$appdir/duckfoot.desktop"
-[Desktop Entry]
-Type=Application
-Name=Duckfoot
-GenericName=Photo & RAW Editor
-Comment=Local-first creative suite
-Exec=duckfoot %F
-Icon=duckfoot
-Terminal=false
-Categories=Graphics;Photography;
-MimeType=image/x-sony-arw;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-fuji-raf;image/x-panasonic-rw2;image/tiff;image/png;image/jpeg;
-EOF
-          cp "$appdir/duckfoot.desktop" "$appdir/usr/share/applications/"
-          cat << 'EOF' > "$appdir/AppRun"
-#!/bin/sh
-SELF=$(readlink -f "$0")
-HERE=${SELF%/*}
-export PATH="${HERE}/usr/bin:${PATH}"
-exec "${HERE}/usr/bin/duckfoot" "$@"
-EOF
+          cp brand/duckfoot.desktop "$appdir/"
+          cp brand/duckfoot.desktop "$appdir/usr/share/applications/"
+          cp brand/AppRun "$appdir/AppRun"
           chmod +x "$appdir/AppRun"
 
           curl -sL -o /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
@@ -213,12 +196,12 @@ EOF
           cp target/release/duckfoot.exe "$dir/"
           cp LICENSE "$dir/"
           cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
-          cat << 'EOF' > "$dir/README.txt"
-Duckfoot for Windows (x86_64), built from ${GITHUB_SHA}.
-
-Run duckfoot.exe, or duckfoot.exe photo.ARW. Needs a working Vulkan driver.
-More: https://github.com/carter48fan/duckfoot
-EOF
+          {
+            echo "Duckfoot for Windows (x86_64), built from ${GITHUB_SHA}."
+            echo
+            echo "Run duckfoot.exe, or duckfoot.exe photo.ARW. Needs a working Vulkan driver."
+            echo "More: https://github.com/carter48fan/duckfoot"
+          } > "$dir/README.txt"
           7z a "dist/$dir.zip" "$dir"
 
       - uses: actions/upload-artifact@v6
