@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.goldtone.duckfoot"
+    namespace = "com.walker.duckfoot"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.goldtone.duckfoot"
+        applicationId = "com.walker.duckfoot"
         // 30 (Android 11) is where an app may write images into the shared Pictures/
         // directory by path without a permission, which is how exports reach the gallery.
         minSdk = 30
