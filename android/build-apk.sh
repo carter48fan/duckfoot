@@ -2,6 +2,7 @@
 # Build the Rust library for Android and package it into an installable APK.
 #
 #   android/build-apk.sh            # → android/app/build/outputs/apk/debug/app-debug.apk
+#   android/build-apk.sh release    # → android/app/build/outputs/apk/release/app-release.apk
 #
 # Needs: rustup, an Android SDK (ANDROID_HOME) and NDK (ANDROID_NDK_HOME), JDK 17, and
 # `cargo install cargo-ndk`. The Rust side is always an optimised build — a debug build
@@ -9,6 +10,14 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# debug is debuggable (run-as, a debugger); release is what gets shipped. Both are signed
+# with the same key; see app/build.gradle.kts.
+variant="${1:-debug}"
+case "$variant" in
+    debug) task=assembleDebug ;;
+    release) task=assembleRelease ;;
+    *) echo "usage: build-apk.sh [debug|release]" >&2; exit 2 ;;
+esac
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
 if [[ -z "$ANDROID_NDK_HOME" ]]; then
     echo "Set ANDROID_NDK_HOME to an Android NDK (r26 or newer)." >&2
@@ -27,8 +36,8 @@ cargo ndk --target arm64-v8a --platform 30 \
     build --release -p duckfoot-android
 
 cd android
-./gradlew --no-daemon assembleDebug
-apk="$root/android/app/build/outputs/apk/debug/app-debug.apk"
+./gradlew --no-daemon "$task"
+apk="$root/android/app/build/outputs/apk/$variant/app-$variant.apk"
 
 # The library is packaged unstripped (AGP cannot find its pinned NDK to strip with), which
 # keeps function names in crash tombstones while the port is young; ~29 MB, ~10 MB zipped.

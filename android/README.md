@@ -12,12 +12,21 @@ android/build-apk.sh            # needs ANDROID_HOME, ANDROID_NDK_HOME and JDK 1
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Every push also builds the APK in the **Android** workflow; it is attached to the run as
-the `duckfoot-debug-apk` artifact.
+Every push also builds a release APK, and a Linux binary, in the **Build** workflow
+(`.github/workflows/build.yml`); they are attached to the run as the `duckfoot-android`
+and `duckfoot-linux-x86_64` artifacts.
+
+## Nightly
+
+Every push to `main` replaces the **nightly** release with that commit's APK
+(`duckfoot-nightly-android-arm64.apk`) and Linux build
+(`duckfoot-nightly-linux-x86_64.tar.gz`). It is a draft, so only collaborators see it,
+until the repository variable `PUBLIC_NIGHTLY` is set to `true` (**Settings → Secrets and
+variables → Actions → Variables**); from then on it is a public pre-release.
 
 ## Release
 
-Either run the workflow by hand — **Actions → Android → Run workflow**, pick the branch,
+Either run the workflow by hand — **Actions → Build → Run workflow**, pick the branch,
 and type a version such as `v0.1.0-alpha.1` — or push a tag that starts with `v`:
 
 ```bash
@@ -26,7 +35,7 @@ git push origin v0.1.0-alpha.1
 ```
 
 Both build that commit and **draft** a pre-release named after the version, with
-`duckfoot-<version>.apk` attached. A draft is visible only to the repository's
+the APK and the Linux build attached. A draft is visible only to the repository's
 collaborators, under **Releases**, where the APK downloads like any other file. Pressing
 **Publish** makes it public (and, for a hand-run, creates the tag on the commit it was
 built from), which the licence note in the top-level README says to hold off on for now.
