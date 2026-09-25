@@ -351,7 +351,9 @@ adb logcat -s duckfoot          # the app's log
 ```
 
 Every push also builds the APK in the **Android** workflow; download it from the run's
-artifacts (`duckfoot-debug-apk`).
+artifacts (`duckfoot-debug-apk`). A `v…` tag drafts a GitHub release with the APK attached,
+and a signing key in the repository's secrets lets each release install over the last —
+see [android/README.md](./android/README.md).
 
 How it differs from the desktop, for now:
 
