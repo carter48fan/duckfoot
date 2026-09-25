@@ -187,6 +187,22 @@ pub fn rail(
     width: f32,
     default: f32,
 ) -> Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+    rail_painted(ui, value, range, width, default, origin, None)
+}
+
+/// `rail`, optionally with a two-colour gradient for a track instead of the amber fill —
+/// for a control whose ends are colours, where the track itself says which way is which.
+fn rail_painted(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    width: f32,
+    default: f32,
+    origin: f32,
+    gradient: Option<[Color32; 2]>,
+) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     let thumb = vec2(8.0, 14.0);
@@ -222,7 +238,6 @@ pub fn rail(
         response.mark_changed();
     }
 
-    let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
     let (x0, x1) = (x_of(origin), x_of(*value));
 
     let enabled = ui.is_enabled();
@@ -230,12 +245,29 @@ pub fn rail(
     let fill = if enabled { ACCENT } else { TEXT_FAINT };
 
     let painter = ui.painter();
-    painter.rect_filled(track, 1, RAIL);
-    painter.rect_filled(
-        Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), track.y_range()),
-        1,
-        fill,
-    );
+    if let Some([left, right]) = gradient {
+        let band = track.expand2(vec2(0.0, 1.0));
+        let (left, right) = if enabled {
+            (left, right)
+        } else {
+            (left.gamma_multiply(0.4), right.gamma_multiply(0.4))
+        };
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(band.left_top(), left);
+        mesh.colored_vertex(band.right_top(), right);
+        mesh.colored_vertex(band.right_bottom(), right);
+        mesh.colored_vertex(band.left_bottom(), left);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(Shape::mesh(mesh));
+    } else {
+        painter.rect_filled(track, 1, RAIL);
+        painter.rect_filled(
+            Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), track.y_range()),
+            1,
+            fill,
+        );
+    }
     // A tick where the default sits, so "back to neutral" is visible before you do it.
     let home = x_of(default);
     painter.vline(
@@ -266,6 +298,41 @@ pub fn param_slider(
     range: RangeInclusive<f32>,
     decimals: usize,
     default: f32,
+) -> Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let span = hi - lo;
+    let scale = SliderScale {
+        to_rail: &|v| (v - lo) / span,
+        from_rail: &|t| lo + t * span,
+        speed: span / 400.0,
+        gradient: None,
+    };
+    scaled_slider(ui, label, value, range, decimals, default, scale)
+}
+
+/// How a `scaled_slider` lays its value out along the rail.
+pub struct SliderScale<'a> {
+    /// Value → position along the rail, 0..=1. Must be monotonic.
+    pub to_rail: &'a dyn Fn(f32) -> f32,
+    /// The inverse of `to_rail`.
+    pub from_rail: &'a dyn Fn(f32) -> f32,
+    /// Value units per pixel of drag on the number box.
+    pub speed: f32,
+    /// A coloured track, left to right, in place of the amber fill.
+    pub gradient: Option<[Color32; 2]>,
+}
+
+/// `param_slider` on a non-linear rail: for a quantity like colour temperature, where equal
+/// steps in kelvin are nowhere near equal steps in what you see. The number box still reads
+/// and types the value itself.
+pub fn scaled_slider(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    decimals: usize,
+    default: f32,
+    scale: SliderScale,
 ) -> Response {
     ui.horizontal(|ui| {
         const LABEL_W: f32 = 74.0;
@@ -303,14 +370,27 @@ pub fn param_slider(
         }
         let gap = ui.spacing().item_spacing.x;
         let rail_w = (ui.available_width() - value_w - gap).max(40.0);
-        let span = range.end() - range.start();
-        let slid = rail(ui, value, range.clone(), rail_w, default);
+        let (lo, hi) = (*range.start(), *range.end());
+        let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+        let mut t = (scale.to_rail)(*value);
+        let slid = rail_painted(
+            ui,
+            &mut t,
+            0.0..=1.0,
+            rail_w,
+            (scale.to_rail)(default),
+            (scale.to_rail)(origin),
+            scale.gradient,
+        );
+        if slid.changed() {
+            *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
+        }
         let typed = ui.add_sized(
             [value_w, 18.0],
             egui::DragValue::new(value)
                 .range(range)
                 .fixed_decimals(decimals)
-                .speed(span / 400.0),
+                .speed(scale.speed),
         );
         label_response | slid | typed
     })
