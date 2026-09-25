@@ -1,12 +1,20 @@
 name: Android
 
 # On every branch, not only main: the job's product is an APK to install and try, and
-# that is most useful for work that has not merged yet. A tag starting with v (v0.1.0,
-# v0.2.0-alpha.1) also drafts a GitHub release with the APK attached.
+# that is most useful for work that has not merged yet.
+#
+# A release: push a tag starting with v (v0.1.0, v0.2.0-alpha.1), or run this workflow by
+# hand (Actions → Android → Run workflow) with a version. Either drafts a GitHub release
+# with the APK attached; see android/README.md.
 on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Draft a release with this version, e.g. v0.1.0-alpha.1 (empty: just build)"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +27,8 @@ jobs:
       contents: write
     env:
       DUCKFOOT_KEYSTORE_BASE64: ${{ secrets.DUCKFOOT_KEYSTORE_BASE64 }}
+      # The version being released, if any: the pushed tag, or the hand-run's input.
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,9 +61,14 @@ jobs:
           echo "$DUCKFOOT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/duckfoot.jks"
           echo "DUCKFOOT_KEYSTORE=$RUNNER_TEMP/duckfoot.jks" >> "$GITHUB_ENV"
 
-      - name: Version from the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: echo "DUCKFOOT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Version from the release
+        if: env.RELEASE_TAG != ''
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::A release version starts with v, like v0.1.0-alpha.1 (got '$RELEASE_TAG')"
+            exit 1
+          fi
+          echo "DUCKFOOT_VERSION_NAME=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
 
       - run: android/build-apk.sh
         env:
@@ -70,11 +85,13 @@ jobs:
       # A draft: visible to the repository's collaborators, who can download the APK from
       # it, and public only once someone presses Publish. The README's licence note says
       # why binaries are not distributed yet.
-      - name: Draft a release for a version tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      # For a hand-run the tag need not exist yet: it is made on this commit when the
+      # draft is published.
+      - name: Draft the release
+        if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           apk="duckfoot-$TAG.apk"
           cp android/app/build/outputs/apk/debug/app-debug.apk "$apk"
@@ -84,6 +101,7 @@ jobs:
             signing="Signed with a one-off key: uninstall any earlier Duckfoot build before installing this one."
           fi
           gh release create "$TAG" "$apk" \
+            --target "$GITHUB_SHA" \
             --draft --prerelease \
             --title "Duckfoot $TAG (Android)" \
             --generate-notes \

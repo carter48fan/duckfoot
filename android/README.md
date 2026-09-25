@@ -17,20 +17,21 @@ the `duckfoot-debug-apk` artifact.
 
 ## Release
 
-Push a tag that starts with `v`:
+Either run the workflow by hand — **Actions → Android → Run workflow**, pick the branch,
+and type a version such as `v0.1.0-alpha.1` — or push a tag that starts with `v`:
 
 ```bash
 git tag v0.1.0-alpha.1
 git push origin v0.1.0-alpha.1
 ```
 
-The Android workflow builds that commit and **drafts** a pre-release named after the tag
-with `duckfoot-<tag>.apk` attached. A draft is visible only to the repository's
+Both build that commit and **draft** a pre-release named after the version, with
+`duckfoot-<version>.apk` attached. A draft is visible only to the repository's
 collaborators, under **Releases**, where the APK downloads like any other file. Pressing
-**Publish** makes it public, which the licence note in the top-level README says to hold
-off on for now.
+**Publish** makes it public (and, for a hand-run, creates the tag on the commit it was
+built from), which the licence note in the top-level README says to hold off on for now.
 
-The tag sets the app's version name (`v0.1.0-alpha.1` → `0.1.0-alpha.1`); the workflow's
+The version sets the app's version name (`v0.1.0-alpha.1` → `0.1.0-alpha.1`); the workflow's
 run number is its version code, so every release is newer than the one before.
 
 ## Signing key (once)
