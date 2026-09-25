@@ -16,7 +16,11 @@
 //! | History | undo, redo, reset, copy / paste stack, save and revert the sidecar, snapshots, history |
 //! | Export | the single export and batch export |
 
-use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Painter, Rect, RichText, Sense, Stroke};
+use egui::containers::scroll_area::{DragScroll, ScrollSource};
+use egui::{
+    pos2, vec2, Align2, Color32, CursorIcon, FontId, Margin, Painter, Rect, RichText, Sense,
+    Stroke,
+};
 
 use crate::widgets::{self, Kind};
 use crate::Gpu;
@@ -106,22 +110,86 @@ impl PhotoApp {
         if let Some(tab) = self.compact_tab {
             let sheet = frame(Margin::same(0));
             if landscape {
+                let default_w = (screen.x * 0.48).clamp(340.0, 480.0);
+                let min_w = 280.0;
+                let max_w = (screen.x * 0.75).clamp(420.0, 680.0);
+                let w = self.compact_sheet_width.unwrap_or(default_w).clamp(min_w, max_w);
                 egui::Panel::right("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
-                    .max_size((screen.x * 0.46).clamp(300.0, 440.0))
-                    .show(ui, |ui| self.compact_sheet(ui, gpu, tab));
+                    .exact_size(w)
+                    .show(ui, |ui| {
+                        self.compact_sheet_handle(ui, true, default_w, min_w, max_w);
+                        self.compact_sheet(ui, gpu, tab);
+                    });
             } else {
+                let default_h = (screen.y * 0.55).clamp(380.0, 620.0);
+                let min_h = (screen.y * 0.28).clamp(200.0, 320.0);
+                let max_h = (screen.y * 0.82).clamp(480.0, 750.0);
+                let h = self.compact_sheet_height.unwrap_or(default_h).clamp(min_h, max_h);
                 egui::Panel::bottom("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
-                    .max_size((screen.y * 0.50).clamp(200.0, 540.0))
-                    .show(ui, |ui| self.compact_sheet(ui, gpu, tab));
+                    .exact_size(h)
+                    .show(ui, |ui| {
+                        self.compact_sheet_handle(ui, false, default_h, min_h, max_h);
+                        self.compact_sheet(ui, gpu, tab);
+                    });
             }
         }
         self.compact_status(ui);
         self.workspace(ui);
         self.batch_export_dialog(ui);
+    }
+
+    /// Touch-friendly drawer grab handle at the top of the compact sheet.
+    /// Dragging resizes the sheet; double-tapping resets to default size.
+    fn compact_sheet_handle(
+        &mut self,
+        ui: &mut egui::Ui,
+        landscape: bool,
+        default_size: f32,
+        min_size: f32,
+        max_size: f32,
+    ) {
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), 16.0),
+            Sense::click_and_drag(),
+        );
+        let hot = response.hovered() || response.dragged();
+        let pill = Rect::from_center_size(rect.center(), vec2(36.0, 4.0));
+        ui.painter().rect_filled(
+            pill,
+            2.0,
+            if hot {
+                theme::TEXT_HI
+            } else {
+                Color32::from_gray(0x44)
+            },
+        );
+        if landscape {
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            }
+            if response.dragged() {
+                let dx = response.drag_delta().x;
+                let current = self.compact_sheet_width.unwrap_or(default_size);
+                self.compact_sheet_width = Some((current - dx).clamp(min_size, max_size));
+            } else if response.double_clicked() {
+                self.compact_sheet_width = None;
+            }
+        } else {
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+            }
+            if response.dragged() {
+                let dy = response.drag_delta().y;
+                let current = self.compact_sheet_height.unwrap_or(default_size);
+                self.compact_sheet_height = Some((current - dy).clamp(min_size, max_size));
+            } else if response.double_clicked() {
+                self.compact_sheet_height = None;
+            }
+        }
     }
 
     /// Brand, the photo's name, and what is wanted with the photo in view: zoom, a / b,
@@ -265,7 +333,11 @@ impl PhotoApp {
         }
         egui::ScrollArea::vertical()
             .id_salt(("compact_sheet", tab.label()))
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
+            .scroll_source(ScrollSource {
+                drag: DragScroll::Always,
+                ..Default::default()
+            })
             .show(ui, |ui| {
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(12, 10))
@@ -485,7 +557,11 @@ impl PhotoApp {
 
         egui::ScrollArea::vertical()
             .id_salt("compact_edit")
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
+            .scroll_source(ScrollSource {
+                drag: DragScroll::Always,
+                ..Default::default()
+            })
             .show(ui, |ui| {
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(12, 6))
@@ -523,6 +599,10 @@ impl PhotoApp {
         egui::ScrollArea::horizontal()
             .id_salt("compact_modules")
             .auto_shrink([false, true])
+            .scroll_source(ScrollSource {
+                drag: DragScroll::Always,
+                ..Default::default()
+            })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;

@@ -406,6 +406,10 @@ pub struct PhotoApp {
     pub compact_tab: Option<compact::Tab>,
     /// The module the phone layout's Edit sheet shows.
     pub compact_module: InspectorSectionId,
+    /// User-adjusted height for the portrait bottom sheet.
+    pub compact_sheet_height: Option<f32>,
+    /// User-adjusted width for the landscape side sheet.
+    pub compact_sheet_width: Option<f32>,
     /// Where a swipe across the stage began, to step photos when it ends.
     swipe_from: Option<egui::Pos2>,
     /// A photo step asked for where there was no `Gpu` to do it with.
@@ -490,6 +494,8 @@ impl PhotoApp {
             touch_seen: false,
             compact_tab: Some(compact::Tab::Library),
             compact_module: InspectorSectionId::Exposure,
+            compact_sheet_height: None,
+            compact_sheet_width: None,
             swipe_from: None,
             pending_step: None,
             layout: compact::Layout::Desktop,

@@ -264,11 +264,12 @@ fn rail_painted(
     gradient: Option<[Color32; 2]>,
 ) -> Response {
     let touch = is_touch(ui.ctx());
+    let row_h = sized(ui, 18.0, 38.0);
     let (rect, mut response) =
-        ui.allocate_exact_size(vec2(width, sized(ui, 18.0, 34.0)), Sense::click_and_drag());
+        ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     let thumb = if touch {
-        vec2(12.0, 24.0)
+        vec2(16.0, 26.0)
     } else {
         vec2(8.0, 14.0)
     };
@@ -281,10 +282,49 @@ fn rail_painted(
     let before = *value;
     if response.double_clicked() {
         *value = default;
+    } else if touch {
+        let fine = is_fine(ui.ctx());
+        if response.clicked() {
+            // Tapping jumps directly to the tapped position on the track.
+            if let Some(p) = response.interact_pointer_pos() {
+                let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                *value = lo + t * (hi - lo);
+            }
+        } else if response.dragged() {
+            let gesture_id = response.id.with("touch_gesture");
+            if response.drag_started() {
+                let delta = response.drag_delta();
+                // Vertical dominant drag -> user is scrolling the drawer vertically.
+                // Otherwise user is adjusting the slider horizontally.
+                let is_sliding = delta.x.abs() >= delta.y.abs() * 0.8;
+                ui.ctx().data_mut(|d| d.insert_temp(gesture_id, is_sliding));
+            }
+            let is_sliding = ui.ctx().data(|d| d.get_temp::<bool>(gesture_id)).unwrap_or(true);
+            if is_sliding {
+                if fine {
+                    let dx = response.drag_delta().x;
+                    *value = (*value + dx / track.width() * (hi - lo) * 0.1).clamp(lo, hi);
+                } else if let Some(p) = response.interact_pointer_pos() {
+                    let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                    *value = lo + t * (hi - lo);
+                } else {
+                    let dx = response.drag_delta().x;
+                    *value = (*value + dx / track.width() * (hi - lo)).clamp(lo, hi);
+                }
+            } else {
+                let dy = response.drag_delta().y;
+                if dy.abs() > 0.0 {
+                    ui.scroll_with_delta(vec2(0.0, dy));
+                }
+            }
+        }
+        if response.drag_stopped() {
+            ui.ctx()
+                .data_mut(|d| d.remove_temp::<bool>(response.id.with("touch_gesture")));
+        }
     } else {
-        // A press jumps the value there with a pointer. A finger lands on a slider on
-        // its way to scrolling past it, so on touch only a drag changes the value.
-        let pressed = !touch && ui.input(|i| i.pointer.primary_pressed());
+        // Desktop mouse pointer.
+        let pressed = ui.input(|i| i.pointer.primary_pressed());
         if pressed && response.is_pointer_button_down_on() {
             if let Some(p) = response.interact_pointer_pos() {
                 if (p.x - x_of(*value)).abs() > thumb.x {
@@ -293,16 +333,13 @@ fn rail_painted(
                 }
             }
         } else if response.dragged() {
-            let delta = response.drag_delta();
-            if !touch || delta.x.abs() > delta.y.abs() * 1.2 {
-                let fine = if ui.input(|i| i.modifiers.shift) || is_fine(ui.ctx()) {
-                    0.1
-                } else {
-                    1.0
-                };
-                let dx = delta.x;
-                *value = (*value + dx / track.width() * (hi - lo) * fine).clamp(lo, hi);
-            }
+            let fine = if ui.input(|i| i.modifiers.shift) || is_fine(ui.ctx()) {
+                0.1
+            } else {
+                1.0
+            };
+            let dx = response.drag_delta().x;
+            *value = (*value + dx / track.width() * (hi - lo) * fine).clamp(lo, hi);
         }
     }
     if *value != before {
@@ -347,11 +384,11 @@ fn rail_painted(
         Stroke::new(1.0, BORDER_HI),
     );
     let knob = Rect::from_center_size(pos2(x1, rect.center().y), thumb);
-    painter.rect_filled(knob, 2, if hot { ACCENT_HI } else { fill });
+    painter.rect_filled(knob, sized(ui, 2.0, 4.0), if hot { ACCENT_HI } else { fill });
     painter.vline(
         x1,
         (knob.top() + 4.0)..=(knob.bottom() - 4.0),
-        Stroke::new(1.0, Color32::BLACK),
+        Stroke::new(sized(ui, 1.0, 1.5), Color32::BLACK),
     );
     if hot {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
@@ -425,14 +462,15 @@ pub fn scaled_slider(
             .size()
             .x;
         let value_w = (digit_w + 2.0 * ui.spacing().button_padding.x + 4.0).max(50.0);
+        let row_h = sized(ui, 18.0, 38.0);
         let (label_rect, mut label_response) =
-            ui.allocate_exact_size(vec2(LABEL_W, 18.0), Sense::click());
+            ui.allocate_exact_size(vec2(LABEL_W, row_h), Sense::click());
         let modified = (*value - default).abs() > 1e-6;
         ui.painter().text(
             label_rect.left_center(),
             Align2::LEFT_CENTER,
             label,
-            FontId::proportional(12.0),
+            FontId::proportional(sized(ui, 12.0, 13.0)),
             if modified { TEXT } else { TEXT_DIM },
         );
         if label_response.double_clicked() && modified {
@@ -456,13 +494,12 @@ pub fn scaled_slider(
         if slid.changed() {
             *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
         }
-        let touch = is_touch(ui.ctx());
         let typed = ui.add_sized(
-            [value_w, sized(ui, 18.0, 26.0)],
+            [value_w, sized(ui, 18.0, 30.0)],
             egui::DragValue::new(value)
                 .range(range)
                 .fixed_decimals(decimals)
-                .speed(if touch { 0.0 } else { scale.speed }),
+                .speed(scale.speed),
         );
         label_response | slid | typed
     })
