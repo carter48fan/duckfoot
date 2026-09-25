@@ -303,7 +303,7 @@ impl Platform for AndroidPlatform {
 
     fn export_completed(&mut self, path: &Path) {
         if let Some(path_str) = path.to_str() {
-            if let Ok(mut env) = self.bridge.env() {
+            if let Ok(env) = self.bridge.env() {
                 if let Ok(jpath) = env.new_string(path_str) {
                     self.bridge.call_void(
                         "scanMediaFile",
