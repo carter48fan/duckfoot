@@ -258,7 +258,7 @@ fn render_3d_scope(
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 12.0),
         egui::Align2::LEFT_BOTTOM,
-        "Drag to rotate 3D view • Ctrl+scroll to zoom • Double-click to reset",
+        crate::widgets::orbit_hint(painter.ctx()),
         egui::FontId::proportional(9.5),
         theme::TEXT_DIM.linear_multiply(0.75),
     );

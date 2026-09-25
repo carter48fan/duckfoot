@@ -15,6 +15,8 @@ is lost.
 | B4 | **Done.** Suspend drops only the window surface; the device and `PhotoApp` survive. Back closes crop/dialogs, then backgrounds the app. Process death still loses unsaved edits |
 | B5 | **Done, pending a device.** `crates/duckfoot-android`, `android/` (Gradle, NativeActivity subclass), `android/build-apk.sh`, and the Android workflow |
 
+| UI | **Done.** `photo-app/src/compact.rs`: the navigation-bar layout below 900 × 560 points, both orientations; touch sizes for every control. The touch-parity list below is covered except item 6 (the shelf row's hover-only remove badge, which select mode's "Remove from shelf" replaces) and item 8 (Shift-click for a second open module, which the one-at-a-time sheet makes moot) |
+
 NativeActivity was chosen over GameActivity: the GameActivity library must match
 android-activity's bundled C sources exactly, and a Java subclass of NativeActivity can
 receive picker results just as well. The cost is a weaker soft keyboard (R6).

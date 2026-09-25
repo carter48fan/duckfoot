@@ -21,7 +21,9 @@
         android:hasCode="true"
         android:enableOnBackInvokedCallback="false">
 
-        <!-- configChanges: rotating, folding or attaching a keyboard is a resize to the app,
+        <!-- screenOrientation fullUser: any way up, unless the user has locked rotation; the
+             app lays itself out for the shape it gets (photo-app's `compact`).
+             configChanges: rotating, folding or attaching a keyboard is a resize to the app,
              not a restart. launchMode singleTask: "Open with Duckfoot" reaches the running
              app through onNewIntent. enableOnBackInvokedCallback=false keeps Back arriving
              as a key the app can handle (close crop, dialogs) before it leaves. -->
@@ -29,7 +31,7 @@
             android:name=".DuckfootActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
             android:windowSoftInputMode="adjustResize">
 
