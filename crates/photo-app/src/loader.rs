@@ -200,10 +200,13 @@ impl Loader {
         // leaves every other core idle while a folder's filmstrip fills in one by one.
         let (thumb_tx, thumb_rx) = mpsc::channel::<PathBuf>();
         let thumb_rx = Arc::new(Mutex::new(thumb_rx));
+        // A phone's "cores" are mostly little ones, and all of them heat the same
+        // small chassis; four keeps the filmstrip quick without throttling the stage.
+        let most = if cfg!(target_os = "android") { 4 } else { 8 };
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(1))
             .unwrap_or(1)
-            .clamp(1, 8);
+            .clamp(1, most);
         for i in 0..workers {
             let (done_tx, repaint, gate, thumb_rx) = (
                 done_tx.clone(),

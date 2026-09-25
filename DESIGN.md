@@ -64,7 +64,8 @@ a new `main.rs`, never a second implementation.
 crates/
   photo-engine/     wgpu device, textures, shaders, decode. Knows nothing about windows.
   photo-app/        egui UI. Knows nothing about winit.
-  duckfoot/         bootstrap: winit. The only platform-specific crate.
+  duckfoot/         the winit shell, and the desktop main.
+  duckfoot-android/ android_main, logcat, and the bridge to android/'s Java activity.
 ```
 
 `photo-engine` takes a `wgpu::Device` and `Queue` it did not create. `photo-app` takes an
