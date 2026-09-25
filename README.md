@@ -290,6 +290,17 @@ cargo run --release -p photo-engine --example synth_raw -- /tmp/big.dng 9728 665
 cargo run --release -p photo-engine --example synth_raw -- /tmp/cam.jpg 6000 4000            # 24 MP JPEG
 ```
 
+### See a layout without its device
+
+```bash
+cargo run --release -p photo-app --example screenshot -- phone.png 412x892 photo.dng edit exposure
+```
+
+Renders the whole app to a PNG at any size (in points, drawn at 2× like a phone), with a
+photo open and, for the phone layout, a sheet and module chosen. Needs a Vulkan driver;
+Mesa's software one (`mesa-vulkan-drivers`, lavapipe) is enough, so it works on a
+headless machine.
+
 ### Stub audit
 
 ```bash
@@ -352,8 +363,13 @@ How it differs from the desktop, for now:
   dialog.
 - **Back** closes the crop tool or an open dialog first, then sends the app to the
   background. Backgrounding keeps the photo, stack and undo history.
-- **Landscape only, desktop layout.** The phone layout is the next step; see
-  [docs/ANDROID_AUDIT.md](./docs/ANDROID_AUDIT.md).
+- **The phone layout.** Below 900 × 560 points (phones either way up, tablets held
+  upright) the stage fills the screen and a navigation bar opens one sheet at a time:
+  **Library · Edit · Scopes · History · Export**. Edit shows one module's sliders at a
+  time, picked from a scroller. Turned sideways, the bar becomes a rail on the right.
+  What a keyboard does on the desktop has a touch control: select mode (Ctrl/Shift-click),
+  select all, a **fine** toggle (Shift-drag), rating and flag chips, and a sideways swipe
+  across the photo for the next or previous one.
 - Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
 
 ### Windows, macOS — not yet built
@@ -400,6 +416,7 @@ duckfoot/
     │   ├── src/widgets.rs       #   painted controls: chips, rails, module cards
     │   ├── src/loader.rs        #   background decode: opening photos, thumbnails
     │   ├── src/platform.rs      #   file pickers and storage places, supplied by the shell
+    │   ├── src/compact.rs       #   the phone layout: navigation bar, one sheet at a time
     │   └── assets/fonts/        #   JetBrains Mono, Space Grotesk, Hanken Grotesk (OFL)
     ├── duckfoot/                # the winit shell (lib.rs) and the desktop main
     └── duckfoot-android/        # android_main and the Java bridge; see android/

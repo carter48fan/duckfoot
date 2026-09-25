@@ -3,6 +3,7 @@
 //! The desktop and Android bootstraps both drive this same type.
 
 pub mod batch;
+pub mod compact;
 pub mod dam;
 pub mod inspector_map_3d;
 mod loader;
@@ -394,6 +395,23 @@ pub struct PhotoApp {
     pub color_eq_tab: ColorEqTab,
     /// File pickers and storage locations, supplied by the bootstrap.
     platform: Box<dyn platform::Platform>,
+    /// A plain click adds to or removes from the selection, as Ctrl-click does: how a
+    /// touch screen multi-selects.
+    pub select_mode: bool,
+    /// Sliders move ten times finer, as holding Shift does.
+    pub fine_adjust: bool,
+    /// Input has come from a touch screen: controls are sized for fingers.
+    touch_seen: bool,
+    /// The phone layout's open sheet; `None` gives the stage the whole screen.
+    pub compact_tab: Option<compact::Tab>,
+    /// The module the phone layout's Edit sheet shows.
+    pub compact_module: InspectorSectionId,
+    /// Where a swipe across the stage began, to step photos when it ends.
+    swipe_from: Option<egui::Pos2>,
+    /// A photo step asked for where there was no `Gpu` to do it with.
+    pending_step: Option<isize>,
+    /// Which arrangement this frame is laid out in; decided by the screen's size.
+    layout: compact::Layout,
 }
 
 impl PhotoApp {
@@ -467,6 +485,14 @@ impl PhotoApp {
             batch_output_dir: None,
             color_eq_tab: ColorEqTab::default(),
             platform,
+            select_mode: false,
+            fine_adjust: false,
+            touch_seen: false,
+            compact_tab: Some(compact::Tab::Library),
+            compact_module: InspectorSectionId::Exposure,
+            swipe_from: None,
+            pending_step: None,
+            layout: compact::Layout::Desktop,
         }
     }
 
@@ -580,7 +606,8 @@ impl PhotoApp {
         egui::Window::new("Batch Multi-Export & Recipes")
             .open(&mut open)
             .resizable(true)
-            .default_size(vec2(520.0, 480.0))
+            // No bigger than the screen: on a phone it is most of it.
+            .default_size(vec2(520.0, 480.0).min(ui.ctx().content_rect().size() - vec2(16.0, 16.0)))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ui.ctx(), |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -891,6 +918,7 @@ impl PhotoApp {
                 platform::Response::AddImages(paths) => self.add_to_shelf(gpu, paths),
                 platform::Response::BrowseFolder(dir) => {
                     self.folder_tree.current_folder = Some(dir);
+                    self.folder_browser_open = true;
                 }
                 platform::Response::BatchOutputDir(dir) => self.batch_output_dir = Some(dir),
                 platform::Response::ExportImage(path) => self.export_to(gpu, path),
@@ -1356,6 +1384,18 @@ impl PhotoApp {
 
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let ctx = ui.ctx().clone();
+        // Phones, and tablets held upright, get the navigation-bar layout (`compact`): the
+        // desktop's side panels need a screen both wide and tall.
+        let screen = ui.max_rect().size();
+        self.layout = compact::Layout::for_size(screen);
+        self.touch_seen |= ctx.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Touch { .. }))
+        });
+        widgets::set_touch(&ctx, self.touch_seen || self.layout.is_compact());
+        widgets::set_fine(&ctx, self.fine_adjust);
         self.loader.set_context(&ctx);
         self.poll_platform(gpu);
         self.poll_loader(&ctx, gpu);
@@ -1365,16 +1405,23 @@ impl PhotoApp {
         self.engine.poll_histogram(gpu.device);
         self.sync(gpu, ctx.pixels_per_point());
 
-        // Panel order is layout order: full-width bars first, then the side panels, then
-        // the filmstrip and stage toolbar, which only span the space left between them.
-        self.top_bar(ui);
-        self.status_bar(ui);
-        self.shelf(ui, gpu);
-        self.inspector(ui);
-        self.filmstrip(ui, gpu);
-        self.stage_toolbar(ui);
-        self.workspace(ui);
-        self.batch_export_dialog(ui);
+        if self.layout.is_compact() {
+            self.compact_layout(ui, gpu, screen);
+        } else {
+            // Panel order is layout order: full-width bars first, then the side panels,
+            // then the filmstrip and stage toolbar, which only span the space left between.
+            self.top_bar(ui);
+            self.status_bar(ui);
+            self.shelf(ui, gpu);
+            self.inspector(ui);
+            self.filmstrip(ui, gpu);
+            self.stage_toolbar(ui);
+            self.workspace(ui);
+            self.batch_export_dialog(ui);
+        }
+        if let Some(dir) = self.pending_step.take() {
+            self.step_photo(gpu, dir);
+        }
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context, gpu: &Gpu) {
@@ -1390,8 +1437,12 @@ impl PhotoApp {
                 self.batch_dialog_open = false;
             } else if self.customize_open {
                 self.customize_open = false;
+            } else if self.select_mode {
+                self.select_mode = false;
             } else if self.folder_browser_open {
                 self.folder_browser_open = false;
+            } else if self.layout.is_compact() && self.compact_tab.is_some() {
+                self.compact_tab = None;
             } else {
                 self.platform.leave();
             }
@@ -2217,6 +2268,8 @@ impl PhotoApp {
                         let (ctrl, shift) = ui.input(|i| {
                             (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
                         });
+                        // Select mode: a touch screen's Ctrl-click.
+                        let ctrl = ctrl || self.select_mode;
                         if shift {
                             row_shift = Some(item.path.clone());
                         } else if ctrl {
@@ -2518,20 +2571,12 @@ impl PhotoApp {
             });
     }
 
-    fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        let mut to_open = None;
-        let mut action_shift = None;
-        let mut action_ctrl = None;
-        let mut action_single = None;
-        let mut action_rating = None;
-        let mut action_flag = None;
-        let mut action_export = false;
-
+    /// The shelf as the filter and sort leave it: indices into `self.shelf`, not copies of
+    /// it, since this runs every frame and cloning every item grew with the folder.
+    fn displayed_indices(&self) -> Vec<usize> {
         let is_stack_edited = self.is_stack_edited();
         let loaded_path = self.loaded_path.clone();
 
-        // Indices into the shelf, not copies of it: this runs every frame, and cloning
-        // every item (metadata strings and all) grew with the size of the folder.
         let mut displayed: Vec<usize> = self
             .shelf
             .iter()
@@ -2564,6 +2609,13 @@ impl PhotoApp {
                 }
             }
         }
+
+        displayed
+    }
+
+    fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        let displayed = self.displayed_indices();
+        let mut action_export = false;
 
         egui::Panel::bottom("filmstrip")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
@@ -2601,108 +2653,15 @@ impl PhotoApp {
                 // Filter & Sort bar
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-
-                    // Rating filter chips
-                    ui.label(theme::dim("Rating:"));
-                    pod(ui, |ui| {
-                        let is_all = matches!(self.filter.rating, dam::RatingFilter::All);
-                        if widgets::chip(ui, is_all, "All").clicked() {
-                            self.filter.rating = dam::RatingFilter::All;
-                        }
-                        for min in 1..=5 {
-                            let active =
-                                matches!(self.filter.rating, dam::RatingFilter::MinStars(m) if m == min);
-                            let label = if min == 5 {
-                                "5★".to_string()
-                            } else {
-                                format!("{min}★+")
-                            };
-                            if widgets::chip(ui, active, &label).clicked() {
-                                self.filter.rating = if active {
-                                    dam::RatingFilter::All
-                                } else {
-                                    dam::RatingFilter::MinStars(min)
-                                };
-                            }
-                        }
-                    });
-
+                    self.rating_filter(ui);
                     ui.separator();
-
-                    // Flag filter chips
-                    ui.label(theme::dim("Flags:"));
-                    pod(ui, |ui| {
-                        let f = self.filter.flag;
-                        if widgets::chip(ui, f == dam::FlagFilter::All, "All").clicked() {
-                            self.filter.flag = dam::FlagFilter::All;
-                        }
-                        if widgets::chip(ui, f == dam::FlagFilter::PicksOnly, "Picks").clicked() {
-                            self.filter.flag = if f == dam::FlagFilter::PicksOnly {
-                                dam::FlagFilter::All
-                            } else {
-                                dam::FlagFilter::PicksOnly
-                            };
-                        }
-                        if widgets::chip(ui, f == dam::FlagFilter::HideRejects, "Hide Rej").clicked()
-                        {
-                            self.filter.flag = if f == dam::FlagFilter::HideRejects {
-                                dam::FlagFilter::All
-                            } else {
-                                dam::FlagFilter::HideRejects
-                            };
-                        }
-                        if widgets::chip(ui, f == dam::FlagFilter::RejectsOnly, "Rejects").clicked() {
-                            self.filter.flag = if f == dam::FlagFilter::RejectsOnly {
-                                dam::FlagFilter::All
-                            } else {
-                                dam::FlagFilter::RejectsOnly
-                            };
-                        }
-                    });
-
+                    self.flag_filter(ui);
                     ui.separator();
-
-                    // Search box
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter.search_query)
-                            .hint_text("Search…")
-                            .desired_width(75.0)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    if !self.filter.search_query.is_empty()
-                        && ui.button("✕").on_hover_text("Clear search").clicked()
-                    {
-                        self.filter.search_query.clear();
-                    }
+                    self.search_field(ui, 75.0);
 
                     // Sort & Batch Actions (right aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let arrow = if self.filter.sort_descending { "↓" } else { "↑" };
-                        if widgets::button(ui, Kind::Secondary, arrow, 22.0)
-                            .on_hover_text(if self.filter.sort_descending {
-                                "Descending order"
-                            } else {
-                                "Ascending order"
-                            })
-                            .clicked()
-                        {
-                            self.filter.sort_descending = !self.filter.sort_descending;
-                        }
-
-                        pod(ui, |ui| {
-                            let s = self.filter.sort_by;
-                            if widgets::chip(ui, s == dam::SortBy::FileSize, "Size").clicked() {
-                                self.filter.sort_by = dam::SortBy::FileSize;
-                            }
-                            if widgets::chip(ui, s == dam::SortBy::Rating, "Rating").clicked() {
-                                self.filter.sort_by = dam::SortBy::Rating;
-                            }
-                            if widgets::chip(ui, s == dam::SortBy::FileName, "Name").clicked() {
-                                self.filter.sort_by = dam::SortBy::FileName;
-                            }
-                        });
-                        ui.label(theme::dim("Sort:"));
-
+                        self.sort_controls(ui, true);
                         if !self.selection.is_empty() {
                             if widgets::button(
                                 ui,
@@ -2722,154 +2681,278 @@ impl PhotoApp {
                 });
                 ui.add_space(6.0);
 
-                egui::ScrollArea::horizontal()
-                    .auto_shrink([false, true])
-                    .show_viewport(ui, |ui, viewport| {
-                        if self.shelf.is_empty() {
-                            let (rect, _) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 70.0),
-                                Sense::hover(),
-                            );
-                            ui.painter().text(
-                                rect.left_center() + vec2(4.0, 0.0),
-                                Align2::LEFT_CENTER,
-                                "Drop photos anywhere in the window to start a roll.",
-                                FontId::proportional(12.0),
-                                theme::TEXT_DIM,
-                            );
-                            return;
+                self.film_tiles(ui, gpu, &displayed);
+            });
+
+        if action_export {
+            self.batch_dialog_open = true;
+        }
+    }
+
+    fn rating_filter(&mut self, ui: &mut egui::Ui) {
+        // Rating filter chips
+        ui.label(theme::dim("Rating:"));
+        pod(ui, |ui| {
+            let is_all = matches!(self.filter.rating, dam::RatingFilter::All);
+            if widgets::chip(ui, is_all, "All").clicked() {
+                self.filter.rating = dam::RatingFilter::All;
+            }
+            for min in 1..=5 {
+                let active =
+                    matches!(self.filter.rating, dam::RatingFilter::MinStars(m) if m == min);
+                let label = if min == 5 {
+                    "5★".to_string()
+                } else {
+                    format!("{min}★+")
+                };
+                if widgets::chip(ui, active, &label).clicked() {
+                    self.filter.rating = if active {
+                        dam::RatingFilter::All
+                    } else {
+                        dam::RatingFilter::MinStars(min)
+                    };
+                }
+            }
+        });
+    }
+
+    fn flag_filter(&mut self, ui: &mut egui::Ui) {
+        // Flag filter chips
+        ui.label(theme::dim("Flags:"));
+        pod(ui, |ui| {
+            let f = self.filter.flag;
+            if widgets::chip(ui, f == dam::FlagFilter::All, "All").clicked() {
+                self.filter.flag = dam::FlagFilter::All;
+            }
+            if widgets::chip(ui, f == dam::FlagFilter::PicksOnly, "Picks").clicked() {
+                self.filter.flag = if f == dam::FlagFilter::PicksOnly {
+                    dam::FlagFilter::All
+                } else {
+                    dam::FlagFilter::PicksOnly
+                };
+            }
+            if widgets::chip(ui, f == dam::FlagFilter::HideRejects, "Hide Rej").clicked() {
+                self.filter.flag = if f == dam::FlagFilter::HideRejects {
+                    dam::FlagFilter::All
+                } else {
+                    dam::FlagFilter::HideRejects
+                };
+            }
+            if widgets::chip(ui, f == dam::FlagFilter::RejectsOnly, "Rejects").clicked() {
+                self.filter.flag = if f == dam::FlagFilter::RejectsOnly {
+                    dam::FlagFilter::All
+                } else {
+                    dam::FlagFilter::RejectsOnly
+                };
+            }
+        });
+    }
+
+    fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.filter.search_query)
+                .hint_text("Search…")
+                .desired_width(width)
+                .font(egui::TextStyle::Monospace),
+        );
+        if !self.filter.search_query.is_empty()
+            && ui.button("✕").on_hover_text("Clear search").clicked()
+        {
+            self.filter.search_query.clear();
+        }
+    }
+
+    /// "Sort: Name · Rating · Size ↑". `right_to_left` callers get it reversed, so it reads
+    /// the same way on screen either way.
+    fn sort_controls(&mut self, ui: &mut egui::Ui, right_to_left: bool) {
+        let arrow = |ui: &mut egui::Ui, filter: &mut dam::FilterState| {
+            let glyph = if filter.sort_descending { "↓" } else { "↑" };
+            if widgets::button(ui, Kind::Secondary, glyph, 22.0)
+                .on_hover_text(if filter.sort_descending {
+                    "Descending order"
+                } else {
+                    "Ascending order"
+                })
+                .clicked()
+            {
+                filter.sort_descending = !filter.sort_descending;
+            }
+        };
+        let chips = |ui: &mut egui::Ui, filter: &mut dam::FilterState| {
+            pod(ui, |ui| {
+                let mut order = [
+                    (dam::SortBy::FileName, "Name"),
+                    (dam::SortBy::Rating, "Rating"),
+                    (dam::SortBy::FileSize, "Size"),
+                ];
+                if right_to_left {
+                    order.reverse();
+                }
+                for (by, label) in order {
+                    if widgets::chip(ui, filter.sort_by == by, label).clicked() {
+                        filter.sort_by = by;
+                    }
+                }
+            });
+        };
+        if right_to_left {
+            arrow(ui, &mut self.filter);
+            chips(ui, &mut self.filter);
+            ui.label(theme::dim("Sort:"));
+        } else {
+            ui.label(theme::dim("Sort:"));
+            chips(ui, &mut self.filter);
+            arrow(ui, &mut self.filter);
+        }
+    }
+
+    /// The strip of thumbnails, and what clicking and long-pressing them does.
+    fn film_tiles(&mut self, ui: &mut egui::Ui, gpu: &Gpu, displayed: &[usize]) {
+        let mut to_open = None;
+        let mut action_shift = None;
+        let mut action_ctrl = None;
+        let mut action_single = None;
+        let mut action_rating = None;
+        let mut action_flag = None;
+        let mut action_export = false;
+
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, true])
+            .show_viewport(ui, |ui, viewport| {
+                if self.shelf.is_empty() {
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 70.0), Sense::hover());
+                    ui.painter().text(
+                        rect.left_center() + vec2(4.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        "Drop photos anywhere in the window to start a roll.",
+                        FontId::proportional(12.0),
+                        theme::TEXT_DIM,
+                    );
+                    return;
+                }
+
+                if displayed.is_empty() {
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 70.0), Sense::hover());
+                    ui.painter().text(
+                        rect.left_center() + vec2(4.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        "No photos match the active filter criteria.",
+                        FontId::proportional(12.0),
+                        theme::TEXT_DIM,
+                    );
+                    return;
+                }
+
+                // Only the tiles in view are laid out and painted; the rest of the
+                // strip is empty space the scroll area measures. Tiles are all one
+                // size, so which ones are in view is arithmetic.
+                let origin = ui.max_rect().left_top();
+                let total = displayed.len();
+                ui.set_min_size(vec2(total as f32 * FILM_STRIDE - FILM_GAP, FILM_TILE.y));
+                let visible = visible_tiles(viewport.x_range(), total);
+
+                let loading = self.loading.as_ref().map(|(p, _)| p);
+                for (slot, &index) in displayed
+                    .iter()
+                    .enumerate()
+                    .take(visible.end)
+                    .skip(visible.start)
+                {
+                    let item = &self.shelf[index];
+                    let active = self.loaded_path.as_ref() == Some(&item.path);
+                    let selected = self.selection.is_selected(&item.path);
+                    let picture = if active {
+                        self.texture_id.zip(
+                            self.engine
+                                .image()
+                                .map(|img| img.width as f32 / img.height.max(1) as f32),
+                        )
+                    } else {
+                        self.thumbs.get(&item.path).map(|t| {
+                            let [w, h] = t.size();
+                            (t.id(), w as f32 / h.max(1) as f32)
+                        })
+                    };
+                    let pending = loading == Some(&item.path);
+                    let tile_rect = Rect::from_min_size(
+                        origin + vec2(slot as f32 * FILM_STRIDE, 0.0),
+                        FILM_TILE,
+                    );
+                    // Keyed by the photo, not by position among the tiles drawn this
+                    // frame: scrolling changes which tile is drawn first, and a click
+                    // or an open context menu must stay with its photo.
+                    let tile_resp = ui
+                        .scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(tile_rect)
+                                .id_salt(&item.path),
+                            |ui| film_tile(ui, item, active, selected, pending, picture),
+                        )
+                        .inner;
+                    if tile_resp.clicked() {
+                        let (ctrl, shift) = ui.input(|i| {
+                            (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
+                        });
+                        // Select mode: a touch screen's Ctrl-click.
+                        let ctrl = ctrl || self.select_mode;
+                        if shift {
+                            let all_paths: Vec<PathBuf> = displayed
+                                .iter()
+                                .map(|&i| self.shelf[i].path.clone())
+                                .collect();
+                            action_shift = Some((item.path.clone(), all_paths));
+                        } else if ctrl {
+                            action_ctrl = Some(item.path.clone());
+                        } else {
+                            action_single = Some((item.path.clone(), active));
                         }
+                    }
 
-                        if displayed.is_empty() {
-                            let (rect, _) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 70.0),
-                                Sense::hover(),
-                            );
-                            ui.painter().text(
-                                rect.left_center() + vec2(4.0, 0.0),
-                                Align2::LEFT_CENTER,
-                                "No photos match the active filter criteria.",
-                                FontId::proportional(12.0),
-                                theme::TEXT_DIM,
-                            );
-                            return;
-                        }
-
-                        // Only the tiles in view are laid out and painted; the rest of the
-                        // strip is empty space the scroll area measures. Tiles are all one
-                        // size, so which ones are in view is arithmetic.
-                        let origin = ui.max_rect().left_top();
-                        let total = displayed.len();
-                        ui.set_min_size(vec2(
-                            total as f32 * FILM_STRIDE - FILM_GAP,
-                            FILM_TILE.y,
-                        ));
-                        let visible = visible_tiles(viewport.x_range(), total);
-
-                        let loading = self.loading.as_ref().map(|(p, _)| p);
-                        for (slot, &index) in
-                            displayed.iter().enumerate().take(visible.end).skip(visible.start)
-                        {
-                            let item = &self.shelf[index];
-                            let active = self.loaded_path.as_ref() == Some(&item.path);
-                            let selected = self.selection.is_selected(&item.path);
-                            let picture = if active {
-                                self.texture_id.zip(
-                                    self.engine
-                                        .image()
-                                        .map(|img| img.width as f32 / img.height.max(1) as f32),
-                                )
-                            } else {
-                                self.thumbs.get(&item.path).map(|t| {
-                                    let [w, h] = t.size();
-                                    (t.id(), w as f32 / h.max(1) as f32)
-                                })
-                            };
-                            let pending = loading == Some(&item.path);
-                            let tile_rect = Rect::from_min_size(
-                                origin + vec2(slot as f32 * FILM_STRIDE, 0.0),
-                                FILM_TILE,
-                            );
-                            // Keyed by the photo, not by position among the tiles drawn this
-                            // frame: scrolling changes which tile is drawn first, and a click
-                            // or an open context menu must stay with its photo.
-                            let tile_resp = ui
-                                .scope_builder(
-                                    egui::UiBuilder::new()
-                                        .max_rect(tile_rect)
-                                        .id_salt(&item.path),
-                                    |ui| film_tile(ui, item, active, selected, pending, picture),
-                                )
-                                .inner;
-                            if tile_resp.clicked() {
-                                let (ctrl, shift) = ui.input(|i| {
-                                    (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
-                                });
-                                if shift {
-                                    let all_paths: Vec<PathBuf> = displayed
-                                        .iter()
-                                        .map(|&i| self.shelf[i].path.clone())
-                                        .collect();
-                                    action_shift = Some((item.path.clone(), all_paths));
-                                } else if ctrl {
-                                    action_ctrl = Some(item.path.clone());
-                                } else {
-                                    action_single = Some((item.path.clone(), active));
-                                }
+                    tile_resp.context_menu(|ui| {
+                        ui.label(
+                            RichText::new(&item.name)
+                                .family(theme::mono_bold())
+                                .color(theme::ACCENT),
+                        );
+                        ui.separator();
+                        ui.label(theme::dim("Flags:"));
+                        ui.horizontal(|ui| {
+                            if ui.button("Pick (P)").clicked() {
+                                action_flag = Some((item.path.clone(), photo_engine::Flag::Pick));
+                                ui.close();
                             }
-
-                            tile_resp.context_menu(|ui| {
-                                ui.label(
-                                    RichText::new(&item.name)
-                                        .family(theme::mono_bold())
-                                        .color(theme::ACCENT),
-                                );
-                                ui.separator();
-                                ui.label(theme::dim("Flags:"));
-                                ui.horizontal(|ui| {
-                                    if ui.button("Pick (P)").clicked() {
-                                        action_flag = Some((
-                                            item.path.clone(),
-                                            photo_engine::Flag::Pick,
-                                        ));
-                                        ui.close();
-                                    }
-                                    if ui.button("Reject (X)").clicked() {
-                                        action_flag = Some((
-                                            item.path.clone(),
-                                            photo_engine::Flag::Reject,
-                                        ));
-                                        ui.close();
-                                    }
-                                    if ui.button("Clear (U)").clicked() {
-                                        action_flag = Some((
-                                            item.path.clone(),
-                                            photo_engine::Flag::Unflagged,
-                                        ));
-                                        ui.close();
-                                    }
-                                });
-                                ui.label(theme::dim("Rating:"));
-                                ui.horizontal(|ui| {
-                                    for r in 0..=5 {
-                                        let label = if r == 0 {
-                                            "0★".to_string()
-                                        } else {
-                                            format!("{r}★")
-                                        };
-                                        if ui.button(label).clicked() {
-                                            action_rating = Some((item.path.clone(), r));
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                                if ui.button("Batch Multi-Export…").clicked() {
-                                    action_export = true;
+                            if ui.button("Reject (X)").clicked() {
+                                action_flag = Some((item.path.clone(), photo_engine::Flag::Reject));
+                                ui.close();
+                            }
+                            if ui.button("Clear (U)").clicked() {
+                                action_flag =
+                                    Some((item.path.clone(), photo_engine::Flag::Unflagged));
+                                ui.close();
+                            }
+                        });
+                        ui.label(theme::dim("Rating:"));
+                        ui.horizontal(|ui| {
+                            for r in 0..=5 {
+                                let label = if r == 0 {
+                                    "0★".to_string()
+                                } else {
+                                    format!("{r}★")
+                                };
+                                if ui.button(label).clicked() {
+                                    action_rating = Some((item.path.clone(), r));
                                     ui.close();
                                 }
-                            });
+                            }
+                        });
+                        if ui.button("Batch Multi-Export…").clicked() {
+                            action_export = true;
+                            ui.close();
                         }
                     });
+                }
             });
 
         if let Some((target, all_paths)) = action_shift {
@@ -3171,6 +3254,22 @@ impl PhotoApp {
                     }
                 } else if response.dragged() && !at_fit && !self.split_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
+                }
+                // On touch, a sideways swipe at fit — where a drag has nothing to pan — steps
+                // to the next or previous photo, as ← and → do.
+                if widgets::is_touch(ui.ctx()) && at_fit && !self.cropping && !self.split_active {
+                    if response.drag_started() {
+                        self.swipe_from = response.interact_pointer_pos();
+                    }
+                    if response.drag_stopped() {
+                        let end = response.interact_pointer_pos();
+                        if let (Some(from), Some(to)) = (self.swipe_from.take(), end) {
+                            let d = to - from;
+                            if d.x.abs() > 60.0 && d.x.abs() > 2.0 * d.y.abs() {
+                                self.pending_step = Some(if d.x < 0.0 { 1 } else { -1 });
+                            }
+                        }
+                    }
                 }
 
                 if let Some(pointer) = response.hover_pos() {
@@ -3708,13 +3807,8 @@ impl PhotoApp {
                 collapsed = !collapsed;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                for (mode, label, tip) in inspector_map_3d::MODES.iter().rev() {
-                    let on = self.inspector_map_state.mode == *mode;
-                    if widgets::chip(ui, on, label).on_hover_text(*tip).clicked() {
-                        self.inspector_map_state.mode = *mode;
-                        collapsed = false;
-                    }
+                if self.scope_mode_chips(ui, true) {
+                    collapsed = false;
                 }
             });
         });
@@ -3740,6 +3834,26 @@ impl PhotoApp {
         if let Some(cfg) = self.section_mut(InspectorSectionId::Scope) {
             cfg.collapsed = collapsed;
         }
+    }
+
+    /// The scope's mode chips. True when one was clicked. `right_to_left` callers get them
+    /// reversed, so they read the same way on screen either way.
+    fn scope_mode_chips(&mut self, ui: &mut egui::Ui, right_to_left: bool) -> bool {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let mut clicked = false;
+        let modes: Vec<_> = if right_to_left {
+            inspector_map_3d::MODES.iter().rev().collect()
+        } else {
+            inspector_map_3d::MODES.iter().collect()
+        };
+        for (mode, label, tip) in modes {
+            let on = self.inspector_map_state.mode == *mode;
+            if widgets::chip(ui, on, label).on_hover_text(*tip).clicked() {
+                self.inspector_map_state.mode = *mode;
+                clicked = true;
+            }
+        }
+        clicked
     }
 
     fn pipeline_body(&mut self, ui: &mut egui::Ui) {
@@ -4510,53 +4624,8 @@ impl PhotoApp {
             )
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.horizontal(|ui| {
-                    // Not `theme::tag`: that uppercases, and it is sRGB, not SRGB.
-                    ui.label(
-                        RichText::new("PNG / JPEG · 8-BIT · sRGB")
-                            .family(theme::mono_bold())
-                            .size(10.5)
-                            .extra_letter_spacing(0.3)
-                            .color(theme::TEXT),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(image) = self.engine.image() {
-                            let (_, _, w, h) = self
-                                .stack
-                                .geometry
-                                .crop
-                                .sanitised()
-                                .to_pixels(image.width, image.height);
-                            ui.label(
-                                RichText::new(format!("{w} × {h}"))
-                                    .family(theme::mono_bold())
-                                    .size(11.5)
-                                    .color(theme::ACCENT),
-                            );
-                        }
-                    });
-                });
-                ui.horizontal(|ui| {
-                    let loaded = self.loaded_path.is_some();
-                    let has_sidecar = self.saved_stack.is_some();
-                    let w = ui.available_width() - 76.0 - ui.spacing().item_spacing.x;
-                    ui.add_enabled_ui(loaded, |ui| {
-                        if widgets::button(ui, Kind::Accent, "SAVE SIDECAR  →", w)
-                            .on_hover_text("Write this stack beside the RAW (Ctrl+S)")
-                            .clicked()
-                        {
-                            self.save_current_sidecar();
-                        }
-                    });
-                    ui.add_enabled_ui(loaded && has_sidecar, |ui| {
-                        if widgets::button(ui, Kind::Secondary, "REVERT", 76.0)
-                            .on_hover_text("Reload the saved sidecar (undoable)")
-                            .clicked()
-                        {
-                            self.revert_to_sidecar();
-                        }
-                    });
-                });
+                self.export_format_line(ui);
+                self.sidecar_buttons(ui);
                 ui.label(
                     RichText::new("edits are non-destructive · the RAW is never written")
                         .monospace()
@@ -4564,6 +4633,62 @@ impl PhotoApp {
                         .color(theme::TEXT_DIM),
                 );
             });
+    }
+
+    /// "PNG / JPEG · 8-BIT · sRGB ········ 6048 × 4024": what an export writes.
+    fn export_format_line(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Not `theme::tag`: that uppercases, and it is sRGB, not SRGB.
+            ui.label(
+                RichText::new("PNG / JPEG · 8-BIT · sRGB")
+                    .family(theme::mono_bold())
+                    .size(10.5)
+                    .extra_letter_spacing(0.3)
+                    .color(theme::TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(image) = self.engine.image() {
+                    let (_, _, w, h) = self
+                        .stack
+                        .geometry
+                        .crop
+                        .sanitised()
+                        .to_pixels(image.width, image.height);
+                    ui.label(
+                        RichText::new(format!("{w} × {h}"))
+                            .family(theme::mono_bold())
+                            .size(11.5)
+                            .color(theme::ACCENT),
+                    );
+                }
+            });
+        });
+    }
+
+    /// SAVE SIDECAR and REVERT, filling the width.
+    fn sidecar_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let loaded = self.loaded_path.is_some();
+            let has_sidecar = self.saved_stack.is_some();
+            let revert_w = 76.0;
+            let w = ui.available_width() - revert_w - ui.spacing().item_spacing.x;
+            ui.add_enabled_ui(loaded, |ui| {
+                if widgets::button(ui, Kind::Accent, "SAVE SIDECAR  →", w)
+                    .on_hover_text("Write this stack beside the RAW (Ctrl+S)")
+                    .clicked()
+                {
+                    self.save_current_sidecar();
+                }
+            });
+            ui.add_enabled_ui(loaded && has_sidecar, |ui| {
+                if widgets::button(ui, Kind::Secondary, "REVERT", revert_w)
+                    .on_hover_text("Reload the saved sidecar (undoable)")
+                    .clicked()
+                {
+                    self.revert_to_sidecar();
+                }
+            });
+        });
     }
 }
 

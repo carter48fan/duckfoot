@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use photo_app::compact::Tab;
 use photo_app::dam::FolderBookmark;
 use photo_app::platform::{Platform, Request, Response};
 use photo_app::{Gpu, PhotoApp};
@@ -59,11 +60,18 @@ impl Headless {
 
     /// One frame at 1440×900, the way the desktop shell runs one.
     fn frame(&self, app: &mut PhotoApp, input: egui::RawInput) -> egui::FullOutput {
+        self.frame_sized(app, egui::vec2(1440.0, 900.0), input)
+    }
+
+    /// One frame on a screen of `size` points.
+    fn frame_sized(
+        &self,
+        app: &mut PhotoApp,
+        size: egui::Vec2,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1440.0, 900.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..input
         };
         let gpu = self.gpu();
@@ -453,5 +461,142 @@ fn a_crop_is_framed_then_applied_or_cancelled() {
     h.frame(&mut app, undo);
     h.frame(&mut app, release());
     assert_eq!(app.stack().geometry.crop, full);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A phone upright and on its side, in points.
+const PORTRAIT: egui::Vec2 = egui::vec2(412.0, 892.0);
+const LANDSCAPE: egui::Vec2 = egui::vec2(892.0, 412.0);
+
+/// A tap: press and release at one point, over a few frames, as a finger's comes in.
+fn tap(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, at: egui::Pos2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame_sized(app, size, pointer(vec![egui::Event::PointerMoved(at)]));
+    h.frame_sized(app, size, pointer(vec![button(true)]));
+    h.frame_sized(app, size, pointer(vec![button(false)]));
+    h.frame_sized(app, size, pointer(vec![egui::Event::PointerGone]));
+}
+
+/// The centre of tab `i` of five in the bottom bar (portrait) or right rail (landscape).
+fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
+    if size.x > size.y {
+        let rail = 68.0;
+        let top = 34.0; // under the top bar
+        let cell = (size.y - top) / 5.0;
+        egui::pos2(size.x - rail / 2.0, top + cell * (i as f32 + 0.5))
+    } else {
+        let bar = 60.0;
+        let cell = size.x / 5.0;
+        egui::pos2(cell * (i as f32 + 0.5), size.y - bar / 2.0)
+    }
+}
+
+/// Phones get the navigation-bar layout either way up; every sheet lays out with a photo
+/// open, and the tabs open and close them.
+#[test]
+fn the_phone_layout_shows_every_sheet_and_tabs_switch_them() {
+    let dir = scratch_dir("phone");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 640, 426);
+    write_dng(&b, 640, 426);
+
+    let h = Headless::new();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(FakePlatform::default()));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.error(), None);
+
+    for size in [PORTRAIT, LANDSCAPE] {
+        for tab in Tab::ALL {
+            app.compact_tab = Some(tab);
+            let out = h.frame_sized(&mut app, size, Default::default());
+            assert!(!out.shapes.is_empty(), "{tab:?} at {size:?} drew nothing");
+        }
+        for (i, tab) in Tab::ALL.into_iter().enumerate() {
+            app.compact_tab = None;
+            h.frame_sized(&mut app, size, Default::default());
+            tap(&h, &mut app, size, tab_centre(size, i));
+            assert_eq!(app.compact_tab, Some(tab), "tapping {tab:?} at {size:?}");
+            // Tapping the open tab again gives the stage the whole screen.
+            tap(&h, &mut app, size, tab_centre(size, i));
+            assert_eq!(app.compact_tab, None, "closing {tab:?} at {size:?}");
+        }
+    }
+
+    // Every module's controls lay out alone in the Edit sheet.
+    app.compact_tab = Some(Tab::Edit);
+    for id in photo_app::InspectorSectionId::all() {
+        app.compact_module = *id;
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a touch screen has instead of keys: back closes the sheet before it leaves, select
+/// mode replaces Ctrl-click, and a swipe across the photo steps to the next one.
+#[test]
+fn back_select_mode_and_swipe_work_without_a_keyboard() {
+    let dir = scratch_dir("touch");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 640, 426);
+    write_dng(&b, 640, 426);
+
+    let h = Headless::new();
+    let platform = FakePlatform::default();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(a.as_path()));
+
+    // Back: select mode first, then the sheet, and only then the app.
+    app.select_mode = true;
+    app.compact_tab = Some(Tab::Library);
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert!(!app.select_mode);
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert_eq!(app.compact_tab, None);
+    assert_eq!(platform.0.lock().unwrap().leaves, 0);
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert_eq!(platform.0.lock().unwrap().leaves, 1);
+
+    // A swipe to the left across the photo, with the whole screen to the stage.
+    let (from, to) = (egui::pos2(330.0, 450.0), egui::pos2(90.0, 460.0));
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame_sized(
+        &mut app,
+        PORTRAIT,
+        pointer(vec![egui::Event::PointerMoved(from)]),
+    );
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(from, true)]));
+    for i in 1..=8 {
+        let p = from + (to - from) * (i as f32 / 8.0);
+        h.frame_sized(
+            &mut app,
+            PORTRAIT,
+            pointer(vec![egui::Event::PointerMoved(p)]),
+        );
+    }
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(to, false)]));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.loaded_path(),
+        Some(b.as_path()),
+        "the swipe did not step"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
