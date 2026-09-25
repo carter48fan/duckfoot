@@ -1,11 +1,12 @@
 //! Barrel 1's UI. Knows about egui and the engine; knows nothing about windowing.
 //!
-//! The desktop bootstrap and the eventual Android bootstrap both drive this same type.
+//! The desktop and Android bootstraps both drive this same type.
 
 pub mod batch;
 pub mod dam;
 pub mod inspector_map_3d;
 mod loader;
+pub mod platform;
 pub mod theme;
 pub mod tonemap_3d;
 pub mod widgets;
@@ -377,11 +378,22 @@ pub struct PhotoApp {
     pub batch_dialog_open: bool,
     pub batch_output_dir: Option<PathBuf>,
     pub color_eq_tab: ColorEqTab,
+    /// File pickers and storage locations, supplied by the bootstrap.
+    platform: Box<dyn platform::Platform>,
 }
 
 impl PhotoApp {
     pub fn new(gpu: &Gpu) -> Self {
+        Self::with_platform(gpu, platform::default_platform())
+    }
+
+    pub fn with_platform(gpu: &Gpu, platform: Box<dyn platform::Platform>) -> Self {
         let engine = Engine::new(gpu.device);
+        let mut folder_tree = dam::FolderTree::default();
+        let bookmarks = platform.bookmarks();
+        if !bookmarks.is_empty() {
+            folder_tree.bookmarks = bookmarks;
+        }
         let loader =
             loader::Loader::new(gpu.device.clone(), gpu.queue.clone(), engine.upload_pool());
         Self {
@@ -428,7 +440,7 @@ impl PhotoApp {
             reveal_section: None,
             selection: dam::SelectionModel::new(),
             filter: dam::FilterState::default(),
-            folder_tree: dam::FolderTree::default(),
+            folder_tree,
             folder_browser_open: false,
             batch_renamer: batch::Renamer::default(),
             export_recipes: batch::ExportRecipe::default_recipes(),
@@ -439,6 +451,7 @@ impl PhotoApp {
             batch_dialog_open: false,
             batch_output_dir: None,
             color_eq_tab: ColorEqTab::default(),
+            platform,
         }
     }
 
@@ -592,6 +605,7 @@ impl PhotoApp {
                     .and_then(|p| p.parent())
                     .map(|p| p.join("Export"))
                     .unwrap_or_else(|| PathBuf::from("Export"));
+                let default_dir = self.platform.default_output_dir().unwrap_or(default_dir);
 
                 if self.batch_output_dir.is_none() {
                     self.batch_output_dir = Some(default_dir);
@@ -605,9 +619,7 @@ impl PhotoApp {
                         .unwrap_or_default();
                     ui.label(RichText::new(dir_str).monospace().color(theme::TEXT));
                     if widgets::button(ui, Kind::Secondary, "Browse...", 80.0).clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.batch_output_dir = Some(folder);
-                        }
+                        self.request(ui.ctx(), platform::Request::BatchOutputDir);
                     }
                 });
 
@@ -837,46 +849,38 @@ impl PhotoApp {
         }
     }
 
-    fn pick_and_open(&mut self, gpu: &Gpu) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(
-                "All Supported Images",
-                &photo_engine::all_image_dialog_extensions(),
-            )
-            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-            .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
-            .add_filter("All files", &["*"])
-            .pick_file()
-        {
-            self.open_path(gpu, path);
-        }
+    fn pick_and_open(&mut self, ctx: &egui::Context) {
+        self.request(ctx, platform::Request::OpenImage);
     }
 
-    fn pick_and_shelve(&mut self, gpu: &Gpu) {
-        if let Some(paths) = rfd::FileDialog::new()
-            .add_filter(
-                "All Supported Images",
-                &photo_engine::all_image_dialog_extensions(),
-            )
-            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-            .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
-            .add_filter("All files", &["*"])
-            .pick_files()
-        {
-            self.add_to_shelf(gpu, paths);
-        }
+    fn pick_and_shelve(&mut self, ctx: &egui::Context) {
+        self.request(ctx, platform::Request::AddImages);
     }
 
-    fn pick_and_export(&mut self, gpu: &Gpu) {
+    fn pick_and_export(&mut self, ctx: &egui::Context) {
         let (dir, name) = self.export_suggestion();
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .add_filter("JPEG", &["jpg", "jpeg"])
-            .set_directory(dir)
-            .set_file_name(name)
-            .save_file()
-        {
-            self.export_to(gpu, path);
+        self.request(ctx, platform::Request::ExportImage { dir, name });
+    }
+
+    /// Ask the platform for a picker. Its answer is handled at the top of a later frame,
+    /// which this makes sure happens even when the answer was immediate.
+    fn request(&mut self, ctx: &egui::Context, request: platform::Request) {
+        self.platform.request(request);
+        ctx.request_repaint();
+    }
+
+    fn poll_platform(&mut self, gpu: &Gpu) {
+        for response in self.platform.poll() {
+            match response {
+                platform::Response::OpenImage(path) => self.open_path(gpu, path),
+                platform::Response::AddImages(paths) => self.add_to_shelf(gpu, paths),
+                platform::Response::BrowseFolder(dir) => {
+                    self.folder_tree.current_folder = Some(dir);
+                }
+                platform::Response::BatchOutputDir(dir) => self.batch_output_dir = Some(dir),
+                platform::Response::ExportImage(path) => self.export_to(gpu, path),
+                platform::Response::Status(msg) => self.set_status(msg),
+            }
         }
     }
 
@@ -1326,6 +1330,7 @@ impl PhotoApp {
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let ctx = ui.ctx().clone();
         self.loader.set_context(&ctx);
+        self.poll_platform(gpu);
         self.poll_loader(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);
@@ -1335,17 +1340,35 @@ impl PhotoApp {
 
         // Panel order is layout order: full-width bars first, then the side panels, then
         // the filmstrip and stage toolbar, which only span the space left between them.
-        self.top_bar(ui, gpu);
+        self.top_bar(ui);
         self.status_bar(ui);
         self.shelf(ui, gpu);
         self.inspector(ui);
         self.filmstrip(ui, gpu);
         self.stage_toolbar(ui);
-        self.workspace(ui, gpu);
+        self.workspace(ui);
         self.batch_export_dialog(ui);
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context, gpu: &Gpu) {
+        // Android's back gesture: close one thing per press, innermost first, and leave
+        // the app only once there is nothing left to close.
+        if ctx.input(|i| i.key_pressed(egui::Key::BrowserBack)) {
+            if let Some(focused) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(focused));
+            } else if self.cropping {
+                self.cropping = false;
+            } else if self.batch_dialog_open {
+                self.batch_dialog_open = false;
+            } else if self.customize_open {
+                self.customize_open = false;
+            } else if self.folder_browser_open {
+                self.folder_browser_open = false;
+            } else {
+                self.platform.leave();
+            }
+            return;
+        }
         // DESIGN.md: hotkeys never fire while a text field has focus.
         if ctx.memory(|m| m.focused().is_some()) {
             return;
@@ -1541,7 +1564,7 @@ impl PhotoApp {
 
     // ── Top bar ─────────────────────────────────────────────────────────────────────────
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top")
             .frame(
                 egui::Frame::new()
@@ -1598,10 +1621,10 @@ impl PhotoApp {
                             })
                             .inner;
                         if export.clicked() {
-                            self.pick_and_export(gpu);
+                            self.pick_and_export(ui.ctx());
                         }
                         if widgets::button(ui, Kind::Secondary, "Open RAW…", 0.0).clicked() {
-                            self.pick_and_open(gpu);
+                            self.pick_and_open(ui.ctx());
                         }
                         ui.add_space(4.0);
 
@@ -1747,7 +1770,7 @@ impl PhotoApp {
                     ui.label(theme::head("Shelf bin"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if widgets::icon(ui, "✚", false, "Add photos to the shelf").clicked() {
-                            self.pick_and_shelve(gpu);
+                            self.pick_and_shelve(ui.ctx());
                         }
                     });
                 });
@@ -1844,7 +1867,7 @@ impl PhotoApp {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
                             if response.clicked() {
-                                self.pick_and_shelve(gpu);
+                                self.pick_and_shelve(ui.ctx());
                             }
                         });
 
@@ -1912,9 +1935,7 @@ impl PhotoApp {
 
                 ui.add_space(4.0);
                 if widgets::button(ui, Kind::Secondary, "Browse Folder…", 0.0).clicked() {
-                    if let Some(picked) = rfd::FileDialog::new().pick_folder() {
-                        change_folder = Some(picked);
-                    }
+                    self.request(ui.ctx(), platform::Request::BrowseFolder);
                 }
             },
         );
@@ -2850,7 +2871,7 @@ impl PhotoApp {
         }
     }
 
-    fn workspace(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+    fn workspace(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -2865,7 +2886,7 @@ impl PhotoApp {
                     }
                 }
                 if self.texture_id.is_none() || self.engine.image().is_none() {
-                    self.empty_stage(ui, gpu);
+                    self.empty_stage(ui);
                     return;
                 }
                 let (Some(id), Some(image)) = (self.texture_id, self.engine.image()) else {
@@ -3179,7 +3200,7 @@ impl PhotoApp {
 
     /// No image yet: a drop target that is also the Open button, and the reason the last
     /// file failed, in place (DESIGN.md: failures surface in the UI, with the filename).
-    fn empty_stage(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+    fn empty_stage(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         let zone = Rect::from_center_size(
             area.center(),
@@ -3258,7 +3279,7 @@ impl PhotoApp {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if response.clicked() {
-            self.pick_and_open(gpu);
+            self.pick_and_open(ui.ctx());
         }
     }
 

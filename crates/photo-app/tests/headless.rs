@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use photo_app::dam::FolderBookmark;
+use photo_app::platform::{Platform, Request, Response};
 use photo_app::{Gpu, PhotoApp};
 
 struct Headless {
@@ -262,5 +264,91 @@ fn a_large_roll_paints_only_the_tiles_in_view() {
         "2000 photos painted {with_2000} shapes against {with_20} for 20: tiles out of view \
          are being drawn"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A platform the test answers for, recording what the app asked of it.
+#[derive(Clone, Default)]
+struct FakePlatform(std::sync::Arc<std::sync::Mutex<FakeState>>);
+
+#[derive(Default)]
+struct FakeState {
+    requests: Vec<Request>,
+    answers: Vec<Response>,
+    leaves: usize,
+}
+
+impl FakePlatform {
+    fn answer(&self, response: Response) {
+        self.0.lock().unwrap().answers.push(response);
+    }
+}
+
+impl Platform for FakePlatform {
+    fn request(&mut self, request: Request) {
+        self.0.lock().unwrap().requests.push(request);
+    }
+
+    fn poll(&mut self) -> Vec<Response> {
+        std::mem::take(&mut self.0.lock().unwrap().answers)
+    }
+
+    fn bookmarks(&self) -> Vec<FolderBookmark> {
+        vec![FolderBookmark {
+            name: "Library".into(),
+            path: PathBuf::from("/library"),
+        }]
+    }
+
+    fn leave(&mut self) {
+        self.0.lock().unwrap().leaves += 1;
+    }
+}
+
+fn back() -> egui::RawInput {
+    egui::RawInput {
+        events: vec![egui::Event::Key {
+            key: egui::Key::BrowserBack,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }],
+        ..Default::default()
+    }
+}
+
+/// The Android shell answers pickers some frames after they were asked, from another
+/// activity; the app must act on an answer whenever it arrives.
+#[test]
+fn platform_answers_and_back_are_handled() {
+    let dir = scratch_dir("platform");
+    let raw = dir.join("picked.dng");
+    write_dng(&raw, 640, 426);
+
+    let h = Headless::new();
+    let platform = FakePlatform::default();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+    assert_eq!(app.folder_tree.bookmarks[0].name, "Library");
+    h.frame(&mut app, Default::default());
+
+    platform.answer(Response::OpenImage(raw.clone()));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.error(), None);
+    assert_eq!(app.loaded_path(), Some(raw.as_path()));
+
+    platform.answer(Response::BatchOutputDir(dir.join("out")));
+    h.frame(&mut app, Default::default());
+    assert_eq!(app.batch_output_dir, Some(dir.join("out")));
+
+    // Back closes what is open before it leaves the app.
+    app.batch_dialog_open = true;
+    h.frame(&mut app, back());
+    assert!(!app.batch_dialog_open);
+    assert_eq!(platform.0.lock().unwrap().leaves, 0);
+    h.frame(&mut app, back());
+    assert_eq!(platform.0.lock().unwrap().leaves, 1);
+
+    assert!(platform.0.lock().unwrap().requests.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

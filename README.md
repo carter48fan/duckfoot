@@ -2,8 +2,8 @@
 
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
-> **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; other
-> platforms not yet built.**
+> **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; Android
+> builds in CI and is untested on devices; Windows and macOS not yet built.**
 >
 > Duckfoot is a native Rust application on wgpu. The only thing under construction is the
 > **Photo Studio and RAW processor**. Audio and Video are design, not code — see
@@ -325,13 +325,42 @@ Categories=Graphics;Photography;
 MimeType=image/x-sony-arw;image/x-canon-cr3;image/x-adobe-dng;
 ```
 
-### Windows, macOS, Android — not yet built
+### Android — builds in CI, not yet verified on a device
 
-**These have not been attempted and no claim is made that they work.** The architecture is
-arranged so they should be a new bootstrap rather than a port — `photo-engine` and
-`photo-app` hold no window handle — but that is a design intention, not a tested result.
+`crates/duckfoot-android` is the entry point (`android_main`) and `android/` is the Gradle
+project around it: a small Java `NativeActivity` subclass for the system file picker,
+"Open with", and hiding the system bars. Everything drawn is the same Rust as the desktop.
 
-Expected shape when we get there:
+```bash
+# needs an Android SDK + NDK (ANDROID_HOME, ANDROID_NDK_HOME), JDK 17, cargo-ndk
+cargo install cargo-ndk
+android/build-apk.sh            # → android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb logcat -s duckfoot          # the app's log
+```
+
+Every push also builds the APK in the **Android** workflow; download it from the run's
+artifacts (`duckfoot-debug-apk`).
+
+How it differs from the desktop, for now:
+
+- **Files are imported.** Android hands out documents, not paths, so a picked photo is
+  copied into the app's private library and edited there; its sidecar lives beside the
+  copy. Picking the same photo again reuses the copy, so its edits come back. The shelf's
+  **Library** bookmark lists everything imported.
+- **Exports go to `Pictures/Duckfoot`**, where the gallery shows them. There is no save
+  dialog.
+- **Back** closes the crop tool or an open dialog first, then sends the app to the
+  background. Backgrounding keeps the photo, stack and undo history.
+- **Landscape only, desktop layout.** The phone layout is the next step; see
+  [docs/ANDROID_AUDIT.md](./docs/ANDROID_AUDIT.md).
+- Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
+
+### Windows, macOS — not yet built
+
+**These have not been attempted and no claim is made that they work.** Both type-check
+(`cargo check --target x86_64-pc-windows-msvc` / `aarch64-apple-darwin`), and the shell in
+`crates/duckfoot/src/lib.rs` holds no Linux-specific code.
 
 ```bash
 # Windows (from Linux)
@@ -340,14 +369,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 # macOS — must build on a Mac; no cross-compilation
 cargo build --release --target aarch64-apple-darwin
-
-# Android — needs NDK + cargo-ndk + a gradle harness, and a new
-# crates/duckfoot-android/ bootstrap using android-activity
 ```
-
-The Android lifecycle work is already written into `crates/duckfoot/src/main.rs`:
-`suspended` drops the surface and everything bound to it, `resumed` rebuilds. That is the
-classic Android wgpu crash and it is handled. The NDK toolchain and APK packaging are not.
 
 **Do not distribute a binary yet** — see the licence note at the bottom.
 
@@ -359,6 +381,7 @@ classic Android wgpu crash and it is handled. The NDK toolchain and APK packagin
 duckfoot/
 ├── DESIGN.md                    # the design brief — start here
 ├── Cargo.toml                   # workspace root
+├── android/                     # Gradle project for the APK; build-apk.sh builds it
 └── crates/
     ├── photo-engine/            # wgpu device, textures, shaders, RAW decode
     │   ├── src/decode.rs        #   rawler/rawloader → cropped CFA mosaic + metadata
@@ -376,8 +399,10 @@ duckfoot/
     │   ├── src/theme.rs         #   pitch-black palette, fonts, egui visuals
     │   ├── src/widgets.rs       #   painted controls: chips, rails, module cards
     │   ├── src/loader.rs        #   background decode: opening photos, thumbnails
+    │   ├── src/platform.rs      #   file pickers and storage places, supplied by the shell
     │   └── assets/fonts/        #   JetBrains Mono, Space Grotesk, Hanken Grotesk (OFL)
-    └── duckfoot/                # bootstrap: winit. The only platform crate
+    ├── duckfoot/                # the winit shell (lib.rs) and the desktop main
+    └── duckfoot-android/        # android_main and the Java bridge; see android/
 ```
 
 `apps/` and `packages/` are the superseded TypeScript build, pending removal.
