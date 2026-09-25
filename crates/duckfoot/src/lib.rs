@@ -393,7 +393,9 @@ impl Shell {
             &window,
             Some(window.scale_factor() as f32),
             None,
-            None,
+            // Left as `None`, egui assumes 2048 and panics on any larger texture (a
+            // full-size embedded RAW preview, say), whatever the GPU can actually hold.
+            Some(gpu.device.limits().max_texture_dimension_2d as usize),
         );
 
         if self.app.is_none() {

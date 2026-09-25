@@ -14,6 +14,7 @@ use crate::decode::{CfaImage, RasterImage};
 use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::params::{Crop, Geometry, PhotoStack};
+use crate::temperature::WhiteScale;
 
 /// The adjusted image is written here, and egui samples it directly.
 ///
@@ -112,6 +113,7 @@ pub struct LoadedImage {
     /// As-shot neutral multipliers, before any user tint.
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
+    white_scale: WhiteScale,
     /// Levels in the sensor texture's mip chain; level 0 is full resolution.
     mip_levels: u32,
     /// Kept so its memory can be recycled when this image is replaced by one the same size.
@@ -128,6 +130,10 @@ pub struct LoadedImage {
 impl LoadedImage {
     pub fn megapixels(&self) -> f32 {
         (self.width as f32 * self.height as f32) / 1_000_000.0
+    }
+    /// Kelvin and tint for this camera's white balance.
+    pub fn white_scale(&self) -> WhiteScale {
+        self.white_scale
     }
     pub fn output_texture(&self) -> &wgpu::Texture {
         &self.output_texture
@@ -243,6 +249,7 @@ pub struct UploadedImage {
     pub orientation: Geometry,
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
+    white_scale: WhiteScale,
     pub make: String,
     pub model: String,
 }
@@ -348,6 +355,7 @@ pub fn upload_cfa(
         orientation: cfa.orientation,
         wb: cfa.wb,
         cam_to_srgb: cfa.cam_to_srgb,
+        white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         make: cfa.make,
         model: cfa.model,
     })
@@ -398,6 +406,7 @@ pub fn upload_raster(
         orientation: raster.orientation,
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        white_scale: WhiteScale::srgb(),
         make: raster.make,
         model: raster.model,
     })
@@ -728,6 +737,7 @@ impl Engine {
             orientation: _,
             wb,
             cam_to_srgb,
+            white_scale,
             make,
             model,
         } = uploaded;
@@ -933,6 +943,7 @@ impl Engine {
             model,
             wb,
             cam_to_srgb,
+            white_scale,
             mip_levels,
             preview_level,
             sensor_extent: extent,
