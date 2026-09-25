@@ -884,6 +884,16 @@ impl PhotoApp {
         self.stack != self.baseline
     }
 
+    /// The photo on the stage, once its decode has landed.
+    pub fn loaded_path(&self) -> Option<&std::path::Path> {
+        self.loaded_path.as_deref()
+    }
+
+    /// Why the last open failed, as shown on the stage.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// A decode is running, or thumbnails are still being built.
     pub fn is_busy(&self) -> bool {
         self.loading.is_some() || self.thumbs_requested.len() > self.thumbs_answered
@@ -2033,6 +2043,18 @@ impl PhotoApp {
                         continue;
                     }
                     any_visible = true;
+                    // Rows are all one height, so a row scrolled out of view only has to
+                    // hold its space: the same allocation `shelf_row` makes, so the scroll
+                    // extent and every later row's id are unchanged. Laying out and
+                    // painting all of a 2000-photo roll every frame is what this avoids.
+                    let row = Rect::from_min_size(
+                        ui.cursor().min,
+                        vec2(ui.available_width(), SHELF_ROW_HEIGHT),
+                    );
+                    if !ui.is_rect_visible(row) {
+                        ui.allocate_space(row.size());
+                        continue;
+                    }
                     let selected = self.selection.is_selected(&item.path);
                     let status = if active {
                         match self.sidecar_state() {
@@ -2347,10 +2369,13 @@ impl PhotoApp {
         let is_stack_edited = self.is_stack_edited();
         let loaded_path = self.loaded_path.clone();
 
-        let mut displayed_items: Vec<ShelfItem> = self
+        // Indices into the shelf, not copies of it: this runs every frame, and cloning
+        // every item (metadata strings and all) grew with the size of the folder.
+        let mut displayed: Vec<usize> = self
             .shelf
             .iter()
-            .filter(|it| {
+            .enumerate()
+            .filter(|(_, it)| {
                 let is_edited = if loaded_path.as_ref() == Some(&it.path) {
                     is_stack_edited
                 } else {
@@ -2359,38 +2384,23 @@ impl PhotoApp {
                 self.filter
                     .matches(&it.path, &it.metadata, is_edited, it.has_sidecar)
             })
-            .cloned()
+            .map(|(i, _)| i)
             .collect();
 
-        match self.filter.sort_by {
-            dam::SortBy::FileName => {
-                displayed_items.sort_by(|a, b| {
-                    if self.filter.sort_descending {
-                        b.name.cmp(&a.name)
-                    } else {
-                        a.name.cmp(&b.name)
-                    }
-                });
-            }
-            dam::SortBy::Rating => {
-                displayed_items.sort_by(|a, b| {
-                    let ord = a.metadata.rating.cmp(&b.metadata.rating);
-                    if self.filter.sort_descending {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                });
-            }
-            dam::SortBy::FileSize => {
-                displayed_items.sort_by(|a, b| {
-                    let ord = a.bytes.cmp(&b.bytes);
-                    if self.filter.sort_descending {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                });
+        {
+            let shelf = &self.shelf;
+            let descending = self.filter.sort_descending;
+            let order = |ord: std::cmp::Ordering| if descending { ord.reverse() } else { ord };
+            match self.filter.sort_by {
+                dam::SortBy::FileName => {
+                    displayed.sort_by(|&a, &b| order(shelf[a].name.cmp(&shelf[b].name)))
+                }
+                dam::SortBy::Rating => displayed.sort_by(|&a, &b| {
+                    order(shelf[a].metadata.rating.cmp(&shelf[b].metadata.rating))
+                }),
+                dam::SortBy::FileSize => {
+                    displayed.sort_by(|&a, &b| order(shelf[a].bytes.cmp(&shelf[b].bytes)))
+                }
             }
         }
 
@@ -2406,7 +2416,7 @@ impl PhotoApp {
                 ui.horizontal(|ui| {
                     ui.label(theme::head("Filmstrip").color(theme::ACCENT));
                     let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
-                    let visible_count = displayed_items.len();
+                    let visible_count = displayed.len();
                     ui.label(
                         theme::num(format!(
                             "{visible_count}/{} stills · {developed} with sidecar",
@@ -2553,130 +2563,151 @@ impl PhotoApp {
 
                 egui::ScrollArea::horizontal()
                     .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            if self.shelf.is_empty() {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 70.0),
-                                    Sense::hover(),
-                                );
-                                ui.painter().text(
-                                    rect.left_center() + vec2(4.0, 0.0),
-                                    Align2::LEFT_CENTER,
-                                    "Drop photos anywhere in the window to start a roll.",
-                                    FontId::proportional(12.0),
-                                    theme::TEXT_DIM,
-                                );
-                                return;
-                            }
+                    .show_viewport(ui, |ui, viewport| {
+                        if self.shelf.is_empty() {
+                            let (rect, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 70.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().text(
+                                rect.left_center() + vec2(4.0, 0.0),
+                                Align2::LEFT_CENTER,
+                                "Drop photos anywhere in the window to start a roll.",
+                                FontId::proportional(12.0),
+                                theme::TEXT_DIM,
+                            );
+                            return;
+                        }
 
-                            if displayed_items.is_empty() {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 70.0),
-                                    Sense::hover(),
-                                );
-                                ui.painter().text(
-                                    rect.left_center() + vec2(4.0, 0.0),
-                                    Align2::LEFT_CENTER,
-                                    "No photos match the active filter criteria.",
-                                    FontId::proportional(12.0),
-                                    theme::TEXT_DIM,
-                                );
-                                return;
-                            }
+                        if displayed.is_empty() {
+                            let (rect, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 70.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().text(
+                                rect.left_center() + vec2(4.0, 0.0),
+                                Align2::LEFT_CENTER,
+                                "No photos match the active filter criteria.",
+                                FontId::proportional(12.0),
+                                theme::TEXT_DIM,
+                            );
+                            return;
+                        }
 
-                            let loading = self.loading.as_ref().map(|(p, _)| p);
-                            for item in &displayed_items {
-                                let active = self.loaded_path.as_ref() == Some(&item.path);
-                                let selected = self.selection.is_selected(&item.path);
-                                let picture = if active {
-                                    self.texture_id.zip(
-                                        self.engine
-                                            .image()
-                                            .map(|img| img.width as f32 / img.height.max(1) as f32),
-                                    )
+                        // Only the tiles in view are laid out and painted; the rest of the
+                        // strip is empty space the scroll area measures. Tiles are all one
+                        // size, so which ones are in view is arithmetic.
+                        let origin = ui.max_rect().left_top();
+                        let total = displayed.len();
+                        ui.set_min_size(vec2(
+                            total as f32 * FILM_STRIDE - FILM_GAP,
+                            FILM_TILE.y,
+                        ));
+                        let visible = visible_tiles(viewport.x_range(), total);
+
+                        let loading = self.loading.as_ref().map(|(p, _)| p);
+                        for (slot, &index) in
+                            displayed.iter().enumerate().take(visible.end).skip(visible.start)
+                        {
+                            let item = &self.shelf[index];
+                            let active = self.loaded_path.as_ref() == Some(&item.path);
+                            let selected = self.selection.is_selected(&item.path);
+                            let picture = if active {
+                                self.texture_id.zip(
+                                    self.engine
+                                        .image()
+                                        .map(|img| img.width as f32 / img.height.max(1) as f32),
+                                )
+                            } else {
+                                self.thumbs.get(&item.path).map(|t| {
+                                    let [w, h] = t.size();
+                                    (t.id(), w as f32 / h.max(1) as f32)
+                                })
+                            };
+                            let pending = loading == Some(&item.path);
+                            let tile_rect = Rect::from_min_size(
+                                origin + vec2(slot as f32 * FILM_STRIDE, 0.0),
+                                FILM_TILE,
+                            );
+                            // Keyed by the photo, not by position among the tiles drawn this
+                            // frame: scrolling changes which tile is drawn first, and a click
+                            // or an open context menu must stay with its photo.
+                            let tile_resp = ui
+                                .scope_builder(
+                                    egui::UiBuilder::new()
+                                        .max_rect(tile_rect)
+                                        .id_salt(&item.path),
+                                    |ui| film_tile(ui, item, active, selected, pending, picture),
+                                )
+                                .inner;
+                            if tile_resp.clicked() {
+                                let (ctrl, shift) = ui.input(|i| {
+                                    (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
+                                });
+                                if shift {
+                                    let all_paths: Vec<PathBuf> = displayed
+                                        .iter()
+                                        .map(|&i| self.shelf[i].path.clone())
+                                        .collect();
+                                    action_shift = Some((item.path.clone(), all_paths));
+                                } else if ctrl {
+                                    action_ctrl = Some(item.path.clone());
                                 } else {
-                                    self.thumbs.get(&item.path).map(|t| {
-                                        let [w, h] = t.size();
-                                        (t.id(), w as f32 / h.max(1) as f32)
-                                    })
-                                };
-                                let pending = loading == Some(&item.path);
-                                let tile_resp =
-                                    film_tile(ui, item, active, selected, pending, picture);
-                                if tile_resp.clicked() {
-                                    let (ctrl, shift) = ui.input(|i| {
-                                        (
-                                            i.modifiers.command || i.modifiers.ctrl,
-                                            i.modifiers.shift,
-                                        )
-                                    });
-                                    if shift {
-                                        let all_paths: Vec<PathBuf> = displayed_items
-                                            .iter()
-                                            .map(|it| it.path.clone())
-                                            .collect();
-                                        action_shift = Some((item.path.clone(), all_paths));
-                                    } else if ctrl {
-                                        action_ctrl = Some(item.path.clone());
-                                    } else {
-                                        action_single = Some((item.path.clone(), active));
-                                    }
+                                    action_single = Some((item.path.clone(), active));
                                 }
+                            }
 
-                                tile_resp.context_menu(|ui| {
-                                    ui.label(
-                                        RichText::new(&item.name)
-                                            .family(theme::mono_bold())
-                                            .color(theme::ACCENT),
-                                    );
-                                    ui.separator();
-                                    ui.label(theme::dim("Flags:"));
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Pick (P)").clicked() {
-                                            action_flag = Some((
-                                                item.path.clone(),
-                                                photo_engine::Flag::Pick,
-                                            ));
-                                            ui.close();
-                                        }
-                                        if ui.button("Reject (X)").clicked() {
-                                            action_flag = Some((
-                                                item.path.clone(),
-                                                photo_engine::Flag::Reject,
-                                            ));
-                                            ui.close();
-                                        }
-                                        if ui.button("Clear (U)").clicked() {
-                                            action_flag = Some((
-                                                item.path.clone(),
-                                                photo_engine::Flag::Unflagged,
-                                            ));
-                                            ui.close();
-                                        }
-                                    });
-                                    ui.label(theme::dim("Rating:"));
-                                    ui.horizontal(|ui| {
-                                        for r in 0..=5 {
-                                            let label = if r == 0 {
-                                                "0★".to_string()
-                                            } else {
-                                                format!("{r}★")
-                                            };
-                                            if ui.button(label).clicked() {
-                                                action_rating = Some((item.path.clone(), r));
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                    if ui.button("Batch Multi-Export…").clicked() {
-                                        action_export = true;
+                            tile_resp.context_menu(|ui| {
+                                ui.label(
+                                    RichText::new(&item.name)
+                                        .family(theme::mono_bold())
+                                        .color(theme::ACCENT),
+                                );
+                                ui.separator();
+                                ui.label(theme::dim("Flags:"));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Pick (P)").clicked() {
+                                        action_flag = Some((
+                                            item.path.clone(),
+                                            photo_engine::Flag::Pick,
+                                        ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Reject (X)").clicked() {
+                                        action_flag = Some((
+                                            item.path.clone(),
+                                            photo_engine::Flag::Reject,
+                                        ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Clear (U)").clicked() {
+                                        action_flag = Some((
+                                            item.path.clone(),
+                                            photo_engine::Flag::Unflagged,
+                                        ));
                                         ui.close();
                                     }
                                 });
-                            }
-                        });
+                                ui.label(theme::dim("Rating:"));
+                                ui.horizontal(|ui| {
+                                    for r in 0..=5 {
+                                        let label = if r == 0 {
+                                            "0★".to_string()
+                                        } else {
+                                            format!("{r}★")
+                                        };
+                                        if ui.button(label).clicked() {
+                                            action_rating = Some((item.path.clone(), r));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                if ui.button("Batch Multi-Export…").clicked() {
+                                    action_export = true;
+                                    ui.close();
+                                }
+                            });
+                        }
                     });
             });
 
@@ -4698,6 +4729,8 @@ fn list_row(
 
 /// A shelved file: icon, name, size badge, and a status dot. The size badge turns into a
 /// remove button under the pointer. Returns `(response, removed)`.
+const SHELF_ROW_HEIGHT: f32 = 30.0;
+
 fn shelf_row(
     ui: &mut egui::Ui,
     item: &ShelfItem,
@@ -4705,7 +4738,8 @@ fn shelf_row(
     selected: bool,
     status: Option<Color32>,
 ) -> (egui::Response, bool) {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), SHELF_ROW_HEIGHT), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
 
     let badge_text = format_bytes(item.bytes);
@@ -4921,6 +4955,19 @@ fn stage_preview(ui: &mut egui::Ui, preview: &egui::TextureHandle, path: &std::p
     );
 }
 
+/// A filmstrip tile, and the distance from one tile's left edge to the next.
+const FILM_TILE: egui::Vec2 = vec2(112.0, 70.0);
+const FILM_GAP: f32 = 8.0;
+const FILM_STRIDE: f32 = FILM_TILE.x + FILM_GAP;
+
+/// Which of `total` tiles overlap the horizontal span `x` of the strip, measured from its
+/// left edge. A tile only partly in view is included.
+fn visible_tiles(x: egui::Rangef, total: usize) -> std::ops::Range<usize> {
+    let first = (x.min / FILM_STRIDE).floor().max(0.0) as usize;
+    let last = (x.max / FILM_STRIDE).ceil().max(0.0) as usize;
+    first.min(total)..last.min(total)
+}
+
 /// A filmstrip frame with thumbnail preview, rating stars, flag badge, and selection border.
 fn film_tile(
     ui: &mut egui::Ui,
@@ -4930,7 +4977,7 @@ fn film_tile(
     pending: bool,
     picture: Option<(egui::TextureId, f32)>,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(112.0, 70.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(FILM_TILE, Sense::click());
     let hovered = response.hovered();
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, theme::BG_900);
@@ -5505,4 +5552,22 @@ fn rgb_to_kelvin_tint(tint_r: f32, tint_b: f32) -> (f32, f32) {
     let avg = (tint_r + tint_b) * 0.5;
     let tint = ((1.0 - avg) * 100.0).clamp(-50.0, 50.0);
     (kelvin, tint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_tiles_in_view_are_drawn() {
+        let span = |a: f32, b: f32| egui::Rangef::new(a, b);
+        // Unscrolled, a strip wide enough for two and a bit tiles.
+        assert_eq!(visible_tiles(span(0.0, 2.5 * FILM_STRIDE), 1000), 0..3);
+        // Scrolled so tile 10 is cut off on the left and tile 14 on the right.
+        let v = visible_tiles(span(10.5 * FILM_STRIDE, 14.2 * FILM_STRIDE), 1000);
+        assert_eq!(v, 10..15);
+        // Never past the end, even when the viewport is wider than the strip.
+        assert_eq!(visible_tiles(span(0.0, 50.0 * FILM_STRIDE), 3), 0..3);
+        assert_eq!(visible_tiles(span(-5.0, 1.0), 0), 0..0);
+    }
 }
