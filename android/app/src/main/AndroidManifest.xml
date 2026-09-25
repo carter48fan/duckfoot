@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The engine is wgpu on Vulkan: the histogram is a compute shader, which GLES 3.0
+         devices cannot run. 0x401000 is Vulkan 1.1. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x401000"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- No storage permissions: files come in through the system picker, and exports are
+         written to Pictures/Duckfoot, which Android 11+ allows without one. -->
+    <application
+        android:label="Duckfoot"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/Duckfoot"
+        android:hasCode="true"
+        android:enableOnBackInvokedCallback="false">
+
+        <!-- configChanges: rotating, folding or attaching a keyboard is a resize to the app,
+             not a restart. launchMode singleTask: "Open with Duckfoot" reaches the running
+             app through onNewIntent. enableOnBackInvokedCallback=false keeps Back arriving
+             as a key the app can handle (close crop, dialogs) before it leaves. -->
+        <activity
+            android:name=".DuckfootActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="duckfoot_android" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- "Open with" / "Share to" from a gallery or file manager. RAW files are usually
+                 image/x-<vendor>-<format>, which image/* covers; the extension is checked on
+                 import, so anything else offered is refused with a message. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

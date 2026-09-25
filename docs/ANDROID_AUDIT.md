@@ -5,6 +5,20 @@ phone UI layout that stands between the current tree and an Android release cand
 last section maps every current feature onto the proposed bottom-navigation layout so none
 is lost.
 
+## Progress
+
+| # | State |
+|---|---|
+| B1 | **Done.** `photo-app` no longer depends on winit |
+| B2 | **Done, interim.** `rfd` is desktop-only behind `photo_app::platform::Platform`; Android pickers are SAF intents in `DuckfootActivity` |
+| B3 | **Interim.** Picked documents are *imported* (copied) into app-private storage, so paths and sidecars work unchanged; exports go to `Pictures/Duckfoot`. The `AssetId` / `Storage` model below is still the goal |
+| B4 | **Done.** Suspend drops only the window surface; the device and `PhotoApp` survive. Back closes crop/dialogs, then backgrounds the app. Process death still loses unsaved edits |
+| B5 | **Done, pending a device.** `crates/duckfoot-android`, `android/` (Gradle, NativeActivity subclass), `android/build-apk.sh`, and the Android workflow |
+
+NativeActivity was chosen over GameActivity: the GameActivity library must match
+android-activity's bundled C sources exactly, and a Java subclass of NativeActivity can
+receive picker results just as well. The cost is a weaker soft keyboard (R6).
+
 ## Verdict
 
 The engine is ready. `photo-engine` compiles for `aarch64-linux-android` unchanged, and

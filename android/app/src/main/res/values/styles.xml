@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0b0b0c</color>
+    <color name="icon_bg">#1a1a1c</color>
+
+    <!-- The whole window is one GPU surface drawn by egui, which knows nothing of system
+         bars or cutouts; so the bars are hidden (DuckfootActivity.hideSystemBars) and the
+         window is kept out of the cutout rather than laid under it. -->
+    <style name="Duckfoot" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">never</item>
+    </style>
+</resources>
