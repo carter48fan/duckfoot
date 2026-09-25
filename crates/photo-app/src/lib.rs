@@ -545,29 +545,41 @@ impl PhotoApp {
     }
 
     fn poll_export(&mut self, ctx: &egui::Context) {
-        let Export::Writing {
-            path,
-            started,
-            result,
-        } = &self.export
-        else {
-            return;
+        let (outcome, path, seconds) = {
+            let Export::Writing {
+                path,
+                started,
+                result,
+            } = &mut self.export
+            else {
+                return;
+            };
+            match result.try_recv() {
+                Ok(Ok(())) => (Some(Ok(())), path.clone(), started.elapsed().as_secs_f32()),
+                Ok(Err(e)) => (Some(Err(e)), path.clone(), started.elapsed().as_secs_f32()),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => (
+                    Some(Err("export thread stopped unexpectedly".to_string())),
+                    path.clone(),
+                    started.elapsed().as_secs_f32(),
+                ),
+            }
         };
-        match result.try_recv() {
-            Ok(Ok(())) => {
-                self.export = Export::Done {
-                    path: path.clone(),
-                    seconds: started.elapsed().as_secs_f32(),
-                };
+
+        match outcome {
+            Some(Ok(())) => {
+                self.platform.export_completed(&path);
+                self.set_status(format!("Exported {} in {seconds:.1}s", file_name(&path)));
+                self.export = Export::Done { path, seconds };
             }
-            Ok(Err(e)) => self.export = Export::Failed(e),
-            Err(mpsc::TryRecvError::Empty) => {
-                // Keep animating the "writing…" state rather than waiting for input.
-                ctx.request_repaint();
+            Some(Err(e)) => {
+                self.set_status(format!("Export failed: {e}"));
+                self.export = Export::Failed(e);
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.export = Export::Failed("export thread stopped unexpectedly".into());
-            }
+            None => {}
         }
     }
 
@@ -3992,12 +4004,26 @@ impl PhotoApp {
         let d = PhotoStack::default();
 
         match id {
-            InspectorSectionId::Scope => {}
+            InspectorSectionId::Scope => {
+                if self.engine.image().is_none() {
+                    ui.label(theme::dim("Open a photo to see its scopes.").size(12.0));
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        self.scope_mode_chips(ui, false);
+                    });
+                    inspector_map_3d::render_inspector_map(
+                        ui,
+                        &mut self.inspector_map_state,
+                        self.engine.histogram(),
+                    );
+                }
+            }
             InspectorSectionId::Geometry => {
                 let g = &mut self.stack.geometry;
                 let mut edited = false;
                 let mut turned = false;
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = widgets::sized(ui, 4.0, 8.0);
                     if geometry_icon_button(
                         ui,
                         GeometryIcon::RotateLeft,
@@ -4065,7 +4091,8 @@ impl PhotoApp {
                     self.rebase_crop();
                 }
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    let pad = widgets::sized(ui, 3.0, 6.0);
+                    ui.spacing_mut().item_spacing = vec2(pad, pad);
                     self.crop_chips(ui);
                 });
                 track!(widgets::param_slider(
@@ -4438,12 +4465,43 @@ impl PhotoApp {
             InspectorSectionId::ColorBalance => {
                 let p = &mut self.stack.color_balance.params;
                 let dp = d.color_balance.params;
-                for (label, rgb, home) in [
-                    ("lift", &mut p.lift, dp.lift),
-                    ("gamma", &mut p.gamma, dp.gamma),
-                    ("gain", &mut p.gain, dp.gain),
-                    ("offset", &mut p.offset, dp.offset),
-                ] {
+                let touch = widgets::is_touch(ui.ctx());
+
+                let mut current_tab = ui.data_mut(|d| {
+                    d.get_temp::<usize>(egui::Id::new("duckfoot.cb_tab"))
+                        .unwrap_or(0)
+                });
+
+                if touch {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (idx, name) in ["lift", "gamma", "gain", "offset", "all"]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let active = current_tab == idx;
+                            if widgets::chip(ui, active, name).clicked() {
+                                current_tab = idx;
+                                ui.data_mut(|d| {
+                                    d.insert_temp(egui::Id::new("duckfoot.cb_tab"), idx)
+                                });
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+
+                let sections = [
+                    ("lift", &mut p.lift, dp.lift, 0),
+                    ("gamma", &mut p.gamma, dp.gamma, 1),
+                    ("gain", &mut p.gain, dp.gain, 2),
+                    ("offset", &mut p.offset, dp.offset, 3),
+                ];
+
+                for (label, rgb, home, idx) in sections {
+                    if touch && current_tab != 4 && current_tab != idx {
+                        continue;
+                    }
                     ui.add_space(2.0);
                     ui.label(theme::tag(label).color(theme::TEXT_DIM));
                     let range = -0.5..=0.5;
@@ -4491,6 +4549,26 @@ impl PhotoApp {
             InspectorSectionId::Sharpen => {
                 let p = &mut self.stack.sharpen.params;
                 let dp = d.sharpen.params;
+                if widgets::is_touch(ui.ctx()) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (label, val) in [
+                            ("0.0", 0.0),
+                            ("0.25", 0.25),
+                            ("0.50", 0.50),
+                            ("0.75", 0.75),
+                            ("1.0", 1.0),
+                        ] {
+                            let active = (p.amount - val).abs() < 0.05;
+                            if widgets::chip(ui, active, label).clicked() {
+                                p.amount = val;
+                                *changed = true;
+                                *started = true;
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
                 track!(widgets::param_slider(
                     ui,
                     "amount",
@@ -5786,7 +5864,10 @@ fn geometry_icon_button(
     active: bool,
     tooltip: &str,
 ) -> egui::Response {
-    let size = egui::vec2(28.0, 24.0);
+    let size = egui::vec2(
+        widgets::sized(ui, 28.0, 48.0),
+        widgets::sized(ui, 24.0, 42.0),
+    );
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -5814,21 +5895,23 @@ fn geometry_icon_button(
             theme::TEXT_DIM
         };
 
+        let rad = widgets::sized(ui, 2.0, 4.0) as u8;
         ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(2), bg_color);
+            .rect_filled(rect, egui::CornerRadius::same(rad), bg_color);
         ui.painter().rect_stroke(
             rect,
-            egui::CornerRadius::same(2),
+            egui::CornerRadius::same(rad),
             egui::Stroke::new(1.0, stroke_color),
             egui::StrokeKind::Inside,
         );
 
         let center = rect.center();
-        let stroke = egui::Stroke::new(1.5, icon_color);
+        let s = (size.y / 24.0).clamp(1.0, 2.0);
+        let stroke = egui::Stroke::new(1.5 * s, icon_color);
 
         match icon {
             GeometryIcon::RotateLeft => {
-                let r = 5.5;
+                let r = 5.5 * s;
                 let mut points = Vec::new();
                 for i in 0..=12 {
                     let angle =
@@ -5840,12 +5923,12 @@ fn geometry_icon_button(
                 }
                 let tip = points[points.len() - 1];
                 ui.painter()
-                    .line_segment([tip, tip + egui::vec2(3.0, 0.0)], stroke);
+                    .line_segment([tip, tip + egui::vec2(3.0 * s, 0.0)], stroke);
                 ui.painter()
-                    .line_segment([tip, tip + egui::vec2(0.5, 3.0)], stroke);
+                    .line_segment([tip, tip + egui::vec2(0.5 * s, 3.0 * s)], stroke);
             }
             GeometryIcon::RotateRight => {
-                let r = 5.5;
+                let r = 5.5 * s;
                 let mut points = Vec::new();
                 for i in 0..=12 {
                     let angle =
@@ -5857,22 +5940,22 @@ fn geometry_icon_button(
                 }
                 let tip = points[points.len() - 1];
                 ui.painter()
-                    .line_segment([tip, tip - egui::vec2(3.0, 0.0)], stroke);
+                    .line_segment([tip, tip - egui::vec2(3.0 * s, 0.0)], stroke);
                 ui.painter()
-                    .line_segment([tip, tip + egui::vec2(-0.5, 3.0)], stroke);
+                    .line_segment([tip, tip + egui::vec2(-0.5 * s, 3.0 * s)], stroke);
             }
             GeometryIcon::MirrorH => {
                 ui.painter().line_segment(
                     [
-                        center + egui::vec2(0.0, -7.0),
-                        center + egui::vec2(0.0, 7.0),
+                        center + egui::vec2(0.0, -7.0 * s),
+                        center + egui::vec2(0.0, 7.0 * s),
                     ],
                     egui::Stroke::new(1.0, theme::BORDER),
                 );
                 let t_left = [
-                    center + egui::vec2(-2.0, -4.5),
-                    center + egui::vec2(-7.0, 0.0),
-                    center + egui::vec2(-2.0, 4.5),
+                    center + egui::vec2(-2.0 * s, -4.5 * s),
+                    center + egui::vec2(-7.0 * s, 0.0),
+                    center + egui::vec2(-2.0 * s, 4.5 * s),
                 ];
                 ui.painter().add(egui::Shape::convex_polygon(
                     t_left.to_vec(),
@@ -5884,9 +5967,9 @@ fn geometry_icon_button(
                     stroke,
                 ));
                 let t_right = [
-                    center + egui::vec2(2.0, -4.5),
-                    center + egui::vec2(7.0, 0.0),
-                    center + egui::vec2(2.0, 4.5),
+                    center + egui::vec2(2.0 * s, -4.5 * s),
+                    center + egui::vec2(7.0 * s, 0.0),
+                    center + egui::vec2(2.0 * s, 4.5 * s),
                 ];
                 ui.painter().add(egui::Shape::convex_polygon(
                     t_right.to_vec(),
@@ -5901,15 +5984,15 @@ fn geometry_icon_button(
             GeometryIcon::MirrorV => {
                 ui.painter().line_segment(
                     [
-                        center + egui::vec2(-7.0, 0.0),
-                        center + egui::vec2(7.0, 0.0),
+                        center + egui::vec2(-7.0 * s, 0.0),
+                        center + egui::vec2(7.0 * s, 0.0),
                     ],
                     egui::Stroke::new(1.0, theme::BORDER),
                 );
                 let t_top = [
-                    center + egui::vec2(-4.5, -2.0),
-                    center + egui::vec2(0.0, -7.0),
-                    center + egui::vec2(4.5, -2.0),
+                    center + egui::vec2(-4.5 * s, -2.0 * s),
+                    center + egui::vec2(0.0, -7.0 * s),
+                    center + egui::vec2(4.5 * s, -2.0 * s),
                 ];
                 ui.painter().add(egui::Shape::convex_polygon(
                     t_top.to_vec(),
@@ -5921,9 +6004,9 @@ fn geometry_icon_button(
                     stroke,
                 ));
                 let t_bottom = [
-                    center + egui::vec2(-4.5, 2.0),
-                    center + egui::vec2(0.0, 7.0),
-                    center + egui::vec2(4.5, 2.0),
+                    center + egui::vec2(-4.5 * s, 2.0 * s),
+                    center + egui::vec2(0.0, 7.0 * s),
+                    center + egui::vec2(4.5 * s, 2.0 * s),
                 ];
                 ui.painter().add(egui::Shape::convex_polygon(
                     t_bottom.to_vec(),

@@ -21,8 +21,8 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Painter, Rect, RichText,
 use crate::widgets::{self, Kind};
 use crate::Gpu;
 use crate::{
-    file_name, inspector_map_3d, module_enabled, module_on, summarise, theme, Export,
-    InspectorSectionId, PhotoApp, View,
+    file_name, module_enabled, module_on, summarise, theme, Export, InspectorSectionId, PhotoApp,
+    View,
 };
 use std::path::PathBuf;
 
@@ -31,26 +31,16 @@ use std::path::PathBuf;
 pub enum Tab {
     Library,
     Edit,
-    Scopes,
-    History,
     Export,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
-        Tab::Library,
-        Tab::Edit,
-        Tab::Scopes,
-        Tab::History,
-        Tab::Export,
-    ];
+    pub const ALL: [Tab; 3] = [Tab::Library, Tab::Edit, Tab::Export];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Library => "library",
             Tab::Edit => "edit",
-            Tab::Scopes => "scopes",
-            Tab::History => "history",
             Tab::Export => "export",
         }
     }
@@ -119,13 +109,13 @@ impl PhotoApp {
                 egui::Panel::right("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
-                    .exact_size((screen.x * 0.46).clamp(300.0, 440.0))
+                    .max_size((screen.x * 0.46).clamp(300.0, 440.0))
                     .show(ui, |ui| self.compact_sheet(ui, gpu, tab));
             } else {
                 egui::Panel::bottom("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
-                    .exact_size((screen.y * 0.44).clamp(220.0, 520.0))
+                    .max_size((screen.y * 0.50).clamp(200.0, 540.0))
                     .show(ui, |ui| self.compact_sheet(ui, gpu, tab));
             }
         }
@@ -275,7 +265,7 @@ impl PhotoApp {
         }
         egui::ScrollArea::vertical()
             .id_salt(("compact_sheet", tab.label()))
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(12, 10))
@@ -283,8 +273,6 @@ impl PhotoApp {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         match tab {
                             Tab::Library => self.library_sheet(ui, gpu),
-                            Tab::Scopes => self.scopes_sheet(ui),
-                            Tab::History => self.history_sheet(ui),
                             Tab::Export => self.export_sheet(ui),
                             Tab::Edit => unreachable!("handled above"),
                         }
@@ -480,6 +468,14 @@ impl PhotoApp {
                     {
                         self.customize_open = !self.customize_open;
                     }
+                    ui.add_enabled_ui(loaded && self.is_stack_edited(), |ui| {
+                        if widgets::chip(ui, false, "reset")
+                            .on_hover_text("Reset all adjustments to baseline")
+                            .clicked()
+                        {
+                            self.reset_to_default();
+                        }
+                    });
                 });
                 if loaded && !self.customize_open {
                     ui.add_space(6.0);
@@ -489,7 +485,7 @@ impl PhotoApp {
 
         egui::ScrollArea::vertical()
             .id_salt("compact_edit")
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(12, 6))
@@ -514,7 +510,7 @@ impl PhotoApp {
         let ids: Vec<InspectorSectionId> = self
             .inspector_sections
             .iter()
-            .filter(|s| s.visible && s.id != InspectorSectionId::Scope)
+            .filter(|s| s.visible)
             .map(|s| s.id)
             .collect();
         if !ids.contains(&self.compact_module) {
@@ -604,29 +600,7 @@ impl PhotoApp {
         }
     }
 
-    // ── Scopes, History, Export ─────────────────────────────────────────────────────────
-
-    fn scopes_sheet(&mut self, ui: &mut egui::Ui) {
-        if self.engine.image().is_none() {
-            ui.label(theme::dim("Open a photo to see its scopes.").size(12.0));
-            return;
-        }
-        ui.horizontal_wrapped(|ui| {
-            self.scope_mode_chips(ui, false);
-        });
-        inspector_map_3d::render_inspector_map(
-            ui,
-            &mut self.inspector_map_state,
-            self.engine.histogram(),
-        );
-    }
-
-    fn history_sheet(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| self.filmstrip_actions(ui, false));
-        self.sidecar_buttons(ui);
-        self.snapshots_group(ui);
-        self.history_group(ui);
-    }
+    // ── Export ──────────────────────────────────────────────────────────────────────────
 
     fn export_sheet(&mut self, ui: &mut egui::Ui) {
         self.export_format_line(ui);
@@ -641,6 +615,49 @@ impl PhotoApp {
         if export.clicked() {
             self.pick_and_export(ui.ctx());
         }
+
+        // Real-time export feedback in the sheet
+        match &self.export {
+            Export::Writing { path, started, .. } => {
+                ui.horizontal(|ui| {
+                    widgets::dot(ui, theme::ACCENT);
+                    ui.label(
+                        RichText::new(format!(
+                            "writing {} ({:.1}s)…",
+                            file_name(path),
+                            started.elapsed().as_secs_f32()
+                        ))
+                        .family(theme::mono_bold())
+                        .size(11.5)
+                        .color(theme::ACCENT),
+                    );
+                });
+            }
+            Export::Done { path, seconds } => {
+                ui.horizontal(|ui| {
+                    widgets::dot(ui, theme::LIME);
+                    ui.label(
+                        RichText::new(format!("exported {} in {seconds:.1}s", file_name(path)))
+                            .family(theme::mono_bold())
+                            .size(11.5)
+                            .color(theme::LIME),
+                    );
+                });
+            }
+            Export::Failed(e) => {
+                ui.horizontal(|ui| {
+                    widgets::dot(ui, theme::DANGER);
+                    ui.label(
+                        RichText::new(format!("failed: {e}"))
+                            .family(theme::mono_bold())
+                            .size(11.5)
+                            .color(theme::DANGER),
+                    );
+                });
+            }
+            Export::Idle => {}
+        }
+
         let n = self.selection.count();
         let label = if n > 1 {
             format!("Batch export {n} selected…")
@@ -654,7 +671,7 @@ impl PhotoApp {
     }
 
     /// One line over the stage when there is something to say: an error, a notice, or an
-    /// export being written. The desktop's status bar has no room here.
+    /// export being written / completed. The desktop's status bar has no room here.
     fn compact_status(&mut self, ui: &mut egui::Ui) {
         let notice = self
             .status_notification
@@ -664,6 +681,13 @@ impl PhotoApp {
             (err.clone(), theme::DANGER)
         } else if let Export::Writing { path, .. } = &self.export {
             (format!("writing {}", file_name(path)), theme::ACCENT)
+        } else if let Export::Done { path, seconds } = &self.export {
+            (
+                format!("exported {} in {seconds:.1}s", file_name(path)),
+                theme::LIME,
+            )
+        } else if let Export::Failed(e) = &self.export {
+            (format!("export failed: {e}"), theme::DANGER)
         } else if let Some((msg, when)) = notice {
             // Wake to take the notice down when its time is up.
             let left = 4.0 - when.elapsed().as_secs_f32();
@@ -779,23 +803,6 @@ fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {
                 painter.line_segment([c + vec2(-9.0, row), c + vec2(9.0, row)], stroke);
                 painter.circle_filled(c + vec2(knob, row), 2.6, colour);
             }
-        }
-        // A histogram's bars.
-        Tab::Scopes => {
-            let base = c.y + 8.0;
-            for (x, h) in [(-7.5, 5.0), (-2.5, 12.0), (2.5, 16.0), (7.5, 8.0)] {
-                painter.rect_filled(
-                    Rect::from_min_max(pos2(c.x + x - 1.8, base - h), pos2(c.x + x + 1.8, base)),
-                    0.5,
-                    colour,
-                );
-            }
-        }
-        // A clock.
-        Tab::History => {
-            painter.circle_stroke(c, 8.5, stroke);
-            painter.line_segment([c, c + vec2(0.0, -5.5)], stroke);
-            painter.line_segment([c, c + vec2(4.0, 2.0)], stroke);
         }
         // An arrow rising out of a tray.
         Tab::Export => {

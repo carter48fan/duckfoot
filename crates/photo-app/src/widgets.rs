@@ -59,7 +59,7 @@ pub fn orbit_hint(ctx: &egui::Context) -> &'static str {
 }
 
 /// `desktop`, or `touch` when controls are sized for fingers.
-fn sized(ui: &Ui, desktop: f32, touch: f32) -> f32 {
+pub fn sized(ui: &Ui, desktop: f32, touch: f32) -> f32 {
     if is_touch(ui.ctx()) {
         touch
     } else {
@@ -293,13 +293,16 @@ fn rail_painted(
                 }
             }
         } else if response.dragged() {
-            let fine = if ui.input(|i| i.modifiers.shift) || is_fine(ui.ctx()) {
-                0.1
-            } else {
-                1.0
-            };
-            let dx = response.drag_delta().x;
-            *value = (*value + dx / track.width() * (hi - lo) * fine).clamp(lo, hi);
+            let delta = response.drag_delta();
+            if !touch || delta.x.abs() > delta.y.abs() * 1.2 {
+                let fine = if ui.input(|i| i.modifiers.shift) || is_fine(ui.ctx()) {
+                    0.1
+                } else {
+                    1.0
+                };
+                let dx = delta.x;
+                *value = (*value + dx / track.width() * (hi - lo) * fine).clamp(lo, hi);
+            }
         }
     }
     if *value != before {
@@ -453,12 +456,13 @@ pub fn scaled_slider(
         if slid.changed() {
             *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
         }
+        let touch = is_touch(ui.ctx());
         let typed = ui.add_sized(
-            [value_w, 18.0],
+            [value_w, sized(ui, 18.0, 26.0)],
             egui::DragValue::new(value)
                 .range(range)
                 .fixed_decimals(decimals)
-                .speed(scale.speed),
+                .speed(if touch { 0.0 } else { scale.speed }),
         );
         label_response | slid | typed
     })

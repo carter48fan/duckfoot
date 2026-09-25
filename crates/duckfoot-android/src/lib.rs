@@ -59,7 +59,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 
     let bridge = Bridge::new(&app)?;
     let library = bridge.dir("libraryDir")?;
-    let pictures = bridge.dir("picturesDir")?.join("Duckfoot");
+    let pictures = bridge.dir("picturesDir")?;
     log::info!(
         "library {}, exports {}",
         library.display(),
@@ -299,6 +299,20 @@ impl Platform for AndroidPlatform {
 
     fn leave(&mut self) {
         self.bridge.call_void("leave", "()V", &[]);
+    }
+
+    fn export_completed(&mut self, path: &Path) {
+        if let Some(path_str) = path.to_str() {
+            if let Ok(mut env) = self.bridge.env() {
+                if let Ok(jpath) = env.new_string(path_str) {
+                    self.bridge.call_void(
+                        "scanMediaFile",
+                        "(Ljava/lang/String;)V",
+                        &[JValue::Object(&jpath)],
+                    );
+                }
+            }
+        }
     }
 }
 

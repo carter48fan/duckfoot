@@ -9,16 +9,15 @@ run-name: >-
       || github.event.pull_request.title
       || 'Build' }}
 
-# Every push, on every branch, builds an optimised Linux binary and an Android APK and
-# attaches both to the run. On top of that (see the `release` job):
+# Every push, on every branch, builds:
+# - Android APK (arm64)
+# - Linux AppImage & tarball (x86_64)
+# - Windows portable zip (x86_64)
+# and attaches them to the workflow run. On top of that (see the `release` job):
 #
-# - every push to main replaces the rolling **nightly** release with that commit's builds;
-# - a tag starting with v (v0.1.0, v0.2.0-alpha.1), or a hand-run (Actions → Build → Run
-#   workflow) given a version, drafts a release under that version.
-#
-# Releases are drafts, visible only to collaborators, while the README's licence note
-# stands. Setting the repository variable PUBLIC_NIGHTLY to true makes the nightly a
-# public pre-release instead. See android/README.md.
+# - every push to main updates the rolling **nightly** release with all target builds;
+# - a tag starting with v (v0.1.0, v0.2.0-alpha.1), or a manual run given a version,
+#   publishes a release with all artifacts attached.
 on:
   push:
   pull_request:
@@ -116,7 +115,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev file
 
       - uses: actions/checkout@v5
 
@@ -134,7 +133,7 @@ jobs:
 
       - run: cargo build --release --locked -p duckfoot
 
-      - name: Package
+      - name: Package tarball and AppImage
         run: |
           dir=duckfoot-linux-x86_64
           mkdir -p "$dir" dist
@@ -153,14 +152,83 @@ jobs:
           ldd "$dir/duckfoot"
           tar czf "dist/$dir.tar.gz" "$dir"
 
+          # Build AppImage
+          echo "Packaging AppImage..."
+          appdir=AppDir
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/256x256/apps"
+          cp "$dir/duckfoot" "$appdir/usr/bin/"
+          cp brand/duckfoot-1024.png "$appdir/duckfoot.png"
+          cp brand/duckfoot-1024.png "$appdir/usr/share/icons/hicolor/256x256/apps/duckfoot.png"
+          cat << 'EOF' > "$appdir/duckfoot.desktop"
+[Desktop Entry]
+Type=Application
+Name=Duckfoot
+GenericName=Photo & RAW Editor
+Comment=Local-first creative suite
+Exec=duckfoot %F
+Icon=duckfoot
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=image/x-sony-arw;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-fuji-raf;image/x-panasonic-rw2;image/tiff;image/png;image/jpeg;
+EOF
+          cp "$appdir/duckfoot.desktop" "$appdir/usr/share/applications/"
+          cat << 'EOF' > "$appdir/AppRun"
+#!/bin/sh
+SELF=$(readlink -f "$0")
+HERE=${SELF%/*}
+export PATH="${HERE}/usr/bin:${PATH}"
+exec "${HERE}/usr/bin/duckfoot" "$@"
+EOF
+          chmod +x "$appdir/AppRun"
+
+          curl -sL -o /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x /tmp/appimagetool
+          (cd /tmp && ./appimagetool --appimage-extract)
+          ARCH=x86_64 /tmp/squashfs-root/AppRun "$appdir" "dist/$dir.AppImage"
+
       - uses: actions/upload-artifact@v6
         with:
           name: duckfoot-linux-x86_64
           path: dist/
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - run: cargo build --release --locked -p duckfoot
+
+      - name: Package
+        shell: bash
+        run: |
+          dir=duckfoot-windows-x86_64
+          mkdir -p "$dir" dist
+          cp target/release/duckfoot.exe "$dir/"
+          cp LICENSE "$dir/"
+          cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
+          cat << 'EOF' > "$dir/README.txt"
+Duckfoot for Windows (x86_64), built from ${GITHUB_SHA}.
+
+Run duckfoot.exe, or duckfoot.exe photo.ARW. Needs a working Vulkan driver.
+More: https://github.com/carter48fan/duckfoot
+EOF
+          7z a "dist/$dir.zip" "$dir"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: duckfoot-windows-x86_64
+          path: dist/
+          if-no-files-found: error
+
   release:
-    needs: [android, linux]
+    needs: [android, linux, windows]
     if: >-
       startsWith(github.ref, 'refs/tags/v')
       || (github.event_name == 'workflow_dispatch' && inputs.release != '')
@@ -189,7 +257,7 @@ jobs:
           # arbitrary text.
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          if [ "$(cat dist/android-signing.txt)" = "repository key" ]; then
+          if [ -f dist/android-signing.txt ] && [ "$(cat dist/android-signing.txt)" = "repository key" ]; then
             signing="The APK is signed with the repository's key, so it installs over earlier builds."
           else
             signing="The APK is signed with a one-off key: uninstall any earlier Duckfoot before installing it (android/README.md explains how to fix this for good)."
@@ -197,8 +265,11 @@ jobs:
           {
             echo "Built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
             echo
-            echo "- **Android** (\`duckfoot-*-android-arm64.apk\`): Android 11+, a Vulkan GPU, arm64. Open the .apk on the phone, allowing installs from that app when asked, or \`adb install -r\` it. $signing"
-            echo "- **Linux** (\`duckfoot-*-linux-x86_64.tar.gz\`): unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
+            echo "### Downloads"
+            echo "- **Android** (\`duckfoot-*-android-arm64.apk\`): Android 11+, Vulkan GPU, arm64. Open on phone or \`adb install -r\`. $signing"
+            echo "- **Linux AppImage** (\`duckfoot-*-linux-x86_64.AppImage\`): standalone AppImage. Run \`chmod +x\` and execute."
+            echo "- **Linux Tarball** (\`duckfoot-*-linux-x86_64.tar.gz\`): unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
+            echo "- **Windows** (\`duckfoot-*-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan."
           } > notes.md
           cat notes.md
 
@@ -207,38 +278,44 @@ jobs:
         run: |
           mv dist/duckfoot-android-arm64.apk dist/duckfoot-nightly-android-arm64.apk
           mv dist/duckfoot-linux-x86_64.tar.gz dist/duckfoot-nightly-linux-x86_64.tar.gz
-          # Replace the previous nightly outright. Drafts have no tag and cannot be found by
-          # one, so every release named nightly is found by listing, and the tag (which only
-          # a published nightly has) is removed with it.
+          mv dist/duckfoot-linux-x86_64.AppImage dist/duckfoot-nightly-linux-x86_64.AppImage
+          mv dist/duckfoot-windows-x86_64.zip dist/duckfoot-nightly-windows-x86_64.zip
+          # Replace the previous nightly outright.
           for id in $(gh api "repos/$GH_REPO/releases" --paginate \
                         --jq '.[] | select(.tag_name == "nightly") | .id'); do
             gh api -X DELETE "repos/$GH_REPO/releases/$id"
           done
           gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly" 2>/dev/null || true
-          if [ "$PUBLIC_NIGHTLY" = "true" ]; then
-            visibility=--prerelease
-          else
+          if [ "$PUBLIC_NIGHTLY" = "false" ]; then
             visibility=--draft
+          else
+            visibility=--prerelease
           fi
           gh release create nightly \
             dist/duckfoot-nightly-android-arm64.apk \
+            dist/duckfoot-nightly-linux-x86_64.AppImage \
             dist/duckfoot-nightly-linux-x86_64.tar.gz \
+            dist/duckfoot-nightly-windows-x86_64.zip \
             --target "$GITHUB_SHA" "$visibility" \
             --title "Nightly: main @ ${GITHUB_SHA::7}" \
             --notes-file notes.md
 
       # For a hand-run the tag need not exist yet: it is made on this commit when the
-      # draft is published.
+      # release is published.
       - name: Versioned release
         if: env.RELEASE_TAG != ''
         run: |
           mv dist/duckfoot-android-arm64.apk "dist/duckfoot-$RELEASE_TAG-android-arm64.apk"
           mv dist/duckfoot-linux-x86_64.tar.gz "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz"
+          mv dist/duckfoot-linux-x86_64.AppImage "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage"
+          mv dist/duckfoot-windows-x86_64.zip "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip"
           gh release create "$RELEASE_TAG" \
             "dist/duckfoot-$RELEASE_TAG-android-arm64.apk" \
+            "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage" \
             "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz" \
+            "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip" \
             --target "$GITHUB_SHA" \
-            --draft --prerelease \
+            --prerelease \
             --title "Duckfoot $RELEASE_TAG" \
             --generate-notes \
             --notes-file notes.md
