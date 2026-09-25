@@ -36,6 +36,12 @@ pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
 
 /// Calibrated amber: selection, the active module, the one primary action.
 pub const ACCENT: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
+
+// White balance tracks: which way each slider pushes the picture.
+pub const WB_COOL: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
+pub const WB_WARM: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
+pub const WB_GREEN: Color32 = Color32::from_rgb(0x4a, 0xc2, 0x6b);
+pub const WB_MAGENTA: Color32 = Color32::from_rgb(0xd9, 0x46, 0xef);
 pub const ACCENT_HI: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24);
 /// Lime: persisted, synced, locked. Never decorative.
 pub const LIME: Color32 = Color32::from_rgb(0x10, 0xb9, 0x81);

@@ -16,10 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-          components: clippy
+      # rust-toolchain.toml pins the version; this adds the Android target to *that*
+      # toolchain, which a target installed on `stable` would not be.
+      - run: rustup target add aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:

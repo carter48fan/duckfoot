@@ -160,6 +160,127 @@ fn sensor_coords(out_px: vec2<f32>) -> vec2<f32> {
     return p + sensor_size * 0.5;
 }
 
+// A sensor sample as linear sRGB: white balance in camera space, then the primaries.
+fn scene(s: vec4<f32>, wb: vec3<f32>) -> vec3<f32> {
+    let c = balanced(s, wb);
+    return vec3<f32>(dot(u.cam0.rgb, c), dot(u.cam1.rgb, c), dot(u.cam2.rgb, c));
+}
+
+// Linear exposure only — no highlight rolloff. For neighbourhood estimates, which need to
+// know roughly how bright the surroundings will be, not the exact tone.
+fn exposed(c: vec3<f32>) -> vec3<f32> {
+    if (enabled(FLAG_EXPOSURE)) {
+        return max(vec3<f32>(0.0), (c - vec3<f32>(u.exposure.y)) * u.exposure.x);
+    }
+    return c;
+}
+
+fn luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// The sensor around `uv`, blurred to the scale of mip `level`: nine bilinear taps a texel
+// apart, weighted 1-2-1, so a mip reads as a smooth bump instead of the 2^level-pixel
+// blocks it is stored in — which would otherwise show up as a grid in every halo.
+//
+// Levels are absolute (level 3 is 8 full-resolution pixels at every preview size), so the
+// neighbourhoods are the same size in the preview as in the export.
+fn blurred(uv: vec2<f32>, level: f32) -> vec4<f32> {
+    let t = exp2(level) / u.sizes.zw;
+    var sum = textureSampleLevel(sensor, sensor_sampler, uv, level) * 4.0;
+    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(t.x, 0.0), level) * 2.0;
+    sum += textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(t.x, 0.0), level) * 2.0;
+    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, t.y), level) * 2.0;
+    sum += textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, t.y), level) * 2.0;
+    sum += textureSampleLevel(sensor, sensor_sampler, uv + t, level);
+    sum += textureSampleLevel(sensor, sensor_sampler, uv - t, level);
+    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(t.x, -t.y), level);
+    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(-t.x, t.y), level);
+    return sum / 16.0;
+}
+
+// Clarity and texture, as a gain on the pixel.
+//
+// Both scale how far a pixel's brightness sits from its neighbourhood's, measured in stops
+// (log2 luminance) rather than linear light. In linear light the same local contrast is a
+// hundred times larger in a highlight than in a shadow, so a linear boost does nothing
+// visible to most of the picture and then blows out the bright edges. As a ratio on all
+// three channels it changes contrast and never hue.
+//
+// Texture is the fine band: the pixel against ~4 px around it. Clarity is the coarse one:
+// ~4 px against ~40 px, weighted to the midtones the way the eye reads "punch". Negative
+// amounts flatten the band instead, which is the soft-skin / glow direction.
+fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>) -> f32 {
+    // Stops, floored so that noise in the deep shadows is not read as detail.
+    let floor_y = 0.002;
+    // The coarsest the band can be pushed is the chain's last level; a band finer than the
+    // preview itself is invisible at this zoom and simply drops out.
+    let fine_level = max(2.0, lod + 1.0);
+    let coarse_level = max(5.0, fine_level);
+
+    let y0 = luma(scene(s, wb)) + floor_y;
+    let y_fine = luma(scene(blurred(uv, fine_level), wb)) + floor_y;
+    let y_coarse = luma(scene(blurred(uv, coarse_level), wb)) + floor_y;
+
+    // Halos grow with the size of an edge; past two stops, more boost is only more halo.
+    let d_texture = clamp(log2(y0 / y_fine), -2.0, 2.0);
+    let d_clarity = clamp(log2(y_fine / y_coarse), -2.0, 2.0);
+
+    // Midtone weight from how bright the neighbourhood will be once exposed.
+    let l = sqrt(clamp(luma(exposed(vec3<f32>(y_coarse))), 0.0, 1.0));
+    let mid = mix(0.35, 1.0, 1.0 - (2.0 * l - 1.0) * (2.0 * l - 1.0));
+
+    // -100 removes 90% of a band; +100 roughly doubles it.
+    let k_clarity = u.detail.x * select(0.009, 0.011, u.detail.x > 0.0) * mid;
+    let k_texture = u.detail.y * select(0.009, 0.011, u.detail.y > 0.0);
+    return exp2(k_clarity * d_clarity + k_texture * d_texture);
+}
+
+// Dehaze, by the atmospheric model: what reached the camera is the scene attenuated by the
+// air, plus a veil of scattered light, I = J·t + A·(1 − t). Removing haze solves for J.
+//
+// The veil is estimated from the neighbourhood (~40 px), not the pixel: its darkest channel
+// is how far haze has lifted the blacks there, since clear air leaves something in every
+// patch near black in at least one channel. Estimating it per pixel — as this used to — is
+// just a contrast curve that crushes every dark pixel and tints the rest.
+//
+// Worked in a display-like encoding, where haze reads as the lifted, flat look it is; in
+// linear light the same algebra pushes a midtone to black at modest strengths.
+fn dehaze(c: vec3<f32>, uv: vec2<f32>, wb: vec3<f32>) -> vec3<f32> {
+    let amount = u.detail.z * 0.01;
+    let gamma = 1.0 / 2.2;
+    let air = 1.0;
+    let p = pow(max(c, vec3<f32>(0.0)), vec3<f32>(gamma));
+
+    if (amount < 0.0) {
+        // Adding haze: a pale veil laid evenly over everything.
+        let veil = -amount * 0.45;
+        let hazed = mix(p, vec3<f32>(0.9 * air), veil);
+        return pow(max(hazed, vec3<f32>(0.0)), vec3<f32>(1.0 / gamma));
+    }
+
+    // The neighbourhood's dark channel: the least of five blurred taps, which keeps a
+    // bright object from being read as haze just because its surroundings average bright.
+    let level = 5.0;
+    let t = 1.5 * exp2(level) / u.sizes.zw;
+    var dark = 1e9;
+    for (var i = 0; i < 5; i = i + 1) {
+        var o = vec2<f32>(0.0);
+        if (i == 1) { o = vec2<f32>(t.x, 0.0); }
+        if (i == 2) { o = vec2<f32>(-t.x, 0.0); }
+        if (i == 3) { o = vec2<f32>(0.0, t.y); }
+        if (i == 4) { o = vec2<f32>(0.0, -t.y); }
+        let n = exposed(scene(textureSampleLevel(sensor, sensor_sampler, uv + o, level), wb));
+        dark = min(dark, min(n.r, min(n.g, n.b)));
+    }
+    let dark_p = pow(clamp(dark, 0.0, 1.0), gamma);
+
+    // Transmission never below 0.25: the division amplifies noise by 1/t.
+    let transmission = max(1.0 - amount * 0.6 * dark_p / air, 0.25);
+    let clear = (p - vec3<f32>(air)) / transmission + vec3<f32>(air);
+    return pow(max(clear, vec3<f32>(0.0)), vec3<f32>(1.0 / gamma));
+}
+
 fn balance_channel(v: f32, lift: f32, gma: f32, gn: f32, off: f32) -> f32 {
     var o = v + off;
     o = o * (1.0 + gn) + lift * (1.0 - o);
@@ -301,16 +422,6 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
     }
 
-    if (enabled(FLAG_CLARITY)) {
-        let s1 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 1.0, 5.0));
-        let s2 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 2.0, 5.0));
-        let s4 = textureSampleLevel(sensor, sensor_sampler, uv, min(lod + 4.0, 5.0));
-        let d_texture = s1 - s2;
-        let d_clarity = s2 - s4;
-        let boost = d_texture * (u.detail.y * 0.005) + d_clarity * (u.detail.x * 0.005);
-        s = clamp(s + boost, vec4<f32>(0.0), vec4<f32>(4.0));
-    }
-
     let split_pos = u.split.x;
     let is_split = split_pos >= 0.0;
     if (is_split) {
@@ -326,31 +437,24 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.
-    var c = balanced(s, vec3<f32>(1.0));
+    var wb = vec3<f32>(1.0);
     if (enabled(FLAG_WB)) {
-        c = balanced(s, u.wb.rgb);
+        wb = u.wb.rgb;
     }
-
     // Camera-native primaries -> linear sRGB. Never optional: skipping this is what made
     // every image in the last build look like a broken white balance.
-    c = vec3<f32>(dot(u.cam0.rgb, c), dot(u.cam1.rgb, c), dot(u.cam2.rgb, c));
+    var c = scene(s, wb);
+
+    if (enabled(FLAG_CLARITY)) {
+        c = c * local_contrast(s, uv, lod, wb);
+    }
 
     if (enabled(FLAG_EXPOSURE)) {
         c = apply_exposure_with_rolloff(c, u.exposure.x, u.exposure.y, u.exposure.z, u.exposure.w);
     }
 
     if (enabled(FLAG_DEHAZE)) {
-        let airlight = vec3<f32>(0.85, 0.90, 0.95);
-        let dark_channel = min(c.r, min(c.g, c.b));
-        let transmission = clamp(1.0 - (dark_channel / 0.95), 0.1, 1.0);
-        let dehaze_amount = u.detail.z * 0.01;
-        if (dehaze_amount >= 0.0) {
-            let t = mix(1.0, transmission, dehaze_amount);
-            c = (c - airlight * dehaze_amount * (1.0 - t)) / max(vec3<f32>(t), vec3<f32>(0.1));
-        } else {
-            c = mix(c, airlight, -dehaze_amount * 0.5);
-        }
-        c = max(vec3<f32>(0.0), c);
+        c = dehaze(c, uv, wb);
     }
 
     if (enabled(FLAG_TONAL)) {

@@ -305,10 +305,10 @@ impl Platform for FakePlatform {
     }
 }
 
-fn back() -> egui::RawInput {
+fn key(key: egui::Key) -> egui::RawInput {
     egui::RawInput {
         events: vec![egui::Event::Key {
-            key: egui::Key::BrowserBack,
+            key,
             physical_key: None,
             pressed: true,
             repeat: false,
@@ -343,12 +343,115 @@ fn platform_answers_and_back_are_handled() {
 
     // Back closes what is open before it leaves the app.
     app.batch_dialog_open = true;
-    h.frame(&mut app, back());
+    h.frame(&mut app, key(egui::Key::BrowserBack));
     assert!(!app.batch_dialog_open);
     assert_eq!(platform.0.lock().unwrap().leaves, 0);
-    h.frame(&mut app, back());
+    h.frame(&mut app, key(egui::Key::BrowserBack));
     assert_eq!(platform.0.lock().unwrap().leaves, 1);
 
     assert!(platform.0.lock().unwrap().requests.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn pointer(events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        events,
+        ..Default::default()
+    }
+}
+
+/// Press at `from`, move to `to` over a few frames, release.
+fn drag(h: &Headless, app: &mut PhotoApp, from: egui::Pos2, to: egui::Pos2) {
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame(app, pointer(vec![egui::Event::PointerMoved(from)]));
+    h.frame(app, pointer(vec![button(from, true)]));
+    for i in 1..=8 {
+        let p = from + (to - from) * (i as f32 / 8.0);
+        h.frame(app, pointer(vec![egui::Event::PointerMoved(p)]));
+    }
+    h.frame(app, pointer(vec![button(to, false)]));
+    h.frame(app, Default::default());
+}
+
+#[test]
+fn a_crop_is_framed_then_applied_or_cancelled() {
+    let dir = scratch_dir("crop");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = PhotoApp::new(&h.gpu());
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.error(), None);
+    let full = app.stack().geometry.crop;
+    assert!(full.is_full_frame());
+
+    // The stage sits between the side panels; a drag across its middle lands on the photo.
+    let (from, to) = (egui::pos2(560.0, 330.0), egui::pos2(760.0, 470.0));
+
+    // Esc throws the framing away.
+    h.frame(&mut app, key(egui::Key::C));
+    assert!(app.is_cropping());
+    drag(&h, &mut app, from, to);
+    assert!(
+        !app.stack().geometry.crop.is_full_frame(),
+        "the drag did not frame a crop"
+    );
+    h.frame(&mut app, key(egui::Key::Escape));
+    assert!(!app.is_cropping());
+    assert_eq!(app.stack().geometry.crop, full);
+
+    // Enter keeps it, and editing carries on in the cropped view.
+    h.frame(&mut app, key(egui::Key::C));
+    drag(&h, &mut app, from, to);
+    let framed = app.stack().geometry.crop;
+    h.frame(&mut app, key(egui::Key::Enter));
+    assert!(!app.is_cropping());
+    assert_eq!(app.stack().geometry.crop, framed);
+    for _ in 0..3 {
+        h.frame(&mut app, Default::default());
+    }
+
+    // Back in, a drag inside the crop slides it without resizing it.
+    h.frame(&mut app, key(egui::Key::C));
+    drag(
+        &h,
+        &mut app,
+        egui::pos2(640.0, 400.0),
+        egui::pos2(600.0, 380.0),
+    );
+    let moved = app.stack().geometry.crop;
+    assert!((moved.width - framed.width).abs() < 1e-4);
+    assert!((moved.height - framed.height).abs() < 1e-4);
+    assert!(
+        moved.x < framed.x && moved.y < framed.y,
+        "{framed:?} -> {moved:?}"
+    );
+    h.frame(&mut app, key(egui::Key::Enter));
+
+    // Each applied session is a single undo step, however many drags it took.
+    let undo = pointer(vec![
+        egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+        egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        },
+    ]);
+    let release = || pointer(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+    h.frame(&mut app, undo.clone());
+    h.frame(&mut app, release());
+    assert_eq!(app.stack().geometry.crop, framed);
+    h.frame(&mut app, undo);
+    h.frame(&mut app, release());
+    assert_eq!(app.stack().geometry.crop, full);
     let _ = std::fs::remove_dir_all(&dir);
 }

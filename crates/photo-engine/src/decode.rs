@@ -16,7 +16,7 @@ use rawler::rawsource::RawSource;
 use crate::params::Geometry;
 
 /// sRGB (D65) primaries — the standard XYZ→linear-sRGB matrix.
-const XYZ_TO_SRGB: [[f32; 3]; 3] = [
+pub(crate) const XYZ_TO_SRGB: [[f32; 3]; 3] = [
     [3.2404542, -1.5371385, -0.4985314],
     [-0.969266, 1.8760108, 0.041556],
     [0.0556434, -0.2040259, 1.0572252],
@@ -38,8 +38,12 @@ pub struct CfaImage {
     pub white: [f32; 4],
     /// As-shot camera-neutral multipliers, normalised so green is 1.0.
     pub wb: [f32; 3],
-    /// Camera-native RGB → linear sRGB, row-normalised so neutral maps to neutral.
+    /// White-balanced camera RGB → linear sRGB; neutral maps to neutral (see `cam_to_srgb`).
     pub cam_to_srgb: [[f32; 3]; 3],
+    /// Multipliers that neutralise a D65 white, green = 1. The normalisation of
+    /// `cam_to_srgb` discards the camera's response to daylight, and kelvin cannot be
+    /// read off a white balance without it (`temperature::WhiteScale`).
+    pub daylight_wb: [f32; 3],
     /// How the camera says the frame is meant to be viewed, as the geometry that does it.
     /// A starting point for a new edit, not a fact about the pixels.
     pub orientation: Geometry,
@@ -155,6 +159,7 @@ fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
         if let Some(dng) = dng::colour(source.buf()) {
             img.cfa.wb = dng.wb;
             img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+            img.cfa.daylight_wb = daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
         }
     }
     Ok(img.cfa)
@@ -196,6 +201,8 @@ impl RawDecoder for RawloaderBackend {
                     if let Some(dng) = dng::colour(bytes) {
                         img.cfa.wb = dng.wb;
                         img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+                        img.cfa.daylight_wb =
+                            daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
                     }
                 }
                 Ok(img.cfa)
@@ -314,6 +321,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             white,
             wb,
             cam_to_srgb: cam_to_srgb(&raw.xyz_to_cam),
+            daylight_wb: daylight_multipliers(&raw.xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry(raw.orientation),
             make: raw.make.clone(),
             model: raw.model.clone(),
@@ -478,7 +486,9 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         );
     }
 
-    let raw_black = raw.blacklevel.shift(cl, ct).as_bayer_array();
+    // rawler gives black per 2×2 *position* (hence the shift); the shader wants it per
+    // colour. White is per component, so every position of a mosaic already agrees.
+    let raw_black = by_colour(raw.blacklevel.shift(cl, ct).as_bayer_array(), &cfa2x2);
     let raw_white = raw.whitelevel.as_bayer_array();
     let mut black = [0.0f32; 4];
     let mut white = [65535.0f32; 4];
@@ -520,12 +530,32 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             white,
             wb,
             cam_to_srgb: cam_to_srgb(&xyz_to_cam),
+            daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry_rawler(raw.orientation),
             make,
             model,
         },
         wb_missing,
     })
+}
+
+/// Per-position values of a 2×2 block as per-colour ones, in the `CfaImage::black` layout.
+/// The two greens, which can differ by a count or two, are averaged; slot 3 repeats green.
+fn by_colour(per_position: [f32; 4], cfa2x2: &[u32; 4]) -> [f32; 4] {
+    let mut sum = [0.0f32; 3];
+    let mut n = [0u32; 3];
+    for (v, &c) in per_position.iter().zip(cfa2x2) {
+        sum[c as usize] += v;
+        n[c as usize] += 1;
+    }
+    let colour = |c: usize| {
+        if n[c] > 0 {
+            sum[c] / n[c] as f32
+        } else {
+            per_position[0]
+        }
+    };
+    [colour(0), colour(1), colour(2), colour(1)]
 }
 
 /// Cut the `width × height` window at (`left`, `top`) out of a `src_w`-wide mosaic,
@@ -987,21 +1017,25 @@ mod dng {
 
 /// Camera-native RGB → linear sRGB.
 ///
-/// `xyz_to_cam` comes from the file. Inverting it gives camera→XYZ; composing with the
-/// sRGB matrix gives camera→sRGB. Row-normalising makes a neutral camera signal land on a
-/// neutral display signal, which is also why rawloader's dcraw-style ×10000 scaling does
-/// not need undoing — a uniform scale cancels in the normalisation.
+/// `xyz_to_cam` comes from the file. Composed with sRGB → XYZ it gives sRGB → camera, and
+/// inverting that gives camera → sRGB.
+///
+/// The camera side has to be normalised so a neutral lands on a neutral, and it is the
+/// rows of sRGB → camera that get scaled — one gain per *camera* channel, which is exactly
+/// what white balance already is, so the matrix only has to carry the primaries. Scaling
+/// the rows of the finished camera → sRGB matrix instead also maps neutral to neutral,
+/// but it is a gain per *display* channel, which distorts every colour that is not grey:
+/// on a Canon 7D it turned the green row from dcraw's [-0.25, 1.76, -0.51] into
+/// [-1.17, 3.56, -1.39], and every photo came out with pink skin and purple water. This is
+/// dcraw's construction, and why the ×10000 scaling of its integer matrices does not need
+/// undoing — a uniform scale cancels in the normalisation.
 fn cam_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let m = [xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2]];
+    let srgb_to_xyz = invert3(&XYZ_TO_SRGB).expect("the sRGB matrix is invertible");
 
-    let Some(cam_to_xyz) = invert3(&m) else {
-        log::warn!("camera has no colour matrix; falling back to identity primaries");
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    };
-
-    let mut out = mul3(&XYZ_TO_SRGB, &cam_to_xyz);
-
-    for row in out.iter_mut() {
+    let mut srgb_to_cam = mul3(&m, &srgb_to_xyz);
+    for row in srgb_to_cam.iter_mut() {
         let sum: f32 = row.iter().sum();
         if sum.is_finite() && sum.abs() > 1e-6 {
             for v in row.iter_mut() {
@@ -1010,11 +1044,21 @@ fn cam_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
         }
     }
 
+    let Some(out) = invert3(&srgb_to_cam) else {
+        log::warn!("camera has no colour matrix; falling back to identity primaries");
+        return identity;
+    };
+
     if out.iter().flatten().any(|v| !v.is_finite()) {
         log::warn!("degenerate colour matrix; falling back to identity primaries");
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        return identity;
     }
     out
+}
+
+/// Matrix × vector, in f64 for code that inverts what it computes.
+pub(crate) fn mul3v(m: &[[f32; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    m.map(|row| (0..3).map(|k| row[k] as f64 * v[k]).sum())
 }
 
 fn mul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
@@ -1027,7 +1071,7 @@ fn mul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     out
 }
 
-fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+pub(crate) fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
@@ -1129,6 +1173,38 @@ mod tests {
             let sum: f32 = row.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4, "row sums to {sum}, not 1.0");
         }
+    }
+
+    #[test]
+    fn camera_matrix_matches_dcraw() {
+        // Canon EOS 7D, dcraw's adobe_coeff. Expected: dcraw's rgb_cam for the same
+        // matrix. Normalising the wrong side still passes the neutral test above, and
+        // gives a green row of [-1.17, 3.56, -1.39]: pink skin, purple water.
+        let xyz_to_cam = [
+            [6844.0, -996.0, -856.0],
+            [-3876.0, 11761.0, 2396.0],
+            [-593.0, 1772.0, 6198.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let want = [
+            [1.9205, -1.0414, 0.1209],
+            [-0.2470, 1.7594, -0.5124],
+            [-0.0070, -0.4896, 1.4965],
+        ];
+        let got = cam_to_srgb(&xyz_to_cam);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((got[i][j] - want[i][j]).abs() < 1e-3, "{got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn black_levels_move_from_positions_to_colours() {
+        // GBRG, as a Canon 7D crop lands: positions (G, B, R, G).
+        let black = by_colour([2047.0, 2049.0, 2051.0, 2045.0], &[1, 2, 0, 1]);
+        assert_eq!(black, [2051.0, 2046.0, 2049.0, 2046.0]);
+        assert_eq!(by_colour([512.0; 4], &RGGB), [512.0; 4]);
     }
 
     #[test]

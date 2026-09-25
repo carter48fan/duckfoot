@@ -13,7 +13,7 @@ edition = "2021"
 license = "MIT"
 # egui 0.36 needs 1.95.
 rust-version = "1.95"
-repository = "https://github.com/goldtone/duckfoot"
+repository = "https://github.com/carter48fan/duckfoot"
 
 [workspace.dependencies]
 photo-engine = { path = "crates/photo-engine" }

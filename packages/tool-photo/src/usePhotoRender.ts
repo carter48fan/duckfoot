@@ -210,7 +210,7 @@ function createSamplePhotoScene(name: string, width = 1200, height = 800): strin
   ctx.fillStyle = '#f7eedd';
   ctx.font = 'italic bold 42px serif';
   ctx.textAlign = 'center';
-  ctx.fillText('Gold Tone', 0, -85);
+  ctx.fillText('Duckfoot', 0, -85);
 
   ctx.font = '13px monospace';
   ctx.fillStyle = '#c9992e';
