@@ -601,3 +601,220 @@ fn back_select_mode_and_swipe_work_without_a_keyboard() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The drawer has a comfortable touch height, its grab handle resizes and snaps it,
+/// and sliders respond to touch tapping and dragging.
+#[test]
+fn drawer_resize_and_touch_slider_interaction() {
+    let dir = scratch_dir("slider_touch");
+    let a = dir.join("a.dng");
+    write_dng(&a, 640, 426);
+
+    let h = Headless::new();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(FakePlatform::default()));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    // Open Edit tab
+    app.compact_tab = Some(Tab::Edit);
+    app.compact_module = photo_app::InspectorSectionId::Exposure;
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+
+    // Verify sheet starts at default height (55% of 892 = ~490.6)
+    assert!(app.compact_sheet_height.is_none());
+
+    // Drag the handle at the top of the sheet
+    // Top of sheet is at y ≈ 892 - 60 - 490.6 ≈ 341.4. Handle is at (206, 349).
+    let handle_pos = egui::pos2(206.0, 350.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![egui::Event::PointerMoved(handle_pos)]));
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(handle_pos, true)]));
+    // Drag UPWARDS by 50px
+    let dragged_pos = egui::pos2(206.0, 300.0);
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![egui::Event::PointerMoved(dragged_pos)]));
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(dragged_pos, false)]));
+
+    // The drawer should now be taller
+    assert!(app.compact_sheet_height.is_some());
+    let h_val = app.compact_sheet_height.unwrap();
+    assert!(h_val > 500.0, "expected sheet height > 500, got {h_val}");
+
+    // Double-click handle at its new position to snap back to default
+    let new_handle_pos = egui::pos2(206.0, 892.0 - 60.0 - h_val + 8.0);
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![egui::Event::PointerMoved(new_handle_pos)]));
+    let click_input = |t: f64, pressed| egui::RawInput {
+        time: Some(t),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, PORTRAIT)),
+        events: vec![
+            egui::Event::PointerMoved(new_handle_pos),
+            egui::Event::PointerButton {
+                pos: new_handle_pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let gpu = h.gpu();
+    let _ = h.ctx.run_ui(click_input(10.01, true), |ui| app.update(ui, &gpu));
+    let _ = h.ctx.run_ui(click_input(10.05, false), |ui| app.update(ui, &gpu));
+    let _ = h.ctx.run_ui(click_input(10.10, true), |ui| app.update(ui, &gpu));
+    let _ = h.ctx.run_ui(click_input(10.15, false), |ui| app.update(ui, &gpu));
+    assert!(app.compact_sheet_height.is_none(), "double-click should reset sheet height to default");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_touch_slider_tap_and_drag() {
+    let ctx = egui::Context::default();
+    photo_app::theme::apply(&ctx);
+    photo_app::widgets::set_touch(&ctx, true);
+
+    let mut value = 0.0f32;
+    // Frame 1: render a rail from -2.0 to 2.0, width 200.0, default 0.0
+    let input1 = egui::RawInput {
+        time: Some(0.0),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        ..Default::default()
+    };
+    let mut out1 = ctx.run_ui(input1, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out1.textures_delta.clear();
+
+    // Frame 2: tap at x=150 on the rail (right of centre x=100) -> jumps towards +1.0
+    let tap_pos = egui::pos2(150.0, 19.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let input2 = egui::RawInput {
+        time: Some(0.05),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(tap_pos),
+            button(tap_pos, true),
+            button(tap_pos, false),
+        ],
+        ..Default::default()
+    };
+    let mut out2 = ctx.run_ui(input2, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out2.textures_delta.clear();
+    assert!(value > 0.5, "tap should jump value towards +1.0, got {value}");
+
+    // Double click to reset: after 1 second, two clicks within 0.15s
+    let input_d1 = egui::RawInput {
+        time: Some(2.0),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(tap_pos),
+            button(tap_pos, true),
+            button(tap_pos, false),
+        ],
+        ..Default::default()
+    };
+    let mut out_d1 = ctx.run_ui(input_d1, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_d1.textures_delta.clear();
+
+    let input_d2 = egui::RawInput {
+        time: Some(2.1),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            button(tap_pos, true),
+            button(tap_pos, false),
+        ],
+        ..Default::default()
+    };
+    let mut out_d2 = ctx.run_ui(input_d2, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_d2.textures_delta.clear();
+    assert_eq!(value, 0.0, "double-click should reset to default 0.0");
+
+    // Vertical swipe across the slider (user trying to scroll drawer):
+    // Start at (100, 19), swipe vertically down to (100, 70)
+    let p_start = egui::pos2(100.0, 19.0);
+    let mut out_v1 = ctx.run_ui(egui::RawInput {
+        time: Some(3.0),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            button(p_start, true),
+        ],
+        ..Default::default()
+    }, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_v1.textures_delta.clear();
+
+    let p_down = egui::pos2(100.0, 70.0);
+    let mut out_v2 = ctx.run_ui(egui::RawInput {
+        time: Some(3.05),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_down),
+            button(p_down, false),
+        ],
+        ..Default::default()
+    }, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_v2.textures_delta.clear();
+    assert_eq!(value, 0.0, "vertical scroll drag should NOT change slider value");
+
+    // Horizontal drag across the slider:
+    // Start at (100, 19), drag horizontally to (180, 19)
+    let mut out_h1 = ctx.run_ui(egui::RawInput {
+        time: Some(4.0),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            button(p_start, true),
+        ],
+        ..Default::default()
+    }, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_h1.textures_delta.clear();
+
+    let p_right = egui::pos2(180.0, 19.0);
+    let mut out_h2 = ctx.run_ui(egui::RawInput {
+        time: Some(4.05),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_right),
+        ],
+        ..Default::default()
+    }, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_h2.textures_delta.clear();
+    assert!(value > 1.0, "horizontal drag should slide value, got {value}");
+
+    let mut out_h3 = ctx.run_ui(egui::RawInput {
+        time: Some(4.10),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+        events: vec![
+            button(p_right, false),
+        ],
+        ..Default::default()
+    }, |ui| {
+        photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
+    });
+    out_h3.textures_delta.clear();
+}
+
