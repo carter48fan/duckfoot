@@ -418,8 +418,8 @@ DESIGN.md invariant 8.
 | **App** | inspector sidebar | Working | Module cards with live values, Customize tab (show/hide, reorder), width toggle |
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
 | **App** | history list | Working | Every undo step labelled by what changed; click a row to jump to it |
-| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded off the UI thread |
-| **App** | filmstrip thumbnails | Working | The camera's embedded preview, decoded at reduced size on a worker per spare core; from the mosaic only when a file has none. The open photo shows its live render |
+| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded and uploaded to the GPU off the UI thread |
+| **App** | filmstrip thumbnails | Working | The camera's embedded preview, decoded at reduced size on a worker per spare core; from the mosaic only when a file has none. The open photo shows its live render. Only tiles in view are laid out, so a 2000-photo roll costs the same per frame as a 20-photo one |
 | **App** | open stand-in | Working | The embedded preview is on the stage in ~20–35 ms while the full decode runs |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |

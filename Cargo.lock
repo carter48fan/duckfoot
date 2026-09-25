@@ -2271,6 +2271,8 @@ dependencies = [
  "image",
  "log",
  "photo-engine",
+ "pollster 1.0.1",
+ "rawler",
  "rfd",
  "serde",
  "serde_json",
