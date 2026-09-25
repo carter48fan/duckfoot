@@ -21,7 +21,10 @@ pub use decode::{
     decode_raster, decode_raw, CfaImage, DefaultRawDecoder, RasterImage, RawDecoder, RawlerBackend,
     RawloaderBackend,
 };
-pub use engine::{Engine, LoadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT};
+pub use engine::{
+    upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
+    OUTPUT_FORMAT,
+};
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
 pub use params::{

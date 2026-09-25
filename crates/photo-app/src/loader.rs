@@ -2,8 +2,9 @@
 //!
 //! A 24 MP RAW takes ~100 ms to decode. On the UI thread that is a visible freeze every
 //! time you step through a roll, so both jobs run on worker threads and hand their results
-//! back over a channel. The GPU upload stays on the UI thread — it has to, the device is
-//! the UI's — but it is a copy, not a decode.
+//! back over a channel. The open thread also copies the result into GPU memory
+//! (`photo_engine::upload_cfa`): wgpu's device and queue are shared handles, and that copy
+//! is 66–200 MB, so all the UI thread records is the demosaic.
 //!
 //! Thumbnails come from the JPEG preview the camera embedded, decoded at reduced size
 //! straight out of the DCT (`photo_engine::preview`) — a few milliseconds, against tens to
@@ -23,8 +24,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use photo_engine::{
-    decode_jpeg_scaled, decode_raster, decode_raw, is_raster_path, load_embedded_preview, CfaImage,
-    Geometry, Preview, RasterImage,
+    decode_jpeg_scaled, decode_raster, decode_raw, is_raster_path, load_embedded_preview,
+    upload_cfa, upload_raster, CfaImage, Geometry, Preview, RasterImage, UploadPool, UploadedImage,
 };
 
 /// Long side of a thumbnail, in pixels. A tile is 112×70 points; this covers it at 2×.
@@ -35,26 +36,13 @@ const THUMB_SIDE: usize = 256;
 /// decodes the latter at 1/2 or 1/4.
 const STAGE_PREVIEW_SIDE: u32 = 2048;
 
-pub enum LoadedSource {
-    Raw(CfaImage),
-    Raster(RasterImage),
-}
-
-impl LoadedSource {
-    pub fn orientation(&self) -> Geometry {
-        match self {
-            Self::Raw(c) => c.orientation,
-            Self::Raster(r) => r.orientation,
-        }
-    }
-}
-
 pub enum Done {
     Opened {
         path: PathBuf,
         /// Matches the request that asked for it; anything older is stale and dropped.
         generation: u64,
-        result: Result<LoadedSource, String>,
+        /// Decoded and already copied into GPU memory: the UI thread only has to demosaic.
+        result: Result<Box<UploadedImage>, String>,
         decode_ms: f32,
     },
     /// The camera's embedded rendering of a photo still being opened, to show until the
@@ -70,6 +58,11 @@ pub enum Done {
         /// knows it is no longer outstanding.
         image: Option<egui::ColorImage>,
     },
+}
+
+enum Decoded {
+    Raw(CfaImage),
+    Raster(RasterImage),
 }
 
 pub struct Loader {
@@ -112,7 +105,10 @@ impl Gate {
 }
 
 impl Loader {
-    pub fn new() -> Self {
+    /// `device` and `queue` are the UI's own. Uploading from the decode thread is what
+    /// keeps a 66–200 MB copy per open off the UI thread; wgpu's device and queue are
+    /// shared handles built for exactly that.
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, pool: UploadPool) -> Self {
         let (done_tx, done) = mpsc::channel();
         let repaint: Arc<Mutex<Option<egui::Context>>> = Arc::default();
         let gate = Arc::new(Gate::default());
@@ -153,21 +149,38 @@ impl Loader {
                                 });
                             }
 
-                            let result: Result<LoadedSource, String> = if is_raster_path(&path) {
+                            let decoded = if is_raster_path(&path) {
                                 fs::read(&path)
-                                    .map_err(|e| format!("{e:#}"))
-                                    .and_then(|bytes| {
-                                        decode_raster(&bytes)
-                                            .map(LoadedSource::Raster)
-                                            .map_err(|e| format!("{e:#}"))
-                                    })
+                                    .map_err(anyhow::Error::from)
+                                    .and_then(|bytes| decode_raster(&bytes))
+                                    .map(Decoded::Raster)
                             } else {
-                                decode_raw(&path)
-                                    .map(LoadedSource::Raw)
-                                    .map_err(|e| format!("{e:#}"))
+                                decode_raw(&path).map(Decoded::Raw)
                             };
-
                             let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
+
+                            let uploading = Instant::now();
+                            // A decode error already names the file; an upload error (a
+                            // photo larger than this GPU's textures) does not.
+                            let result = decoded
+                                .map_err(|e| format!("{e:#}"))
+                                .and_then(|decoded| {
+                                    match decoded {
+                                        Decoded::Raw(cfa) => {
+                                            upload_cfa(&device, &queue, &pool, cfa)
+                                        }
+                                        Decoded::Raster(raster) => {
+                                            upload_raster(&device, &queue, raster)
+                                        }
+                                    }
+                                    .map_err(|e| format!("{}: {e:#}", path.display()))
+                                })
+                                .map(Box::new);
+                            log::debug!(
+                                "{}: decoded in {decode_ms:.0} ms, uploaded in {:.0} ms",
+                                path.display(),
+                                uploading.elapsed().as_secs_f32() * 1000.0
+                            );
                             let _ = done_tx.send(Done::Opened {
                                 path: path.clone(),
                                 generation,
