@@ -5,9 +5,6 @@ plugins {
 android {
     namespace = "com.goldtone.duckfoot"
     compileSdk = 35
-    // The NDK that built the Rust library also strips it for packaging; without this
-    // AGP looks for its own pinned NDK version and ships the library unstripped.
-    System.getenv("ANDROID_NDK_HOME")?.let { ndkPath = it }
 
     defaultConfig {
         applicationId = "com.goldtone.duckfoot"

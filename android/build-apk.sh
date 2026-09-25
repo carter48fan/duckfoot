@@ -30,6 +30,9 @@ cd android
 ./gradlew --no-daemon assembleDebug
 apk="$root/android/app/build/outputs/apk/debug/app-debug.apk"
 
+# The library is packaged unstripped (AGP cannot find its pinned NDK to strip with), which
+# keeps function names in crash tombstones while the port is young; ~29 MB, ~10 MB zipped.
+#
 # "BUILD SUCCESSFUL" does not mean the app can start: check the APK carries the library
 # and that it exports the entry point NativeActivity looks up.
 lib=lib/arm64-v8a/libduckfoot_android.so
