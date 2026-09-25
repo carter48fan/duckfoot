@@ -15,6 +15,7 @@ pub mod histogram;
 pub mod params;
 pub mod preview;
 pub mod sidecar;
+pub mod temperature;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
@@ -36,6 +37,7 @@ pub use sidecar::{
     find_sidecar, load_sidecar, load_sidecar_full, save_sidecar, save_sidecar_full, sidecar_path,
     AssetMetadata, Flag, SidecarData, SIDECAR_EXT,
 };
+pub use temperature::WhiteScale;
 
 /// File extensions the RAW decoder will attempt.
 pub const RAW_EXTENSIONS: &[&str] = &[

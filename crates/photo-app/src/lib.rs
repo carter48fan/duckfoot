@@ -21,6 +21,7 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Rect, RichText, Sense, S
 use photo_engine::params::Module;
 use photo_engine::{
     find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
+    WhiteScale,
 };
 use widgets::Kind;
 
@@ -160,6 +161,15 @@ pub struct Gpu<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     pub renderer: &'a RwLock<egui_wgpu::Renderer>,
+}
+
+/// A drag in crop mode, in normalised coordinates of the full frame.
+#[derive(Debug, Clone, Copy)]
+enum CropDrag {
+    /// Started outside the crop: draws a new one from this corner.
+    Draw { anchor: egui::Pos2 },
+    /// Started inside it: slides the whole crop, keeping its size.
+    Move { grab: egui::Pos2, start: Crop },
 }
 
 /// Zoom and pan over the image.
@@ -317,10 +327,14 @@ pub struct PhotoApp {
     view: View,
     /// Size the image panel got last frame, so "100%" can be resolved outside of it.
     last_panel: egui::Vec2,
-    /// While true, dragging on the image defines a crop instead of panning.
+    /// While true the whole frame is on screen and dragging on it frames a crop. Outside
+    /// crop mode only the cropped picture is shown, so editing carries on in the framing
+    /// that will be exported.
     cropping: bool,
-    /// Where a crop drag started, in normalised image coordinates.
-    crop_anchor: Option<egui::Pos2>,
+    /// The crop when crop mode was entered, which Cancel puts back.
+    crop_before: Crop,
+    /// The crop drag in progress.
+    crop_drag: Option<CropDrag>,
     /// The Shelf: assets in the project/session.
     pub shelf: Vec<ShelfItem>,
     pub shelf_open: bool,
@@ -399,7 +413,8 @@ impl PhotoApp {
             view: View::default(),
             last_panel: egui::Vec2::ZERO,
             cropping: false,
-            crop_anchor: None,
+            crop_before: Crop::default(),
+            crop_drag: None,
             shelf: Vec::new(),
             shelf_open: true,
             split_active: false,
@@ -884,6 +899,16 @@ impl PhotoApp {
         self.stack != self.baseline
     }
 
+    /// The edit on the stage.
+    pub fn stack(&self) -> &PhotoStack {
+        &self.stack
+    }
+
+    /// Framing a crop: the whole frame is on screen instead of the cropped picture.
+    pub fn is_cropping(&self) -> bool {
+        self.cropping
+    }
+
     /// The photo on the stage, once its decode has landed.
     pub fn loaded_path(&self) -> Option<&std::path::Path> {
         self.loaded_path.as_deref()
@@ -1252,6 +1277,8 @@ impl PhotoApp {
         self.saved_stack = saved;
         self.history = History::new();
         self.view = View::default();
+        self.cropping = false;
+        self.crop_drag = None;
         self.needs_render = true;
     }
 
@@ -1469,56 +1496,150 @@ impl PhotoApp {
             }
         }
 
-        let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc) = ctx.input(|i| {
-            (
-                !i.modifiers.command && i.key_pressed(egui::Key::OpenBracket),
-                !i.modifiers.command && i.key_pressed(egui::Key::CloseBracket),
-                !i.modifiers.command && i.key_pressed(egui::Key::H),
-                !i.modifiers.command && i.key_pressed(egui::Key::V),
-                !i.modifiers.command && i.key_pressed(egui::Key::C),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
+        let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc, crop_enter) =
+            ctx.input(|i| {
+                (
+                    !i.modifiers.command && i.key_pressed(egui::Key::OpenBracket),
+                    !i.modifiers.command && i.key_pressed(egui::Key::CloseBracket),
+                    !i.modifiers.command && i.key_pressed(egui::Key::H),
+                    !i.modifiers.command && i.key_pressed(egui::Key::V),
+                    !i.modifiers.command && i.key_pressed(egui::Key::C),
+                    i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
         if rot_left {
             let before = self.stack.clone();
             self.stack.geometry.rotate_left();
             self.history.checkpoint(&before);
+            self.rebase_crop();
             self.needs_render = true;
         }
         if rot_right {
             let before = self.stack.clone();
             self.stack.geometry.rotate_right();
             self.history.checkpoint(&before);
+            self.rebase_crop();
             self.needs_render = true;
         }
         if flip_h {
             let before = self.stack.clone();
             self.stack.geometry.flip_h();
             self.history.checkpoint(&before);
+            self.rebase_crop();
             self.needs_render = true;
         }
         if flip_v {
             let before = self.stack.clone();
             self.stack.geometry.flip_v();
             self.history.checkpoint(&before);
+            self.rebase_crop();
             self.needs_render = true;
         }
         if crop_toggle {
-            self.cropping = !self.cropping;
+            self.toggle_crop();
         }
-        if crop_esc && self.cropping {
-            self.cropping = false;
+        if crop_esc {
+            self.cancel_crop();
         }
+        if crop_enter {
+            self.apply_crop();
+        }
+    }
+
+    // ── Crop mode ───────────────────────────────────────────────────────────────────────
+
+    /// Show the whole frame again, with the crop drawn over it, to reframe.
+    fn begin_crop(&mut self) {
+        if self.cropping || self.engine.image().is_none() {
+            return;
+        }
+        self.cropping = true;
+        self.crop_before = self.stack.geometry.crop;
+        self.crop_drag = None;
+        // The shown region just changed size, so a zoom into the old one means nothing.
+        self.view = View::default();
+    }
+
+    /// Keep the new framing and go back to editing inside it. The whole session is one
+    /// undo step, however many drags it took.
+    fn apply_crop(&mut self) {
+        if !self.cropping {
+            return;
+        }
+        self.cropping = false;
+        self.crop_drag = None;
+        if self.stack.geometry.crop != self.crop_before {
+            let mut before = self.stack.clone();
+            before.geometry.crop = self.crop_before;
+            self.history.checkpoint(&before);
+        }
+        self.view = View::default();
+        self.needs_render = true;
+    }
+
+    /// Leave crop mode with the crop as it was on entering.
+    fn cancel_crop(&mut self) {
+        if !self.cropping {
+            return;
+        }
+        self.cropping = false;
+        self.crop_drag = None;
+        self.stack.geometry.crop = self.crop_before;
+        self.view = View::default();
+        self.needs_render = true;
+    }
+
+    fn toggle_crop(&mut self) {
+        if self.cropping {
+            self.apply_crop();
+        } else {
+            self.begin_crop();
+        }
+    }
+
+    /// A turn or flip mid-session moves the crop into a new frame, and is its own undo
+    /// step; Cancel returns to the crop as it stands after it, not to one in the old frame.
+    fn rebase_crop(&mut self) {
+        if self.cropping {
+            self.crop_before = self.stack.geometry.crop;
+        }
+    }
+
+    /// The part of the frame on screen: all of it while framing, otherwise the crop.
+    fn shown_region(&self) -> Crop {
+        if self.cropping {
+            Crop::default()
+        } else {
+            self.stack.geometry.crop.sanitised()
+        }
+    }
+
+    /// Size of the shown region, in full-resolution output pixels.
+    fn shown_size(&self) -> Option<egui::Vec2> {
+        let image = self.engine.image()?;
+        let region = self.shown_region();
+        Some(egui::vec2(
+            image.width as f32 * region.width,
+            image.height as f32 * region.height,
+        ))
+    }
+
+    /// Kelvin and tint for the open photo's camera.
+    fn white_scale(&self) -> WhiteScale {
+        self.engine
+            .image()
+            .map_or_else(WhiteScale::srgb, |image| image.white_scale())
     }
 
     /// Scale at which the whole frame fits the panel it had last frame.
     fn fit_scale(&self) -> Option<f32> {
-        let image = self.engine.image()?;
+        let img = self.shown_size()?;
         let panel = self.last_panel;
         if panel.x < 1.0 || panel.y < 1.0 {
             return None;
         }
-        Some((panel.x / image.width as f32).min(panel.y / image.height as f32))
+        Some((panel.x / img.x).min(panel.y / img.y))
     }
 
     fn zoom_by(&mut self, factor: f32) {
@@ -2293,6 +2414,29 @@ impl PhotoApp {
 
     // ── Stage toolbar, canvas and filmstrip (centre) ────────────────────────────────────
 
+    /// CROP to start framing; APPLY and CANCEL while framing.
+    fn crop_chips(&mut self, ui: &mut egui::Ui) {
+        if self.cropping {
+            if widgets::chip(ui, true, "✓ apply crop")
+                .on_hover_text("Keep this framing and carry on editing inside it (Enter or C)")
+                .clicked()
+            {
+                self.apply_crop();
+            }
+            if widgets::chip(ui, false, "✕ cancel")
+                .on_hover_text("Put the crop back the way it was (Esc)")
+                .clicked()
+            {
+                self.cancel_crop();
+            }
+        } else if widgets::chip(ui, false, "crop")
+            .on_hover_text("Frame a crop on the whole picture (C)")
+            .clicked()
+        {
+            self.begin_crop();
+        }
+    }
+
     fn stage_toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("stage_toolbar")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin::symmetric(14, 7)))
@@ -2300,12 +2444,7 @@ impl PhotoApp {
                 ui.horizontal(|ui| {
                     let loaded = self.engine.image().is_some();
                     ui.add_enabled_ui(loaded, |ui| {
-                        if widgets::chip(ui, self.cropping, "crop")
-                            .on_hover_text("Drag on the image to frame a crop (C, Esc to leave)")
-                            .clicked()
-                        {
-                            self.cropping = !self.cropping;
-                        }
+                        self.crop_chips(ui);
                         if widgets::chip(ui, self.split_active, "a / b")
                             .on_hover_text("Before / after split (\\). Drag the divider; double-click it to centre")
                             .clicked()
@@ -2872,7 +3011,18 @@ impl PhotoApp {
                     return;
                 };
 
-                let img = egui::vec2(image.width as f32, image.height as f32);
+                // Only the crop is on screen outside crop mode: `img` is the size of what is
+                // shown, and `frame_of` finds where the whole frame would sit around it.
+                let full = egui::vec2(image.width as f32, image.height as f32);
+                let region = self.shown_region();
+                let img = full * egui::vec2(region.width, region.height);
+                let frame_of = |shown: egui::Rect| {
+                    let size = shown.size() / egui::vec2(region.width, region.height);
+                    egui::Rect::from_min_size(
+                        shown.min - size * egui::vec2(region.x, region.y),
+                        size,
+                    )
+                };
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
                 self.last_panel = rect.size();
@@ -2896,8 +3046,12 @@ impl PhotoApp {
                 // The before/after divider is its own widget, registered after the image so
                 // it sits on top: grabbing it can never start a pan. The hit strip is wider
                 // than the line it draws.
+                // The split is a fraction of the whole frame (that is what the shader tests),
+                // so it is placed against the frame, not the crop.
+                let frame_now = frame_of(dest_now);
                 let divider = (self.split_active && !self.cropping).then(|| {
-                    let x = dest_now.left() + self.split_pos * dest_now.width();
+                    let x = (frame_now.left() + self.split_pos * frame_now.width())
+                        .clamp(dest_now.left(), dest_now.right());
                     let strip = Rect::from_x_y_ranges(x - 12.0..=x + 12.0, dest_now.y_range())
                         .intersect(rect);
                     ui.interact(
@@ -2924,7 +3078,8 @@ impl PhotoApp {
                 }
                 self.split_dragging = move_divider_to.is_some();
                 if let Some(p) = move_divider_to {
-                    let fraction = ((p.x - dest_now.left()) / dest_now.width()).clamp(0.0, 1.0);
+                    let x = p.x.clamp(dest_now.left(), dest_now.right());
+                    let fraction = ((x - frame_now.left()) / frame_now.width()).clamp(0.0, 1.0);
                     if (fraction - self.split_pos).abs() > 1e-4 {
                         self.split_pos = fraction;
                         self.needs_render = true;
@@ -2932,39 +3087,65 @@ impl PhotoApp {
                 }
 
                 if self.cropping {
-                    // In crop mode a drag frames the picture instead of moving it.
+                    // In crop mode a drag frames the picture instead of moving it: from
+                    // outside the crop it draws a new one, from inside it slides this one.
+                    // Nothing is checkpointed per drag — Apply makes the session one step.
                     let to_norm = |p: egui::Pos2| {
                         egui::pos2(
-                            ((p.x - dest_now.left()) / dest_now.width()).clamp(0.0, 1.0),
-                            ((p.y - dest_now.top()) / dest_now.height()).clamp(0.0, 1.0),
+                            ((p.x - frame_now.left()) / frame_now.width()).clamp(0.0, 1.0),
+                            ((p.y - frame_now.top()) / frame_now.height()).clamp(0.0, 1.0),
                         )
                     };
+                    let current = self.stack.geometry.crop.sanitised();
+                    let inside = |p: egui::Pos2| {
+                        !current.is_full_frame()
+                            && (current.x..=current.x + current.width).contains(&p.x)
+                            && (current.y..=current.y + current.height).contains(&p.y)
+                    };
                     if response.drag_started() {
-                        self.crop_anchor = response.interact_pointer_pos().map(to_norm);
+                        self.crop_drag = response.interact_pointer_pos().map(to_norm).map(|p| {
+                            if inside(p) {
+                                CropDrag::Move {
+                                    grab: p,
+                                    start: current,
+                                }
+                            } else {
+                                CropDrag::Draw { anchor: p }
+                            }
+                        });
                     }
-                    if let (Some(anchor), Some(now)) = (
-                        self.crop_anchor,
-                        response.interact_pointer_pos().map(to_norm),
-                    ) {
+                    if let (Some(drag), Some(now)) =
+                        (self.crop_drag, response.interact_pointer_pos().map(to_norm))
+                    {
                         if response.dragged() || response.drag_stopped() {
-                            let crop = Crop {
-                                x: anchor.x.min(now.x),
-                                y: anchor.y.min(now.y),
-                                width: (now.x - anchor.x).abs(),
-                                height: (now.y - anchor.y).abs(),
+                            let crop = match drag {
+                                CropDrag::Draw { anchor } => Crop {
+                                    x: anchor.x.min(now.x),
+                                    y: anchor.y.min(now.y),
+                                    width: (now.x - anchor.x).abs(),
+                                    height: (now.y - anchor.y).abs(),
+                                },
+                                CropDrag::Move { grab, start } => Crop {
+                                    x: start.x + now.x - grab.x,
+                                    y: start.y + now.y - grab.y,
+                                    ..start
+                                },
                             }
                             .sanitised();
                             if crop != self.stack.geometry.crop {
-                                if response.drag_started() {
-                                    self.history.checkpoint(&self.stack);
-                                }
                                 self.stack.geometry.crop = crop;
                                 self.needs_render = true;
                             }
                         }
                     }
                     if response.drag_stopped() {
-                        self.crop_anchor = None;
+                        self.crop_drag = None;
+                    }
+                    if let Some(p) = response.hover_pos() {
+                        let moving = matches!(self.crop_drag, Some(CropDrag::Move { .. }));
+                        if moving || (self.crop_drag.is_none() && inside(to_norm(p))) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+                        }
                     }
                 } else if response.dragged() && !at_fit && !self.split_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
@@ -3000,11 +3181,15 @@ impl PhotoApp {
                     rect.center() - self.view.pan * scale,
                     img * scale,
                 );
+                let frame = frame_of(dest);
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.image(
                     id,
                     dest,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Rect::from_min_size(
+                        egui::pos2(region.x, region.y),
+                        egui::vec2(region.width, region.height),
+                    ),
                     egui::Color32::WHITE,
                 );
                 // The frame the image sits in: a hairline, not a shadow.
@@ -3016,10 +3201,10 @@ impl PhotoApp {
                     egui::StrokeKind::Outside,
                 );
 
-                // The crop is not baked into the texture, so it is drawn: everything
-                // outside it is dimmed, and thirds are marked while framing.
+                // While framing, the whole picture is shown and the crop drawn over it:
+                // everything outside is dimmed, and thirds are marked.
                 let crop = self.stack.geometry.crop.sanitised();
-                if self.cropping || !crop.is_full_frame() {
+                if self.cropping {
                     let framed = egui::Rect::from_min_size(
                         dest.min + egui::vec2(crop.x * dest.width(), crop.y * dest.height()),
                         egui::vec2(crop.width * dest.width(), crop.height * dest.height()),
@@ -3061,26 +3246,33 @@ impl PhotoApp {
                         egui::Stroke::new(1.0, theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
-                    if self.cropping {
-                        let thin = egui::Stroke::new(1.0, theme::TEXT.linear_multiply(0.25));
-                        for i in 1..3 {
-                            let t = i as f32 / 3.0;
-                            let x = framed.left() + framed.width() * t;
-                            let y = framed.top() + framed.height() * t;
-                            painter.line_segment(
-                                [egui::pos2(x, framed.top()), egui::pos2(x, framed.bottom())],
-                                thin,
-                            );
-                            painter.line_segment(
-                                [egui::pos2(framed.left(), y), egui::pos2(framed.right(), y)],
-                                thin,
-                            );
-                        }
+                    let thin = egui::Stroke::new(1.0, theme::TEXT.linear_multiply(0.25));
+                    for i in 1..3 {
+                        let t = i as f32 / 3.0;
+                        let x = framed.left() + framed.width() * t;
+                        let y = framed.top() + framed.height() * t;
+                        painter.line_segment(
+                            [egui::pos2(x, framed.top()), egui::pos2(x, framed.bottom())],
+                            thin,
+                        );
+                        painter.line_segment(
+                            [egui::pos2(framed.left(), y), egui::pos2(framed.right(), y)],
+                            thin,
+                        );
                     }
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "CROP · drag to frame · drag inside to move · Enter apply · Esc cancel",
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
                 }
 
                 if self.split_active {
-                    let split_screen_x = dest.left() + self.split_pos * dest.width();
+                    let split_screen_x = (frame.left() + self.split_pos * frame.width())
+                        .clamp(dest.left(), dest.right());
                     let (top, bottom) = (framed_view.top(), framed_view.bottom());
                     painter.vline(
                         split_screen_x,
@@ -3166,7 +3358,9 @@ impl PhotoApp {
                 }
 
                 if self.cropping {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    if ui.ctx().output(|o| o.cursor_icon) != egui::CursorIcon::Move {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
                 } else if self.split_dragging {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 } else if !at_fit && response.dragged() {
@@ -3365,8 +3559,7 @@ impl PhotoApp {
 
     /// Display scale as a percentage of 1:1, for the status bar.
     fn zoom_percent(&self, panel: egui::Vec2) -> Option<f32> {
-        let image = self.engine.image()?;
-        let img = egui::vec2(image.width as f32, image.height as f32);
+        let img = self.shown_size()?;
         if panel.x < 1.0 || panel.y < 1.0 {
             return None;
         }
@@ -3533,6 +3726,7 @@ impl PhotoApp {
         // "Modified" means changed from how this photo opened — so the camera's own
         // orientation is not an edit.
         let defaults = self.baseline.clone();
+        let white = self.white_scale();
         let mut changed = false;
         let mut started = false;
         let mut close_others = None;
@@ -3547,7 +3741,7 @@ impl PhotoApp {
                 continue;
             }
 
-            let (summary, modified) = summarise(id, &self.stack, &defaults);
+            let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
             let on = module_on(&self.stack, id);
             let summary_colour = if !on {
                 theme::TEXT_FAINT
@@ -3666,6 +3860,7 @@ impl PhotoApp {
             InspectorSectionId::Geometry => {
                 let g = &mut self.stack.geometry;
                 let mut edited = false;
+                let mut turned = false;
                 ui.horizontal(|ui| {
                     if geometry_icon_button(
                         ui,
@@ -3677,6 +3872,7 @@ impl PhotoApp {
                     {
                         g.rotate_left();
                         edited = true;
+                        turned = true;
                     }
                     if geometry_icon_button(
                         ui,
@@ -3688,6 +3884,7 @@ impl PhotoApp {
                     {
                         g.rotate_right();
                         edited = true;
+                        turned = true;
                     }
                     if geometry_icon_button(
                         ui,
@@ -3699,6 +3896,7 @@ impl PhotoApp {
                     {
                         g.flip_h();
                         edited = true;
+                        turned = true;
                     }
                     if geometry_icon_button(
                         ui,
@@ -3710,6 +3908,7 @@ impl PhotoApp {
                     {
                         g.flip_v();
                         edited = true;
+                        turned = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!g.crop.is_full_frame(), |ui| {
@@ -3718,17 +3917,21 @@ impl PhotoApp {
                                 edited = true;
                             }
                         });
-                        if widgets::chip(ui, self.cropping, "crop")
-                            .on_hover_text("Drag on the image to frame a crop (C)")
-                            .clicked()
-                        {
-                            self.cropping = !self.cropping;
+                        if self.cropping {
+                            ui.label(theme::tag("framing").color(theme::ACCENT));
                         }
                     });
                 });
                 if edited {
                     discrete!();
                 }
+                if turned {
+                    self.rebase_crop();
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    self.crop_chips(ui);
+                });
                 track!(widgets::param_slider(
                     ui,
                     "straighten",
@@ -3739,42 +3942,89 @@ impl PhotoApp {
                 ));
             }
             InspectorSectionId::WhiteBalance => {
+                // Kelvin and tint through this camera's own colour matrix, so the numbers
+                // name real lights and the as-shot white reads as what the camera metered.
+                let scale = self.white_scale();
                 let p = &mut self.stack.white_balance.params;
                 let dp = d.white_balance.params;
-                let (mut kelvin, mut tint) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
-                let (home_k, home_t) = rgb_to_kelvin_tint(dp.tint_r, dp.tint_b);
-                let k =
-                    widgets::param_slider(ui, "temp (K)", &mut kelvin, 2000.0..=12000.0, 0, home_k);
-                let t = widgets::param_slider(ui, "tint", &mut tint, -50.0..=50.0, 1, home_t);
+                let (mut kelvin, mut tint) = scale.temperature(p);
+                let (home_k, home_t) = scale.temperature(&dp);
+                let (k_lo, k_hi) = (WB_KELVIN_MIN, WB_KELVIN_MAX);
+                // Evenly spaced in mired, as Lightroom's is: a step from 3000 to 3500 K is
+                // as visible as one from 7000 to 10000 K.
+                let (m_lo, m_hi) = (1e6 / k_lo, 1e6 / k_hi);
+                let k = widgets::scaled_slider(
+                    ui,
+                    "temp (K)",
+                    &mut kelvin,
+                    k_lo..=k_hi,
+                    0,
+                    home_k,
+                    widgets::SliderScale {
+                        to_rail: &|k| (m_lo - 1e6 / k) / (m_lo - m_hi),
+                        from_rail: &|t| 1e6 / (m_lo - t * (m_lo - m_hi)),
+                        speed: 10.0,
+                        gradient: Some([theme::WB_COOL, theme::WB_WARM]),
+                    },
+                )
+                .on_hover_text("The light the photo was taken under. Higher is warmer.");
+                let t = widgets::scaled_slider(
+                    ui,
+                    "tint",
+                    &mut tint,
+                    -150.0..=150.0,
+                    0,
+                    home_t,
+                    widgets::SliderScale {
+                        to_rail: &|v| (v + 150.0) / 300.0,
+                        from_rail: &|t| t * 300.0 - 150.0,
+                        speed: 0.5,
+                        gradient: Some([theme::WB_GREEN, theme::WB_MAGENTA]),
+                    },
+                )
+                .on_hover_text("Negative is greener, positive more magenta.");
                 let both = k | t;
                 if both.changed() {
-                    let (r, b) = kelvin_tint_to_rgb(kelvin, tint);
-                    p.tint_r = r;
-                    p.tint_b = b;
+                    // A light the camera cannot neutralise with positive gains is simply
+                    // out of reach: the slider stops rather than jumping somewhere else.
+                    if let Some(wb) = scale.white_balance(kelvin, tint) {
+                        *p = wb;
+                    }
                 }
                 track!(both);
 
-                // Presets as chips; the one matching the current multipliers is lit.
+                // Presets as chips; the one matching the current setting is lit. Adobe's
+                // standard lights, so a preset means the same here as in Lightroom.
                 let mut preset = None;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                    for (label, tip, r, b) in [
-                        ("as shot", "The camera's own multipliers", 1.0, 1.0),
-                        ("daylight", "5500K daylight", 1.05, 0.95),
-                        ("cloudy", "6500K overcast", 1.15, 0.88),
-                        ("shade", "7500K deep shade", 1.28, 0.80),
-                        ("tungsten", "3200K incandescent", 0.75, 1.35),
-                        ("fluoro", "4000K fluorescent", 0.88, 1.12),
+                    let as_shot = (p.tint_r - 1.0).abs() < 1e-4 && (p.tint_b - 1.0).abs() < 1e-4;
+                    if widgets::chip(ui, as_shot, "as shot")
+                        .on_hover_text(format!("What the camera metered: {home_k:.0} K"))
+                        .clicked()
+                    {
+                        preset = Some(dp);
+                    }
+                    for (label, tip, pk, pt) in [
+                        ("daylight", "5500 K, tint +10", 5500.0, 10.0),
+                        ("cloudy", "6500 K, tint +10", 6500.0, 10.0),
+                        ("shade", "7500 K, tint +10", 7500.0, 10.0),
+                        ("tungsten", "2850 K incandescent", 2850.0, 0.0),
+                        ("fluoro", "3800 K, tint +21", 3800.0, 21.0),
+                        ("flash", "5500 K", 5500.0, 0.0),
                     ] {
-                        let lit = (p.tint_r - r).abs() < 1e-4 && (p.tint_b - b).abs() < 1e-4;
-                        if widgets::chip(ui, lit, label).on_hover_text(tip).clicked() {
-                            preset = Some((r, b));
+                        let lit = !as_shot && (kelvin - pk).abs() < 5.0 && (tint - pt).abs() < 0.5;
+                        let wb = scale.white_balance(pk, pt);
+                        let chip = ui.add_enabled_ui(wb.is_some(), |ui| {
+                            widgets::chip(ui, lit, label).on_hover_text(tip)
+                        });
+                        if chip.inner.clicked() {
+                            preset = wb;
                         }
                     }
                 });
-                if let Some((r, b)) = preset {
-                    p.tint_r = r;
-                    p.tint_b = b;
+                if let Some(wb) = preset {
+                    *p = wb;
                     discrete!();
                 }
             }
@@ -4337,7 +4587,12 @@ fn module_on(stack: &PhotoStack, id: InspectorSectionId) -> bool {
 
 /// A module's current value, for its collapsed header, and whether it differs from default.
 /// DESIGN.md: every control that changes the image shows its current numeric value.
-fn summarise(id: InspectorSectionId, s: &PhotoStack, d: &PhotoStack) -> (String, bool) {
+fn summarise(
+    id: InspectorSectionId,
+    s: &PhotoStack,
+    d: &PhotoStack,
+    white: &WhiteScale,
+) -> (String, bool) {
     use InspectorSectionId as S;
     let signed = |label: &str, v: f32| format!("{label} {v:+.2}");
     match id {
@@ -4378,7 +4633,7 @@ fn summarise(id: InspectorSectionId, s: &PhotoStack, d: &PhotoStack) -> (String,
             if !modified {
                 return ("as shot".to_string(), false);
             }
-            let (k, t) = rgb_to_kelvin_tint(p.tint_r, p.tint_b);
+            let (k, t) = white.temperature(p);
             (format!("{k:.0} K · {t:+.0} tint"), true)
         }
         S::Exposure => {
@@ -5539,20 +5794,9 @@ fn geometry_icon_button(
     response.on_hover_text(tooltip)
 }
 
-fn kelvin_tint_to_rgb(kelvin: f32, tint: f32) -> (f32, f32) {
-    let k_factor = (kelvin - 5500.0) / 4500.0;
-    let r = 1.0 + k_factor * 0.45 - tint * 0.005;
-    let b = 1.0 - k_factor * 0.40 - tint * 0.005;
-    (r.clamp(0.2, 4.0), b.clamp(0.2, 4.0))
-}
-
-fn rgb_to_kelvin_tint(tint_r: f32, tint_b: f32) -> (f32, f32) {
-    let diff = (tint_r - tint_b) * 0.5;
-    let kelvin = (5500.0 + diff * 4500.0).clamp(2000.0, 12000.0);
-    let avg = (tint_r + tint_b) * 0.5;
-    let tint = ((1.0 - avg) * 100.0).clamp(-50.0, 50.0);
-    (kelvin, tint)
-}
+/// The white balance temperature slider's span, as Lightroom's.
+const WB_KELVIN_MIN: f32 = 2000.0;
+const WB_KELVIN_MAX: f32 = 50000.0;
 
 #[cfg(test)]
 mod tests {
