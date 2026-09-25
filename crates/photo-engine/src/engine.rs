@@ -4,6 +4,8 @@
 //! whatever shell is running (eframe on desktop, `android-activity` later), which is what
 //! makes an Android build a new bootstrap rather than a second implementation.
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::{bail, Result};
 use wgpu::util::DeviceExt;
 
@@ -209,13 +211,196 @@ pub struct Engine {
     /// fresh textures per photo costs tens of milliseconds of driver time on the UI thread.
     scratch: Option<Scratch>,
     retired_sensor: Option<(wgpu::Extent3d, u32, wgpu::Texture)>,
+    /// Where the mosaic texture goes once demosaic has read it, for the decode thread's
+    /// next upload of the same size (see `UploadPool`).
+    upload_pool: UploadPool,
 }
 
-/// The upload-only planes, which nothing reads once demosaic has run.
+/// The green plane, which nothing reads once demosaic has run.
 struct Scratch {
     extent: wgpu::Extent3d,
-    mosaic: wgpu::Texture,
     green: wgpu::Texture,
+}
+
+/// A photo whose pixels are already in GPU memory, ready for `Engine::load_uploaded`.
+///
+/// Uploading is the one large CPU cost of opening a photo that is not the decode:
+/// `write_texture` copies the whole image into wgpu's staging memory — 2 bytes a
+/// photosite for a mosaic, 8 bytes a pixel for a raster, so 66 MB for a 33 MP RAW and
+/// 192 MB for a 24 MP JPEG. `upload_cfa` and `upload_raster` do that on whatever thread
+/// calls them, which in the app is the decode thread; the UI thread's share of an open is
+/// then recording and submitting GPU work, with no copy of the image at all.
+///
+/// Ordering is safe by construction: a queue write lands before the next submission on
+/// that queue, and this value can only reach `load_uploaded` after the write has returned.
+pub struct UploadedImage {
+    pixels: UploadedPixels,
+    extent: wgpu::Extent3d,
+    /// What the engine starts from: identity for a RAW, whose orientation is an edit in
+    /// the stack, and the file's own for a raster.
+    geometry: Geometry,
+    /// How the camera says the frame is meant to be viewed.
+    pub orientation: Geometry,
+    wb: [f32; 3],
+    cam_to_srgb: [[f32; 3]; 3],
+    pub make: String,
+    pub model: String,
+}
+
+enum UploadedPixels {
+    /// The sensor mosaic, still to be demosaiced.
+    Mosaic {
+        texture: wgpu::Texture,
+        cfa: [u32; 4],
+        black: [f32; 4],
+        white: [f32; 4],
+    },
+    /// Linear RGB half-floats, for mip level 0 of the sensor texture as they are.
+    Linear { texture: wgpu::Texture },
+}
+
+impl UploadedImage {
+    pub fn width(&self) -> u32 {
+        self.extent.width
+    }
+    pub fn height(&self) -> u32 {
+        self.extent.height
+    }
+}
+
+/// One spare mosaic texture, shared between the engine and whichever thread uploads.
+///
+/// The engine returns a mosaic here once its demosaic is submitted, and the next upload
+/// of the same size writes into it instead of allocating 66–130 MB afresh.
+#[derive(Clone, Default)]
+pub struct UploadPool(Arc<Mutex<Option<wgpu::Texture>>>);
+
+impl UploadPool {
+    fn take(&self, extent: wgpu::Extent3d) -> Option<wgpu::Texture> {
+        let mut slot = self.0.lock().ok()?;
+        slot.take_if(|t| t.size() == extent)
+    }
+
+    fn put(&self, texture: wgpu::Texture) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(texture);
+        }
+    }
+}
+
+fn check_size(device: &wgpu::Device, width: u32, height: u32) -> Result<()> {
+    let limit = device.limits().max_texture_dimension_2d;
+    if width > limit || height > limit {
+        bail!("{width}×{height} exceeds this GPU's {limit}px texture limit");
+    }
+    Ok(())
+}
+
+/// Copy a decoded mosaic into GPU memory. Safe to call from any thread.
+pub fn upload_cfa(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pool: &UploadPool,
+    cfa: CfaImage,
+) -> Result<UploadedImage> {
+    check_size(device, cfa.width, cfa.height)?;
+    let extent = wgpu::Extent3d {
+        width: cfa.width,
+        height: cfa.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = pool.take(extent).unwrap_or_else(|| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cfa mosaic"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&cfa.data),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(cfa.width * 2),
+            rows_per_image: Some(cfa.height),
+        },
+        extent,
+    );
+    Ok(UploadedImage {
+        pixels: UploadedPixels::Mosaic {
+            texture,
+            cfa: cfa.cfa2x2,
+            black: cfa.black,
+            white: cfa.white,
+        },
+        extent,
+        geometry: Geometry::default(),
+        orientation: cfa.orientation,
+        wb: cfa.wb,
+        cam_to_srgb: cfa.cam_to_srgb,
+        make: cfa.make,
+        model: cfa.model,
+    })
+}
+
+/// Copy a decoded raster (JPEG, PNG, TIFF, WebP) into GPU memory. Safe to call from any
+/// thread.
+pub fn upload_raster(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster: RasterImage,
+) -> Result<UploadedImage> {
+    check_size(device, raster.width, raster.height)?;
+    let extent = wgpu::Extent3d {
+        width: raster.width,
+        height: raster.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("raster upload"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SENSOR_FORMAT,
+        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &raster.data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(raster.width * 8),
+            rows_per_image: Some(raster.height),
+        },
+        extent,
+    );
+    Ok(UploadedImage {
+        pixels: UploadedPixels::Linear { texture },
+        extent,
+        geometry: raster.orientation,
+        orientation: raster.orientation,
+        wb: [1.0, 1.0, 1.0],
+        cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        make: raster.make,
+        model: raster.model,
+    })
 }
 
 impl Engine {
@@ -476,6 +661,7 @@ impl Engine {
             preview_level: 0,
             scratch: None,
             retired_sensor: None,
+            upload_pool: UploadPool::default(),
         }
     }
 
@@ -493,78 +679,61 @@ impl Engine {
         self.histogram = Histogram::default();
     }
 
-    /// Upload, demosaic, and keep only the linear RGB result.
-    ///
-    /// The mosaic texture is dropped at the end of this function: it has served its
-    /// purpose and the sensor texture is immutable from here (invariant 5).
+    /// The pool `upload_cfa` should draw its mosaic texture from, so that a texture this
+    /// engine has finished with is reused rather than reallocated.
+    pub fn upload_pool(&self) -> UploadPool {
+        self.upload_pool.clone()
+    }
+
+    /// Upload, demosaic, and keep only the linear RGB result. `upload_cfa` followed by
+    /// `load_uploaded`, for callers with nothing to gain from splitting them.
     pub fn load(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         cfa: CfaImage,
     ) -> Result<()> {
-        let limit = device.limits().max_texture_dimension_2d;
-        if cfa.width > limit || cfa.height > limit {
-            bail!(
-                "{}×{} exceeds this GPU's {}px texture limit",
-                cfa.width,
-                cfa.height,
-                limit
-            );
-        }
+        let uploaded = upload_cfa(device, queue, &self.upload_pool, cfa)?;
+        self.load_uploaded(device, queue, uploaded)
+    }
 
-        let extent = wgpu::Extent3d {
-            width: cfa.width,
-            height: cfa.height,
-            depth_or_array_layers: 1,
-        };
+    /// Upload a decoded raster image (JPEG, PNG, TIFF, WebP) as the sensor texture.
+    /// `upload_raster` followed by `load_uploaded`.
+    pub fn load_raster(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raster: RasterImage,
+    ) -> Result<()> {
+        let uploaded = upload_raster(device, queue, raster)?;
+        self.load_uploaded(device, queue, uploaded)
+    }
 
-        let scratch = match self.scratch.take() {
-            Some(s) if s.extent == extent => s,
-            _ => Scratch {
-                extent,
-                mosaic: device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("cfa mosaic"),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R16Uint,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                }),
-                green: device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("green plane"),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: GREEN_FORMAT,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                }),
-            },
-        };
-        let mosaic = &scratch.mosaic;
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: mosaic,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&cfa.data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(cfa.width * 2),
-                rows_per_image: Some(cfa.height),
-            },
+    /// Make an uploaded photo the current image: demosaic a mosaic (a raster is copied
+    /// as it is), build the preview mip chain, and keep only the linear RGB result.
+    ///
+    /// GPU work only — the image's bytes were copied by `upload_cfa` / `upload_raster`.
+    /// The mosaic goes back to the upload pool once demosaic is submitted: it has served
+    /// its purpose and the sensor texture is immutable from here (invariant 5).
+    pub fn load_uploaded(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uploaded: UploadedImage,
+    ) -> Result<()> {
+        let UploadedImage {
+            pixels,
             extent,
-        );
+            geometry,
+            orientation: _,
+            wb,
+            cam_to_srgb,
+            make,
+            model,
+        } = uploaded;
+        let (width, height) = (extent.width, extent.height);
 
-        let mip_levels = mip_count(cfa.width, cfa.height);
+        let mip_levels = mip_count(width, height);
         let sensor = match self.retired_sensor.take() {
             Some((e, m, texture)) if e == extent && m == mip_levels => texture,
             _ => device.create_texture(&wgpu::TextureDescriptor {
@@ -590,71 +759,111 @@ impl Engine {
             })
         };
 
-        let green_view = scratch.green.create_view(&Default::default());
-
-        let demosaic_uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("demosaic uniforms"),
-            contents: bytemuck::bytes_of(&DemosaicUniforms {
-                size: [cfa.width, cfa.height, 0, 0],
-                cfa: cfa.cfa2x2,
-                black: cfa.black,
-                white: cfa.white,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-        let mosaic_view = mosaic.create_view(&Default::default());
-        let green_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("demosaic green bind"),
-            layout: &self.green_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&mosaic_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: demosaic_uniforms.as_entire_binding(),
-                },
-            ],
-        });
-        let rb_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("demosaic rb bind"),
-            layout: &self.rb_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&mosaic_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: demosaic_uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&green_view),
-                },
-            ],
-        });
-
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("demosaic encoder"),
+            label: Some("load encoder"),
         });
-        // Green first and alone: red and blue are reconstructed relative to it.
-        draw_fullscreen(
-            &mut encoder,
-            "demosaic green pass",
-            &self.green_pipeline,
-            &green_bind,
-            &green_view,
-        );
-        draw_fullscreen(
-            &mut encoder,
-            "demosaic rb pass",
-            &self.rb_pipeline,
-            &rb_bind,
-            &level_view(0),
-        );
+
+        let mut spent_mosaic = None;
+        match pixels {
+            UploadedPixels::Mosaic {
+                texture: mosaic,
+                cfa,
+                black,
+                white,
+            } => {
+                let scratch = match self.scratch.take() {
+                    Some(s) if s.extent == extent => s,
+                    _ => Scratch {
+                        extent,
+                        green: device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("green plane"),
+                            size: extent,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: GREEN_FORMAT,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            view_formats: &[],
+                        }),
+                    },
+                };
+                let green_view = scratch.green.create_view(&Default::default());
+
+                let demosaic_uniforms =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("demosaic uniforms"),
+                        contents: bytemuck::bytes_of(&DemosaicUniforms {
+                            size: [width, height, 0, 0],
+                            cfa,
+                            black,
+                            white,
+                        }),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+
+                let mosaic_view = mosaic.create_view(&Default::default());
+                let green_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("demosaic green bind"),
+                    layout: &self.green_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&mosaic_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: demosaic_uniforms.as_entire_binding(),
+                        },
+                    ],
+                });
+                let rb_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("demosaic rb bind"),
+                    layout: &self.rb_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&mosaic_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: demosaic_uniforms.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&green_view),
+                        },
+                    ],
+                });
+
+                // Green first and alone: red and blue are reconstructed relative to it.
+                draw_fullscreen(
+                    &mut encoder,
+                    "demosaic green pass",
+                    &self.green_pipeline,
+                    &green_bind,
+                    &green_view,
+                );
+                draw_fullscreen(
+                    &mut encoder,
+                    "demosaic rb pass",
+                    &self.rb_pipeline,
+                    &rb_bind,
+                    &level_view(0),
+                );
+                // Kept for the next photo's demosaic; the mosaic for its next upload.
+                self.scratch = Some(scratch);
+                spent_mosaic = Some(mosaic);
+            }
+            UploadedPixels::Linear { texture } => {
+                encoder.copy_texture_to_texture(
+                    texture.as_image_copy(),
+                    sensor.as_image_copy(),
+                    extent,
+                );
+            }
+        }
+
         // Each level from the one above. Still part of "demosaic once": after this the
         // whole sensor texture, every level of it, is immutable (invariant 5).
         for level in 1..mip_levels {
@@ -676,9 +885,12 @@ impl Engine {
             );
         }
         queue.submit([encoder.finish()]);
+        // Only after the submit: an upload into it now is ordered after this demosaic.
+        if let Some(mosaic) = spent_mosaic {
+            self.upload_pool.put(mosaic);
+        }
 
-        let geometry = Geometry::default();
-        let (out_w, out_h) = geometry.output_size(cfa.width, cfa.height);
+        let (out_w, out_h) = geometry.output_size(width, height);
         let preview_level = self.preview_level.min(mip_levels - 1);
         let (preview_w, preview_h) = scaled(out_w, out_h, preview_level);
         let output_texture = output_texture(device, preview_w, preview_h);
@@ -714,13 +926,13 @@ impl Engine {
         self.image = Some(LoadedImage {
             width: out_w,
             height: out_h,
-            sensor_width: cfa.width,
-            sensor_height: cfa.height,
+            sensor_width: width,
+            sensor_height: height,
             geometry,
-            make: cfa.make,
-            model: cfa.model,
-            wb: cfa.wb,
-            cam_to_srgb: cfa.cam_to_srgb,
+            make,
+            model,
+            wb,
+            cam_to_srgb,
             mip_levels,
             preview_level,
             sensor_extent: extent,
@@ -729,156 +941,6 @@ impl Engine {
             output_texture,
             adjust_bind,
         });
-        // Only linear RGB survives as the image, and it is immutable from here
-        // (invariant 5). The upload planes are kept for the next photo's upload.
-        self.scratch = Some(scratch);
-        Ok(())
-    }
-
-    /// Upload a decoded raster image (JPEG, PNG, TIFF, WebP) directly to the sensor texture.
-    ///
-    /// Skips Bayer demosaic passes and uploads linear float data directly, building the mip chain.
-    pub fn load_raster(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        raster: RasterImage,
-    ) -> Result<()> {
-        let limit = device.limits().max_texture_dimension_2d;
-        if raster.width > limit || raster.height > limit {
-            bail!(
-                "{}×{} exceeds this GPU's {}px texture limit",
-                raster.width,
-                raster.height,
-                limit
-            );
-        }
-
-        let extent = wgpu::Extent3d {
-            width: raster.width,
-            height: raster.height,
-            depth_or_array_layers: 1,
-        };
-
-        let mip_levels = mip_count(raster.width, raster.height);
-        let sensor = match self.retired_sensor.take() {
-            Some((e, m, texture)) if e == extent && m == mip_levels => texture,
-            _ => device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("sensor rgb (raster)"),
-                size: extent,
-                mip_level_count: mip_levels,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: SENSOR_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            }),
-        };
-
-        // Write linear half-floats directly to mip level 0 (4 half-floats = 8 bytes per pixel)
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &sensor,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &raster.data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(raster.width * 8),
-                rows_per_image: Some(raster.height),
-            },
-            extent,
-        );
-
-        let level_view = |level: u32| {
-            sensor.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..Default::default()
-            })
-        };
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("raster downsample encoder"),
-        });
-
-        for level in 1..mip_levels {
-            let parent = level_view(level - 1);
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sensor downsample bind"),
-                layout: &self.mip_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&parent),
-                }],
-            });
-            draw_fullscreen(
-                &mut encoder,
-                "sensor downsample pass",
-                &self.mip_pipeline,
-                &bind,
-                &level_view(level),
-            );
-        }
-        queue.submit([encoder.finish()]);
-
-        let geometry = raster.orientation;
-        let (out_w, out_h) = geometry.output_size(raster.width, raster.height);
-        let preview_level = self.preview_level.min(mip_levels - 1);
-        let (preview_w, preview_h) = scaled(out_w, out_h, preview_level);
-        let output_texture = output_texture(device, preview_w, preview_h);
-        let output_view = output_texture.create_view(&Default::default());
-
-        let sensor_view = sensor.create_view(&Default::default());
-        let adjust_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("adjust bind"),
-            layout: &self.adjust_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&sensor_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.adjust_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&self.lut_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
-                },
-            ],
-        });
-
-        self.hist_epoch = self.hist_epoch.wrapping_add(1);
-        self.histogram = Histogram::default();
-
-        self.image = Some(LoadedImage {
-            width: out_w,
-            height: out_h,
-            sensor_width: raster.width,
-            sensor_height: raster.height,
-            geometry,
-            make: raster.make,
-            model: raster.model,
-            wb: [1.0, 1.0, 1.0],
-            cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            mip_levels,
-            preview_level,
-            sensor_extent: extent,
-            sensor,
-            output_view,
-            output_texture,
-            adjust_bind,
-        });
-
         Ok(())
     }
 
