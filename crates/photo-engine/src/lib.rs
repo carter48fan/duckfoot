@@ -13,20 +13,25 @@ pub mod engine;
 pub mod export;
 pub mod histogram;
 pub mod params;
+pub mod preview;
 pub mod sidecar;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
-    decode_raster, decode_raw, extract_embedded_thumbnail, CfaImage, DefaultRawDecoder,
-    RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
+    decode_raster, decode_raw, CfaImage, DefaultRawDecoder, RasterImage, RawDecoder, RawlerBackend,
+    RawloaderBackend,
 };
-pub use engine::{Engine, LoadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT};
+pub use engine::{
+    upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
+    OUTPUT_FORMAT,
+};
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, Dehaze, Exposure, ExposureMode, Filmic,
     Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
 };
+pub use preview::{decode_jpeg_scaled, find_embedded_jpeg, load_embedded_preview, Preview};
 pub use sidecar::{
     find_sidecar, load_sidecar, load_sidecar_full, save_sidecar, save_sidecar_full, sidecar_path,
     AssetMetadata, Flag, SidecarData, SIDECAR_EXT,
