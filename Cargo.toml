@@ -1,12 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/photo-engine", "crates/photo-app", "crates/duckfoot"]
+members = [
+    "crates/photo-engine",
+    "crates/photo-app",
+    "crates/duckfoot",
+    "crates/duckfoot-android",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/goldtone/duckfoot"
+# egui 0.36 needs 1.95.
+rust-version = "1.95"
+repository = "https://github.com/carter48fan/duckfoot"
 
 [workspace.dependencies]
 photo-engine = { path = "crates/photo-engine" }
@@ -14,7 +21,7 @@ photo-app = { path = "crates/photo-app" }
 
 wgpu = "30"
 egui = "0.36"
-egui-wgpu = { version = "0.36", features = ["winit"] }
+egui-wgpu = "0.36"
 # eframe is deliberately absent. eframe 0.36.2 requires egui_glow ^0.36.2, which was never
 # published — that crate stops at 0.34.3 — and Cargo resolves optional dependencies whether
 # or not a feature enables them, so eframe cannot be locked at current versions at all.

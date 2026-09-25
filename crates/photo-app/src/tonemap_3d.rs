@@ -283,9 +283,15 @@ pub fn render_tonemap_3d(
 
     // Interaction handling
     let hover_pos = response.hover_pos();
+    // A fingertip covers far more than a pointer does.
+    let reach = if crate::widgets::is_touch(ui.ctx()) {
+        24.0
+    } else {
+        12.0
+    };
     let hovered_handle = hover_pos.and_then(|hpos| {
         handle_screen.iter().find_map(|(handle, spos, _)| {
-            if hpos.distance(*spos) <= 12.0 {
+            if hpos.distance(*spos) <= reach {
                 Some(*handle)
             } else {
                 None
@@ -477,7 +483,7 @@ pub fn render_tonemap_3d(
     } else if hovered_handle.is_some() {
         "Click & drag handle to adjust parameter"
     } else {
-        "Drag to rotate 3D view • Ctrl+scroll to zoom • Double-click to reset"
+        crate::widgets::orbit_hint(ui.ctx())
     };
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 14.0),

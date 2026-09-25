@@ -15,16 +15,71 @@ use egui::{
 
 use crate::theme::{self, *};
 
+// ── Touch ─────────────────────────────────────────────────────────────────────────────────
+//
+// A finger needs bigger targets than a pointer, and a slider that jumps to wherever it is
+// pressed turns every attempt to scroll past it into an edit. The layout decides whether
+// input is touch (`PhotoApp::update`) and every control below reads it from here, so the
+// desktop layout keeps its sizes.
+
+fn flag(ctx: &egui::Context, key: &'static str) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::new(key)))
+        .unwrap_or(false)
+}
+
+fn set_flag(ctx: &egui::Context, key: &'static str, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(key), on));
+}
+
+/// Size controls for fingers, and stop sliders jumping on press.
+pub fn set_touch(ctx: &egui::Context, on: bool) {
+    set_flag(ctx, "duckfoot.touch", on);
+}
+
+pub fn is_touch(ctx: &egui::Context) -> bool {
+    flag(ctx, "duckfoot.touch")
+}
+
+/// Sliders move ten times finer, as holding Shift does. Touch screens have no Shift.
+pub fn set_fine(ctx: &egui::Context, on: bool) {
+    set_flag(ctx, "duckfoot.fine", on);
+}
+
+pub fn is_fine(ctx: &egui::Context) -> bool {
+    flag(ctx, "duckfoot.fine")
+}
+
+/// The 3D views' how-to line, in the words of whichever input is in use.
+pub fn orbit_hint(ctx: &egui::Context) -> &'static str {
+    if is_touch(ctx) {
+        "Drag to rotate 3D view • Pinch to zoom • Double-tap to reset"
+    } else {
+        "Drag to rotate 3D view • Ctrl+scroll to zoom • Double-click to reset"
+    }
+}
+
+/// `desktop`, or `touch` when controls are sized for fingers.
+fn sized(ui: &Ui, desktop: f32, touch: f32) -> f32 {
+    if is_touch(ui.ctx()) {
+        touch
+    } else {
+        desktop
+    }
+}
+
 /// A toggle chip: small bold monospace caps. The barrel switcher, scope modes, the stage
 /// toolbar's CROP and A / B.
 pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
     let enabled = ui.is_enabled();
     let galley = ui.painter().layout_no_wrap(
         text.to_uppercase(),
-        FontId::new(10.5, theme::mono_bold()),
+        FontId::new(sized(ui, 10.5, 12.0), theme::mono_bold()),
         Color32::PLACEHOLDER,
     );
-    let size = vec2(galley.size().x + 14.0, 20.0);
+    let size = vec2(
+        galley.size().x + sized(ui, 14.0, 20.0),
+        sized(ui, 20.0, 32.0),
+    );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
     let hovered = enabled && response.hovered();
@@ -84,7 +139,10 @@ pub fn button_enabled(
         FontId::new(11.5, family),
         Color32::PLACEHOLDER,
     );
-    let size = vec2((galley.size().x + 22.0).max(min_width), 26.0);
+    let size = vec2(
+        (galley.size().x + sized(ui, 22.0, 28.0)).max(min_width),
+        sized(ui, 26.0, 36.0),
+    );
     let sense = if enabled {
         Sense::click()
     } else {
@@ -114,7 +172,8 @@ pub fn button_enabled(
 /// A square icon button, ghost-styled. `glyph` must exist in egui's bundled fallback fonts.
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(sized(ui, 26.0, 36.0)), Sense::click());
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => TEXT_FAINT,
@@ -130,7 +189,7 @@ pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(15.0),
+        FontId::proportional(sized(ui, 15.0, 18.0)),
         colour,
     );
     if hovered {
@@ -172,14 +231,15 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
     response
 }
 
-/// A 2px rail with an amber fill and an 8×14 thumb.
+/// A 2px rail with an amber fill and an 8×14 thumb (12×24 on touch).
 ///
 /// Bipolar ranges fill from zero rather than from the left end, so "+0.4 EV" and "−0.4 EV"
 /// read as the same distance from neutral.
 ///
-/// Pressing the rail away from the thumb jumps there; dragging moves the value by how far
-/// the pointer travels, not to where it is, so grabbing the thumb never makes it leap.
-/// Shift while dragging is ten times finer. Double-click returns to `default`.
+/// Pressing the rail away from the thumb jumps there (not on touch); dragging moves the
+/// value by how far the pointer travels, not to where it is, so grabbing the thumb never
+/// makes it leap. Shift while dragging, or [`set_fine`], is ten times finer. Double-click
+/// returns to `default`.
 pub fn rail(
     ui: &mut Ui,
     value: &mut f32,
@@ -203,9 +263,15 @@ fn rail_painted(
     origin: f32,
     gradient: Option<[Color32; 2]>,
 ) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click_and_drag());
+    let touch = is_touch(ui.ctx());
+    let (rect, mut response) =
+        ui.allocate_exact_size(vec2(width, sized(ui, 18.0, 34.0)), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
-    let thumb = vec2(8.0, 14.0);
+    let thumb = if touch {
+        vec2(12.0, 24.0)
+    } else {
+        vec2(8.0, 14.0)
+    };
     let track = Rect::from_min_max(
         pos2(rect.left() + thumb.x / 2.0, rect.center().y - 1.0),
         pos2(rect.right() - thumb.x / 2.0, rect.center().y + 1.0),
@@ -216,7 +282,9 @@ fn rail_painted(
     if response.double_clicked() {
         *value = default;
     } else {
-        let pressed = ui.input(|i| i.pointer.primary_pressed());
+        // A press jumps the value there with a pointer. A finger lands on a slider on
+        // its way to scrolling past it, so on touch only a drag changes the value.
+        let pressed = !touch && ui.input(|i| i.pointer.primary_pressed());
         if pressed && response.is_pointer_button_down_on() {
             if let Some(p) = response.interact_pointer_pos() {
                 if (p.x - x_of(*value)).abs() > thumb.x {
@@ -225,7 +293,7 @@ fn rail_painted(
                 }
             }
         } else if response.dragged() {
-            let fine = if ui.input(|i| i.modifiers.shift) {
+            let fine = if ui.input(|i| i.modifiers.shift) || is_fine(ui.ctx()) {
                 0.1
             } else {
                 1.0
