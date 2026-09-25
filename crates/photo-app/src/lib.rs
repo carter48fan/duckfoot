@@ -381,8 +381,11 @@ pub struct PhotoApp {
 
 impl PhotoApp {
     pub fn new(gpu: &Gpu) -> Self {
+        let engine = Engine::new(gpu.device);
+        let loader =
+            loader::Loader::new(gpu.device.clone(), gpu.queue.clone(), engine.upload_pool());
         Self {
-            engine: Engine::new(gpu.device),
+            engine,
             stack: PhotoStack::default(),
             history: History::new(),
             texture_id: None,
@@ -414,7 +417,7 @@ impl PhotoApp {
             focused_section: None,
             single_open: true,
             baseline: PhotoStack::default(),
-            loader: loader::Loader::new(),
+            loader,
             open_generation: 0,
             loading: None,
             thumbs: HashMap::new(),
@@ -1179,7 +1182,12 @@ impl PhotoApp {
         }
     }
 
-    fn finish_open(&mut self, gpu: &Gpu, path: PathBuf, source: loader::LoadedSource) {
+    fn finish_open(
+        &mut self,
+        gpu: &Gpu,
+        path: PathBuf,
+        uploaded: Box<photo_engine::UploadedImage>,
+    ) {
         // Save the photo being left, including anything edited while this one decoded.
         if let Some(current) = &self.loaded_path {
             if self.is_stack_edited() && save_sidecar(current, &self.stack).is_ok() {
@@ -1190,15 +1198,12 @@ impl PhotoApp {
         }
 
         self.error = None;
-        let orientation = source.orientation();
+        let orientation = uploaded.orientation;
         self.release_texture(gpu);
 
-        let load_res = match source {
-            loader::LoadedSource::Raw(cfa) => self.engine.load(gpu.device, gpu.queue, cfa),
-            loader::LoadedSource::Raster(raster) => {
-                self.engine.load_raster(gpu.device, gpu.queue, raster)
-            }
-        };
+        // The pixels are already on the GPU (the loader uploaded them); what is left here
+        // is recording the demosaic.
+        let load_res = self.engine.load_uploaded(gpu.device, gpu.queue, *uploaded);
 
         if let Err(e) = load_res {
             // DESIGN.md: failures surface in the UI, with the filename.
