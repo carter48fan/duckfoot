@@ -59,6 +59,10 @@ pub trait Platform: Send {
     /// Back was pressed with nothing left in the app to close. On Android this sends the
     /// app to the background; a desktop has no such key.
     fn leave(&mut self) {}
+
+    /// Called when an image has been successfully written to disk. Used on mobile
+    /// platforms to request system indexing into the media library/gallery.
+    fn export_completed(&mut self, _path: &std::path::Path) {}
 }
 
 /// Answers nothing. For shells with no pickers, and for tests.

@@ -125,8 +125,28 @@ public class DuckfootActivity extends NativeActivity {
 
     /** The shared Pictures directory; exports go in a Duckfoot folder inside it. */
     public String picturesDir() {
-        return Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                .getAbsolutePath();
+        File pictures = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
+        File duckfoot = new File(pictures, "Duckfoot");
+        if (!duckfoot.exists()) {
+            duckfoot.mkdirs();
+        }
+        return duckfoot.getAbsolutePath();
+    }
+
+    /**
+     * Ask the system media scanner to index an exported photo so it appears immediately
+     * in the Android Gallery and Google Photos.
+     */
+    public void scanMediaFile(String path) {
+        try {
+            android.media.MediaScannerConnection.scanFile(
+                    getApplicationContext(),
+                    new String[]{path},
+                    null,
+                    (scannedPath, uri) -> Log.i(TAG, "MediaScanner indexed: " + scannedPath + " -> " + uri));
+        } catch (Exception e) {
+            Log.e(TAG, "MediaScanner failed for " + path, e);
+        }
     }
 
     /** The oldest unread answer as {kind, args...}, or null. */

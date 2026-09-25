@@ -482,16 +482,17 @@ fn tap(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, at: egui::Pos2) {
     h.frame_sized(app, size, pointer(vec![egui::Event::PointerGone]));
 }
 
-/// The centre of tab `i` of five in the bottom bar (portrait) or right rail (landscape).
+/// The centre of tab `i` of Tab::ALL.len() in the bottom bar (portrait) or right rail (landscape).
 fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
+    let n = Tab::ALL.len() as f32;
     if size.x > size.y {
         let rail = 68.0;
         let top = 34.0; // under the top bar
-        let cell = (size.y - top) / 5.0;
+        let cell = (size.y - top) / n;
         egui::pos2(size.x - rail / 2.0, top + cell * (i as f32 + 0.5))
     } else {
         let bar = 60.0;
-        let cell = size.x / 5.0;
+        let cell = size.x / n;
         egui::pos2(cell * (i as f32 + 0.5), size.y - bar / 2.0)
     }
 }
