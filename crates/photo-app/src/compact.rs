@@ -318,7 +318,7 @@ impl PhotoApp {
                         {
                             self.needs_render = true;
                         }
-                        let loaded = self.engine.image().is_some();
+                        let loaded = self.ready_image().is_some();
                         ui.add_enabled_ui(loaded, |ui| {
                             if bar_icon(ui, BarIcon::Split, self.split_active, "Before / after")
                                 .clicked()
@@ -650,7 +650,7 @@ impl PhotoApp {
 
     /// A row of looks, "original" first, and — while a look is live — how strong it is.
     fn presets_sheet(&mut self, ui: &mut egui::Ui) {
-        if self.engine.image().is_none() {
+        if !self.can_edit() {
             ui.label(theme::dim("Open a photo to try a look on it.").size(12.0));
             return;
         }
@@ -763,7 +763,8 @@ impl PhotoApp {
     /// chosen module again folds its controls away, leaving only the strip. Returns the
     /// height it wants, as [`Self::compact_sheet`] does.
     fn edit_sheet(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
-        let loaded = self.engine.image().is_some();
+        // Editable from the moment a photo is chosen, before it has decoded.
+        let loaded = self.can_edit();
         let body_open = !loaded || self.customize_open || self.compact_controls_open;
         let top = ui.cursor().top();
         // How much more the controls want than they were given this frame.
@@ -1107,15 +1108,11 @@ impl PhotoApp {
 
     /// A quarter turn from the Edit strip, as one undo step.
     fn quick_turn(&mut self, clockwise: bool) {
-        let before = self.stack.clone();
         if clockwise {
-            self.stack.geometry.rotate_right();
+            self.geometry_edit(photo_engine::Geometry::rotate_right);
         } else {
-            self.stack.geometry.rotate_left();
+            self.geometry_edit(photo_engine::Geometry::rotate_left);
         }
-        self.history.checkpoint(&before);
-        self.rebase_crop();
-        self.needs_render = true;
     }
 
     // ── Export ──────────────────────────────────────────────────────────────────────────
@@ -1123,7 +1120,7 @@ impl PhotoApp {
     fn export_sheet(&mut self, ui: &mut egui::Ui) {
         self.export_format_line(ui);
         let busy = matches!(self.export, Export::Writing { .. });
-        let ready = self.engine.image().is_some() && !busy;
+        let ready = self.ready_image().is_some() && !busy;
         let width = ui.available_width();
         let export = ui
             .add_enabled_ui(ready, |ui| {
