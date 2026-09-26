@@ -594,17 +594,13 @@ impl PhotoApp {
     fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
         // Renders the current stack at full resolution, whatever the preview is at, and
         // never with the split.
-        let exported =
-            match self
-                .engine
-                .export(gpu.device, gpu.queue, &self.stack, self.stack.geometry.crop)
-            {
-                Ok(e) => e,
-                Err(e) => {
-                    self.export = Export::Failed(format!("{e:#}"));
-                    return;
-                }
-            };
+        let exported = match self.engine.export(gpu.device, gpu.queue, &self.stack) {
+            Ok(e) => e,
+            Err(e) => {
+                self.export = Export::Failed(format!("{e:#}"));
+                return;
+            }
+        };
 
         let (tx, rx) = mpsc::channel();
         let target = path.clone();

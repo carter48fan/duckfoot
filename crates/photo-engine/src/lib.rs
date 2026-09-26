@@ -17,6 +17,8 @@ pub mod params;
 pub mod preview;
 pub mod sidecar;
 pub mod temperature;
+#[doc(hidden)]
+pub mod testkit;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
