@@ -26,12 +26,15 @@ impl Settings {
 
     pub fn save(&self, dir: Option<&Path>) {
         let Some(dir) = dir else { return };
-        let result = std::fs::create_dir_all(dir).and_then(|()| {
-            let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-            std::fs::write(file(dir), json)
-        });
+        // Through a temporary file: a crash mid-write must not reset every setting.
+        let result = std::fs::create_dir_all(dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                let json = serde_json::to_vec_pretty(self)?;
+                photo_engine::fsio::atomic_write_bytes(&file(dir), &json)
+            });
         if let Err(e) = result {
-            log::warn!("could not save settings in {}: {e}", dir.display());
+            log::warn!("could not save settings in {}: {e:#}", dir.display());
         }
     }
 }

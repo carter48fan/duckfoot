@@ -83,6 +83,15 @@ impl GpuState {
                 ..Default::default()
             }))?;
 
+        // wgpu panics on an error outside an error scope by default, taking the user's
+        // unsaved work with it. Report instead, and keep running where that is possible.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            photo_app::gpu_errors::report(e.to_string());
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            photo_app::gpu_errors::report(format!("device lost ({reason:?}): {message}"));
+        });
+
         let format = surface_format(surface, &adapter)?;
         let renderer = RwLock::new(new_renderer(&device, format));
         Ok(Self {
@@ -456,6 +465,23 @@ impl ApplicationHandler<UserEvent> for Shell {
         // built on it afterwards is the classic Android wgpu crash. Only the window side
         // goes — the device and the app, with the user's work, stay.
         self.window = None;
+        // …for as long as the system lets them. A backgrounded app is the first thing the
+        // low-memory killer takes, with no further warning, so the edits go to disk now.
+        if let Some(app) = self.app.as_mut() {
+            app.flush();
+        }
+    }
+
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.flush();
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.shutdown();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -474,7 +500,14 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                app.shutdown();
+                event_loop.exit();
+            }
+            // Switching away is when work is most often abandoned mid-thought.
+            WindowEvent::Focused(false) => {
+                app.flush();
+            }
             WindowEvent::Resized(size) => {
                 window.resize(gpu, size.width, size.height);
                 window.window.request_redraw();

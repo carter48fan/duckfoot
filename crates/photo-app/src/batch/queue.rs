@@ -110,7 +110,18 @@ impl ExportQueue {
                                     .unwrap_or("image")
                                     .to_string();
 
-                                match process_single_job(&device, &queue, &mut engine, &job) {
+                                // A decoder panic on one file fails that job, not the queue;
+                                // the engine it happened in is rebuilt, since it may be
+                                // half-loaded.
+                                let outcome =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        process_single_job(&device, &queue, &mut engine, &job)
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        engine = Engine::new(&device);
+                                        Err(anyhow::anyhow!("the decoder crashed on this file"))
+                                    });
+                                match outcome {
                                     Ok(()) => {
                                         completed += 1;
                                         let _ = progress_tx.send(ExportProgressMsg::JobProgress {
@@ -222,6 +233,19 @@ impl ExportQueue {
             }
         }
         &self.current_status
+    }
+
+    /// The result of a finished batch, handed out once; the queue is idle again after.
+    pub fn take_finished(&mut self) -> Option<ExportStatus> {
+        self.poll();
+        if matches!(self.current_status, ExportStatus::Finished { .. }) {
+            Some(std::mem::replace(
+                &mut self.current_status,
+                ExportStatus::Idle,
+            ))
+        } else {
+            None
+        }
     }
 
     pub fn is_running(&self) -> bool {
