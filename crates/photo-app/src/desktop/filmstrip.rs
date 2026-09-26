@@ -553,9 +553,8 @@ impl PhotoApp {
                     )
                     .on_hover_text("Ctrl+Z")
                     .clicked()
-                        && self.history.undo(&mut self.stack)
                     {
-                        self.needs_render = true;
+                        self.undo();
                     }
                 }
                 Action::Redo => {
@@ -568,9 +567,8 @@ impl PhotoApp {
                     )
                     .on_hover_text("Ctrl+Shift+Z")
                     .clicked()
-                        && self.history.redo(&mut self.stack)
                     {
-                        self.needs_render = true;
+                        self.redo();
                     }
                 }
                 Action::Sep => vsep(ui),

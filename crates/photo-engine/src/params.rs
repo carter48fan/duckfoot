@@ -586,6 +586,7 @@ impl PhotoStack {
             n.x = finite_or(n.x, 0.0).clamp(0.0, 1.0);
             n.y = finite_or(n.y, 0.0).clamp(0.0, 1.0);
         }
+        nodes.sort_by(|a, b| a.x.total_cmp(&b.x));
         if nodes.len() < 2 {
             *nodes = crate::curve::identity_nodes();
         }
