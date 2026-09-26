@@ -22,7 +22,8 @@ struct Adjust {
     gamma:      vec4<f32>,
     gain:       vec4<f32>,
     offset:     vec4<f32>,
-    flags:      vec4<u32>,   // x = enabled bitmask, y = 1 if the curve works on display values
+    flags:      vec4<u32>,   // x = enabled bitmask, y = 1 if the curve works on display values,
+                             // z = 1 to dither for an 8-bit target
     sizes:      vec4<f32>,   // xy = output size, zw = sensor size
     orient:     vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
     turns:      vec4<u32>,   // x = quarter turns clockwise
@@ -179,6 +180,21 @@ fn filmic(c: vec3<f32>) -> vec3<f32> {
 
 // The one and only transfer function in the pipeline. The render target is a plain
 // unorm format, so nothing else applies or removes a gamma — see OUTPUT_FORMAT.
+// The finished pixel: display-encoded, and for an 8-bit target dithered by up to half a
+// level either way, so a smooth gradient (a sky) lands on a fine mix of neighbouring levels
+// instead of visible steps. The noise (interleaved gradient noise) is fixed per output
+// pixel, so the preview at 1:1 and the export agree exactly, and has a mean of zero, so it
+// shifts no tone. A 16-bit target has levels to spare and is left alone.
+fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
+    var e = linear_to_srgb(clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0)));
+    if (u.flags.z == 1u) {
+        let p = floor(out_px);
+        let n = fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+        e = clamp(e + (n - 0.5) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return vec4<f32>(e, 1.0);
+}
+
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
     let hi = 1.055 * pow(max(c, vec3<f32>(0.0031308)), vec3<f32>(1.0 / 2.4)) - 0.055;
@@ -480,7 +496,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         if (norm_x < split_pos) {
             var bc = balanced(s, u.as_shot_wb.rgb);
             bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
-            return vec4<f32>(linear_to_srgb(clamp(bc, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+            return finish(bc, out_px);
         }
     }
 
@@ -600,5 +616,5 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         // saturated pink can legitimately clamp to (255, 0, 255).
         return vec4<f32>(1.0, 0.0, 1.0, 0.0);
     }
-    return vec4<f32>(linear_to_srgb(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+    return finish(c, out_px);
 }

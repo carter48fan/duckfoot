@@ -123,6 +123,7 @@ pub fn read_texture(
         queue,
         texture,
         (0, 0, size.width, size.height),
+        4,
         crate::engine::MAX_BAND_BYTES.min(device.limits().max_buffer_size),
     )
 }

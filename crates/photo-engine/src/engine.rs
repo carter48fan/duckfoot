@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, RasterImage};
-use crate::export::{padded_bytes_per_row, ExportedImage};
+use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::params::{Geometry, PhotoStack};
 use crate::temperature::WhiteScale;
@@ -24,6 +24,11 @@ use crate::temperature::WhiteScale;
 /// around it. So there is exactly one transfer function in the whole pipeline and it is
 /// written by hand at the end of adjust.wgsl.
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The target of a 16-bit export: half floats, which every WebGPU device can render to
+/// (16-bit unorm is an optional feature, missing on most phones). In 0..=1 that is at
+/// least 2048 levels per channel, eight times what 8-bit holds, before it is widened to
+/// 16-bit integers for the file.
+pub const DEEP_OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Linear camera RGB, half float, with the reconstructed-highlight neutral in alpha
 /// (demosaic_rb.wgsl). 16 bits is the point: 8 would quantise the headroom that makes
@@ -167,6 +172,15 @@ fn mip_count(width: u32, height: u32) -> u32 {
 }
 
 fn output_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    output_texture_as(device, width, height, OUTPUT_FORMAT)
+}
+
+fn output_texture_as(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("adjusted output"),
         size: wgpu::Extent3d {
@@ -177,7 +191,7 @@ fn output_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textu
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: OUTPUT_FORMAT,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC,
@@ -194,6 +208,8 @@ pub struct Engine {
     rb_pipeline: wgpu::RenderPipeline,
     rb_bgl: wgpu::BindGroupLayout,
     adjust_pipeline: wgpu::RenderPipeline,
+    /// The same shader into [`DEEP_OUTPUT_FORMAT`], for 16-bit export.
+    deep_adjust_pipeline: wgpu::RenderPipeline,
     adjust_bgl: wgpu::BindGroupLayout,
     adjust_buffer: wgpu::Buffer,
     mip_pipeline: wgpu::RenderPipeline,
@@ -573,6 +589,13 @@ impl Engine {
             fullscreen_pipeline(device, "demosaic rb", &rb_shader, &rb_bgl, SENSOR_FORMAT);
         let adjust_pipeline =
             fullscreen_pipeline(device, "adjust", &adjust_shader, &adjust_bgl, OUTPUT_FORMAT);
+        let deep_adjust_pipeline = fullscreen_pipeline(
+            device,
+            "adjust 16-bit",
+            &adjust_shader,
+            &adjust_bgl,
+            DEEP_OUTPUT_FORMAT,
+        );
 
         let uniform_buffer = |label| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -690,6 +713,7 @@ impl Engine {
             rb_pipeline,
             rb_bgl,
             adjust_pipeline,
+            deep_adjust_pipeline,
             adjust_bgl,
             adjust_buffer,
             mip_pipeline,
@@ -1051,6 +1075,61 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
     ) -> Result<ExportedImage> {
+        let (width, height, rgba) = self.render_export(device, queue, stack, false)?;
+        Ok(ExportedImage {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    /// [`Self::export`] at 16 bits per channel, undithered: for PNG and TIFF masters that
+    /// will be edited further, where 8 bits would band under a later curve.
+    pub fn export_16(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+    ) -> Result<ExportedImage<u16>> {
+        let (width, height, halves) = self.render_export(device, queue, stack, true)?;
+        let rgba = halves
+            .chunks_exact(2)
+            .map(|h| {
+                let v = half::f16::from_le_bytes([h[0], h[1]]).to_f32();
+                (v.clamp(0.0, 1.0) * 65535.0).round() as u16
+            })
+            .collect();
+        Ok(ExportedImage {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    /// [`Self::export`] at the depth `deep` asks for.
+    pub fn export_at(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        depth: crate::export::BitDepth,
+    ) -> Result<crate::export::Exported> {
+        use crate::export::{BitDepth, Exported};
+        Ok(match depth {
+            BitDepth::Eight => Exported::Eight(self.export(device, queue, stack)?),
+            BitDepth::Sixteen => Exported::Sixteen(self.export_16(device, queue, stack)?),
+        })
+    }
+
+    /// Render `stack` at full resolution and read back the crop, as tightly packed rows
+    /// of the target's own texels: RGBA8, or RGBA16F little-endian when `deep`.
+    fn render_export(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        deep: bool,
+    ) -> Result<(u32, u32, Vec<u8>)> {
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
@@ -1062,15 +1141,21 @@ impl Engine {
             .output_size(image.sensor_width, image.sensor_height);
         check_size(device, out_w, out_h)?;
         let sizes = ((out_w, out_h), (out_w, out_h), 0);
-        self.write_uniforms(queue, stack, None, sizes, true);
+        // 8-bit is dithered like the preview; 16-bit has no steps to hide.
+        self.write_uniforms(queue, stack, None, sizes, true, !deep);
 
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
+        let (format, pipeline) = if deep {
+            (DEEP_OUTPUT_FORMAT, &self.deep_adjust_pipeline)
+        } else {
+            (OUTPUT_FORMAT, &self.adjust_pipeline)
+        };
         // Rendered whole, once: the adjust pass reads neighbourhoods (clarity, dehaze,
         // sharpen), so it cannot be split into bands without seams. Only the copy is.
         let full = scoped(device, "export render", || {
-            let full = output_texture(device, out_w, out_h);
+            let full = output_texture_as(device, out_w, out_h, format);
             let bind = self.adjust_bind(device, &image.sensor_view, &self.export_buffer);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("export encoder"),
@@ -1078,7 +1163,7 @@ impl Engine {
             draw_fullscreen(
                 &mut encoder,
                 "export adjust pass",
-                &self.adjust_pipeline,
+                pipeline,
                 &bind,
                 &full.create_view(&Default::default()),
             );
@@ -1090,13 +1175,16 @@ impl Engine {
         // only the region the user framed. See `params::Crop` for why it is not in the shader.
         let rect = stack.geometry.crop.to_pixels(out_w, out_h);
         let (_, _, width, height) = rect;
-        let rgba = read_back(device, queue, &full, rect, self.export_band_bytes(device))?;
-
-        Ok(ExportedImage {
-            width,
-            height,
-            rgba,
-        })
+        let texel = format.block_copy_size(None).unwrap_or(4);
+        let pixels = read_back(
+            device,
+            queue,
+            &full,
+            rect,
+            texel,
+            self.export_band_bytes(device),
+        )?;
+        Ok((width, height, pixels))
     }
 
     /// Choose the preview resolution: 1/2^level of full, clamped to what the sensor mip
@@ -1187,7 +1275,14 @@ impl Engine {
         let target = image.preview_size();
         let level = image.preview_level;
         let out_size = (image.width, image.height);
-        self.write_uniforms(queue, stack, split_x, (out_size, target, level), false);
+        self.write_uniforms(
+            queue,
+            stack,
+            split_x,
+            (out_size, target, level),
+            false,
+            true,
+        );
         let Some(image) = &self.image else { return };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1246,6 +1341,7 @@ impl Engine {
         split_x: Option<f32>,
         (out_size, target, level): ((u32, u32), (u32, u32), u32),
         for_export: bool,
+        dither: bool,
     ) {
         let Some(image) = &self.image else { return };
 
@@ -1310,7 +1406,7 @@ impl Engine {
                 flags: [
                     stack.bitmask() | if self.nan_paint { NAN_PAINT } else { 0 },
                     (stack.curve_domain == crate::params::CurveDomain::Display) as u32,
-                    0,
+                    dither as u32,
                     0,
                 ],
                 sizes: [
@@ -1646,10 +1742,11 @@ pub(crate) fn read_back(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     (ox, oy, width, height): (u32, u32, u32, u32),
+    texel: u32,
     band_bytes: u64,
 ) -> Result<Vec<u8>> {
-    let stride = padded_bytes_per_row(width);
-    let row = width as usize * 4;
+    let stride = crate::export::padded_row_bytes(width, texel);
+    let row = (width * texel) as usize;
     // At least one row, whatever the limit: a row is never more than 64 KiB × 4.
     let band_rows = (band_bytes / stride as u64).clamp(1, height.max(1) as u64) as u32;
 

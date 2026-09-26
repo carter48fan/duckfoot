@@ -460,6 +460,8 @@ pub struct PhotoApp {
     /// The desktop inspector's Looks band is open.
     pub looks_open: bool,
     pub batch_output_dir: Option<PathBuf>,
+    /// How the single export writes: format, quality, size, depth, sharpening, metadata.
+    pub export_settings: photo_engine::ExportSettings,
     pub color_eq_tab: ColorEqTab,
     /// File pickers and storage locations, supplied by the bootstrap.
     platform: Box<dyn platform::Platform>,
@@ -609,6 +611,7 @@ impl PhotoApp {
             presets_view: compact::PresetsView::default(),
             looks_open: false,
             batch_output_dir: None,
+            export_settings: photo_engine::ExportSettings::new(photo_engine::ExportFormat::Jpeg),
             color_eq_tab: ColorEqTab::default(),
             platform,
             select_mode: false,
@@ -660,6 +663,9 @@ impl PhotoApp {
         }
         if let Some(pattern) = s.rename_pattern {
             self.batch_renamer.pattern = pattern;
+        }
+        if let Some(export) = s.export {
+            self.export_settings = export;
         }
         if let Some(filter) = s.filter {
             self.filter = filter;
