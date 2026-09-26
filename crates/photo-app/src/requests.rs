@@ -57,7 +57,10 @@ impl PhotoApp {
                 }
                 platform::Response::ExportImage(path) => {
                     self.settings.export_dir = path.parent().map(Path::to_path_buf);
-                    self.settings.export_format = photo_engine::ExportFormat::from_path(&path).ok();
+                    if let Ok(format) = photo_engine::ExportFormat::from_path(&path) {
+                        self.export_settings.format = format;
+                    }
+                    self.settings.export = Some(self.export_settings);
                     self.save_settings();
                     self.export_to(gpu, path);
                 }

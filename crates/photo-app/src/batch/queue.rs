@@ -282,23 +282,14 @@ fn process_single_job(
         engine.load(device, queue, cfa)?;
     }
 
-    // 2. Full-resolution export from shader pipeline (Invariant 2)
-    let exported = engine.export(device, queue, &job.stack)?;
+    // 2. Full-resolution export from shader pipeline (Invariant 2), at the recipe's depth.
+    let settings = &job.recipe.settings;
+    let exported = engine.export_at(device, queue, &job.stack, settings.effective_depth())?;
 
-    // 3. Size it and encode it, through the same encoder the single export uses.
-    let (w, h) = job
-        .recipe
-        .sizing
-        .calculate_size(exported.width, exported.height);
-    let exported = exported.resized(w, h)?;
+    // 3. Size, sharpen and encode it, through the same path the single export uses.
     if let Some(parent) = job.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    exported.write(
-        &job.output_path,
-        &photo_engine::EncodeOptions {
-            format: job.recipe.format,
-            quality: job.recipe.quality,
-        },
-    )
+    let info = photo_engine::read_info(&job.source_path);
+    exported.save(&job.output_path, settings, info.as_ref())
 }

@@ -10,9 +10,11 @@
 pub mod curve;
 pub mod decode;
 pub mod engine;
+pub mod exif_out;
 pub mod export;
 pub mod fsio;
 pub mod histogram;
+pub mod icc;
 pub mod metadata;
 pub mod params;
 pub mod preview;
@@ -30,7 +32,11 @@ pub use engine::{
     upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
     OUTPUT_FORMAT,
 };
-pub use export::{EncodeOptions, ExportFormat, ExportedImage, JPEG_QUALITY};
+pub use exif_out::MetadataPolicy;
+pub use export::{
+    BitDepth, ExportFormat, ExportSettings, Exported, ExportedImage, Resize, SharpenAmount,
+    SharpenFor, JPEG_QUALITY,
+};
 pub use histogram::Histogram;
 pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{

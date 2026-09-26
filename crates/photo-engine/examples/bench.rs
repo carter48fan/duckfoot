@@ -208,7 +208,7 @@ fn main() -> anyhow::Result<()> {
 
     let out = std::env::temp_dir().join("duckfoot-bench-export.png");
     let t = Instant::now();
-    exported.write(&out, &photo_engine::EncodeOptions::for_path(&out)?)?;
+    exported.write(&out, &photo_engine::ExportSettings::for_path(&out)?, None)?;
     println!(
         "png encode+write {:.0} ms   {}",
         t.elapsed().as_secs_f64() * 1000.0,

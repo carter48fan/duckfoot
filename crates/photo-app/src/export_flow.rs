@@ -7,7 +7,21 @@ impl PhotoApp {
     pub(crate) fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
         // Renders the current stack at full resolution, whatever the preview is at, and
         // never with the split.
-        let exported = match self.engine.export(gpu.device, gpu.queue, &self.stack) {
+        let settings = photo_engine::ExportSettings {
+            format: match photo_engine::ExportFormat::from_path(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.export = Export::Failed(format!("{e:#}"));
+                    return;
+                }
+            },
+            ..self.export_settings
+        };
+        let depth = settings.effective_depth();
+        let exported = match self
+            .engine
+            .export_at(gpu.device, gpu.queue, &self.stack, depth)
+        {
             Ok(e) => e,
             Err(e) => {
                 self.export = Export::Failed(format!("{e:#}"));
@@ -17,9 +31,11 @@ impl PhotoApp {
 
         let (tx, rx) = mpsc::channel();
         let target = path.clone();
+        let source = self.loaded_path.clone();
         std::thread::spawn(move || {
-            let outcome = photo_engine::EncodeOptions::for_path(&target)
-                .and_then(|options| exported.write(&target, &options))
+            let info = source.as_deref().and_then(photo_engine::read_info);
+            let outcome = exported
+                .save(&target, &settings, info.as_ref())
                 .map_err(|e| format!("{e:#}"));
             // The receiver is gone only if the app is shutting down; nothing to report to.
             let _ = tx.send(outcome);
@@ -37,11 +53,7 @@ impl PhotoApp {
     /// Default filename beside the source: DSC08450.ARW -> DSC08450.jpg. JPEG at the export
     /// quality: what a photo is shared as, at a tenth of a PNG's size.
     pub(crate) fn export_suggestion(&self) -> (PathBuf, String) {
-        let ext = self
-            .settings
-            .export_format
-            .unwrap_or(photo_engine::ExportFormat::Jpeg)
-            .extension();
+        let ext = self.export_settings.format.extension();
         match &self.loaded_path {
             Some(src) => {
                 let stem = src
@@ -218,7 +230,7 @@ impl PhotoApp {
                 for recipe in &mut self.export_recipes {
                     ui.horizontal(|ui| {
                         widgets::checkbox(ui, &mut recipe.enabled);
-                        let fmt_tag = recipe.format.label();
+                        let fmt_tag = recipe.settings.format.label();
                         ui.label(
                             RichText::new(format!("[{fmt_tag}]"))
                                 .family(theme::mono_bold())
@@ -439,7 +451,7 @@ impl PhotoApp {
                     camera_model: info.as_ref().map(|i| i.model.as_str()),
                     rating,
                     custom_text: "",
-                    target_extension: recipe.format.extension(),
+                    target_extension: recipe.settings.format.extension(),
                     date: date.as_deref(),
                 };
 

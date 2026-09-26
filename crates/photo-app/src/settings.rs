@@ -31,7 +31,8 @@ pub struct Settings {
     pub import_dir: Option<PathBuf>,
     /// Where, and as what, the last single export was written.
     pub export_dir: Option<PathBuf>,
-    pub export_format: Option<photo_engine::ExportFormat>,
+    /// The single export's settings, as last used.
+    pub export: Option<photo_engine::ExportSettings>,
     pub batch_output_dir: Option<PathBuf>,
     /// The shelf's filter and sort (the search is not kept).
     pub filter: Option<crate::dam::FilterState>,
@@ -53,7 +54,7 @@ impl Default for Settings {
             rename_pattern: None,
             import_dir: None,
             export_dir: None,
-            export_format: None,
+            export: None,
             batch_output_dir: None,
             filter: None,
         }

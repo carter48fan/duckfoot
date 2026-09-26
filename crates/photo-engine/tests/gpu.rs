@@ -131,7 +131,7 @@ fn export_equals_preview_at_level_0() {
 }
 
 #[test]
-fn a_flat_field_fills_exactly_one_histogram_bin() {
+fn a_flat_field_fills_the_histogram_bins_the_file_holds() {
     let gpu = gpu_or_skip!();
     let mut engine = Engine::new(&gpu.device);
     engine
@@ -150,21 +150,46 @@ fn a_flat_field_fills_exactly_one_histogram_bin() {
         }
     }
     let hist = engine.histogram().clone();
-    let value = engine.export(&gpu.device, &gpu.queue, &stack).unwrap().rgba[1] as usize;
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
 
-    for (name, bins) in [
+    // The 8-bit output is dithered, so a level between two codes is a mix of both: the
+    // histogram shows exactly that mix, no more and no less.
+    for (c, (name, bins)) in [
         ("red", &hist.red),
         ("green", &hist.green),
         ("blue", &hist.blue),
-        ("luma", &hist.luma),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut want = vec![0u32; bins.len()];
+        for p in out.rgba.chunks_exact(4) {
+            want[p[c] as usize] += 1;
+        }
         let populated: Vec<usize> = (0..bins.len()).filter(|&i| bins[i] > 0).collect();
-        assert_eq!(
-            populated,
-            vec![value],
-            "{name}: a uniform frame of {value} filled bins {populated:?}"
+        assert!(
+            populated.len() <= 2 && populated.windows(2).all(|w| w[1] == w[0] + 1),
+            "{name}: a uniform frame filled bins {populated:?}"
         );
+        // The scope samples the preview, not every pixel of the file: the mix, not the
+        // counts, is what must agree.
+        let (total, file_total) = (
+            bins.iter().sum::<u32>() as f32,
+            want.iter().sum::<u32>() as f32,
+        );
+        for i in 0..bins.len() {
+            let (a, b) = (bins[i] as f32 / total, want[i] as f32 / file_total);
+            assert!(
+                (a - b).abs() < 0.1,
+                "{name}: bin {i} holds {a:.3} of the scope but {b:.3} of the file"
+            );
+        }
     }
+    let luma: Vec<usize> = (0..hist.luma.len()).filter(|&i| hist.luma[i] > 0).collect();
+    assert!(
+        luma.len() <= 3,
+        "luma of a uniform frame spread over {luma:?}"
+    );
 }
 
 /// Rows `y0..y0+h`, columns `x0..x0+w` of a tightly packed RGBA8 image `width` wide.
@@ -694,4 +719,71 @@ fn a_uniform_colour_is_uniform_out_to_the_frame_edge() {
             assert!(off <= 1, "({x}, {y}) is {px:?}, the centre {centre:?}");
         }
     }
+}
+
+#[test]
+fn a_16_bit_export_keeps_the_levels_an_8_bit_one_rounds_away() {
+    let gpu = gpu_or_skip!();
+    // A slow ramp: 2048 px across a stop and a half of shadows and mid-tones.
+    let (w, h) = (2048u32, 8u32);
+    let cfa = testkit::cfa_from_fn(w, h, |x, _| {
+        let v = 0.05 + 0.25 * x as f32 / w as f32;
+        [v, v, v]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let stack = PhotoStack::default();
+    let deep = engine.export_16(&gpu.device, &gpu.queue, &stack).unwrap();
+    let eight = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert_eq!((deep.width, deep.height), (eight.width, eight.height));
+
+    let row = h / 2;
+    let levels = |px: &[u16]| {
+        (0..w)
+            .map(|x| px[((row * w + x) * 4 + 1) as usize])
+            .collect::<std::collections::BTreeSet<u16>>()
+            .len()
+    };
+    let deep_levels = levels(&deep.rgba);
+    let eight_levels = (0..w)
+        .map(|x| eight.rgba[((row * w + x) * 4 + 1) as usize])
+        .collect::<std::collections::BTreeSet<u8>>()
+        .len();
+    assert!(
+        deep_levels > 4 * eight_levels,
+        "16-bit held {deep_levels} levels, 8-bit {eight_levels}"
+    );
+    // The same picture: the 8-bit one is the 16-bit one rounded, give or take the dither.
+    let worst = deep
+        .rgba
+        .iter()
+        .zip(&eight.rgba)
+        .map(|(&d, &e)| (d as f32 / 257.0 - e as f32).abs())
+        .fold(0.0f32, f32::max);
+    // Half a level of dither, half of rounding, and the half-float's own step.
+    assert!(worst <= 1.15, "8-bit strays {worst} levels from 16-bit");
+}
+
+#[test]
+fn the_dither_shifts_no_tone() {
+    let gpu = gpu_or_skip!();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(256, 256, 0.21))
+        .unwrap();
+    let stack = PhotoStack::default();
+    let eight = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let deep = engine.export_16(&gpu.device, &gpu.queue, &stack).unwrap();
+    let mean8 = eight.rgba.chunks_exact(4).map(|p| p[1] as f64).sum::<f64>()
+        / (eight.rgba.len() / 4) as f64;
+    let mean16 = deep
+        .rgba
+        .chunks_exact(4)
+        .map(|p| p[1] as f64 / 257.0)
+        .sum::<f64>()
+        / (deep.rgba.len() / 4) as f64;
+    assert!(
+        (mean8 - mean16).abs() < 0.1,
+        "dithered mean {mean8:.3} against the true level {mean16:.3}"
+    );
 }
