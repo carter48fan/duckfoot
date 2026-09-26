@@ -98,16 +98,59 @@ fn curve(v: f32) -> f32 {
     return mix(lut_at(i), lut_at(i + 1), p - floor(p));
 }
 
-fn filmic_channel(v: f32) -> f32 {
-    if (v <= 0.0) {
-        return 0.0;
+// Mid grey, and what the display shows it as with filmic off: sRGB-encoded 0.18, 118/255.
+const MID_GREY: f32 = 0.18;
+const MID_GREY_DISPLAY: f32 = 0.46135;
+
+fn sigmoid(x: f32) -> f32 {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+fn srgb_to_linear1(v: f32) -> f32 {
+    if (v <= 0.04045) {
+        return v / 12.92;
     }
-    let white = exp2(u.filmic.x);
-    let black = exp2(u.filmic.y);
-    let latitude = max(u.filmic.z / 100.0, 0.01);
-    let log_range = max(log2(white / black), 0.001);
-    let norm = (log2(v / black) / log_range - 0.5) * u.filmic.w;
-    return clamp(1.0 / (1.0 + exp(-norm / latitude)), 0.0, 1.0);
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+// Filmic: a sigmoid across the scene's range in stops, black_ev..white_ev, onto the display.
+//
+// The curve is shaped in display terms and its result is decoded back to linear light, so
+// the `linear_to_srgb` at the end of the chain stays the only encode. Treating the display
+// value as linear — as this used to — encoded it twice: mid grey showed at 184/255 and
+// black_ev at 69, the flat grey look that was blamed on latitude.
+//
+// Normalised so black_ev lands exactly on 0 and white_ev on 1, then bent by an output power
+// so that mid grey lands where it does with filmic off. Contrast and latitude shape the S
+// around it; they no longer move it.
+fn filmic_curve(v: f32) -> f32 {
+    let black_ev = u.filmic.y;
+    let range = max(u.filmic.x - black_ev, 0.01);
+    // Steepness: contrast over latitude (a percentage of the range), as before.
+    let k = max(u.filmic.w, 0.01) / max(u.filmic.z / 100.0, 0.01);
+
+    // Centred on mid grey, so contrast is symmetric about it.
+    let x_grey = clamp((log2(MID_GREY) - black_ev) / range, 0.001, 0.999);
+    let s0 = sigmoid(-k * x_grey);
+    let s1 = sigmoid(k * (1.0 - x_grey));
+    let span = max(s1 - s0, 1e-6);
+
+    let x = clamp((log2(max(v, 1e-10)) - black_ev) / range, 0.0, 1.0);
+    let y = clamp((sigmoid(k * (x - x_grey)) - s0) / span, 0.0, 1.0);
+    let y_grey = clamp((0.5 - s0) / span, 1e-4, 1.0 - 1e-4);
+    let power = clamp(log2(MID_GREY_DISPLAY) / log2(y_grey), 0.2, 5.0);
+    return srgb_to_linear1(pow(max(y, 1e-7), power));
+}
+
+// Filmic on the pixel's brightness, not on each channel: the curve maps max(R, G, B) and all
+// three channels scale by the same ratio. Per channel, a saturated highlight's channels were
+// compressed by different amounts and its hue slid toward the nearest primary.
+fn filmic(c: vec3<f32>) -> vec3<f32> {
+    let norm = max(c.r, max(c.g, c.b));
+    if (norm <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    return c * (filmic_curve(norm) / norm);
 }
 
 // The one and only transfer function in the pipeline. The render target is a plain
@@ -477,7 +520,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_FILMIC)) {
-        c = vec3<f32>(filmic_channel(c.r), filmic_channel(c.g), filmic_channel(c.b));
+        c = filmic(c);
     }
 
     if (enabled(FLAG_COLOR_EQ)) {
