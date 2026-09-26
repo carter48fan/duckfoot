@@ -117,34 +117,21 @@ impl PhotoApp {
             });
     }
 
-    /// "JPEG · PNG · TIFF · WEBP · 8-BIT · sRGB ···· 6048 × 4024": what an export writes.
-    pub(crate) fn export_format_line(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            // Not `theme::tag`: that uppercases, and it is sRGB, not SRGB.
-            ui.label(
-                RichText::new("JPEG · PNG · TIFF · WEBP · 8-BIT · sRGB")
-                    .family(theme::mono_bold())
-                    .size(10.5)
-                    .extra_letter_spacing(0.3)
-                    .color(theme::TEXT),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(image) = self.ready_image() {
-                    let (_, _, w, h) = self
-                        .stack
-                        .geometry
-                        .crop
-                        .sanitised()
-                        .to_pixels(image.width, image.height);
-                    ui.label(
-                        RichText::new(format!("{w} × {h}"))
-                            .family(theme::mono_bold())
-                            .size(11.5)
-                            .color(theme::ACCENT),
-                    );
-                }
-            });
-        });
+    /// What an export will write, as the Export settings stand: "2048 × 1365 · JPEG q85 ·
+    /// 8-bit sRGB · …". A click opens the settings.
+    pub(crate) fn export_format_line(&mut self, ui: &mut egui::Ui) {
+        let text = crate::export_ui::summary(&self.export_settings, self.export_source_size());
+        let mut job = egui::text::LayoutJob::single_section(
+            text.clone(),
+            egui::TextFormat::simple(FontId::new(10.5, theme::mono_bold()), theme::TEXT),
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+        let r = ui
+            .add(egui::Label::new(job).sense(Sense::click()))
+            .on_hover_text(format!("{text}\nClick to change (Ctrl+E)"));
+        if r.clicked() {
+            self.export_dialog_open = true;
+        }
     }
 
     /// SAVE SIDECAR and REVERT, filling the width.

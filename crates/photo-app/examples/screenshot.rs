@@ -123,6 +123,11 @@ fn main() -> anyhow::Result<()> {
     app.shortcuts_open = std::env::var_os("DUCKFOOT_SHOT_SHORTCUTS").is_some();
     // DUCKFOOT_SHOT_LOOKS=1: the desktop inspector's Looks band open.
     app.looks_open = std::env::var_os("DUCKFOOT_SHOT_LOOKS").is_some();
+    // DUCKFOOT_SHOT_EXPORT=1: the Export dialog (desktop) or its options (phone).
+    if std::env::var_os("DUCKFOOT_SHOT_EXPORT").is_some() {
+        app.export_dialog_open = true;
+        app.export_options_open = true;
+    }
     // Let the layout, the render and the histogram readback settle.
     for _ in 0..8 {
         frame(&mut app);

@@ -18,6 +18,8 @@ impl PhotoApp {
                 self.cancel_crop();
             } else if self.batch_dialog_open {
                 self.batch_dialog_open = false;
+            } else if self.export_dialog_open {
+                self.export_dialog_open = false;
             } else if self.customize_open {
                 self.customize_open = false;
             } else if self.select_mode {
@@ -65,7 +67,23 @@ impl PhotoApp {
             return;
         }
         // Nor behind a dialog, where they would change the photo out of sight.
+        if self.export_dialog_open {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.export_dialog_open = false;
+            }
+            return;
+        }
         if self.batch_dialog_open {
+            return;
+        }
+        if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::E))
+            && self.ready_image().is_some()
+        {
+            if self.layout.is_compact() {
+                self.compact_tab = Some(compact::Tab::Export);
+            } else {
+                self.export_dialog_open = true;
+            }
             return;
         }
         let (prev, next) = ctx.input(|i| {

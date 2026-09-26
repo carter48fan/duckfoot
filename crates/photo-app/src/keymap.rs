@@ -61,6 +61,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Ctrl+S`",
         "save now (edits also save on their own)",
     ),
+    s(
+        Photos,
+        "`Ctrl+E`",
+        "export this photo: size, format, metadata, then where",
+    ),
     s(Photos, "`Ctrl+Shift+E`", "batch export the selection"),
     s(
         Editing,

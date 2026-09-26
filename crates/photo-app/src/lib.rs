@@ -18,6 +18,7 @@ pub mod widgets;
 mod curve_editor;
 mod desktop;
 mod export_flow;
+mod export_ui;
 mod icons;
 mod inspector;
 mod keymap;
@@ -451,6 +452,12 @@ pub struct PhotoApp {
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
+    /// The desktop Export dialog.
+    pub export_dialog_open: bool,
+    /// The phone Export sheet's settings, unfolded.
+    pub export_options_open: bool,
+    /// The batch recipe being edited, by index.
+    pub(crate) editing_recipe: Option<usize>,
     /// The photo open before this one, for "Same as previous".
     pub(crate) previous_photo: Option<PathBuf>,
     /// The snapshot last deleted, the photo it belonged to and where it stood.
@@ -606,6 +613,9 @@ impl PhotoApp {
             )),
             batch_dialog_open: false,
             shortcuts_open: false,
+            export_dialog_open: false,
+            export_options_open: false,
+            editing_recipe: None,
             previous_photo: None,
             deleted_snapshot: None,
             presets_view: compact::PresetsView::default(),
@@ -697,6 +707,7 @@ impl PhotoApp {
         s.export_recipes = Some(self.export_recipes.clone());
         s.rename_pattern = Some(self.batch_renamer.pattern.clone());
         s.filter = Some(self.filter.clone());
+        s.export = Some(self.export_settings);
         s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
         s.last_open = self.loaded_path.clone();
         self.save_settings();
@@ -979,6 +990,7 @@ impl PhotoApp {
             self.stage_toolbar(ui);
             self.workspace(ui);
             self.batch_export_dialog(ui);
+            self.export_dialog(&ctx);
             self.shortcuts_overlay(&ctx);
         }
         if let Some(dir) = self.pending_step.take() {

@@ -227,12 +227,14 @@ impl PhotoApp {
                     .color(theme::TEXT_FAINT),
                 );
 
-                for recipe in &mut self.export_recipes {
+                let mut duplicate = None;
+                let mut delete = None;
+                for (i, recipe) in self.export_recipes.iter_mut().enumerate() {
+                    let editing = self.editing_recipe == Some(i);
                     ui.horizontal(|ui| {
                         widgets::checkbox(ui, &mut recipe.enabled);
-                        let fmt_tag = recipe.settings.format.label();
                         ui.label(
-                            RichText::new(format!("[{fmt_tag}]"))
+                            RichText::new(format!("[{}]", recipe.settings.format.label()))
                                 .family(theme::mono_bold())
                                 .color(theme::ACCENT),
                         );
@@ -248,8 +250,87 @@ impl PhotoApp {
                                     .color(theme::TEXT_FAINT),
                             );
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::chip(ui, editing, if editing { "done" } else { "edit" })
+                                .clicked()
+                            {
+                                self.editing_recipe = if editing { None } else { Some(i) };
+                            }
+                        });
                     });
+                    if editing {
+                        egui::Frame::new()
+                            .fill(theme::BG_925)
+                            .stroke(Stroke::new(1.0, theme::BORDER))
+                            .corner_radius(theme::RADIUS)
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(theme::dim("name"));
+                                    ui.text_edit_singleline(&mut recipe.name);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(theme::dim("subfolder"));
+                                    let mut sub = recipe.subfolder.clone().unwrap_or_default();
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut sub)
+                                                .hint_text("none: straight into the folder"),
+                                        )
+                                        .changed()
+                                    {
+                                        // Kept as typed; made one safe folder name where
+                                        // the batch builds the path.
+                                        recipe.subfolder = (!sub.trim().is_empty()).then_some(sub);
+                                    }
+                                });
+                                crate::export_ui::settings_editor(ui, &mut recipe.settings, None);
+                                ui.horizontal(|ui| {
+                                    if widgets::button(ui, Kind::Secondary, "Duplicate", 0.0)
+                                        .clicked()
+                                    {
+                                        duplicate = Some(i);
+                                    }
+                                    if widgets::button(ui, Kind::Secondary, "Delete", 0.0)
+                                        .clicked()
+                                    {
+                                        delete = Some(i);
+                                    }
+                                });
+                            });
+                    }
                 }
+                if let Some(i) = duplicate {
+                    let mut copy = self.export_recipes[i].clone();
+                    copy.id = format!("{}_copy_{}", copy.id, self.export_recipes.len());
+                    copy.name = format!("{} (copy)", copy.name);
+                    self.export_recipes.insert(i + 1, copy);
+                    self.editing_recipe = Some(i + 1);
+                }
+                if let Some(i) = delete {
+                    self.export_recipes.remove(i);
+                    self.editing_recipe = None;
+                }
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, Kind::Secondary, "+ New recipe", 0.0).clicked() {
+                        let n = self.export_recipes.len();
+                        self.export_recipes.push(batch::ExportRecipe {
+                            id: format!("recipe_{n}"),
+                            name: format!("Recipe {}", n + 1),
+                            enabled: true,
+                            settings: self.export_settings,
+                            subfolder: None,
+                        });
+                        self.editing_recipe = Some(n);
+                    }
+                    if widgets::button(ui, Kind::Secondary, "Reset recipes", 0.0)
+                        .on_hover_text("Back to the four built-in recipes")
+                        .clicked()
+                    {
+                        self.export_recipes = batch::ExportRecipe::default_recipes();
+                        self.editing_recipe = None;
+                    }
+                });
 
                 ui.separator();
 

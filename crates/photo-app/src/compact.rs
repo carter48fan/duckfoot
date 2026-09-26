@@ -1256,7 +1256,24 @@ impl PhotoApp {
     fn export_sheet(&mut self, ui: &mut egui::Ui) {
         self.edits_block(ui);
         ui.add_space(8.0);
-        self.export_format_line(ui);
+        // What the export will be, and the settings behind it a tap away.
+        let source = self.export_source_size();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(crate::export_ui::summary(&self.export_settings, source))
+                    .family(theme::mono_bold())
+                    .size(11.0)
+                    .color(theme::ACCENT),
+            );
+            if widgets::chip(ui, self.export_options_open, "options").clicked() {
+                self.export_options_open = !self.export_options_open;
+            }
+        });
+        if self.export_options_open {
+            let mut settings = self.export_settings;
+            crate::export_ui::settings_editor(ui, &mut settings, source);
+            self.export_settings = settings;
+        }
         let busy = matches!(self.export, Export::Writing { .. });
         let ready = self.ready_image().is_some() && !busy;
         let width = ui.available_width();
