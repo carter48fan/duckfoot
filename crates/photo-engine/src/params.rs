@@ -414,6 +414,25 @@ impl<T: Default> Default for Module<T> {
     }
 }
 
+/// What the tone curve's axes measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CurveDomain {
+    /// Linear scene light, where mid grey sits at 0.18 and half the curve's width is the
+    /// top stop and a half. How curves worked before the display domain; a sidecar
+    /// without the field was made this way and keeps it, so its look does not change.
+    Linear,
+    /// Display-encoded values (sRGB), where mid grey sits near the middle and the axes
+    /// line up with the histogram drawn under the curve. Every new edit uses this.
+    #[default]
+    Display,
+}
+
+impl CurveDomain {
+    fn legacy() -> Self {
+        Self::Linear
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhotoStack {
     /// Not a `Module`: there is no meaningful "disabled" state for orientation, and a
@@ -424,6 +443,8 @@ pub struct PhotoStack {
     #[serde(default)]
     pub tonal: Module<Tonal>,
     pub tone_curve: Module<Vec<CurveNode>>,
+    #[serde(default = "CurveDomain::legacy")]
+    pub curve_domain: CurveDomain,
     pub filmic: Module<Filmic>,
     pub color_balance: Module<ColorBalance>,
     #[serde(default)]
@@ -454,6 +475,7 @@ impl Default for PhotoStack {
             exposure: Module::new(true, Exposure::default()),
             tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
+            curve_domain: CurveDomain::Display,
             filmic: Module::new(
                 false,
                 Filmic {
@@ -771,5 +793,14 @@ mod tests {
         assert_eq!(deserialized.ev, 1.5);
         assert_eq!(deserialized.mode, ExposureMode::ClassicLinear);
         assert_eq!(deserialized.rolloff, 0.0);
+    }
+
+    #[test]
+    fn curves_saved_before_the_display_domain_stay_linear() {
+        let mut json = serde_json::to_value(PhotoStack::default()).unwrap();
+        json.as_object_mut().unwrap().remove("curve_domain");
+        let old: PhotoStack = serde_json::from_value(json).unwrap();
+        assert_eq!(old.curve_domain, CurveDomain::Linear);
+        assert_eq!(PhotoStack::default().curve_domain, CurveDomain::Display);
     }
 }

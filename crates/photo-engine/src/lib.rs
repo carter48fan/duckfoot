@@ -32,8 +32,8 @@ pub use engine::{
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
 pub use params::{
-    Clarity, ColorBalance, ColorBand, ColorEq, Crop, Dehaze, Exposure, ExposureMode, Filmic,
-    Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
+    Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Exposure, ExposureMode,
+    Filmic, Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
 };
 pub use preview::{
     decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
