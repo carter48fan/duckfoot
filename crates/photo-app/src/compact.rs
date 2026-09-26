@@ -1106,6 +1106,63 @@ impl PhotoApp {
         }
     }
 
+    /// Where this photo's edits stand, and what can be done to them as a whole: the
+    /// phone's counterpart of the desktop's sidecar footer and filmstrip actions.
+    fn edits_block(&mut self, ui: &mut egui::Ui) {
+        use widgets::button_enabled as button;
+        let editable = self.can_edit();
+        let (text, colour) = if !editable {
+            ("no photo to edit".to_string(), theme::TEXT_FAINT)
+        } else if self.sidecar_locked {
+            ("edits here are not being saved".to_string(), theme::DANGER)
+        } else if self.saved_stack.is_some() || self.is_stack_edited() {
+            ("edits save automatically".to_string(), theme::TEXT_DIM)
+        } else {
+            ("no edits yet".to_string(), theme::TEXT_FAINT)
+        };
+        ui.label(
+            RichText::new(text)
+                .family(theme::mono_bold())
+                .size(11.5)
+                .color(colour),
+        );
+        ui.add_space(4.0);
+        let has_saved = self.saved_stack.is_some();
+        let has_clip = self.clipboard_stack.is_some();
+        ui.horizontal_wrapped(|ui| {
+            if button(ui, editable && has_saved, Kind::Secondary, "Revert", 0.0).clicked() {
+                self.revert_to_sidecar();
+            }
+            if button(ui, editable, Kind::Secondary, "Reset all", 0.0).clicked() {
+                self.reset_to_default();
+            }
+            if button(ui, editable, Kind::Secondary, "Copy look", 0.0).clicked() {
+                self.copy_adjustments();
+            }
+            if button(ui, editable && has_clip, Kind::Secondary, "Paste", 0.0).clicked() {
+                self.paste_adjustments();
+            }
+            if self.can_undo_paste_to_all() {
+                if button(ui, true, Kind::Secondary, "Undo paste", 0.0).clicked() {
+                    self.undo_paste_to_all();
+                }
+            } else {
+                let label = format!("Paste to all {}", self.shelf.len());
+                if button(
+                    ui,
+                    has_clip && !self.shelf.is_empty(),
+                    Kind::Secondary,
+                    &label,
+                    0.0,
+                )
+                .clicked()
+                {
+                    self.paste_to_all_in_shelf();
+                }
+            }
+        });
+    }
+
     /// A quarter turn from the Edit strip, as one undo step.
     fn quick_turn(&mut self, clockwise: bool) {
         if clockwise {
@@ -1118,6 +1175,8 @@ impl PhotoApp {
     // ── Export ──────────────────────────────────────────────────────────────────────────
 
     fn export_sheet(&mut self, ui: &mut egui::Ui) {
+        self.edits_block(ui);
+        ui.add_space(8.0);
         self.export_format_line(ui);
         let busy = matches!(self.export, Export::Writing { .. });
         let ready = self.ready_image().is_some() && !busy;

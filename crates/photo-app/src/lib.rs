@@ -1767,7 +1767,8 @@ impl PhotoApp {
             return;
         }
         let started = Instant::now();
-        let split_x = if self.split_active {
+        // Framing a crop shows the whole frame with no divider, so no split either.
+        let split_x = if self.split_active && !self.cropping {
             Some(self.split_pos)
         } else {
             None
@@ -1902,7 +1903,10 @@ impl PhotoApp {
                 i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z),
             )
         });
-        if undo && self.history.undo(&mut self.stack) {
+        if undo && self.cropping {
+            // Mid-framing, undo means "not this framing": the steps before it stay.
+            self.cancel_crop();
+        } else if undo && self.history.undo(&mut self.stack) {
             self.needs_render = true;
         }
         if redo && self.history.redo(&mut self.stack) {
