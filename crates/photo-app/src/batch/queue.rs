@@ -3,7 +3,7 @@
 //! Processes multi-export recipes and batch rendering off the UI thread
 //! using an independent Engine instance on cloned wgpu device/queue handles.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -307,35 +307,30 @@ fn encode_and_save(
     path: &Path,
     recipe: &ExportRecipe,
 ) -> anyhow::Result<()> {
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-
-    match recipe.format {
-        ExportImageFormat::Jpeg => {
-            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut writer,
-                recipe.quality.clamp(1, 100),
-            );
-            encoder.encode(
-                &rgb,
-                rgb.width(),
-                rgb.height(),
-                image::ExtendedColorType::Rgb8,
-            )?;
+    use std::io::Write;
+    // Written beside the target and renamed over it: a cancelled or crashed batch never
+    // leaves a truncated file under a finished file's name.
+    photo_engine::fsio::atomic_write(path, |file| {
+        let mut writer = BufWriter::new(file);
+        match recipe.format {
+            ExportImageFormat::Jpeg => {
+                // The encoder reads each pixel as RGB and drops the (opaque) alpha, so no
+                // RGB copy of the frame is made.
+                image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    &mut writer,
+                    recipe.quality.clamp(1, 100),
+                )
+                .encode_image(img)?;
+            }
+            ExportImageFormat::Png => img.write_to(&mut writer, image::ImageFormat::Png)?,
+            ExportImageFormat::Tiff => img.write_to(&mut writer, image::ImageFormat::Tiff)?,
+            ExportImageFormat::Webp => {
+                // Lossless: the `image` crate has no lossy WebP encoder.
+                let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+                rgb.write_to(&mut writer, image::ImageFormat::WebP)?;
+            }
         }
-        ExportImageFormat::Png => {
-            img.write_to(&mut writer, image::ImageFormat::Png)?;
-        }
-        ExportImageFormat::Tiff => {
-            img.write_to(&mut writer, image::ImageFormat::Tiff)?;
-        }
-        ExportImageFormat::Webp => {
-            // image 0.25 supports WebP encoding
-            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-            rgb.write_to(&mut writer, image::ImageFormat::WebP)?;
-        }
-    }
-
-    Ok(())
+        writer.flush()?;
+        Ok(())
+    })
 }

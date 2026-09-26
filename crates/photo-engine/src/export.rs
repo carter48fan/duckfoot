@@ -7,7 +7,6 @@
 //!
 //! This is also the only sanctioned GPU→CPU readback outside the scopes (invariant 4).
 
-use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
@@ -71,12 +70,15 @@ impl ExportedImage {
     pub fn write(&self, path: &Path) -> Result<()> {
         let format = ExportFormat::from_path(path)?;
         self.check_size()?;
-        let file =
-            File::create(path).with_context(|| format!("{}: could not create", path.display()))?;
-        let mut out = BufWriter::new(file);
-        self.encode(format, &mut out)
-            .and_then(|()| out.flush().map_err(Into::into))
-            .with_context(|| format!("writing {}", path.display()))
+        // Beside the target and renamed over it once complete: a full disk or a crash
+        // mid-encode leaves any earlier export of the same name intact, never half of one.
+        crate::fsio::atomic_write(path, |file| {
+            let mut out = BufWriter::new(file);
+            self.encode(format, &mut out)?;
+            out.flush()?;
+            Ok(())
+        })
+        .with_context(|| format!("writing {}", path.display()))
     }
 
     /// Encode into any seekable writer (TIFF needs to seek back to patch its offsets).
