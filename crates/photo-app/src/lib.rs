@@ -375,8 +375,11 @@ pub struct PhotoApp {
     pub split_pos: f32,
     /// In-memory clipboard for copying/pasting adjustment stacks across photos.
     pub clipboard_stack: Option<PhotoStack>,
-    /// Named snapshot history checkpoints.
+    /// The open photo's named snapshots, kept in its sidecar.
     pub snapshots: Vec<(String, PhotoStack)>,
+    /// Undo history for photos stepped away from, most recent last, so returning to one
+    /// brings its Ctrl+Z back. Capped: see `session::HISTORY_KEPT`.
+    parked_histories: Vec<(PathBuf, History)>,
     pub new_snapshot_name: String,
     /// Brief notifications in the status bar with timestamp.
     pub status_notification: Option<(String, Instant)>,
@@ -528,6 +531,7 @@ impl PhotoApp {
             split_pos: 0.5,
             clipboard_stack: None,
             snapshots: Vec::new(),
+            parked_histories: Vec::new(),
             new_snapshot_name: String::new(),
             status_notification: None,
             tonemap_3d_state: tonemap_3d::Tonemap3DState::default(),

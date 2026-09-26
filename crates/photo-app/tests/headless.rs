@@ -1169,3 +1169,36 @@ fn paste_to_all_keeps_each_photos_framing_and_can_be_taken_back() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn undo_and_snapshots_stay_with_their_photo() {
+    let dir = scratch_dir("perphoto");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    app.edit(|s| s.exposure.params.ev = 0.5);
+    app.take_snapshot("bright");
+    app.open_path(&h.gpu(), b.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.snapshots.is_empty(), "A's snapshot is not offered on B");
+    assert!(!app.undo(), "B has nothing to undo");
+
+    // Back on A, its snapshot and its undo step are there again.
+    app.open_path(&h.gpu(), a.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.snapshots.len(), 1);
+    assert_eq!(app.snapshots[0].0, "bright");
+    assert!(app.undo(), "A's edit can still be undone");
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+
+    // And the snapshot is in A's sidecar, for the next session.
+    let data = photo_engine::load_sidecar_full(&a).unwrap().unwrap();
+    assert_eq!(data.snapshots.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
