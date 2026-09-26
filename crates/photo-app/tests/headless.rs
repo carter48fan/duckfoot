@@ -1297,7 +1297,7 @@ fn removing_from_the_shelf_can_be_taken_back() {
     h.settle(&mut app, Duration::from_secs(30));
     app.selection.select_all(&[a.clone(), b.clone(), c.clone()]);
 
-    app.remove_from_shelf(&[b.clone()]);
+    app.remove_from_shelf(std::slice::from_ref(&b));
     assert_eq!(app.shelf.len(), 2);
     assert!(
         !app.selection.is_selected(&b),
