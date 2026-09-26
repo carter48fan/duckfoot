@@ -376,3 +376,52 @@ fn filmic_maps_mid_grey_to_mid_grey_and_its_range_to_black_and_white() {
         "a saturated red moved {drift:.1}° in hue ({red:?} -> {shown:?})"
     );
 }
+
+#[test]
+fn saturated_colours_never_go_nan_through_local_contrast() {
+    let gpu = gpu_or_skip!();
+    // A pure camera-blue object on grey, through a real camera matrix (the Sony A7 III's, with its
+    // negative coefficients). Camera blue lands outside sRGB with a negative red and green
+    // and a luminance below zero, and its edges blend into grey whose luminance is not:
+    // the log of their ratio is NaN, which survives every clamp after it and ends as a
+    // black speck. Stage lights, LEDs and violet flowers are exactly this.
+    //
+    // WGSL leaves NaN through `clamp` to the implementation, and lavapipe's returns the
+    // bound, so on CI this guards the whole chain rather than reproducing the original
+    // bug; GPUs whose `clamp` propagates it are where the specks came from.
+    let mut cfa = testkit::cfa_from_fn(96, 64, |x, y| {
+        let (dx, dy) = (x as f32 - 48.0, y as f32 - 32.0);
+        if dx * dx + dy * dy < 20.0 * 20.0 {
+            [0.0, 0.0, 0.9]
+        } else {
+            [0.2, 0.2, 0.2]
+        }
+    });
+    cfa.cam_to_srgb = testkit::SONY_A7III;
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    engine.set_nan_paint(true);
+    let mut stack = busy_stack();
+    stack.dehaze.enabled = true;
+    stack.dehaze.params.amount = 0.5;
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    // The NaN paint is the only thing that writes alpha below 255.
+    let bad = out.rgba.chunks_exact(4).filter(|p| p[3] != 255).count();
+    assert_eq!(bad, 0, "{bad} pixels went NaN or infinite");
+}
+
+#[test]
+fn the_nan_paint_sees_a_value_that_went_infinite() {
+    let gpu = gpu_or_skip!();
+    // Without this, a NaN test that passes might only mean the detector is blind.
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(32, 32, 0.2))
+        .unwrap();
+    engine.set_nan_paint(true);
+    let mut stack = PhotoStack::default();
+    stack.exposure.params.ev = 200.0; // a gain of 2^200: infinity in f32
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let bad = out.rgba.chunks_exact(4).filter(|p| p[3] != 255).count();
+    assert!(bad > 0, "an infinite exposure gain was not flagged");
+}

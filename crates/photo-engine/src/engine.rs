@@ -182,6 +182,9 @@ fn output_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textu
     })
 }
 
+/// The shader's `FLAG_NAN_PAINT`: outside the module bits, never set by a stack.
+const NAN_PAINT: u32 = 0x8000_0000;
+
 pub struct Engine {
     green_pipeline: wgpu::RenderPipeline,
     green_bgl: wgpu::BindGroupLayout,
@@ -228,6 +231,8 @@ pub struct Engine {
     export_buffer: wgpu::Buffer,
     /// A smaller readback band than the device allows, for tests (`set_export_band_bytes`).
     export_band_bytes: Option<u64>,
+    /// See [`Engine::set_nan_paint`].
+    nan_paint: bool,
 }
 
 /// The green plane, which nothing reads once demosaic has run.
@@ -691,7 +696,16 @@ impl Engine {
             upload_pool: UploadPool::default(),
             export_buffer,
             export_band_bytes: None,
+            nan_paint: false,
         }
+    }
+
+    /// Paint any pixel whose value went NaN or infinite anywhere in the chain transparent
+    /// magenta (alpha 0, which no real pixel has), instead of letting the final clamp turn
+    /// it into a black speck. For tests.
+    #[doc(hidden)]
+    pub fn set_nan_paint(&mut self, on: bool) {
+        self.nan_paint = on;
     }
 
     /// Read exports back in bands of at most `bytes` rather than the device's own limit.
@@ -1322,7 +1336,12 @@ impl Engine {
                 gamma: cb.gamma.to_array(),
                 gain: cb.gain.to_array(),
                 offset: cb.offset.to_array(),
-                flags: [stack.bitmask(), 0, 0, 0],
+                flags: [
+                    stack.bitmask() | if self.nan_paint { NAN_PAINT } else { 0 },
+                    0,
+                    0,
+                    0,
+                ],
                 sizes: [
                     out_size.0 as f32,
                     out_size.1 as f32,
