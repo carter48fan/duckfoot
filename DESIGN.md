@@ -93,7 +93,8 @@ makes the Android bootstrap a small file instead of a fork.
               ▼
         PASS 2  the adjustment chain — ONE fragment shader, ONE pass
               │   levels · white balance · camera→working matrix · exposure
-              │   tone curve (1D LUT texture) · filmic · colour balance
+              │   tone curve (1D LUT texture) · filmic · colour eq · saturation
+              │   · colour balance (after saturation, so black and white can be toned)
               │   all driven by ONE uniform buffer
               ▼
         PASS 3  output transform → sRGB ──► egui texture, presented

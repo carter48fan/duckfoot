@@ -480,14 +480,6 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         c = vec3<f32>(filmic_channel(c.r), filmic_channel(c.g), filmic_channel(c.b));
     }
 
-    if (enabled(FLAG_BALANCE)) {
-        c = vec3<f32>(
-            balance_channel(c.r, u.lift.r, u.gamma.r, u.gain.r, u.offset.r),
-            balance_channel(c.g, u.lift.g, u.gamma.g, u.gain.g, u.offset.g),
-            balance_channel(c.b, u.lift.b, u.gamma.b, u.gain.b, u.offset.b),
-        );
-    }
-
     if (enabled(FLAG_COLOR_EQ)) {
         c = apply_color_eq(c);
     }
@@ -500,6 +492,17 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let vib_boost = u.vibrance.x * (1.0 - clamp(cur_sat, 0.0, 1.0));
         let sat_factor = max(1.0 + u.vibrance.y + vib_boost, 0.0);
         c = mix(vec3<f32>(luma), c, sat_factor);
+    }
+
+    // Colour balance grades what saturation left: after it, so a photo taken to black and
+    // white can still be toned (sepia, selenium, cyanotype) instead of the tint being
+    // mixed back out to grey.
+    if (enabled(FLAG_BALANCE)) {
+        c = vec3<f32>(
+            balance_channel(c.r, u.lift.r, u.gamma.r, u.gain.r, u.offset.r),
+            balance_channel(c.g, u.lift.g, u.gamma.g, u.gain.g, u.offset.g),
+            balance_channel(c.b, u.lift.b, u.gamma.b, u.gain.b, u.offset.b),
+        );
     }
 
     if (enabled(FLAG_VIGNETTE)) {

@@ -60,6 +60,11 @@ pub trait Platform: Send {
     /// app to the background; a desktop has no such key.
     fn leave(&mut self) {}
 
+    /// A private directory the app may keep its settings in. `None` remembers nothing.
+    fn settings_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Called when an image has been successfully written to disk. Used on mobile
     /// platforms to request system indexing into the media library/gallery.
     fn export_completed(&mut self, _path: &std::path::Path) {}
@@ -119,6 +124,24 @@ impl Platform for DesktopPlatform {
 
     fn poll(&mut self) -> Vec<Response> {
         std::mem::take(&mut self.answered)
+    }
+
+    fn settings_dir(&self) -> Option<PathBuf> {
+        // The platform's usual place: %APPDATA% on Windows, ~/Library/Application Support
+        // on macOS, $XDG_CONFIG_HOME or ~/.config elsewhere.
+        let var = |k: &str| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        let base = if cfg!(windows) {
+            var("APPDATA")
+        } else if cfg!(target_os = "macos") {
+            var("HOME").map(|h| h.join("Library/Application Support"))
+        } else {
+            var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))
+        };
+        base.map(|b| b.join("duckfoot"))
     }
 }
 
