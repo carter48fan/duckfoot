@@ -2,44 +2,6 @@
 
 use crate::*;
 
-pub(crate) fn module_enabled(stack: &mut PhotoStack, id: InspectorSectionId) -> Option<&mut bool> {
-    use InspectorSectionId as S;
-    match id {
-        S::Scope | S::Geometry => None,
-        S::WhiteBalance => Some(&mut stack.white_balance.enabled),
-        S::Exposure => Some(&mut stack.exposure.enabled),
-        S::Tonal => Some(&mut stack.tonal.enabled),
-        S::ToneCurve => Some(&mut stack.tone_curve.enabled),
-        S::Clarity => Some(&mut stack.clarity.enabled),
-        S::Dehaze => Some(&mut stack.dehaze.enabled),
-        S::ColorEq => Some(&mut stack.color_eq.enabled),
-        S::Filmic3D => Some(&mut stack.filmic.enabled),
-        S::ColorBalance => Some(&mut stack.color_balance.enabled),
-        S::Vibrance => Some(&mut stack.vibrance.enabled),
-        S::Sharpen => Some(&mut stack.sharpen.enabled),
-        S::Vignette => Some(&mut stack.vignette.enabled),
-    }
-}
-
-pub(crate) fn module_on(stack: &PhotoStack, id: InspectorSectionId) -> bool {
-    use InspectorSectionId as S;
-    match id {
-        S::Scope | S::Geometry => true,
-        S::WhiteBalance => stack.white_balance.enabled,
-        S::Exposure => stack.exposure.enabled,
-        S::Tonal => stack.tonal.enabled,
-        S::ToneCurve => stack.tone_curve.enabled,
-        S::Clarity => stack.clarity.enabled,
-        S::Dehaze => stack.dehaze.enabled,
-        S::ColorEq => stack.color_eq.enabled,
-        S::Filmic3D => stack.filmic.enabled,
-        S::ColorBalance => stack.color_balance.enabled,
-        S::Vibrance => stack.vibrance.enabled,
-        S::Sharpen => stack.sharpen.enabled,
-        S::Vignette => stack.vignette.enabled,
-    }
-}
-
 /// A module's current value, for its collapsed header, and whether it differs from default.
 /// DESIGN.md: every control that changes the image shows its current numeric value.
 pub(crate) fn summarise(
@@ -222,58 +184,6 @@ pub(crate) fn summarise(
                 *p != d.vignette.params,
             )
         }
-    }
-}
-
-/// What changed between two adjacent undo states, for the History list.
-pub(crate) fn describe_change(a: &PhotoStack, b: &PhotoStack) -> String {
-    let mut names: Vec<String> = Vec::new();
-    let (ga, gb) = (&a.geometry, &b.geometry);
-    if ga.quarter_turns != gb.quarter_turns {
-        names.push("rotate".into());
-    }
-    if ga.mirror_h != gb.mirror_h || ga.mirror_v != gb.mirror_v {
-        names.push("flip".into());
-    }
-    if ga.straighten_deg != gb.straighten_deg {
-        names.push("straighten".into());
-    }
-    if ga.crop != gb.crop {
-        names.push("crop".into());
-    }
-
-    fn module<T: PartialEq>(names: &mut Vec<String>, name: &str, a: &Module<T>, b: &Module<T>) {
-        if a.enabled != b.enabled {
-            names.push(format!("{name} {}", if b.enabled { "on" } else { "off" }));
-        } else if a.params != b.params {
-            names.push(name.to_string());
-        }
-    }
-    module(
-        &mut names,
-        "white balance",
-        &a.white_balance,
-        &b.white_balance,
-    );
-    module(&mut names, "exposure", &a.exposure, &b.exposure);
-    module(&mut names, "shadows & highlights", &a.tonal, &b.tonal);
-    module(&mut names, "tone curve", &a.tone_curve, &b.tone_curve);
-    module(&mut names, "filmic rgb", &a.filmic, &b.filmic);
-    module(
-        &mut names,
-        "colour balance",
-        &a.color_balance,
-        &b.color_balance,
-    );
-    module(&mut names, "vibrance", &a.vibrance, &b.vibrance);
-    module(&mut names, "sharpen", &a.sharpen, &b.sharpen);
-    module(&mut names, "vignette", &a.vignette, &b.vignette);
-
-    match names.len() {
-        0 => "no change".to_string(),
-        1 => names.remove(0),
-        2 => names.join(" + "),
-        n => format!("{n} modules"),
     }
 }
 

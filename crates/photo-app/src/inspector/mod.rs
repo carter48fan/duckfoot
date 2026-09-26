@@ -46,7 +46,7 @@ impl PhotoApp {
                         .filter(|id| {
                             // Scope and geometry have no on/off; everything else does.
                             !matches!(id, InspectorSectionId::Scope | InspectorSectionId::Geometry)
-                                && module_on(&self.stack, **id)
+                                && id.is_on(&self.stack)
                         })
                         .count();
                     ui.label(theme::tag(format!("{on} on")).color(theme::TEXT_DIM));
@@ -202,7 +202,7 @@ impl PhotoApp {
             }
 
             let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
-            let on = module_on(&self.stack, id);
+            let on = id.is_on(&self.stack);
             let summary_colour = if !on {
                 theme::TEXT_FAINT
             } else if modified {
@@ -218,7 +218,7 @@ impl PhotoApp {
                 let head = widgets::module_header(
                     ui,
                     id.title(),
-                    module_enabled(&mut self.stack, id),
+                    id.enabled_mut(&mut self.stack),
                     &summary,
                     summary_colour,
                     focused,
@@ -244,7 +244,7 @@ impl PhotoApp {
                     let mut body_changed = false;
                     self.module_body(ui, id, &mut body_changed, &mut card_started);
                     if body_changed {
-                        if let Some(on) = module_enabled(&mut self.stack, id) {
+                        if let Some(on) = id.enabled_mut(&mut self.stack) {
                             *on = true;
                         }
                     }

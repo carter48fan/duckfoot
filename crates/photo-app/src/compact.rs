@@ -33,10 +33,7 @@ use egui::{
 use crate::presets::{self, LOOKS};
 use crate::widgets::{self, Kind};
 use crate::Gpu;
-use crate::{
-    file_name, module_enabled, module_on, summarise, theme, Export, InspectorSectionId, PhotoApp,
-    View,
-};
+use crate::{file_name, summarise, theme, Export, InspectorSectionId, PhotoApp, View};
 use photo_engine::PhotoStack;
 use std::path::PathBuf;
 
@@ -889,10 +886,10 @@ impl PhotoApp {
                     divider(ui, STRIP_H);
                     for id in ids {
                         let (_, modified) = summarise(id, &self.stack, &defaults, &white);
-                        let dot = (module_on(&self.stack, id) && modified).then_some(theme::ACCENT);
+                        let dot = (id.is_on(&self.stack) && modified).then_some(theme::ACCENT);
                         let chosen = self.compact_module == id && !self.customize_open;
                         let open = chosen && self.compact_controls_open;
-                        let response = strip_tab(ui, module_short_name(id), chosen, open, dot)
+                        let response = strip_tab(ui, id.short_name(), chosen, open, dot)
                             .on_hover_text(id.title());
                         if chosen && self.reveal_section == Some(id) {
                             response.scroll_to_me(Some(egui::Align::Center));
@@ -1000,7 +997,7 @@ impl PhotoApp {
         self.module_body(ui, id, &mut body_changed, &mut started);
         if body_changed {
             // As on the desktop: touching a control turns its module on.
-            if let Some(on) = module_enabled(&mut self.stack, id) {
+            if let Some(on) = id.enabled_mut(&mut self.stack) {
                 *on = true;
             }
         }
@@ -1021,14 +1018,14 @@ impl PhotoApp {
         let defaults = self.baseline.clone();
         let white = self.white_scale();
         let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
-        let on = module_on(&self.stack, id);
+        let on = id.is_on(&self.stack);
         let ids = self.compact_ids();
         let at = ids.iter().position(|i| *i == id);
         let mut changed = false;
         let mut step = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if let Some(enabled) = module_enabled(&mut self.stack, id) {
+            if let Some(enabled) = id.enabled_mut(&mut self.stack) {
                 if widgets::switch(ui, enabled).changed() {
                     changed = true;
                 }
@@ -1083,26 +1080,9 @@ impl PhotoApp {
     /// Put one module back as the photo opened. Crop & rotate returns to the camera's
     /// orientation, uncropped.
     fn reset_module(&mut self, id: InspectorSectionId) {
-        let b = &self.baseline;
-        let s = &mut self.stack;
-        match id {
-            InspectorSectionId::Scope => {}
-            InspectorSectionId::Geometry => {
-                s.geometry = b.geometry;
-                self.cropping = false;
-            }
-            InspectorSectionId::WhiteBalance => s.white_balance = b.white_balance.clone(),
-            InspectorSectionId::Exposure => s.exposure = b.exposure.clone(),
-            InspectorSectionId::Tonal => s.tonal = b.tonal.clone(),
-            InspectorSectionId::ToneCurve => s.tone_curve = b.tone_curve.clone(),
-            InspectorSectionId::Clarity => s.clarity = b.clarity.clone(),
-            InspectorSectionId::Dehaze => s.dehaze = b.dehaze.clone(),
-            InspectorSectionId::ColorEq => s.color_eq = b.color_eq.clone(),
-            InspectorSectionId::Filmic3D => s.filmic = b.filmic.clone(),
-            InspectorSectionId::ColorBalance => s.color_balance = b.color_balance.clone(),
-            InspectorSectionId::Vibrance => s.vibrance = b.vibrance.clone(),
-            InspectorSectionId::Sharpen => s.sharpen = b.sharpen.clone(),
-            InspectorSectionId::Vignette => s.vignette = b.vignette.clone(),
+        id.reset(&mut self.stack, &self.baseline);
+        if id == InspectorSectionId::Geometry {
+            self.cropping = false;
         }
     }
 
@@ -1716,25 +1696,6 @@ fn divider(ui: &mut egui::Ui, height: f32) {
 }
 
 /// A module's name in the Edit strip: short enough that several fit across a phone.
-fn module_short_name(id: InspectorSectionId) -> &'static str {
-    match id {
-        InspectorSectionId::Scope => "scope",
-        InspectorSectionId::Geometry => "crop",
-        InspectorSectionId::WhiteBalance => "wb",
-        InspectorSectionId::Exposure => "exposure",
-        InspectorSectionId::Tonal => "tone",
-        InspectorSectionId::ToneCurve => "curve",
-        InspectorSectionId::Clarity => "clarity",
-        InspectorSectionId::Dehaze => "dehaze",
-        InspectorSectionId::ColorEq => "color",
-        InspectorSectionId::Filmic3D => "filmic",
-        InspectorSectionId::ColorBalance => "balance",
-        InspectorSectionId::Vibrance => "vibrance",
-        InspectorSectionId::Sharpen => "sharpen",
-        InspectorSectionId::Vignette => "vignette",
-    }
-}
-
 /// The tab icons, painted rather than taken from a font: the bundled fonts have no glyph
 /// for sliders or a scope, and painted strokes match the rest of the controls.
 fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {
