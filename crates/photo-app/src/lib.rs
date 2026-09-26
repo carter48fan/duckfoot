@@ -4815,11 +4815,32 @@ impl PhotoApp {
                         ui.add_enabled_ui(!is_linear, |ui| {
                             if widgets::chip(ui, false, "reset").clicked() {
                                 self.stack.tone_curve.params = identity_nodes();
+                                self.stack.curve_domain = photo_engine::CurveDomain::Display;
                                 discrete!();
                             }
                         });
                     });
                 });
+                if self.stack.curve_domain == photo_engine::CurveDomain::Linear {
+                    // An edit from before curves moved to display values: it keeps its
+                    // look, on axes that do not match the histogram under them.
+                    ui.horizontal(|ui| {
+                        ui.label(theme::tag("older curve · linear axes").color(theme::TEXT_DIM))
+                            .on_hover_text(
+                                "Made before the curve's axes matched the histogram. It looks as \
+                             it always did; update it to edit on display values.",
+                            );
+                        if widgets::chip(ui, false, "update").clicked() {
+                            let nodes = &mut self.stack.tone_curve.params;
+                            for n in nodes.iter_mut() {
+                                n.x = encode_srgb(n.x);
+                                n.y = encode_srgb(n.y);
+                            }
+                            self.stack.curve_domain = photo_engine::CurveDomain::Display;
+                            discrete!();
+                        }
+                    });
+                }
             }
             InspectorSectionId::Clarity => {
                 let p = &mut self.stack.clarity.params;
@@ -6413,6 +6434,16 @@ fn renderer_write<'a>(gpu: &Gpu<'a>) -> std::sync::RwLockWriteGuard<'a, egui_wgp
     gpu.renderer
         .write()
         .expect("egui renderer lock poisoned by a panic in another thread")
+}
+
+/// Linear light to its sRGB-encoded display value, 0..=1.
+fn encode_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// Present while a desktop session runs; left behind, it means the last one did not end

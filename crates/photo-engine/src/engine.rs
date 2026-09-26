@@ -1309,7 +1309,7 @@ impl Engine {
                 offset: cb.offset.to_array(),
                 flags: [
                     stack.bitmask() | if self.nan_paint { NAN_PAINT } else { 0 },
-                    0,
+                    (stack.curve_domain == crate::params::CurveDomain::Display) as u32,
                     0,
                     0,
                 ],

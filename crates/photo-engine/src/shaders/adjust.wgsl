@@ -22,7 +22,7 @@ struct Adjust {
     gamma:      vec4<f32>,
     gain:       vec4<f32>,
     offset:     vec4<f32>,
-    flags:      vec4<u32>,   // x = enabled bitmask
+    flags:      vec4<u32>,   // x = enabled bitmask, y = 1 if the curve works on display values
     sizes:      vec4<f32>,   // xy = output size, zw = sensor size
     orient:     vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
     turns:      vec4<u32>,   // x = quarter turns clockwise
@@ -96,8 +96,20 @@ fn lut_at(i: i32) -> f32 {
 // an optional WebGPU feature (FLOAT32_FILTERABLE) that plenty of Android GPUs lack, and
 // textureLoad has no such requirement.
 //
-// Values above 1.0 are headroom and pass through with the curve's top slope rather than
-// being clamped here — clamping mid-chain is what destroys highlight recovery.
+// Values above 1.0 are headroom and pass through at a slope of 1 above the curve's top
+// rather than being clamped here — clamping mid-chain is what destroys highlight recovery.
+// The curve with its axes in display values: what the histogram under the editor shows,
+// and where a quarter-tone node sits on a quarter tone. Encoded, looked up, decoded.
+fn curve_display(v: f32) -> f32 {
+    var e = 0.0;
+    if (v > 0.0031308) {
+        e = 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+    } else if (v > 0.0) {
+        e = v * 12.92;
+    }
+    return srgb_to_linear1(curve(e));
+}
+
 fn curve(v: f32) -> f32 {
     if (v <= 0.0) {
         return lut_at(0);
@@ -533,7 +545,11 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_CURVE)) {
-        c = vec3<f32>(curve(c.r), curve(c.g), curve(c.b));
+        if (u.flags.y == 1u) {
+            c = vec3<f32>(curve_display(c.r), curve_display(c.g), curve_display(c.b));
+        } else {
+            c = vec3<f32>(curve(c.r), curve(c.g), curve(c.b));
+        }
     }
 
     if (enabled(FLAG_FILMIC)) {

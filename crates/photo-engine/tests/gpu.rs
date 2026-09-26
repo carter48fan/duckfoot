@@ -644,3 +644,28 @@ fn the_last_render_of_a_drag_is_the_one_the_histogram_shows() {
         "the scopes show an earlier frame, not the last render's {value}"
     );
 }
+
+#[test]
+fn a_curve_node_moves_the_display_value_it_sits_on() {
+    let gpu = gpu_or_skip!();
+    // 0.214 linear displays as 50% grey. A node at (0.5, 0.6) on the display-domain curve
+    // must show it at 60%, and an identity curve must change nothing.
+    let half = testkit::srgb_to_linear(128);
+    let mut stack = PhotoStack::default();
+    stack.tone_curve.enabled = true;
+    let plain = render_patches(gpu, &stack, &[[half; 3]])[0];
+    assert!(
+        plain.iter().all(|&v| v.abs_diff(128) <= 1),
+        "identity curve moved 50% grey to {plain:?}"
+    );
+    stack.tone_curve.params = vec![
+        photo_engine::CurveNode::new(0.0, 0.0),
+        photo_engine::CurveNode::new(0.5, 0.6),
+        photo_engine::CurveNode::new(1.0, 1.0),
+    ];
+    let lifted = render_patches(gpu, &stack, &[[half; 3]])[0];
+    assert!(
+        lifted.iter().all(|&v| v.abs_diff(153) <= 2),
+        "a node at 0.5 -> 0.6 showed 50% grey as {lifted:?}, not 153"
+    );
+}
