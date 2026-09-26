@@ -829,3 +829,129 @@ fn test_touch_slider_tap_and_drag() {
     );
     out_h3.textures_delta.clear();
 }
+
+/// A sideways drag at `y` from `x0` to `x1`, as a finger's comes in over a few frames.
+fn flick(h: &Headless, app: &mut PhotoApp, y: f32, x0: f32, x1: f32) {
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let from = egui::pos2(x0, y);
+    let to = egui::pos2(x1, y);
+    h.frame_sized(
+        app,
+        PORTRAIT,
+        pointer(vec![egui::Event::PointerMoved(from)]),
+    );
+    h.frame_sized(app, PORTRAIT, pointer(vec![button(from, true)]));
+    for i in 1..=8 {
+        let p = from + (to - from) * (i as f32 / 8.0);
+        h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerMoved(p)]));
+    }
+    h.frame_sized(app, PORTRAIT, pointer(vec![button(to, false)]));
+    h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerGone]));
+}
+
+/// Swiping moves between modules on the Edit sheet and between tabs on the nav bar; the
+/// scope and filmic start hidden on a phone and draw flat once shown; a look from Presets
+/// applies and "original" takes it off; the tour closes with back.
+#[test]
+fn phone_swipes_presets_and_tour() {
+    use photo_app::InspectorSectionId as M;
+    let dir = scratch_dir("swipes");
+    let a = dir.join("a.dng");
+    write_dng(&a, 640, 426);
+
+    let h = Headless::new();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(FakePlatform::default()));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.compact_tab, Some(Tab::Edit));
+    assert_eq!(
+        app.tour_step(),
+        None,
+        "no settings directory, so no tour on its own"
+    );
+
+    // Hidden until asked for: the scope and filmic.
+    let shown = |app: &PhotoApp, id| app.compact_sections.iter().any(|s| s.id == id && s.visible);
+    assert!(!shown(&app, M::Scope) && !shown(&app, M::Filmic3D));
+    assert!(shown(&app, M::Exposure) && shown(&app, M::Tonal));
+
+    // A flick to the left on the exposure module's header (between its name and its
+    // summary, where there is no control) moves on to the next module.
+    app.compact_module = M::Exposure;
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let sheet_top = app.sheet_rect().top();
+    flick(&h, &mut app, sheet_top + 22.0, 230.0, 90.0);
+    assert_eq!(
+        app.compact_module,
+        M::Tonal,
+        "a flick left is the next module"
+    );
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let sheet_top = app.sheet_rect().top();
+    flick(&h, &mut app, sheet_top + 22.0, 120.0, 300.0);
+    assert_eq!(app.compact_module, M::Exposure, "a flick right goes back");
+
+    // Along the nav bar, a flick left moves one tab on.
+    flick(&h, &mut app, PORTRAIT.y - 24.0, 330.0, 150.0);
+    assert_eq!(app.compact_tab, Some(Tab::Export));
+    flick(&h, &mut app, PORTRAIT.y - 24.0, 100.0, 300.0);
+    assert_eq!(app.compact_tab, Some(Tab::Edit));
+
+    // Shown, the scope and filmic lay out (flat) on the phone.
+    for s in &mut app.compact_sections {
+        s.visible = true;
+    }
+    for id in [M::Scope, M::Filmic3D] {
+        app.compact_module = id;
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+        assert_eq!(app.compact_module, id);
+    }
+
+    // Presets: the second tile is the first look ("vivid"); the first is "original".
+    app.compact_tab = Some(Tab::Presets);
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let sheet_top = app.sheet_rect().top();
+    let row = sheet_top + 8.0 + 24.0;
+    let before = app.stack().clone();
+    tap(&h, &mut app, PORTRAIT, egui::pos2(12.0 + 78.0 + 36.0, row));
+    assert!(app.stack().vibrance.enabled, "vivid turns vibrance on");
+    assert!(app.stack().vibrance.params.vibrance > 0.3);
+    assert_eq!(
+        app.stack().exposure,
+        before.exposure,
+        "a look leaves exposure alone"
+    );
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let sheet_top = app.sheet_rect().top();
+    tap(
+        &h,
+        &mut app,
+        PORTRAIT,
+        egui::pos2(48.0, sheet_top + 8.0 + 24.0),
+    );
+    assert_eq!(app.stack(), &before, "original takes the look back off");
+
+    // The tour: shown on request, closed by back.
+    app.start_tour();
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    assert_eq!(app.tour_step(), Some(0));
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert_eq!(app.tour_step(), None);
+
+    assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

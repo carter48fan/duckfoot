@@ -242,6 +242,39 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
     response
 }
 
+/// An on / off switch sized for a thumb: a 38×22 track in a 48×34 target. Amber with the
+/// knob to the right when on.
+pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(48.0, 34.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let track = Rect::from_center_size(rect.center(), vec2(38.0, 22.0));
+    let t = ui.ctx().animate_bool_responsive(response.id, *on);
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let fill = if *on {
+        if hovered {
+            ACCENT_HI
+        } else {
+            ACCENT
+        }
+    } else {
+        BG_850
+    };
+    let stroke = if *on {
+        Stroke::NONE
+    } else {
+        Stroke::new(1.0, if hovered { BORDER_HI } else { BORDER })
+    };
+    painter.rect(track, 11, fill, stroke, StrokeKind::Inside);
+    let x = egui::lerp(track.left() + 11.0..=track.right() - 11.0, t);
+    let knob = if *on { Color32::BLACK } else { TEXT_DIM };
+    painter.circle_filled(pos2(x, track.center().y), 8.0, knob);
+    response
+}
+
 /// A 2px rail with an amber fill and an 8×14 thumb (14×22 on touch).
 ///
 /// Bipolar ranges fill from zero rather than from the left end, so "+0.4 EV" and "−0.4 EV"
