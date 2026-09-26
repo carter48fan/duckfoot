@@ -29,6 +29,12 @@ if ! command -v cargo-ndk >/dev/null; then
 fi
 
 rustup target add aarch64-linux-android
+# C dependencies (libwebp) are compiled by cc-rs, which looks for the NDK's clang under a
+# name cargo-ndk does not always export. Name it, for the same API level as the link.
+ndk_bin=("$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin)
+export CC_aarch64_linux_android="${ndk_bin[0]}/aarch64-linux-android30-clang"
+export CXX_aarch64_linux_android="${ndk_bin[0]}/aarch64-linux-android30-clang++"
+export AR_aarch64_linux_android="${ndk_bin[0]}/llvm-ar"
 cd "$root"
 # API 30 matches minSdk in app/build.gradle.kts.
 cargo ndk --target arm64-v8a --platform 30 \
