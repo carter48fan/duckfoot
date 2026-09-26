@@ -19,8 +19,8 @@ pub mod temperature;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
-    decode_raster, decode_raw, CfaImage, DefaultRawDecoder, RasterImage, RawDecoder, RawlerBackend,
-    RawloaderBackend,
+    decode_raster, decode_raw, raster_orientation, CfaImage, DefaultRawDecoder, RasterImage,
+    RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{
     upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
