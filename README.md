@@ -159,7 +159,12 @@ You can also **drag a RAW file onto the window**.
 | Scroll wheel / pinch over the image | zoom about the cursor |
 | Drag the image | pan, once zoomed in (at fit there is nothing to pan) |
 | `←` / `→` | previous / next photo on the shelf |
-| `0` / `1` | fit to window / 100% (1:1) |
+| `Ctrl+0` / `Ctrl+1` / `Z` | fit to window / 100% (1:1) / toggle between them |
+| `0`–`5` | star rating for the selection (`0` clears) |
+| `P` / `X` / `U` | flag as pick / reject / clear the flag |
+| `Ctrl+A` | select every photo on the shelf |
+| `Ctrl+Shift+E` | batch export the selection |
+| `Enter` | apply the crop |
 | Drag a slider | live re-render; one undo step per gesture, not per frame |
 | `Shift` while dragging a slider | ten times finer |
 | Double-click a slider or its label | back to default (the tick on the rail) |
