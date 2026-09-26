@@ -214,7 +214,12 @@ impl PhotoApp {
 
                 ui.add_space(4.0);
                 if widgets::button(ui, Kind::Secondary, "Browse Folder…", 0.0).clicked() {
-                    self.request(ui.ctx(), platform::Request::BrowseFolder);
+                    self.request(
+                        ui.ctx(),
+                        platform::Request::BrowseFolder {
+                            from: self.settings.import_dir.clone(),
+                        },
+                    );
                 }
             },
         );

@@ -12,14 +12,15 @@ use crate::dam::FolderBookmark;
 /// Something the app wants the user to choose.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    /// One image to open on the stage.
-    OpenImage,
+    /// One image to open on the stage. `from` is where the picker starts, if known: the
+    /// folder the last one was chosen from, remembered between runs.
+    OpenImage { from: Option<PathBuf> },
     /// Any number of images to add to the shelf.
-    AddImages,
+    AddImages { from: Option<PathBuf> },
     /// A folder to browse in the shelf's folder tree.
-    BrowseFolder,
+    BrowseFolder { from: Option<PathBuf> },
     /// Where batch export writes.
-    BatchOutputDir,
+    BatchOutputDir { from: Option<PathBuf> },
     /// Where the single-image export writes. `dir` and `name` are suggestions.
     ExportImage { dir: PathBuf, name: String },
 }
@@ -92,8 +93,15 @@ pub struct DesktopPlatform {
 #[cfg(not(target_os = "android"))]
 impl Platform for DesktopPlatform {
     fn request(&mut self, request: Request) {
-        let images = || {
-            rfd::FileDialog::new()
+        let start = |from: Option<PathBuf>| {
+            let dialog = rfd::FileDialog::new();
+            match from.filter(|d| d.is_dir()) {
+                Some(dir) => dialog.set_directory(dir),
+                None => dialog,
+            }
+        };
+        let images = |from| {
+            start(from)
                 .add_filter(
                     "All Supported Images",
                     &photo_engine::all_image_dialog_extensions(),
@@ -103,14 +111,12 @@ impl Platform for DesktopPlatform {
                 .add_filter("All files", &["*"])
         };
         let answer = match request {
-            Request::OpenImage => images().pick_file().map(Response::OpenImage),
-            Request::AddImages => images().pick_files().map(Response::AddImages),
-            Request::BrowseFolder => rfd::FileDialog::new()
-                .pick_folder()
-                .map(Response::BrowseFolder),
-            Request::BatchOutputDir => rfd::FileDialog::new()
-                .pick_folder()
-                .map(Response::BatchOutputDir),
+            Request::OpenImage { from } => images(from).pick_file().map(Response::OpenImage),
+            Request::AddImages { from } => images(from).pick_files().map(Response::AddImages),
+            Request::BrowseFolder { from } => start(from).pick_folder().map(Response::BrowseFolder),
+            Request::BatchOutputDir { from } => {
+                start(from).pick_folder().map(Response::BatchOutputDir)
+            }
             Request::ExportImage { dir, name } => rfd::FileDialog::new()
                 .add_filter("JPEG", &["jpg", "jpeg"])
                 .add_filter("PNG", &["png"])

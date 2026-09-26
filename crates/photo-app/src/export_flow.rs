@@ -37,16 +37,28 @@ impl PhotoApp {
     /// Default filename beside the source: DSC08450.ARW -> DSC08450.jpg. JPEG at the export
     /// quality: what a photo is shared as, at a tenth of a PNG's size.
     pub(crate) fn export_suggestion(&self) -> (PathBuf, String) {
+        let ext = self
+            .settings
+            .export_format
+            .unwrap_or(photo_engine::ExportFormat::Jpeg)
+            .extension();
         match &self.loaded_path {
             Some(src) => {
                 let stem = src
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("untitled");
-                let dir = src.parent().map(PathBuf::from).unwrap_or_default();
-                (dir, format!("{stem}.jpg"))
+                // Where the last export went, in its format; else beside the photo.
+                let dir = self
+                    .settings
+                    .export_dir
+                    .clone()
+                    .filter(|d| d.is_dir())
+                    .or_else(|| src.parent().map(PathBuf::from))
+                    .unwrap_or_default();
+                (dir, format!("{stem}.{ext}"))
             }
-            None => (PathBuf::new(), "untitled.jpg".to_string()),
+            None => (PathBuf::new(), format!("untitled.{ext}")),
         }
     }
 
@@ -186,7 +198,8 @@ impl PhotoApp {
                         .unwrap_or_default();
                     ui.label(RichText::new(dir_str).monospace().color(theme::TEXT));
                     if widgets::button(ui, Kind::Secondary, "Browse...", 80.0).clicked() {
-                        self.request(ui.ctx(), platform::Request::BatchOutputDir);
+                        let from = self.batch_output_dir.clone();
+                        self.request(ui.ctx(), platform::Request::BatchOutputDir { from });
                     }
                 });
 

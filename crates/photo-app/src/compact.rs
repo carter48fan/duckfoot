@@ -522,7 +522,12 @@ impl PhotoApp {
                 self.pick_and_shelve(ui.ctx());
             }
             if widgets::chip(ui, false, "folder…").clicked() {
-                self.request(ui.ctx(), crate::platform::Request::BrowseFolder);
+                self.request(
+                    ui.ctx(),
+                    crate::platform::Request::BrowseFolder {
+                        from: self.settings.import_dir.clone(),
+                    },
+                );
             }
             divider(ui, 28.0);
             if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
@@ -953,7 +958,7 @@ impl PhotoApp {
                         if strip_tab(ui, "✓ apply", true, true, None).clicked() {
                             self.apply_crop();
                         }
-                        if strip_tab(ui, "✕ cancel", false, false, None).clicked() {
+                        if strip_tab(ui, "× cancel", false, false, None).clicked() {
                             self.cancel_crop();
                         }
                         divider(ui, STRIP_H);

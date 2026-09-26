@@ -1460,3 +1460,34 @@ fn a_deleted_snapshot_comes_back_from_the_notice() {
     assert_eq!(app.stack().exposure.params.ev, 0.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_missing_photo_stays_on_the_shelf_and_the_filter_comes_back() {
+    let dir = scratch_dir("missing");
+    let settings = dir.join("settings");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+        h.settle(&mut app, Duration::from_secs(30));
+        app.filter.sort_descending = true;
+        app.shutdown();
+    }
+    // The drive with b on it is unplugged.
+    std::fs::remove_file(&b).unwrap();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.shelf.len(), 2, "b is still shelved");
+    let missing: Vec<bool> = app.shelf.iter().map(|it| it.missing).collect();
+    assert_eq!(missing, [false, true]);
+    assert!(app.filter.sort_descending, "the sort came back");
+    // Opening it says why instead of failing a decode; stepping goes past it.
+    app.open_path(&h.gpu(), b.clone());
+    assert_eq!(app.loaded_path(), Some(a.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

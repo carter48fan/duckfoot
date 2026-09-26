@@ -3,14 +3,14 @@
 use photo_engine::{AssetMetadata, Flag};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RatingFilter {
     #[default]
     All,
     MinStars(u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FlagFilter {
     #[default]
     All,
@@ -19,7 +19,7 @@ pub enum FlagFilter {
     RejectsOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum EditFilter {
     #[default]
     All,
@@ -27,7 +27,7 @@ pub enum EditFilter {
     PristineOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SortBy {
     #[default]
     FileName,
@@ -35,12 +35,14 @@ pub enum SortBy {
     FileSize,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FilterState {
     pub rating: RatingFilter,
     pub flag: FlagFilter,
     pub edit: EditFilter,
     pub color_label: Option<String>,
+    #[serde(skip)]
     pub search_query: String,
     pub sort_by: SortBy,
     pub sort_descending: bool,
