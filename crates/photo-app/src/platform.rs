@@ -112,8 +112,10 @@ impl Platform for DesktopPlatform {
                 .pick_folder()
                 .map(Response::BatchOutputDir),
             Request::ExportImage { dir, name } => rfd::FileDialog::new()
-                .add_filter("PNG", &["png"])
                 .add_filter("JPEG", &["jpg", "jpeg"])
+                .add_filter("PNG", &["png"])
+                .add_filter("TIFF", &["tif", "tiff"])
+                .add_filter("WebP", &["webp"])
                 .set_directory(dir)
                 .set_file_name(name)
                 .save_file()

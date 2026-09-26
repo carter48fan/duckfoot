@@ -18,7 +18,9 @@ impl PhotoApp {
         let (tx, rx) = mpsc::channel();
         let target = path.clone();
         std::thread::spawn(move || {
-            let outcome = exported.write(&target).map_err(|e| format!("{e:#}"));
+            let outcome = photo_engine::EncodeOptions::for_path(&target)
+                .and_then(|options| exported.write(&target, &options))
+                .map_err(|e| format!("{e:#}"));
             // The receiver is gone only if the app is shutting down; nothing to report to.
             let _ = tx.send(outcome);
         });
@@ -32,7 +34,8 @@ impl PhotoApp {
         self.needs_render = true;
     }
 
-    /// Default filename beside the source: DSC08450.ARW -> DSC08450.png
+    /// Default filename beside the source: DSC08450.ARW -> DSC08450.jpg. JPEG at the export
+    /// quality: what a photo is shared as, at a tenth of a PNG's size.
     pub(crate) fn export_suggestion(&self) -> (PathBuf, String) {
         match &self.loaded_path {
             Some(src) => {
@@ -41,9 +44,9 @@ impl PhotoApp {
                     .and_then(|s| s.to_str())
                     .unwrap_or("untitled");
                 let dir = src.parent().map(PathBuf::from).unwrap_or_default();
-                (dir, format!("{stem}.png"))
+                (dir, format!("{stem}.jpg"))
             }
-            None => (PathBuf::new(), "untitled.png".to_string()),
+            None => (PathBuf::new(), "untitled.jpg".to_string()),
         }
     }
 
@@ -198,12 +201,7 @@ impl PhotoApp {
                 for recipe in &mut self.export_recipes {
                     ui.horizontal(|ui| {
                         widgets::checkbox(ui, &mut recipe.enabled);
-                        let fmt_tag = match recipe.format {
-                            batch::ExportImageFormat::Jpeg => "JPEG",
-                            batch::ExportImageFormat::Png => "PNG",
-                            batch::ExportImageFormat::Tiff => "TIFF",
-                            batch::ExportImageFormat::Webp => "WEBP",
-                        };
+                        let fmt_tag = recipe.format.label();
                         ui.label(
                             RichText::new(format!("[{fmt_tag}]"))
                                 .family(theme::mono_bold())
