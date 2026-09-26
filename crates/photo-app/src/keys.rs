@@ -22,6 +22,14 @@ impl PhotoApp {
                 self.select_mode = false;
             } else if self.folder_browser_open {
                 self.folder_browser_open = false;
+            } else if self.library_filters_open {
+                self.library_filters_open = false;
+            } else if (self.view.zoom - 1.0).abs() > 0.01 {
+                // Zoomed in, back returns to the whole photo before it leaves anything.
+                self.view = View::default();
+            } else if self.split_active {
+                self.split_active = false;
+                self.needs_render = true;
             } else if self.layout.is_compact() && self.compact_tab.is_some() {
                 self.compact_tab = None;
             } else {

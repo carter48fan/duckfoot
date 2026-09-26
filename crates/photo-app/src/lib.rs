@@ -380,6 +380,8 @@ pub struct PhotoApp {
     /// Undo history for photos stepped away from, most recent last, so returning to one
     /// brings its Ctrl+Z back. Capped: see `session::HISTORY_KEPT`.
     parked_histories: Vec<(PathBuf, History)>,
+    /// Files dropped on the window since the last frame; they are shelved together.
+    pending_drops: Vec<PathBuf>,
     pub new_snapshot_name: String,
     /// Brief notifications in the status bar with timestamp.
     pub status_notification: Option<(String, Instant)>,
@@ -532,6 +534,7 @@ impl PhotoApp {
             clipboard_stack: None,
             snapshots: Vec::new(),
             parked_histories: Vec::new(),
+            pending_drops: Vec::new(),
             new_snapshot_name: String::new(),
             status_notification: None,
             tonemap_3d_state: tonemap_3d::Tonemap3DState::default(),
@@ -775,16 +778,31 @@ impl PhotoApp {
         // desktop's side panels need a screen both wide and tall.
         let screen = ui.max_rect().size();
         self.layout = compact::Layout::for_size(screen);
-        self.touch_seen |= ctx.input(|i| {
-            i.raw
+        // Controls size for the last input used: a laptop with a touch screen gets finger-
+        // sized controls after a tap and desktop ones again once the mouse moves.
+        let (touched, moused) = ctx.input(|i| {
+            let touched = i
+                .raw
                 .events
                 .iter()
-                .any(|e| matches!(e, egui::Event::Touch { .. }))
+                .any(|e| matches!(e, egui::Event::Touch { .. }));
+            let moved = i
+                .raw
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::PointerMoved(_)));
+            (touched, moved && !touched)
         });
+        if touched {
+            self.touch_seen = true;
+        } else if moused {
+            self.touch_seen = false;
+        }
         widgets::set_touch(&ctx, self.touch_seen || self.layout.is_compact());
         widgets::set_fine(&ctx, self.fine_adjust);
         self.loader.set_context(&ctx);
         self.poll_platform(gpu);
+        self.take_drops(gpu);
         self.poll_loader(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);

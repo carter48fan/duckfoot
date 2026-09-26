@@ -87,6 +87,11 @@ pub fn is_raw_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A RAW or raster file the app can open.
+pub fn is_supported_path(path: &std::path::Path) -> bool {
+    is_raw_path(path) || is_raster_path(path)
+}
+
 pub fn is_raster_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())

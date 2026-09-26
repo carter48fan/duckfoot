@@ -1202,3 +1202,33 @@ fn undo_and_snapshots_stay_with_their_photo() {
     assert_eq!(data.snapshots.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_drop_of_several_files_shelves_them_all_and_stepping_follows_the_filter() {
+    let dir = scratch_dir("drop");
+    let paths: Vec<PathBuf> = ["a.dng", "b.dng", "c.dng"]
+        .iter()
+        .map(|n| dir.join(n))
+        .collect();
+    for p in &paths {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    for p in &paths {
+        app.drop_file(p.clone());
+    }
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.shelf.len(), 3, "every dropped file is shelved");
+    assert_eq!(app.loaded_path(), Some(paths[0].as_path()));
+
+    // Picks only: a and c. → from a goes to c, skipping the hidden b.
+    app.set_flag_for_path(&paths[0], photo_engine::Flag::Pick);
+    app.set_flag_for_path(&paths[2], photo_engine::Flag::Pick);
+    app.filter.flag = photo_app::dam::FlagFilter::PicksOnly;
+    h.frame(&mut app, key(egui::Key::ArrowRight));
+    assert_eq!(app.loaded_path(), Some(paths[2].as_path()));
+    h.settle(&mut app, Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}

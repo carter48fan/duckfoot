@@ -513,7 +513,8 @@ impl ApplicationHandler<UserEvent> for Shell {
                 window.window.request_redraw();
             }
             WindowEvent::DroppedFile(path) => {
-                app.open_path(&gpu.gpu(), path);
+                // One event per file; the app shelves a drop of several together.
+                app.drop_file(path);
                 window.window.request_redraw();
             }
             WindowEvent::RedrawRequested => window.redraw(gpu, &self.egui_ctx, app),

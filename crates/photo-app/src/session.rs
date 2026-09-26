@@ -349,9 +349,11 @@ impl PhotoApp {
         }
     }
 
-    /// Step to the previous (-1) or next (+1) photo on the shelf.
+    /// Step to the previous (-1) or next (+1) photo as the shelf shows them: through the
+    /// active filter and sort, so stepping with "picks only" on stays on picks.
     pub(crate) fn step_photo(&mut self, gpu: &Gpu, dir: isize) {
-        if self.shelf.is_empty() {
+        let order = self.displayed_indices();
+        if order.is_empty() {
             return;
         }
         let current = self
@@ -359,13 +361,13 @@ impl PhotoApp {
             .as_ref()
             .map(|(p, _)| p)
             .or(self.loaded_path.as_ref())
-            .and_then(|p| self.shelf.iter().position(|it| &it.path == p));
-        let n = self.shelf.len() as isize;
+            .and_then(|p| order.iter().position(|&i| &self.shelf[i].path == p));
+        let n = order.len() as isize;
         let next = match current {
             Some(i) => (i as isize + dir).rem_euclid(n) as usize,
             None => 0,
         };
-        let path = self.shelf[next].path.clone();
+        let path = self.shelf[order[next]].path.clone();
         self.open_path(gpu, path);
     }
 
@@ -374,8 +376,8 @@ impl PhotoApp {
     /// The controls move at once (U-01): the photo being left is saved, and the sliders
     /// show the new photo's own saved edits — or defaults, if it has none — from this
     /// frame on, while the decode runs in the background. Tone and colour can be edited
-    /// straight away and appear when the pixels land; rotate, flip and crop wait for the
-    /// decode, which is what knows the photo's true orientation and size.
+    /// straight away and appear when the pixels land; rotate, flip, crop and white balance
+    /// wait for the decode, which is what knows the photo's true orientation and camera.
     pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
         if self.loaded_path.as_ref() == Some(&path) {
             let decoding_it = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
@@ -662,5 +664,36 @@ impl PhotoApp {
         };
         self.snapshots.push((name, self.stack.clone()));
         self.save_snapshots();
+    }
+
+    /// A file or folder dropped on the window. The shell sends one call per file, so they
+    /// are collected here and shelved together on the next frame, instead of each
+    /// superseding the one before and only the last surviving.
+    pub fn drop_file(&mut self, path: PathBuf) {
+        self.pending_drops.push(path);
+    }
+
+    pub(crate) fn take_drops(&mut self, gpu: &Gpu) {
+        if self.pending_drops.is_empty() {
+            return;
+        }
+        let mut photos = Vec::new();
+        for path in std::mem::take(&mut self.pending_drops) {
+            if path.is_dir() {
+                photos.extend(dam::FolderTree::scan_supported_images(&path));
+            } else if photo_engine::is_supported_path(&path) {
+                photos.push(path);
+            }
+        }
+        let Some(first) = photos.first().cloned() else {
+            self.set_status("Nothing dropped that Duckfoot can open");
+            return;
+        };
+        let count = photos.len();
+        self.add_to_shelf(gpu, photos);
+        self.open_path(gpu, first);
+        if count > 1 {
+            self.set_status(format!("Added {count} photos to the shelf"));
+        }
     }
 }

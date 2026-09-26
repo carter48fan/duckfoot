@@ -351,13 +351,19 @@ impl PhotoApp {
             return;
         };
 
-        // In shelf order, so {seq} numbers photos the way they are laid out, not the way
-        // a hash set happens to iterate.
+        // In the order the shelf shows them (its filter and sort), then any selected photo
+        // the filter hides: {seq} numbers photos the way they are laid out, not the way a
+        // hash set happens to iterate.
         let selected_paths: Vec<PathBuf> = if !self.selection.is_empty() {
-            self.shelf
+            let shown = self.displayed_indices();
+            let hidden = (0..self.shelf.len()).filter(|i| !shown.contains(i));
+            shown
                 .iter()
-                .filter(|it| self.selection.is_selected(&it.path))
-                .map(|it| it.path.clone())
+                .copied()
+                .chain(hidden)
+                .map(|i| &self.shelf[i].path)
+                .filter(|p| self.selection.is_selected(p))
+                .cloned()
                 .collect()
         } else if let Some(p) = &self.loaded_path {
             vec![p.clone()]
