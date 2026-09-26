@@ -79,6 +79,7 @@ pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
     use rayon::prelude::*;
 
     let img = image::load_from_memory(bytes).context("decoding raster image format")?;
+    let orientation = raster_orientation(bytes);
     // Free for the JPEG case, which decodes to RGB8 already. Alpha is not carried: the
     // sensor texture's alpha is the highlight-reconstruction neutral, not coverage.
     let rgb = img.into_rgb8();
@@ -117,7 +118,7 @@ pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
         width,
         height,
         data,
-        orientation: Geometry::default(),
+        orientation,
         make: "Raster".to_string(),
         model: "Image".to_string(),
     })
@@ -361,6 +362,21 @@ pub(crate) fn tiff_orientation(bytes: &[u8]) -> Option<Geometry> {
     Some(orientation_geometry_rawler(rawler::Orientation::from_u16(
         v as u16,
     )))
+}
+
+/// The EXIF orientation of a JPEG, PNG, TIFF or WebP. Phones write every photo in the
+/// sensor's own landscape frame and record which way up it was held only here, so a
+/// raster that ignores it shows every portrait on its side.
+pub fn raster_orientation(bytes: &[u8]) -> Geometry {
+    use image::ImageDecoder;
+    let exif = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .and_then(|mut d| d.orientation().ok())
+        .map(|o| o.to_exif());
+    exif.map(|v| orientation_geometry_rawler(rawler::Orientation::from_u16(v as u16)))
+        .unwrap_or_default()
 }
 
 fn orientation_geometry_rawler(o: rawler::Orientation) -> Geometry {
@@ -1386,6 +1402,36 @@ mod tests {
         assert!(orientation_geometry_rawler(O::Normal).is_identity());
         let t = orientation_geometry_rawler(O::Transpose);
         assert!(t.quarter_turns == 1 && t.mirror_h && !t.mirror_v);
+    }
+
+    #[test]
+    fn a_phone_jpeg_held_upright_opens_upright() {
+        let mut jpeg = Vec::new();
+        image::RgbImage::new(8, 4)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        assert!(raster_orientation(&jpeg).is_identity());
+
+        // APP1 with one IFD entry: Orientation (0x0112), SHORT, 6 = turn 90° clockwise.
+        let tiff: &[u8] = &[
+            b'M', b'M', 0, 42, 0, 0, 0, 8, // header, IFD at 8
+            0, 1, // one entry
+            0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation = 6
+            0, 0, 0, 0, // no next IFD
+        ];
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(tiff);
+        jpeg.splice(2..2, app1);
+
+        let g = raster_orientation(&jpeg);
+        assert_eq!(g.quarter_turns, 1);
+        assert!(!g.mirror_h && !g.mirror_v);
+        assert_eq!(decode_raster(&jpeg).unwrap().orientation.quarter_turns, 1);
     }
 
     #[test]

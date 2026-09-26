@@ -25,7 +25,8 @@ use std::time::Instant;
 
 use photo_engine::{
     decode_jpeg_scaled, decode_raster, decode_raw, is_raster_path, load_embedded_preview,
-    upload_cfa, upload_raster, CfaImage, Geometry, Preview, RasterImage, UploadPool, UploadedImage,
+    raster_orientation, upload_cfa, upload_raster, CfaImage, Geometry, Preview, RasterImage,
+    UploadPool, UploadedImage,
 };
 
 /// Long side of a thumbnail, in pixels. A tile is 112×70 points; this covers it at 2×.
@@ -275,12 +276,15 @@ fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
                 width,
                 height,
                 rgb,
-                orientation: Geometry::default(),
+                orientation: raster_orientation(&bytes),
             };
             return Some(preview_image(preview, Some(THUMB_SIDE)));
         }
         let img = image::load_from_memory(&bytes).ok()?;
-        return Some(downsample_to_thumb(img));
+        return Some(orient(
+            downsample_to_thumb(img),
+            &raster_orientation(&bytes),
+        ));
     }
     if let Some(preview) = load_embedded_preview(path, THUMB_SIDE as u32) {
         return Some(preview_image(preview, Some(THUMB_SIDE)));

@@ -70,17 +70,28 @@ pub fn sized(ui: &Ui, desktop: f32, touch: f32) -> f32 {
 /// A toggle chip: small bold monospace caps. The barrel switcher, scope modes, the stage
 /// toolbar's CROP and A / B.
 pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
-    let enabled = ui.is_enabled();
+    chip_enabled(ui, true, selected, text)
+}
+
+/// [`chip`] with its own enabled flag, for rows that must wrap: an `add_enabled_ui` scope
+/// around each chip would stop `horizontal_wrapped` from wrapping them.
+pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> Response {
+    let enabled = enabled && ui.is_enabled();
     let galley = ui.painter().layout_no_wrap(
         text.to_uppercase(),
-        FontId::new(sized(ui, 10.5, 12.0), theme::mono_bold()),
+        FontId::new(sized(ui, 10.5, 11.5), theme::mono_bold()),
         Color32::PLACEHOLDER,
     );
     let size = vec2(
-        galley.size().x + sized(ui, 14.0, 20.0),
-        sized(ui, 20.0, 32.0),
+        galley.size().x + sized(ui, 14.0, 16.0),
+        sized(ui, 20.0, 28.0),
     );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = if selected {
@@ -140,8 +151,8 @@ pub fn button_enabled(
         Color32::PLACEHOLDER,
     );
     let size = vec2(
-        (galley.size().x + sized(ui, 22.0, 28.0)).max(min_width),
-        sized(ui, 26.0, 36.0),
+        (galley.size().x + sized(ui, 22.0, 24.0)).max(min_width),
+        sized(ui, 26.0, 32.0),
     );
     let sense = if enabled {
         Sense::click()
@@ -173,7 +184,7 @@ pub fn button_enabled(
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::splat(sized(ui, 26.0, 36.0)), Sense::click());
+        ui.allocate_exact_size(Vec2::splat(sized(ui, 26.0, 32.0)), Sense::click());
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => TEXT_FAINT,
@@ -189,7 +200,7 @@ pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(sized(ui, 15.0, 18.0)),
+        FontId::proportional(sized(ui, 15.0, 17.0)),
         colour,
     );
     if hovered {
@@ -231,7 +242,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
     response
 }
 
-/// A 2px rail with an amber fill and an 8×14 thumb (12×24 on touch).
+/// A 2px rail with an amber fill and an 8×14 thumb (14×22 on touch).
 ///
 /// Bipolar ranges fill from zero rather than from the left end, so "+0.4 EV" and "−0.4 EV"
 /// read as the same distance from neutral.
@@ -264,12 +275,11 @@ fn rail_painted(
     gradient: Option<[Color32; 2]>,
 ) -> Response {
     let touch = is_touch(ui.ctx());
-    let row_h = sized(ui, 18.0, 38.0);
-    let (rect, mut response) =
-        ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
+    let row_h = sized(ui, 18.0, 32.0);
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     let thumb = if touch {
-        vec2(16.0, 26.0)
+        vec2(14.0, 22.0)
     } else {
         vec2(8.0, 14.0)
     };
@@ -299,7 +309,10 @@ fn rail_painted(
                 let is_sliding = delta.x.abs() >= delta.y.abs() * 0.8;
                 ui.ctx().data_mut(|d| d.insert_temp(gesture_id, is_sliding));
             }
-            let is_sliding = ui.ctx().data(|d| d.get_temp::<bool>(gesture_id)).unwrap_or(true);
+            let is_sliding = ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(gesture_id))
+                .unwrap_or(true);
             if is_sliding {
                 if fine {
                     let dx = response.drag_delta().x;
@@ -384,7 +397,11 @@ fn rail_painted(
         Stroke::new(1.0, BORDER_HI),
     );
     let knob = Rect::from_center_size(pos2(x1, rect.center().y), thumb);
-    painter.rect_filled(knob, sized(ui, 2.0, 4.0), if hot { ACCENT_HI } else { fill });
+    painter.rect_filled(
+        knob,
+        sized(ui, 2.0, 4.0),
+        if hot { ACCENT_HI } else { fill },
+    );
     painter.vline(
         x1,
         (knob.top() + 4.0)..=(knob.bottom() - 4.0),
@@ -461,8 +478,10 @@ pub fn scaled_slider(
             )
             .size()
             .x;
-        let value_w = (digit_w + 2.0 * ui.spacing().button_padding.x + 4.0).max(50.0);
-        let row_h = sized(ui, 18.0, 38.0);
+        // A common floor keeps the rails of a module's rows the same length.
+        let value_w =
+            (digit_w + 2.0 * ui.spacing().button_padding.x + 4.0).max(sized(ui, 50.0, 56.0));
+        let row_h = sized(ui, 18.0, 32.0);
         let (label_rect, mut label_response) =
             ui.allocate_exact_size(vec2(LABEL_W, row_h), Sense::click());
         let modified = (*value - default).abs() > 1e-6;
@@ -495,7 +514,7 @@ pub fn scaled_slider(
             *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
         }
         let typed = ui.add_sized(
-            [value_w, sized(ui, 18.0, 30.0)],
+            [value_w, sized(ui, 18.0, 26.0)],
             egui::DragValue::new(value)
                 .range(range)
                 .fixed_decimals(decimals)
