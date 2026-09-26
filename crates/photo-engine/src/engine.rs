@@ -13,7 +13,7 @@ use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, RasterImage};
 use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
-use crate::params::{Crop, Geometry, PhotoStack};
+use crate::params::{Geometry, PhotoStack};
 use crate::temperature::WhiteScale;
 
 /// The adjusted image is written here, and egui samples it directly.
@@ -962,6 +962,9 @@ impl Engine {
     /// target exists only for the length of this call, so a preview-sized session never
     /// holds a second copy of a 24 MP frame.
     ///
+    /// Everything about the frame comes from `stack`: its turns set the output size and
+    /// its crop the region written, whatever `set_geometry` was last told.
+    ///
     /// Blocks until the GPU has finished and the buffer is mapped. At 24 MP the readback
     /// is ~98 MB, so this belongs off the UI thread in anything interactive. The preview's
     /// uniforms are overwritten, so render again before the next frame is shown.
@@ -970,14 +973,19 @@ impl Engine {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         stack: &PhotoStack,
-        crop: Crop,
     ) -> Result<ExportedImage> {
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
-        let full = output_texture(device, image.width, image.height);
+        // Sized from the stack's own geometry, not the image's: only `set_geometry` moves
+        // those, and batch export never calls it, so a portrait RAW came out rendered into a
+        // landscape frame — cut top and bottom, black at the sides, the crop misplaced.
+        let (out_w, out_h) = stack
+            .geometry
+            .output_size(image.sensor_width, image.sensor_height);
+        let full = output_texture(device, out_w, out_h);
         let full_view = full.create_view(&Default::default());
-        self.write_uniforms(queue, stack, None, (image.width, image.height), 0);
+        self.write_uniforms(queue, stack, None, (out_w, out_h), (out_w, out_h), 0);
 
         let Some(image) = &self.image else {
             bail!("no image is loaded");
@@ -995,7 +1003,7 @@ impl Engine {
 
         // The crop is not baked into the texture, so export is where it becomes real: copy
         // only the region the user framed. See `params::Crop` for why it is not in the shader.
-        let (ox, oy, width, height) = crop.to_pixels(image.width, image.height);
+        let (ox, oy, width, height) = stack.geometry.crop.to_pixels(out_w, out_h);
 
         let stride = padded_bytes_per_row(width);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1125,7 +1133,8 @@ impl Engine {
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
-        self.write_uniforms(queue, stack, split_x, target, level);
+        let out_size = (image.width, image.height);
+        self.write_uniforms(queue, stack, split_x, out_size, target, level);
         let Some(image) = &self.image else { return };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1213,12 +1222,14 @@ impl Engine {
     }
 
     /// Everything a pass needs, into the one uniform buffer, plus the curve LUT if it
-    /// changed. `target` is the render target's size and `level` the sensor mip to sample.
+    /// changed. `out_size` is the full-resolution frame after right-angle turns, `target`
+    /// the render target's size and `level` the sensor mip to sample.
     fn write_uniforms(
         &mut self,
         queue: &wgpu::Queue,
         stack: &PhotoStack,
         split_x: Option<f32>,
+        out_size: (u32, u32),
         target: (u32, u32),
         level: u32,
     ) {
@@ -1280,8 +1291,8 @@ impl Engine {
                 offset: cb.offset.to_array(),
                 flags: [stack.bitmask(), 0, 0, 0],
                 sizes: [
-                    image.width as f32,
-                    image.height as f32,
+                    out_size.0 as f32,
+                    out_size.1 as f32,
                     image.sensor_width as f32,
                     image.sensor_height as f32,
                 ],

@@ -246,7 +246,7 @@ fn process_single_job(
     }
 
     // 2. Full-resolution export from shader pipeline (Invariant 2)
-    let exported = engine.export(device, queue, &job.stack, job.crop)?;
+    let exported = engine.export(device, queue, &job.stack)?;
 
     // 3. Convert buffer to RgbaImage
     let mut rgba_img = image::RgbaImage::from_raw(exported.width, exported.height, exported.rgba)
