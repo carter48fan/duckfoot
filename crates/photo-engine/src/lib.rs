@@ -11,6 +11,7 @@ pub mod curve;
 pub mod decode;
 pub mod engine;
 pub mod export;
+pub mod fsio;
 pub mod histogram;
 pub mod params;
 pub mod preview;
@@ -32,10 +33,13 @@ pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, Dehaze, Exposure, ExposureMode, Filmic,
     Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
 };
-pub use preview::{decode_jpeg_scaled, find_embedded_jpeg, load_embedded_preview, Preview};
+pub use preview::{
+    decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
+};
 pub use sidecar::{
     find_sidecar, load_sidecar, load_sidecar_full, save_sidecar, save_sidecar_full, sidecar_path,
-    AssetMetadata, Flag, SidecarData, SIDECAR_EXT,
+    update_sidecar, write_sidecar, AssetMetadata, Flag, SidecarData, Snapshot, SIDECAR_EXT,
+    SIDECAR_VERSION,
 };
 pub use temperature::WhiteScale;
 

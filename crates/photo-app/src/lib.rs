@@ -18,14 +18,14 @@ pub mod widgets;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::sync::RwLock;
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Rect, RichText, Sense, Stroke};
 use photo_engine::params::Module;
 use photo_engine::{
-    find_sidecar, identity_nodes, load_sidecar, save_sidecar, Crop, CurveNode, Engine, PhotoStack,
+    find_sidecar, identity_nodes, load_sidecar, Crop, CurveNode, Engine, Geometry, PhotoStack,
     WhiteScale,
 };
 use widgets::Kind;
@@ -275,6 +275,17 @@ impl History {
             .collect()
     }
 
+    /// The camera orientation became known after edits were already recorded against a
+    /// guess. Every state still carrying the guess gets the real one, so undoing past
+    /// the moment it arrived does not turn the photo.
+    fn rebase_geometry(&mut self, from: Geometry, to: Geometry) {
+        for stack in self.past.iter_mut().chain(self.future.iter_mut()) {
+            if stack.geometry == from {
+                stack.geometry = to;
+            }
+        }
+    }
+
     /// Walk the stack to a timeline index, as clicking a row in the History list does.
     fn jump_to(&mut self, current: &mut PhotoStack, target: usize) -> bool {
         let mut moved = false;
@@ -322,7 +333,25 @@ pub struct PhotoApp {
     /// Set whenever the stack changes; cleared once the GPU has re-rendered.
     needs_render: bool,
     error: Option<String>,
+    /// The photo being edited: what the inspector, autosave, ratings and hotkeys act on.
+    /// It moves the moment another photo is chosen, before that photo has decoded, so the
+    /// controls never show one photo's values while another is on the stage.
     loaded_path: Option<PathBuf>,
+    /// The photo whose pixels are on the GPU. Trails `loaded_path` while a newly chosen
+    /// photo decodes.
+    engine_path: Option<PathBuf>,
+    /// Nothing has read the open photo's camera orientation yet, so `baseline` has none.
+    orientation_pending: bool,
+    /// The open photo failed to decode: there is nothing to edit, and nothing is saved.
+    decode_failed: bool,
+    /// The open photo's sidecar could not be read, or was written by a newer build: it is
+    /// shown as found and never written over.
+    sidecar_locked: bool,
+    /// The stack as autosave last saw it, and when it is due to be written.
+    autosave_seen: PhotoStack,
+    autosave_due: Option<Instant>,
+    /// Every shelf sidecar as it was before the last paste to all, to take the paste back.
+    bulk_paste_undo: Option<Vec<(PathBuf, Option<Vec<u8>>)>>,
     /// The stack as last written to (or read from) the sidecar, so "modified" means
     /// modified relative to disk rather than relative to defaults.
     saved_stack: Option<PhotoStack>,
@@ -461,7 +490,17 @@ impl PhotoApp {
             .clone()
             .map(settings::merge_sections)
             .unwrap_or_else(settings::default_compact_sections);
-        Self {
+        // A marker left by the last run means it ended without `shutdown` — a crash, a
+        // kill, a power cut. Autosave will have kept the edits; say so.
+        let lock = session_lock_path(settings_dir.as_deref());
+        let unclean = lock.as_ref().is_some_and(|l| l.is_file());
+        if let Some(lock) = &lock {
+            if let Some(dir) = lock.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(lock, std::process::id().to_string());
+        }
+        let mut app = Self {
             engine,
             stack: PhotoStack::default(),
             history: History::new(),
@@ -469,6 +508,13 @@ impl PhotoApp {
             needs_render: false,
             error: None,
             loaded_path: None,
+            engine_path: None,
+            orientation_pending: false,
+            decode_failed: false,
+            sidecar_locked: false,
+            autosave_seen: PhotoStack::default(),
+            autosave_due: None,
+            bulk_paste_undo: None,
             saved_stack: None,
             decode_ms: 0.0,
             render_ms: 0.0,
@@ -537,7 +583,11 @@ impl PhotoApp {
             preset: None,
             tour_step: None,
             compact_rects: compact::Rects::default(),
+        };
+        if unclean {
+            app.set_status("Duckfoot did not close cleanly last time; edits up to then were saved");
         }
+        app
     }
 
     /// Read the current frame back and write it, encoding off the UI thread.
@@ -906,11 +956,14 @@ impl PhotoApp {
             } else {
                 let (stack, meta) = match photo_engine::load_sidecar_full(src_path) {
                     Ok(Some(sc)) => (sc.stack, sc.metadata),
-                    _ => (
-                        PhotoStack::default(),
-                        photo_engine::AssetMetadata::default(),
-                    ),
+                    _ => (None, photo_engine::AssetMetadata::default()),
                 };
+                // Never opened, or only rated: exported as shot, which includes the way the
+                // camera was held.
+                let stack = stack.unwrap_or_else(|| PhotoStack {
+                    geometry: photo_engine::file_orientation(src_path),
+                    ..PhotoStack::default()
+                });
                 let crop = stack.geometry.crop;
                 (stack, crop, meta.rating)
             };
@@ -998,6 +1051,32 @@ impl PhotoApp {
         &self.stack
     }
 
+    /// A photo is chosen and editable: from the moment it is picked, before it decodes,
+    /// and not once its decode has failed.
+    pub fn can_edit(&self) -> bool {
+        self.loaded_path.is_some() && !self.decode_failed
+    }
+
+    /// Change the open photo's stack as one undo step. Nothing happens with no photo open.
+    pub fn edit(&mut self, change: impl FnOnce(&mut PhotoStack)) {
+        if !self.can_edit() {
+            return;
+        }
+        let before = self.stack.clone();
+        change(&mut self.stack);
+        if self.stack != before {
+            self.history.checkpoint(&before);
+            self.needs_render = true;
+        }
+    }
+
+    /// Step back one edit, as Ctrl+Z does.
+    pub fn undo(&mut self) -> bool {
+        let moved = self.history.undo(&mut self.stack);
+        self.needs_render |= moved;
+        moved
+    }
+
     /// Framing a crop: the whole frame is on screen instead of the cropped picture.
     pub fn is_cropping(&self) -> bool {
         self.cropping
@@ -1058,60 +1137,122 @@ impl PhotoApp {
         self.status_notification = Some((msg.into(), Instant::now()));
     }
 
+    /// Save the open photo's edits now (Ctrl+S), whether or not autosave would have.
     pub fn save_current_sidecar(&mut self) {
-        let Some(path) = &self.loaded_path else {
+        let Some(path) = self.loaded_path.clone() else {
             return;
         };
+        if self.write_open_sidecar() {
+            let name = photo_engine::sidecar_path(&path);
+            self.set_status(format!("Saved sidecar: {}", file_name(&name)));
+        }
+    }
+
+    /// Write the open photo's edits to its sidecar if they differ from what is on disk.
+    /// Called when leaving a photo, a second after an edit settles, and by the shell on
+    /// close, suspend and memory warnings: DESIGN.md forbids "are you sure", so nothing
+    /// may depend on the user remembering to save. Returns false if something could not
+    /// be written, and says why.
+    pub fn flush(&mut self) -> bool {
+        self.autosave_due = None;
+        if self.loaded_path.is_none() {
+            return true;
+        }
+        let on_disk = self.saved_stack.as_ref().unwrap_or(&self.baseline);
+        if self.committed_stack() == *on_disk {
+            return true;
+        }
+        self.write_open_sidecar()
+    }
+
+    /// The stack as it stands outside any gesture still in progress: a crop being framed
+    /// is not part of it until it is applied.
+    fn committed_stack(&self) -> PhotoStack {
+        let mut stack = self.stack.clone();
+        if self.cropping {
+            stack.geometry.crop = self.crop_before;
+        }
+        stack
+    }
+
+    fn write_open_sidecar(&mut self) -> bool {
+        let Some(path) = self.loaded_path.clone() else {
+            return true;
+        };
+        if self.decode_failed {
+            return true;
+        }
+        if self.sidecar_locked {
+            self.error = Some(format!(
+                "{}: edits are not being saved — its sidecar could not be read or is from a \
+                 newer Duckfoot, and is left untouched",
+                file_name(&path)
+            ));
+            return false;
+        }
+        // The camera orientation is the baseline of an unsaved photo; writing before it is
+        // known would record the photo as unrotated for good.
+        if self.orientation_pending && self.saved_stack.is_none() {
+            let orientation = photo_engine::file_orientation(&path);
+            self.apply_orientation(orientation);
+        }
         let metadata = self
             .shelf
             .iter()
-            .find(|it| &it.path == path)
+            .find(|it| it.path == path)
             .map(|it| it.metadata.clone())
             .unwrap_or_default();
-        match photo_engine::save_sidecar_full(path, &self.stack, &metadata) {
-            Ok(p) => {
-                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
+        let stack = self.committed_stack();
+        match photo_engine::save_sidecar_full(&path, Some(&stack), &metadata) {
+            Ok(_) => {
+                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                     item.has_sidecar = true;
                     item.is_edited = false;
                 }
-                self.saved_stack = Some(self.stack.clone());
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("sidecar");
-                self.set_status(format!("Saved sidecar: {name}"));
+                self.saved_stack = Some(stack);
+                true
             }
             Err(e) => {
-                self.error = Some(format!("Failed to save sidecar: {e:#}"));
+                self.error = Some(format!(
+                    "Could not save edits to {}: {e:#}",
+                    file_name(&path)
+                ));
+                false
+            }
+        }
+    }
+
+    /// Flush, and mark the session as closed cleanly. The shell calls this on the way out.
+    pub fn shutdown(&mut self) {
+        self.flush();
+        if let Some(lock) = session_lock_path(self.settings_dir.as_deref()) {
+            let _ = std::fs::remove_file(lock);
+        }
+    }
+
+    /// Write a rating or flag without touching the stack on disk. A photo that was never
+    /// opened keeps a sidecar with no stack, so its camera orientation still decides how
+    /// it opens.
+    fn update_metadata(&mut self, p: &Path, change: impl Fn(&mut photo_engine::AssetMetadata)) {
+        let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) else {
+            return;
+        };
+        change(&mut item.metadata);
+        let metadata = item.metadata.clone();
+        match photo_engine::update_sidecar(p, |data| data.metadata = metadata.clone()) {
+            Ok(_) => item.has_sidecar = true,
+            Err(e) => {
+                self.error = Some(format!("Could not save to {}: {e:#}", file_name(p)));
             }
         }
     }
 
     pub fn set_rating_for_path(&mut self, p: &Path, rating: u8) {
-        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) {
-            item.metadata.rating = rating;
-            item.has_sidecar = true;
-            let stack = if Some(p) == self.loaded_path.as_deref() {
-                self.stack.clone()
-            } else {
-                photo_engine::load_sidecar(p)
-                    .unwrap_or(None)
-                    .unwrap_or_default()
-            };
-            let _ = photo_engine::save_sidecar_full(p, &stack, &item.metadata);
-        }
+        self.update_metadata(p, |m| m.rating = rating.min(5));
     }
 
     pub fn set_flag_for_path(&mut self, p: &Path, flag: photo_engine::Flag) {
-        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) {
-            item.metadata.flag = flag;
-            item.has_sidecar = true;
-            let stack = if Some(p) == self.loaded_path.as_deref() {
-                self.stack.clone()
-            } else {
-                photo_engine::load_sidecar(p)
-                    .unwrap_or(None)
-                    .unwrap_or_default()
-            };
-            let _ = photo_engine::save_sidecar_full(p, &stack, &item.metadata);
-        }
+        self.update_metadata(p, |m| m.flag = flag);
     }
 
     pub fn set_rating_for_selection(&mut self, rating: u8) {
@@ -1163,22 +1304,22 @@ impl PhotoApp {
     }
 
     pub fn revert_to_sidecar(&mut self) {
-        let Some(path) = &self.loaded_path else {
+        let Some(path) = self.loaded_path.clone() else {
             return;
         };
-        match load_sidecar(path) {
+        match load_sidecar(&path) {
             Ok(Some(saved)) => {
                 self.history.checkpoint(&self.stack);
                 self.saved_stack = Some(saved.clone());
                 self.stack = saved;
                 self.needs_render = true;
-                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
+                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                     item.is_edited = false;
                 }
                 self.set_status("Reverted to saved sidecar");
             }
             Ok(None) => {
-                self.set_status("No sidecar file found to revert to");
+                self.set_status("No saved edits to revert to");
             }
             Err(e) => {
                 self.error = Some(format!("Failed to load sidecar: {e:#}"));
@@ -1194,8 +1335,23 @@ impl PhotoApp {
     }
 
     pub fn copy_adjustments(&mut self) {
+        if self.loaded_path.is_none() {
+            return;
+        }
         self.clipboard_stack = Some(self.stack.clone());
-        self.set_status("Copied adjustments to clipboard");
+        // A new look on the clipboard: the last paste to all is settled.
+        self.bulk_paste_undo = None;
+        self.set_status("Copied adjustments (everything but crop and rotation)");
+    }
+
+    /// The clipboard's look on `target`'s own framing: rotation, mirroring, straighten
+    /// and crop belong to a photo, not to a look, and pasting them turns and crops photos
+    /// that were never framed that way.
+    fn pasted_onto(copied: &PhotoStack, target: &PhotoStack) -> PhotoStack {
+        PhotoStack {
+            geometry: target.geometry,
+            ..copied.clone()
+        }
     }
 
     pub fn paste_adjustments(&mut self) {
@@ -1203,33 +1359,96 @@ impl PhotoApp {
             self.set_status("Clipboard is empty");
             return;
         };
-        self.history.checkpoint(&self.stack);
-        self.stack = copied.clone();
-        self.needs_render = true;
-        if let Some(path) = &self.loaded_path {
-            if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == path) {
-                item.is_edited = true;
-            }
+        if self.loaded_path.is_none() {
+            return;
         }
+        let pasted = Self::pasted_onto(copied, &self.stack);
+        self.history.checkpoint(&self.stack);
+        self.stack = pasted;
+        self.needs_render = true;
         self.set_status("Pasted adjustments from clipboard");
     }
 
+    /// Paste onto every photo on the shelf. Each keeps its own framing, the open photo
+    /// takes the paste as an undoable edit, and the sidecars it replaced are kept so the
+    /// whole paste can be taken back with [`Self::undo_paste_to_all`].
     pub fn paste_to_all_in_shelf(&mut self) {
-        let Some(copied) = &self.clipboard_stack else {
+        let Some(copied) = self.clipboard_stack.clone() else {
             self.set_status("Clipboard is empty");
             return;
         };
+        let mut before = Vec::new();
         let mut count = 0;
-        for item in &mut self.shelf {
-            if save_sidecar(&item.path, copied).is_ok() {
-                item.has_sidecar = true;
-                count += 1;
-                if self.loaded_path.as_ref() == Some(&item.path) {
-                    self.saved_stack = Some(copied.clone());
+        let mut failed = Vec::new();
+        let paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
+        for path in paths {
+            if self.loaded_path.as_ref() == Some(&path) {
+                let pasted = Self::pasted_onto(&copied, &self.stack);
+                if pasted != self.stack {
+                    self.history.checkpoint(&self.stack);
+                    self.stack = pasted;
+                    self.needs_render = true;
                 }
+                count += 1;
+                continue;
+            }
+            let sidecar = photo_engine::sidecar_path(&path);
+            let previous = std::fs::read(&sidecar).ok();
+            let result = photo_engine::update_sidecar(&path, |data| {
+                let own = data.stack.clone().unwrap_or_else(|| PhotoStack {
+                    geometry: photo_engine::file_orientation(&path),
+                    ..PhotoStack::default()
+                });
+                data.stack = Some(Self::pasted_onto(&copied, &own));
+            });
+            match result {
+                Ok(_) => {
+                    before.push((path.clone(), previous));
+                    if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                        item.has_sidecar = true;
+                    }
+                    count += 1;
+                }
+                Err(_) => failed.push(file_name(&path)),
             }
         }
-        self.set_status(format!("Applied adjustments to {count} photos in shelf"));
+        self.bulk_paste_undo = Some(before);
+        if failed.is_empty() {
+            self.set_status(format!(
+                "Pasted onto {count} photos — Undo paste takes it back"
+            ));
+        } else {
+            self.error = Some(format!(
+                "Pasted onto {count} photos; could not write {}",
+                failed.join(", ")
+            ));
+        }
+    }
+
+    /// Put back every sidecar the last paste to all replaced.
+    pub fn undo_paste_to_all(&mut self) {
+        let Some(before) = self.bulk_paste_undo.take() else {
+            return;
+        };
+        let count = before.len();
+        for (path, previous) in before {
+            let sidecar = photo_engine::sidecar_path(&path);
+            let restored = match previous {
+                Some(bytes) => photo_engine::fsio::atomic_write_bytes(&sidecar, &bytes),
+                None => std::fs::remove_file(&sidecar).map_err(anyhow::Error::from),
+            };
+            if restored.is_err() {
+                self.error = Some(format!("Could not restore {}", file_name(&sidecar)));
+            }
+            if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                item.has_sidecar = find_sidecar(&path).is_some();
+            }
+        }
+        self.set_status(format!("Took the paste back off {count} photos"));
+    }
+
+    pub fn can_undo_paste_to_all(&self) -> bool {
+        self.bulk_paste_undo.is_some()
     }
 
     pub fn add_to_shelf(&mut self, gpu: &Gpu, paths: Vec<PathBuf>) {
@@ -1276,15 +1495,128 @@ impl PhotoApp {
         self.open_path(gpu, path);
     }
 
-    /// Start opening a photo. The decode runs in the background (see `loader`); the
-    /// current photo stays on screen and editable until the new one is ready.
+    /// Make `path` the photo being edited, and start decoding it.
+    ///
+    /// The controls move at once (U-01): the photo being left is saved, and the sliders
+    /// show the new photo's own saved edits — or defaults, if it has none — from this
+    /// frame on, while the decode runs in the background. Tone and colour can be edited
+    /// straight away and appear when the pixels land; rotate, flip and crop wait for the
+    /// decode, which is what knows the photo's true orientation and size.
     pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
-        if self.loaded_path.as_ref() == Some(&path) && self.loading.is_none() {
-            return;
+        if self.loaded_path.as_ref() == Some(&path) {
+            let decoding_it = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
+            if decoding_it || self.engine_path.as_ref() == Some(&path) {
+                return;
+            }
+        } else {
+            // An unapplied crop is never saved, and a slider or crop drag in progress
+            // belongs to the photo it started on.
+            self.cancel_crop();
+            self.flush();
+            self.begin_editing(&path);
         }
         self.open_generation += 1;
         self.loading = Some((path.clone(), Instant::now()));
+        self.stage_preview = None;
         self.loader.open(path, self.open_generation);
+    }
+
+    /// Point every control at `path`: its sidecar's stack, or defaults.
+    fn begin_editing(&mut self, path: &Path) {
+        self.error = None;
+        self.sidecar_locked = false;
+        self.decode_failed = false;
+        let (saved, metadata) = match photo_engine::load_sidecar_full(path) {
+            Ok(Some(data)) => {
+                if data.is_from_newer_version() {
+                    self.sidecar_locked = true;
+                    self.error = Some(format!(
+                        "{}: its sidecar is from a newer Duckfoot. Shown as saved; edits \
+                         here will not be written over it.",
+                        file_name(path)
+                    ));
+                }
+                (data.stack, data.metadata)
+            }
+            Ok(None) => (None, photo_engine::AssetMetadata::default()),
+            Err(e) => {
+                // Holding edits this build cannot read is not the same as holding none:
+                // show it, and never write over it.
+                self.sidecar_locked = true;
+                self.error = Some(format!(
+                    "{}: {e:#}. Its edits were not loaded, and the file is left untouched.",
+                    file_name(path)
+                ));
+                (None, photo_engine::AssetMetadata::default())
+            }
+        };
+
+        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+            item.metadata = metadata;
+            item.is_edited = false;
+        } else {
+            self.request_thumbnail(path);
+            let mut item = ShelfItem::new(path.to_path_buf());
+            item.metadata = metadata;
+            self.shelf.push(item);
+        }
+        // Stepping through a selection built for a batch keeps it.
+        let keep_selection =
+            self.selection.selected.len() > 1 && self.selection.selected.contains(path);
+        if !keep_selection {
+            self.selection.select_single(path.to_path_buf());
+        }
+
+        self.baseline = PhotoStack::default();
+        self.orientation_pending = true;
+        self.stack = saved.clone().unwrap_or_else(|| self.baseline.clone());
+        self.saved_stack = saved;
+        self.autosave_seen = self.stack.clone();
+        self.autosave_due = None;
+        self.history = History::new();
+        self.loaded_path = Some(path.to_path_buf());
+        self.view = View::default();
+        self.cropping = false;
+        self.crop_drag = None;
+        self.needs_render = true;
+    }
+
+    /// The camera's orientation for the open photo is now known. It is what "no edits"
+    /// means for it, so the baseline takes it — and so does a stack that is still the
+    /// baseline, along with its undo history. A saved stack already carries its own.
+    fn apply_orientation(&mut self, orientation: Geometry) {
+        self.orientation_pending = false;
+        let guessed = self.baseline.geometry;
+        if guessed == orientation {
+            return;
+        }
+        self.baseline.geometry = orientation;
+        if self.saved_stack.is_none() {
+            if self.stack.geometry == guessed {
+                self.stack.geometry = orientation;
+                self.needs_render = true;
+            }
+            if self.autosave_seen.geometry == guessed {
+                self.autosave_seen.geometry = orientation;
+            }
+            self.history.rebase_geometry(guessed, orientation);
+        }
+    }
+
+    /// The open photo, once its pixels are on the GPU. While a newly chosen photo decodes
+    /// the engine still holds the last one, which must not be drawn, measured or exported
+    /// as if it were the photo the controls now describe.
+    fn ready_image(&self) -> Option<&photo_engine::LoadedImage> {
+        if self.engine_path.is_some() && self.engine_path == self.loaded_path {
+            self.engine.image()
+        } else {
+            None
+        }
+    }
+
+    /// The photo's pixels are on the GPU and match the controls.
+    pub fn is_photo_ready(&self) -> bool {
+        self.ready_image().is_some()
     }
 
     /// Collect whatever the workers have finished.
@@ -1308,6 +1640,9 @@ impl PhotoApp {
                         Err(e) => {
                             self.error = Some(e);
                             self.edit_when_opened = false;
+                            if self.loaded_path.as_ref() == Some(&path) {
+                                self.decode_failed = true;
+                            }
                         }
                     }
                 }
@@ -1317,11 +1652,15 @@ impl PhotoApp {
                     path,
                     generation,
                     image,
+                    orientation,
                 } => {
                     // Only while its own decode is still running; a preview that loses the
                     // race to the real image has nothing left to stand in for.
                     let current = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
                     if generation == self.open_generation && current {
+                        if self.orientation_pending {
+                            self.apply_orientation(orientation);
+                        }
                         let texture =
                             ctx.load_texture("stage preview", image, egui::TextureOptions::LINEAR);
                         self.stage_preview = Some((path, texture));
@@ -1345,18 +1684,13 @@ impl PhotoApp {
         path: PathBuf,
         uploaded: Box<photo_engine::UploadedImage>,
     ) {
-        // Save the photo being left, including anything edited while this one decoded.
-        if let Some(current) = &self.loaded_path {
-            if self.is_stack_edited() && save_sidecar(current, &self.stack).is_ok() {
-                if let Some(item) = self.shelf.iter_mut().find(|it| &it.path == current) {
-                    item.has_sidecar = true;
-                }
-            }
+        if self.loaded_path.as_ref() != Some(&path) {
+            // The user has moved on; the generation check makes this rare, not impossible.
+            return;
         }
-
-        self.error = None;
         let orientation = uploaded.orientation;
         self.release_texture(gpu);
+        self.engine_path = None;
 
         // The pixels are already on the GPU (the loader uploaded them); what is left here
         // is recording the demosaic.
@@ -1365,47 +1699,20 @@ impl PhotoApp {
         if let Err(e) = load_res {
             // DESIGN.md: failures surface in the UI, with the filename.
             self.error = Some(format!("{}: {e:#}", path.display()));
-            self.loaded_path = None;
             self.edit_when_opened = false;
+            self.decode_failed = true;
             return;
         }
+        self.engine_path = Some(path.clone());
+        self.apply_orientation(orientation);
         if std::mem::take(&mut self.edit_when_opened) {
             self.compact_tab = Some(compact::Tab::Edit);
             self.compact_controls_open = true;
         }
-
-        let (saved, metadata) = match photo_engine::load_sidecar_full(&path) {
-            Ok(Some(sc)) => {
-                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                self.set_status(format!("Loaded sidecar for {fname}"));
-                (Some(sc.stack), sc.metadata)
-            }
-            _ => (None, photo_engine::AssetMetadata::default()),
-        };
-
-        let mut item = ShelfItem::new(path.clone());
-        item.metadata = metadata;
-        if let Some(existing) = self.shelf.iter_mut().find(|it| it.path == path) {
-            existing.has_sidecar = item.has_sidecar;
-            existing.is_edited = false;
-            existing.metadata = item.metadata.clone();
-        } else {
-            self.request_thumbnail(&path);
-            self.shelf.push(item);
+        if self.saved_stack.is_some() {
+            self.set_status(format!("Loaded sidecar for {}", file_name(&path)));
         }
-
-        self.selection.select_single(path.clone());
-        self.baseline = PhotoStack {
-            geometry: orientation,
-            ..PhotoStack::default()
-        };
-        self.loaded_path = Some(path);
-        self.stack = saved.clone().unwrap_or_else(|| self.baseline.clone());
-        self.saved_stack = saved;
-        self.history = History::new();
         self.view = View::default();
-        self.cropping = false;
-        self.crop_drag = None;
         self.needs_render = true;
     }
 
@@ -1432,6 +1739,11 @@ impl PhotoApp {
 
     /// Runs the GPU work for this frame, if anything changed.
     fn sync(&mut self, gpu: &Gpu, pixels_per_point: f32) {
+        // The engine still holds the last photo while the chosen one decodes; rendering
+        // it with the new photo's stack would draw one photo with another's edits.
+        if self.ready_image().is_none() {
+            return;
+        }
         // Zooming changes how much resolution the screen can show; the preview follows,
         // and a new preview texture needs registering with egui like a turned one does.
         let level = self.wanted_preview_level(pixels_per_point);
@@ -1466,7 +1778,7 @@ impl PhotoApp {
         self.needs_render = false;
 
         if self.texture_id.is_none() {
-            if let Some(image) = self.engine.image() {
+            if let Some(image) = self.ready_image() {
                 let id = renderer_write(gpu).register_native_texture(
                     gpu.device,
                     &image.output_view,
@@ -1519,6 +1831,26 @@ impl PhotoApp {
         }
         if let Some(dir) = self.pending_step.take() {
             self.step_photo(gpu, dir);
+        }
+        self.autosave(&ctx);
+    }
+
+    /// Write the edits a second after they stop changing. A drag changes the stack every
+    /// frame and pushes the deadline on, so a gesture is saved once, when it ends.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        const SETTLE: Duration = Duration::from_secs(1);
+        if self.stack != self.autosave_seen {
+            self.autosave_seen = self.stack.clone();
+            self.autosave_due = Some(Instant::now() + SETTLE);
+        }
+        let Some(due) = self.autosave_due else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= due {
+            self.flush();
+        } else {
+            ctx.request_repaint_after(due - now);
         }
     }
 
@@ -1684,32 +2016,16 @@ impl PhotoApp {
                 )
             });
         if rot_left {
-            let before = self.stack.clone();
-            self.stack.geometry.rotate_left();
-            self.history.checkpoint(&before);
-            self.rebase_crop();
-            self.needs_render = true;
+            self.geometry_edit(Geometry::rotate_left);
         }
         if rot_right {
-            let before = self.stack.clone();
-            self.stack.geometry.rotate_right();
-            self.history.checkpoint(&before);
-            self.rebase_crop();
-            self.needs_render = true;
+            self.geometry_edit(Geometry::rotate_right);
         }
         if flip_h {
-            let before = self.stack.clone();
-            self.stack.geometry.flip_h();
-            self.history.checkpoint(&before);
-            self.rebase_crop();
-            self.needs_render = true;
+            self.geometry_edit(Geometry::flip_h);
         }
         if flip_v {
-            let before = self.stack.clone();
-            self.stack.geometry.flip_v();
-            self.history.checkpoint(&before);
-            self.rebase_crop();
-            self.needs_render = true;
+            self.geometry_edit(Geometry::flip_v);
         }
         if crop_toggle {
             self.toggle_crop();
@@ -1722,11 +2038,26 @@ impl PhotoApp {
         }
     }
 
+    /// Turn or mirror the open photo as one undo step. Waits for the decode: until then
+    /// the photo's true orientation is not known, so there is nothing sound to turn.
+    fn geometry_edit(&mut self, edit: impl FnOnce(&mut Geometry)) {
+        if self.ready_image().is_none() {
+            return;
+        }
+        let before = self.stack.clone();
+        edit(&mut self.stack.geometry);
+        if self.stack != before {
+            self.history.checkpoint(&before);
+            self.rebase_crop();
+            self.needs_render = true;
+        }
+    }
+
     // ── Crop mode ───────────────────────────────────────────────────────────────────────
 
     /// Show the whole frame again, with the crop drawn over it, to reframe.
     fn begin_crop(&mut self) {
-        if self.cropping || self.engine.image().is_none() {
+        if self.cropping || self.ready_image().is_none() {
             return;
         }
         self.cropping = true;
@@ -1792,7 +2123,7 @@ impl PhotoApp {
 
     /// Size of the shown region, in full-resolution output pixels.
     fn shown_size(&self) -> Option<egui::Vec2> {
-        let image = self.engine.image()?;
+        let image = self.ready_image()?;
         let region = self.shown_region();
         Some(egui::vec2(
             image.width as f32 * region.width,
@@ -1802,8 +2133,7 @@ impl PhotoApp {
 
     /// Kelvin and tint for the open photo's camera.
     fn white_scale(&self) -> WhiteScale {
-        self.engine
-            .image()
+        self.ready_image()
             .map_or_else(WhiteScale::srgb, |image| image.white_scale())
     }
 
@@ -1886,7 +2216,7 @@ impl PhotoApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let busy = matches!(self.export, Export::Writing { .. });
-                        let ready = self.engine.image().is_some() && !busy;
+                        let ready = self.ready_image().is_some() && !busy;
                         let export = ui
                             .add_enabled_ui(ready, |ui| {
                                 widgets::button(ui, Kind::Primary, "Export", 84.0)
@@ -1957,7 +2287,7 @@ impl PhotoApp {
                                 .color(Color32::from_gray(0x33)),
                         );
                     };
-                    match self.engine.image() {
+                    match self.ready_image() {
                         Some(image) => {
                             widgets::dot(ui, theme::ACCENT);
                             let camera = format!("{} {}", image.make, image.model);
@@ -2617,7 +2947,7 @@ impl PhotoApp {
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin::symmetric(14, 7)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let loaded = self.engine.image().is_some();
+                    let loaded = self.ready_image().is_some();
                     ui.add_enabled_ui(loaded, |ui| {
                         self.crop_chips(ui);
                         if widgets::chip(ui, self.split_active, "a / b")
@@ -2967,12 +3297,14 @@ impl PhotoApp {
                     let item = &self.shelf[index];
                     let active = self.loaded_path.as_ref() == Some(&item.path);
                     let selected = self.selection.is_selected(&item.path);
-                    let picture = if active {
-                        self.texture_id.zip(
-                            self.engine
-                                .image()
-                                .map(|img| img.width as f32 / img.height.max(1) as f32),
-                        )
+                    // The open photo's tile shows the live render, once there is one for
+                    // it; until its decode lands, its thumbnail like any other.
+                    let live = self.ready_image().filter(|_| active).and_then(|img| {
+                        self.texture_id
+                            .map(|id| (id, img.width as f32 / img.height.max(1) as f32))
+                    });
+                    let picture = if live.is_some() {
+                        live
                     } else {
                         self.thumbs.get(&item.path).map(|t| {
                             let [w, h] = t.size();
@@ -3180,6 +3512,14 @@ impl PhotoApp {
                         self.paste_adjustments();
                     }
                 }
+                Action::PasteAll if self.can_undo_paste_to_all() => {
+                    if button(ui, true, Kind::Secondary, "Undo paste", 0.0)
+                        .on_hover_text("Put back every sidecar the paste to all replaced")
+                        .clicked()
+                    {
+                        self.undo_paste_to_all();
+                    }
+                }
                 Action::PasteAll => {
                     if button(
                         ui,
@@ -3188,7 +3528,10 @@ impl PhotoApp {
                         &format!("Paste to all {n}"),
                         0.0,
                     )
-                    .on_hover_text("Write the copied stack to the sidecar of every shelf item")
+                    .on_hover_text(
+                        "Paste the copied look onto every shelf photo; each keeps its own \
+                         crop and rotation",
+                    )
                     .clicked()
                     {
                         self.paste_to_all_in_shelf();
@@ -3212,17 +3555,20 @@ impl PhotoApp {
                         return;
                     }
                 }
-                if self.texture_id.is_none() || self.engine.image().is_none() {
+                if self.texture_id.is_none() || self.ready_image().is_none() {
                     self.empty_stage(ui);
                     return;
                 }
-                let (Some(id), Some(image)) = (self.texture_id, self.engine.image()) else {
+                let (Some(id), Some((image_w, image_h))) = (
+                    self.texture_id,
+                    self.ready_image().map(|i| (i.width, i.height)),
+                ) else {
                     return;
                 };
 
                 // Only the crop is on screen outside crop mode: `img` is the size of what is
                 // shown, and `frame_of` finds where the whole frame would sit around it.
-                let full = egui::vec2(image.width as f32, image.height as f32);
+                let full = egui::vec2(image_w as f32, image_h as f32);
                 let region = self.shown_region();
                 let img = full * egui::vec2(region.width, region.height);
                 let frame_of = |shown: egui::Rect| {
@@ -3541,7 +3887,7 @@ impl PhotoApp {
                 // Corner readouts. What exports is exactly this texture, cropped; only the
                 // display scale differs.
                 if framed_view.width() > 420.0 {
-                    let (_, _, w, h) = crop.to_pixels(image.width, image.height);
+                    let (_, _, w, h) = crop.to_pixels(image_w, image_h);
                     hud_badge(
                         &painter,
                         framed_view.left_bottom() + vec2(12.0, -12.0),
@@ -3741,7 +4087,7 @@ impl PhotoApp {
                             }
                         }
 
-                        if self.engine.image().is_some() {
+                        if self.ready_image().is_some() {
                             if let Some(percent) = self.zoom_percent(self.last_panel) {
                                 readout(ui, "zoom", &format!("{percent:.0}%"), theme::TEXT_HI);
                             }
@@ -3819,10 +4165,12 @@ impl PhotoApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             self.inspector_footer(ui);
 
-            let loaded = self.engine.image().is_some();
-            if loaded {
+            if self.ready_image().is_some() {
                 self.scope_block(ui);
             }
+            // The pipeline follows the photo being edited, which is ahead of the pixels
+            // while a newly chosen photo decodes.
+            let loaded = self.can_edit();
 
             // One slim header: what the list below is, and the two things you do to it.
             widgets::band(ui, |ui| {
@@ -4106,7 +4454,7 @@ impl PhotoApp {
 
         match id {
             InspectorSectionId::Scope => {
-                if self.engine.image().is_none() {
+                if self.ready_image().is_none() {
                     ui.label(theme::dim("Open a photo to see its scopes.").size(12.0));
                 } else if self.layout.is_compact() {
                     // Flat only on a phone: the 3D views need orbiting, which fights the
@@ -4126,6 +4474,15 @@ impl PhotoApp {
                 }
             }
             InspectorSectionId::Geometry => {
+                if self.ready_image().is_none() {
+                    let text = if self.loaded_path.is_some() {
+                        "Rotate, flip and crop as soon as the photo has loaded."
+                    } else {
+                        "Open a photo to rotate, flip or crop it."
+                    };
+                    ui.label(theme::dim(text).size(12.0));
+                    return;
+                }
                 let g = &mut self.stack.geometry;
                 let mut edited = false;
                 let mut turned = false;
@@ -4210,6 +4567,11 @@ impl PhotoApp {
                     2,
                     d.geometry.straighten_deg,
                 ));
+            }
+            InspectorSectionId::WhiteBalance if self.ready_image().is_none() => {
+                // Kelvin and tint are this camera's; until the decode says which camera,
+                // there is no scale to read them on.
+                ui.label(theme::dim("White balance as soon as the photo has loaded.").size(12.0));
             }
             InspectorSectionId::WhiteBalance => {
                 // Kelvin and tint through this camera's own colour matrix, so the numbers
@@ -4852,7 +5214,7 @@ impl PhotoApp {
                     .color(theme::TEXT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(image) = self.engine.image() {
+                if let Some(image) = self.ready_image() {
                     let (_, _, w, h) = self
                         .stack
                         .geometry
@@ -6046,6 +6408,15 @@ fn renderer_write<'a>(gpu: &Gpu<'a>) -> std::sync::RwLockWriteGuard<'a, egui_wgp
     gpu.renderer
         .write()
         .expect("egui renderer lock poisoned by a panic in another thread")
+}
+
+/// Present while a desktop session runs; left behind, it means the last one did not end
+/// cleanly. Android kills backgrounded apps as a matter of course, so it has no marker.
+fn session_lock_path(settings_dir: Option<&Path>) -> Option<PathBuf> {
+    if cfg!(target_os = "android") {
+        return None;
+    }
+    settings_dir.map(|d| d.join("session.lock"))
 }
 
 fn file_name(path: &std::path::Path) -> String {

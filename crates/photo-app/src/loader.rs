@@ -52,6 +52,8 @@ pub enum Done {
         path: PathBuf,
         generation: u64,
         image: egui::ColorImage,
+        /// How the camera meant the photo to be viewed, known long before the decode.
+        orientation: Geometry,
     },
     Thumbnail {
         path: PathBuf,
@@ -174,10 +176,12 @@ impl Loader {
                                         Ok(load_embedded_preview(path, STAGE_PREVIEW_SIDE))
                                     });
                                     if let Ok(Some(preview)) = preview {
+                                        let orientation = preview.orientation;
                                         let _ = done_tx.send(Done::Preview {
                                             path: path.clone(),
                                             generation,
                                             image: preview_image(preview, None),
+                                            orientation,
                                         });
                                         wake(repaint);
                                     }

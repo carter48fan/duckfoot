@@ -107,6 +107,12 @@ impl Headless {
     }
 }
 
+/// The app with no platform: tests must not write settings or a session marker into the
+/// real user's configuration.
+fn quiet_app(h: &Headless) -> PhotoApp {
+    PhotoApp::with_platform(&h.gpu(), Box::new(photo_app::platform::NoPlatform))
+}
+
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("duckfoot-headless-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -196,7 +202,7 @@ fn raws_and_jpegs_open_through_the_upload_thread() {
         .unwrap();
 
     let h = Headless::new();
-    let mut app = PhotoApp::new(&h.gpu());
+    let mut app = quiet_app(&h);
     h.frame(&mut app, Default::default());
 
     // Shelving opens the first photo; the thumbnails build alongside.
@@ -217,15 +223,27 @@ fn raws_and_jpegs_open_through_the_upload_thread() {
     assert_eq!(app.error(), None);
     assert_eq!(app.loaded_path(), Some(raw.as_path()));
 
-    // A file that is not a RAW fails in place, naming the file once, and leaves the photo
-    // that was open on the stage.
+    // A file that is not a RAW fails in place, naming the file once. The controls went to
+    // it when it was chosen, and stay there with nothing to act on; nothing is written.
     let broken = dir.join("c.dng");
     std::fs::write(&broken, b"II*\0not really a raw file").unwrap();
     app.open_path(&h.gpu(), broken.clone());
     h.settle(&mut app, Duration::from_secs(30));
     let error = app.error().expect("no error shown");
     assert_eq!(error.matches("c.dng").count(), 1, "{error}");
-    assert_eq!(app.loaded_path(), Some(raw.as_path()));
+    assert_eq!(app.loaded_path(), Some(broken.as_path()));
+    assert!(!app.is_photo_ready());
+    app.edit(|s| s.exposure.params.ev = 1.0);
+    app.flush();
+    assert!(
+        photo_engine::find_sidecar(&broken).is_none(),
+        "a photo that never decoded is not written to"
+    );
+    // And the photo that did open is one step away.
+    app.open_path(&h.gpu(), raw.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.error(), None);
+    assert!(app.is_photo_ready());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -233,7 +251,7 @@ fn raws_and_jpegs_open_through_the_upload_thread() {
 fn a_large_roll_paints_only_the_tiles_in_view() {
     let dir = scratch_dir("roll");
     let h = Headless::new();
-    let mut app = PhotoApp::new(&h.gpu());
+    let mut app = quiet_app(&h);
     h.frame(&mut app, Default::default());
 
     let count_shapes = |app: &mut PhotoApp| {
@@ -395,7 +413,7 @@ fn a_crop_is_framed_then_applied_or_cancelled() {
     let raw = dir.join("a.dng");
     write_dng(&raw, 640, 426);
     let h = Headless::new();
-    let mut app = PhotoApp::new(&h.gpu());
+    let mut app = quiet_app(&h);
     h.frame(&mut app, Default::default());
     app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
     h.settle(&mut app, Duration::from_secs(30));
@@ -953,5 +971,201 @@ fn phone_swipes_presets_and_tour() {
     assert_eq!(app.tour_step(), None);
 
     assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// U-01: the controls move to a photo the moment it is chosen, showing its own saved
+/// edits or defaults; the photo left behind is saved on the way out.
+#[test]
+fn sliders_reset_to_the_chosen_photo_before_it_decodes() {
+    let dir = scratch_dir("u01");
+    let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    // B was edited in an earlier session.
+    let mut saved_b = photo_engine::PhotoStack::default();
+    saved_b.exposure.params.ev = -0.5;
+    photo_engine::save_sidecar(&b, &saved_b).unwrap();
+
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone(), c.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(a.as_path()));
+    app.edit(|s| s.exposure.params.ev = 1.0);
+
+    // Choosing B: on this very call, before any frame has run B's decode, the controls
+    // show B's saved value, and A's edit is on disk.
+    app.open_path(&h.gpu(), b.clone());
+    assert_eq!(app.loaded_path(), Some(b.as_path()));
+    assert!(!app.is_photo_ready(), "B has not decoded yet");
+    assert_eq!(app.stack().exposure.params.ev, -0.5);
+    let a_disk = photo_engine::load_sidecar(&a)
+        .unwrap()
+        .expect("A saved on leaving");
+    assert_eq!(a_disk.exposure.params.ev, 1.0);
+
+    // C has no edits: everything reads its default at once.
+    app.open_path(&h.gpu(), c.clone());
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+    assert!(
+        photo_engine::find_sidecar(&c).is_none(),
+        "passing through a photo writes nothing"
+    );
+    assert_eq!(
+        photo_engine::load_sidecar(&b).unwrap().unwrap(),
+        saved_b,
+        "B, passed through without an edit, is untouched"
+    );
+
+    // An edit made while C decodes is C's, and is on screen once C lands.
+    app.edit(|s| s.exposure.params.ev = 0.7);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.is_photo_ready());
+    assert_eq!(app.loaded_path(), Some(c.as_path()));
+    assert_eq!(app.stack().exposure.params.ev, 0.7);
+    app.flush();
+    assert_eq!(
+        photo_engine::load_sidecar(&c)
+            .unwrap()
+            .unwrap()
+            .exposure
+            .params
+            .ev,
+        0.7
+    );
+    assert_eq!(
+        photo_engine::load_sidecar(&a)
+            .unwrap()
+            .unwrap()
+            .exposure
+            .params
+            .ev,
+        1.0,
+        "A is not touched by edits made after leaving it"
+    );
+
+    // Back to A: its edit comes back with it.
+    app.open_path(&h.gpu(), a.clone());
+    assert_eq!(app.stack().exposure.params.ev, 1.0);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edits_are_saved_a_moment_after_they_stop() {
+    let dir = scratch_dir("autosave");
+    let a = dir.join("a.dng");
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    app.edit(|s| s.exposure.params.ev = 0.4);
+    h.frame(&mut app, Default::default());
+    assert!(
+        photo_engine::find_sidecar(&a).is_none(),
+        "not while still settling"
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    h.frame(&mut app, Default::default());
+    assert_eq!(
+        photo_engine::load_sidecar(&a)
+            .unwrap()
+            .unwrap()
+            .exposure
+            .params
+            .ev,
+        0.4
+    );
+
+    // A reset is an edit too: it is saved, not left to come back from the old sidecar.
+    app.reset_to_default();
+    app.flush();
+    assert_eq!(
+        photo_engine::load_sidecar(&a)
+            .unwrap()
+            .unwrap()
+            .exposure
+            .params
+            .ev,
+        0.0
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rating_an_unopened_photo_writes_no_stack() {
+    let dir = scratch_dir("rating");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    app.set_rating_for_path(&b, 4);
+    let data = photo_engine::load_sidecar_full(&b).unwrap().unwrap();
+    assert_eq!(data.metadata.rating, 4);
+    assert_eq!(
+        data.stack, None,
+        "a stack here would pin the photo's orientation before anything read it"
+    );
+
+    // A sidecar this build cannot read is shown as an error and never written over.
+    let sidecar = photo_engine::sidecar_path(&a);
+    std::fs::write(&sidecar, b"{ damaged").unwrap();
+    app.open_path(&h.gpu(), b.clone());
+    app.open_path(&h.gpu(), a.clone());
+    assert!(app.error().is_some_and(|e| e.contains("a.dng")));
+    app.edit(|s| s.exposure.params.ev = 1.0);
+    app.set_rating_for_path(&a, 2);
+    app.flush();
+    assert_eq!(std::fs::read(&sidecar).unwrap(), b"{ damaged");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn paste_to_all_keeps_each_photos_framing_and_can_be_taken_back() {
+    let dir = scratch_dir("paste");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    app.edit(|s| {
+        s.exposure.params.ev = 0.8;
+        s.geometry.quarter_turns = 1;
+        s.geometry.crop = photo_engine::Crop {
+            x: 0.1,
+            y: 0.1,
+            width: 0.5,
+            height: 0.5,
+        };
+    });
+    app.copy_adjustments();
+    app.paste_to_all_in_shelf();
+    let pasted = photo_engine::load_sidecar(&b).unwrap().unwrap();
+    assert_eq!(pasted.exposure.params.ev, 0.8, "the look travels");
+    assert_eq!(pasted.geometry.quarter_turns, 0, "the rotation does not");
+    assert!(pasted.geometry.crop.is_full_frame(), "nor the crop");
+
+    assert!(app.can_undo_paste_to_all());
+    app.undo_paste_to_all();
+    assert!(
+        photo_engine::find_sidecar(&b).is_none(),
+        "B had no sidecar before the paste"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

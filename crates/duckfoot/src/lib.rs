@@ -465,6 +465,23 @@ impl ApplicationHandler<UserEvent> for Shell {
         // built on it afterwards is the classic Android wgpu crash. Only the window side
         // goes — the device and the app, with the user's work, stay.
         self.window = None;
+        // …for as long as the system lets them. A backgrounded app is the first thing the
+        // low-memory killer takes, with no further warning, so the edits go to disk now.
+        if let Some(app) = self.app.as_mut() {
+            app.flush();
+        }
+    }
+
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.flush();
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.shutdown();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -483,7 +500,14 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                app.shutdown();
+                event_loop.exit();
+            }
+            // Switching away is when work is most often abandoned mid-thought.
+            WindowEvent::Focused(false) => {
+                app.flush();
+            }
             WindowEvent::Resized(size) => {
                 window.resize(gpu, size.width, size.height);
                 window.window.request_redraw();
