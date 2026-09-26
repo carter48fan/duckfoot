@@ -61,6 +61,19 @@ jobs:
         with:
           tool: cargo-ndk
 
+      # C dependencies (libwebp) are compiled by cc-rs even under clippy, and it looks for
+      # the NDK's clang under a name the NDK does not ship. Name it for every later step.
+      - name: Name the NDK's C compiler
+        run: |
+          ndk="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          bin=("$ndk"/toolchains/llvm/prebuilt/*/bin)
+          {
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=${bin[0]}/aarch64-linux-android30-clang"
+            echo "CXX_aarch64_linux_android=${bin[0]}/aarch64-linux-android30-clang++"
+            echo "AR_aarch64_linux_android=${bin[0]}/llvm-ar"
+          } >> "$GITHUB_ENV"
+
       # Clippy needs no linker, so it runs before the (slower) NDK build.
       - run: cargo clippy -p duckfoot-android --target aarch64-linux-android -- -D warnings
 
