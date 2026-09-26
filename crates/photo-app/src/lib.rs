@@ -20,6 +20,7 @@ mod desktop;
 mod export_flow;
 mod export_ui;
 mod icons;
+mod info;
 mod inspector;
 mod keymap;
 mod keys;
@@ -139,6 +140,9 @@ pub struct ShelfItem {
     /// Not on disk when it was shelved: a session restored with its drive unplugged. It
     /// stays, greyed, so plugging the drive back in does not mean rebuilding the shelf.
     pub missing: bool,
+    /// What the file says about how it was taken; `None` until the loader has read it,
+    /// or if the file says nothing.
+    pub info: Option<photo_engine::PhotoInfo>,
 }
 
 impl ShelfItem {
@@ -157,6 +161,7 @@ impl ShelfItem {
             metadata,
             bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
             missing: !path.exists(),
+            info: None,
             path,
         }
     }
@@ -466,6 +471,8 @@ pub struct PhotoApp {
     pub(crate) presets_view: compact::PresetsView,
     /// The desktop inspector's Looks band is open.
     pub looks_open: bool,
+    /// The desktop inspector's Info band is open.
+    pub info_open: bool,
     pub batch_output_dir: Option<PathBuf>,
     /// How the single export writes: format, quality, size, depth, sharpening, metadata.
     pub export_settings: photo_engine::ExportSettings,
@@ -620,6 +627,7 @@ impl PhotoApp {
             deleted_snapshot: None,
             presets_view: compact::PresetsView::default(),
             looks_open: false,
+            info_open: false,
             batch_output_dir: None,
             export_settings: photo_engine::ExportSettings::new(photo_engine::ExportFormat::Jpeg),
             color_eq_tab: ColorEqTab::default(),

@@ -656,6 +656,14 @@ impl PhotoApp {
             }
             (false, None) => {}
         }
+        // What the file says about it, in one line.
+        if !many {
+            if let Some(line) = self.open_info().map(crate::info::one_line) {
+                if !line.is_empty() {
+                    ui.label(theme::dim(line).size(11.5));
+                }
+            }
+        }
     }
 
     // ── Presets ─────────────────────────────────────────────────────────────────────────

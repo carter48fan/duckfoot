@@ -621,8 +621,11 @@ impl PhotoApp {
                         self.stage_preview = Some((path, texture));
                     }
                 }
-                loader::Done::Thumbnail { path, image } => {
+                loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_answered += 1;
+                    if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                        item.info = info;
+                    }
                     if let Some(image) = image {
                         let name = format!("thumb:{}", path.display());
                         let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);

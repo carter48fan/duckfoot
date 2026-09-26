@@ -60,6 +60,8 @@ pub enum Done {
         /// `None` if nothing could be built; the request is still answered, so the UI
         /// knows it is no longer outstanding.
         image: Option<egui::ColorImage>,
+        /// Camera, lens, exposure and the rest, read from the header on the same trip.
+        info: Option<photo_engine::PhotoInfo>,
     },
 }
 
@@ -270,7 +272,10 @@ impl Loader {
                     let image = guarded(&path, || Ok(generate_thumbnail(&path)))
                         .ok()
                         .flatten();
-                    let _ = done_tx.send(Done::Thumbnail { path, image });
+                    let info = guarded(&path, || Ok(photo_engine::read_info(&path)))
+                        .ok()
+                        .flatten();
+                    let _ = done_tx.send(Done::Thumbnail { path, image, info });
                     wake(&repaint);
                 })
                 .expect("could not start a thumbnail thread");

@@ -82,6 +82,9 @@ impl PhotoApp {
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
+                    if loaded && !self.customize_open {
+                        self.info_band(ui);
+                    }
                     // The phone's Presets, folded to one line until asked for; it scrolls with
                     // the pipeline, which it would otherwise push off a short window.
                     if loaded && !self.customize_open {
