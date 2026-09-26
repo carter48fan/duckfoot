@@ -183,7 +183,7 @@ fn display_keys(keys: &str) -> String {
 }
 
 impl PhotoApp {
-    /// The shortcut sheet, over everything, until Esc, `?`, a click outside or its ✕.
+    /// The shortcut sheet, over everything, until Esc, `?`, a click outside or its ×.
     pub(crate) fn shortcuts_overlay(&mut self, ctx: &egui::Context) {
         if !self.shortcuts_open {
             return;

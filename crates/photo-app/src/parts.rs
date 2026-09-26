@@ -182,7 +182,11 @@ pub(crate) fn shelf_row(
         ui.allocate_exact_size(vec2(ui.available_width(), SHELF_ROW_HEIGHT), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
 
-    let badge_text = format_bytes(item.bytes);
+    let badge_text = if item.missing {
+        "missing".to_string()
+    } else {
+        format_bytes(item.bytes)
+    };
     let badge_font = FontId::monospace(10.5);
     let badge_galley = ui
         .painter()
@@ -310,6 +314,8 @@ pub(crate) fn shelf_row(
 
     let (family, colour) = if active {
         (theme::mono_bold(), theme::ACCENT)
+    } else if item.missing {
+        (egui::FontFamily::Monospace, theme::TEXT_FAINT)
     } else {
         (egui::FontFamily::Monospace, theme::TEXT)
     };
@@ -342,7 +348,7 @@ pub(crate) fn shelf_row(
         painter.text(
             badge.center(),
             Align2::CENTER_CENTER,
-            "✕ remove",
+            "× remove",
             FontId::monospace(10.0),
             if hot { theme::DANGER } else { theme::TEXT_DIM },
         );
@@ -447,6 +453,15 @@ pub(crate) fn film_tile(
                 Rect::from_min_max(pos2(0.0, 0.5 - h / 2.0), pos2(1.0, 0.5 + h / 2.0))
             };
             painter.image(id, inner, uv, Color32::from_white_alpha(220));
+        }
+        None if item.missing => {
+            painter.text(
+                inner.center() - vec2(0.0, 6.0),
+                Align2::CENTER_CENTER,
+                "MISSING",
+                FontId::new(10.0, theme::mono_bold()),
+                theme::TEXT_FAINT,
+            );
         }
         None => {
             let is_raster = photo_engine::is_raster_path(&item.path);

@@ -249,11 +249,11 @@ impl AndroidPlatform {
 impl Platform for AndroidPlatform {
     fn request(&mut self, request: Request) {
         match request {
-            Request::OpenImage => self.pick(PICK_OPEN),
-            Request::AddImages => self.pick(PICK_ADD),
-            Request::BrowseFolder => self.pick(PICK_FOLDER),
+            Request::OpenImage { .. } => self.pick(PICK_OPEN),
+            Request::AddImages { .. } => self.pick(PICK_ADD),
+            Request::BrowseFolder { .. } => self.pick(PICK_FOLDER),
             // No save dialog: exports go where the gallery finds them.
-            Request::BatchOutputDir => {
+            Request::BatchOutputDir { .. } => {
                 if let Some(dir) = self.exports_dir() {
                     self.answered.push(Response::BatchOutputDir(dir));
                 }

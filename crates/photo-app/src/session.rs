@@ -378,6 +378,9 @@ impl PhotoApp {
     }
 
     pub(crate) fn request_thumbnail(&mut self, path: &std::path::Path) {
+        if !path.exists() {
+            return;
+        }
         if self.thumbs_requested.insert(path.to_path_buf()) {
             self.loader.thumbnail(path.to_path_buf());
         }
@@ -401,7 +404,13 @@ impl PhotoApp {
             Some(i) => (i as isize + dir).rem_euclid(n) as usize,
             None => 0,
         };
-        let path = self.shelf[order[next]].path.clone();
+        // Past any photo whose file is missing, unless every one is.
+        let n = order.len();
+        let step = if dir < 0 { n - 1 } else { 1 };
+        let found = (0..n)
+            .map(|k| order[(next + k * step) % n])
+            .find(|&i| !self.shelf[i].missing);
+        let path = self.shelf[found.unwrap_or(order[next])].path.clone();
         self.open_path(gpu, path);
     }
 
@@ -413,6 +422,19 @@ impl PhotoApp {
     /// straight away and appear when the pixels land; rotate, flip, crop and white balance
     /// wait for the decode, which is what knows the photo's true orientation and camera.
     pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
+        if !path.exists() {
+            if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                item.missing = true;
+            }
+            self.set_status(format!(
+                "{} is missing: reconnect its drive, or remove it from the shelf",
+                file_name(&path)
+            ));
+            return;
+        }
+        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+            item.missing = false;
+        }
         if self.loaded_path.as_ref() == Some(&path) {
             let decoding_it = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
             if decoding_it || self.engine_path.as_ref() == Some(&path) {

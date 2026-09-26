@@ -14,7 +14,7 @@ impl PhotoApp {
             {
                 self.apply_crop();
             }
-            if widgets::chip(ui, false, "✕ cancel")
+            if widgets::chip(ui, false, "× cancel")
                 .on_hover_text("Put the crop back the way it was (Esc)")
                 .clicked()
             {
@@ -276,7 +276,7 @@ impl PhotoApp {
                 .font(egui::TextStyle::Monospace),
         );
         if !self.filter.search_query.is_empty()
-            && ui.button("✕").on_hover_text("Clear search").clicked()
+            && ui.button("×").on_hover_text("Clear search").clicked()
         {
             self.filter.search_query.clear();
         }

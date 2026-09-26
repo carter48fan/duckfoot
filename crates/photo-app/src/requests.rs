@@ -4,16 +4,26 @@ use crate::*;
 
 impl PhotoApp {
     pub(crate) fn pick_and_open(&mut self, ctx: &egui::Context) {
-        self.request(ctx, platform::Request::OpenImage);
+        let from = self.settings.import_dir.clone();
+        self.request(ctx, platform::Request::OpenImage { from });
     }
 
     pub(crate) fn pick_and_shelve(&mut self, ctx: &egui::Context) {
-        self.request(ctx, platform::Request::AddImages);
+        let from = self.settings.import_dir.clone();
+        self.request(ctx, platform::Request::AddImages { from });
     }
 
     pub(crate) fn pick_and_export(&mut self, ctx: &egui::Context) {
         let (dir, name) = self.export_suggestion();
         self.request(ctx, platform::Request::ExportImage { dir, name });
+    }
+
+    /// Pickers for photos start next time in the folder this one came from.
+    fn remember_import_dir(&mut self, dir: Option<&Path>) {
+        if let Some(dir) = dir {
+            self.settings.import_dir = Some(dir.to_path_buf());
+            self.save_settings();
+        }
     }
 
     /// Ask the platform for a picker. Its answer is handled at the top of a later frame,
@@ -27,16 +37,30 @@ impl PhotoApp {
         for response in self.platform.poll() {
             match response {
                 platform::Response::OpenImage(path) => {
+                    self.remember_import_dir(path.parent());
                     self.edit_when_opened = true;
                     self.open_path(gpu, path);
                 }
-                platform::Response::AddImages(paths) => self.add_to_shelf(gpu, paths),
+                platform::Response::AddImages(paths) => {
+                    self.remember_import_dir(paths.first().and_then(|p| p.parent()));
+                    self.add_to_shelf(gpu, paths);
+                }
                 platform::Response::BrowseFolder(dir) => {
+                    self.remember_import_dir(Some(&dir));
                     self.folder_tree.current_folder = Some(dir);
                     self.folder_browser_open = true;
                 }
-                platform::Response::BatchOutputDir(dir) => self.batch_output_dir = Some(dir),
-                platform::Response::ExportImage(path) => self.export_to(gpu, path),
+                platform::Response::BatchOutputDir(dir) => {
+                    self.settings.batch_output_dir = Some(dir.clone());
+                    self.batch_output_dir = Some(dir);
+                    self.save_settings();
+                }
+                platform::Response::ExportImage(path) => {
+                    self.settings.export_dir = path.parent().map(Path::to_path_buf);
+                    self.settings.export_format = photo_engine::ExportFormat::from_path(&path).ok();
+                    self.save_settings();
+                    self.export_to(gpu, path);
+                }
                 platform::Response::Status(msg) => self.set_status(msg),
             }
         }

@@ -27,6 +27,14 @@ pub struct Settings {
     pub last_open: Option<PathBuf>,
     pub export_recipes: Option<Vec<crate::batch::ExportRecipe>>,
     pub rename_pattern: Option<String>,
+    /// Where the photo pickers start: the folder the last photos came from.
+    pub import_dir: Option<PathBuf>,
+    /// Where, and as what, the last single export was written.
+    pub export_dir: Option<PathBuf>,
+    pub export_format: Option<photo_engine::ExportFormat>,
+    pub batch_output_dir: Option<PathBuf>,
+    /// The shelf's filter and sort (the search is not kept).
+    pub filter: Option<crate::dam::FilterState>,
 }
 
 impl Default for Settings {
@@ -43,6 +51,11 @@ impl Default for Settings {
             last_open: None,
             export_recipes: None,
             rename_pattern: None,
+            import_dir: None,
+            export_dir: None,
+            export_format: None,
+            batch_output_dir: None,
+            filter: None,
         }
     }
 }

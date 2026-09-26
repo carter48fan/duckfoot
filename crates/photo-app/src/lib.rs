@@ -135,6 +135,9 @@ pub struct ShelfItem {
     pub metadata: photo_engine::AssetMetadata,
     /// Size on disk, read once when the item is shelved.
     pub bytes: u64,
+    /// Not on disk when it was shelved: a session restored with its drive unplugged. It
+    /// stays, greyed, so plugging the drive back in does not mean rebuilding the shelf.
+    pub missing: bool,
 }
 
 impl ShelfItem {
@@ -152,6 +155,7 @@ impl ShelfItem {
             has_sidecar,
             metadata,
             bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            missing: !path.exists(),
             path,
         }
     }
@@ -657,7 +661,12 @@ impl PhotoApp {
         if let Some(pattern) = s.rename_pattern {
             self.batch_renamer.pattern = pattern;
         }
-        let shelf: Vec<PathBuf> = s.shelf.into_iter().filter(|p| p.is_file()).collect();
+        if let Some(filter) = s.filter {
+            self.filter = filter;
+        }
+        self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
+        // Missing photos are shelved too, and shown as missing.
+        let shelf = s.shelf;
         if !shelf.is_empty() {
             self.add_to_shelf(gpu, shelf);
             if let Some(last) = s.last_open.filter(|p| p.is_file()) {
@@ -681,6 +690,7 @@ impl PhotoApp {
         s.shelf_open = Some(self.shelf_open);
         s.export_recipes = Some(self.export_recipes.clone());
         s.rename_pattern = Some(self.batch_renamer.pattern.clone());
+        s.filter = Some(self.filter.clone());
         s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
         s.last_open = self.loaded_path.clone();
         self.save_settings();
