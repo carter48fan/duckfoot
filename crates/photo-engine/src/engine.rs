@@ -63,7 +63,7 @@ struct DemosaicUniforms {
 }
 
 /// Everything the adjustment chain needs, in one buffer. A slider drag rewrites exactly
-/// this — 176 bytes — and nothing else (DESIGN.md invariant 6).
+/// this — a few hundred bytes — and nothing else (DESIGN.md invariant 6).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AdjustUniforms {
@@ -97,6 +97,9 @@ struct AdjustUniforms {
     eq_blue: [f32; 4],
     eq_purple: [f32; 4],
     eq_magenta: [f32; 4],
+    /// The crop, normalised to the oriented frame: x, y, width, height. Framing effects
+    /// (the vignette) centre on what is exported, not on the uncropped sensor.
+    frame: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -1432,6 +1435,10 @@ impl Engine {
                     stack.color_eq.params.magenta.luminance,
                     0.0,
                 ],
+                frame: {
+                    let c = stack.geometry.crop.sanitised();
+                    [c.x, c.y, c.width, c.height]
+                },
             }),
         );
     }
@@ -1537,6 +1544,35 @@ fn wait_for(device: &wgpu::Device, index: wgpu::SubmissionIndex) -> Result<()> {
     Ok(())
 }
 
+/// Wait for a `map_async` callback. The submission it waited on having finished is not
+/// enough: the device is shared (the batch exporter, the loader, tests running in
+/// parallel), and whichever thread polls next is the one that runs the callback, possibly
+/// a moment after this thread's own poll returned. So poll until it arrives.
+fn map_result(
+    device: &wgpu::Device,
+    rx: &std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + GPU_TIMEOUT;
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => bail!("export readback: {e}"),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                bail!("export readback: the mapping was dropped")
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if std::time::Instant::now() > deadline {
+                    bail!("export readback: the GPU never mapped the buffer");
+                }
+                let _ = device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_millis(10)),
+                });
+            }
+        }
+    }
+}
+
 /// Copy `(x, y, width, height)` of an RGBA8 texture back to the CPU, tightly packed.
 ///
 /// In horizontal bands of at most `band_bytes`, through one reused `MAP_READ` buffer, so no
@@ -1608,11 +1644,7 @@ pub(crate) fn read_back(
             let _ = tx.send(result);
         });
         wait_for(device, index)?;
-        match rx.try_recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => bail!("export readback: {e}"),
-            Err(_) => bail!("export readback: the GPU never mapped the buffer"),
-        }
+        map_result(device, &rx)?;
         {
             let mapped = slice.get_mapped_range()?;
             for r in 0..rows as usize {

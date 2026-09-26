@@ -518,3 +518,97 @@ fn a_reduced_preview_shows_what_the_downscaled_export_will() {
         "texture: {texture:.2} vs {base:.2} plain"
     );
 }
+
+#[test]
+fn the_vignette_centres_on_the_crop() {
+    let gpu = gpu_or_skip!();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(128, 64, 0.3))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    stack.vignette.enabled = true;
+    stack.vignette.params.amount = -0.6;
+    // The right half only: centred on the whole frame, its left edge would sit at the
+    // frame's centre and stay bright while its right edge darkened.
+    stack.geometry.crop = Crop {
+        x: 0.5,
+        y: 0.0,
+        width: 0.5,
+        height: 1.0,
+    };
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let column = |x: u32| -> f32 {
+        (0..out.height)
+            .map(|y| out.rgba[((y * out.width + x) * 4) as usize] as f32)
+            .sum::<f32>()
+            / out.height as f32
+    };
+    let (left, right, middle) = (column(0), column(out.width - 1), column(out.width / 2));
+    assert!(
+        (left - right).abs() <= 1.0,
+        "edges {left:.1} and {right:.1} should darken alike"
+    );
+    assert!(middle > left + 5.0, "no vignette: {left:.1} .. {middle:.1}");
+}
+
+#[test]
+fn colour_eq_moves_every_hue_by_what_the_sliders_say() {
+    let gpu = gpu_or_skip!();
+    // Every band's saturation at -100 takes every hue to grey: under the old weights a hue
+    // between two bands (90°, between yellow and green) kept half its colour, and one near
+    // two of them (15°) was pushed past grey.
+    let hue_patch = |h: f32| -> [f32; 3] {
+        let x = 1.0 - ((h / 60.0) % 2.0 - 1.0).abs();
+        let rgb = match (h / 60.0) as u32 {
+            0 => [1.0, x, 0.0],
+            1 => [x, 1.0, 0.0],
+            2 => [0.0, 1.0, x],
+            3 => [0.0, x, 1.0],
+            4 => [x, 0.0, 1.0],
+            _ => [1.0, 0.0, x],
+        };
+        rgb.map(|v| 0.05 + 0.4 * v)
+    };
+    let hues = [0.0, 15.0, 45.0, 90.0, 150.0, 210.0, 260.0, 300.0, 340.0];
+    let patches: Vec<[f32; 3]> = hues.iter().map(|&h| hue_patch(h)).collect();
+    let mut stack = PhotoStack::default();
+    stack.color_eq.enabled = true;
+    for (_, band) in stack.color_eq.params.bands_mut() {
+        band.saturation = -100.0;
+    }
+    let out = render_patches(gpu, &stack, &patches);
+    for (h, px) in hues.iter().zip(&out) {
+        let spread = px.iter().max().unwrap() - px.iter().min().unwrap();
+        assert!(spread <= 2, "hue {h}° kept colour: {px:?}");
+    }
+}
+
+#[test]
+fn the_before_half_of_the_split_is_the_file_as_shot() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (96u32, 64u32);
+    let scene = testkit::smooth_scene(w, h);
+    let render = |stack: &PhotoStack| {
+        let mut engine = Engine::new(&gpu.device);
+        engine
+            .load(&gpu.device, &gpu.queue, testkit::cfa_from_fn(w, h, &scene))
+            .unwrap();
+        engine.set_preview_level(&gpu.device, 0);
+        // The whole frame is "before".
+        engine.render(&gpu.device, &gpu.queue, stack, Some(1.0));
+        read_texture(
+            &gpu.device,
+            &gpu.queue,
+            engine.image().unwrap().output_texture(),
+        )
+        .unwrap()
+    };
+    let mut sharpened = PhotoStack::default();
+    sharpened.sharpen.enabled = true;
+    sharpened.sharpen.params.amount = 1.0;
+    assert!(
+        render(&sharpened) == render(&PhotoStack::default()),
+        "the before half was sharpened"
+    );
+}
