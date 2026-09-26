@@ -83,6 +83,15 @@ impl GpuState {
                 ..Default::default()
             }))?;
 
+        // wgpu panics on an error outside an error scope by default, taking the user's
+        // unsaved work with it. Report instead, and keep running where that is possible.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            photo_app::gpu_errors::report(e.to_string());
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            photo_app::gpu_errors::report(format!("device lost ({reason:?}): {message}"));
+        });
+
         let format = surface_format(surface, &adapter)?;
         let renderer = RwLock::new(new_renderer(&device, format));
         Ok(Self {

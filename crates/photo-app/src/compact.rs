@@ -1199,14 +1199,9 @@ impl PhotoApp {
             (err.clone(), theme::DANGER)
         } else if let Export::Writing { path, .. } = &self.export {
             (format!("writing {}", file_name(path)), theme::ACCENT)
-        } else if let Export::Done { path, seconds } = &self.export {
-            (
-                format!("exported {} in {seconds:.1}s", file_name(path)),
-                theme::LIME,
-            )
-        } else if let Export::Failed(e) = &self.export {
-            (format!("export failed: {e}"), theme::DANGER)
         } else if let Some((msg, when)) = notice {
+            // A finished export arrives here as a notice, so it comes down with the rest
+            // rather than holding the line until the next export.
             // Wake to take the notice down when its time is up.
             let left = 4.0 - when.elapsed().as_secs_f32();
             ui.ctx()

@@ -92,6 +92,13 @@ impl Gate {
         self.changed.notify_all();
     }
 
+    /// Closes the gate until the returned guard drops, so a decode that panics cannot
+    /// leave the thumbnail workers waiting forever.
+    fn opening(&self) -> OpeningGuard<'_> {
+        self.set_opening(true);
+        OpeningGuard(self)
+    }
+
     fn wait_until_idle(&self) {
         let Ok(mut state) = self.opening.lock() else {
             return;
@@ -103,6 +110,31 @@ impl Gate {
             };
         }
     }
+}
+
+struct OpeningGuard<'a>(&'a Gate);
+
+impl Drop for OpeningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_opening(false);
+    }
+}
+
+/// Runs a job that parses file contents. The RAW decoders can panic on a malformed or
+/// hostile file; caught here, that is one file that failed to open rather than a worker
+/// thread gone for the rest of the session.
+fn guarded<T>(path: &Path, job: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|panic| {
+        let reason = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown reason".to_string());
+        Err(format!(
+            "{}: the decoder crashed on this file ({reason})",
+            path.display()
+        ))
+    })
 }
 
 impl Loader {
@@ -129,7 +161,7 @@ impl Loader {
                             job = newer;
                         }
                         let (path, generation) = job;
-                        gate.set_opening(true);
+                        let _opening = gate.opening();
                         let started = Instant::now();
 
                         std::thread::scope(|scope| {
@@ -138,8 +170,10 @@ impl Loader {
                             if !is_raster_path(&path) {
                                 let (path, done_tx, repaint) = (&path, &done_tx, &repaint);
                                 scope.spawn(move || {
-                                    let preview = load_embedded_preview(path, STAGE_PREVIEW_SIDE);
-                                    if let Some(preview) = preview {
+                                    let preview = guarded(path, || {
+                                        Ok(load_embedded_preview(path, STAGE_PREVIEW_SIDE))
+                                    });
+                                    if let Ok(Some(preview)) = preview {
                                         let _ = done_tx.send(Done::Preview {
                                             path: path.clone(),
                                             generation,
@@ -150,31 +184,35 @@ impl Loader {
                                 });
                             }
 
-                            let decoded = if is_raster_path(&path) {
-                                fs::read(&path)
-                                    .map_err(anyhow::Error::from)
-                                    .and_then(|bytes| decode_raster(&bytes))
-                                    .map(Decoded::Raster)
-                            } else {
-                                decode_raw(&path).map(Decoded::Raw)
-                            };
+                            let decoded = guarded(&path, || {
+                                if is_raster_path(&path) {
+                                    fs::read(&path)
+                                        .map_err(anyhow::Error::from)
+                                        .and_then(|bytes| decode_raster(&bytes))
+                                        .map(Decoded::Raster)
+                                } else {
+                                    decode_raw(&path).map(Decoded::Raw)
+                                }
+                                .map_err(|e| format!("{e:#}"))
+                            });
                             let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
 
                             let uploading = Instant::now();
                             // A decode error already names the file; an upload error (a
                             // photo larger than this GPU's textures) does not.
                             let result = decoded
-                                .map_err(|e| format!("{e:#}"))
                                 .and_then(|decoded| {
-                                    match decoded {
-                                        Decoded::Raw(cfa) => {
-                                            upload_cfa(&device, &queue, &pool, cfa)
+                                    guarded(&path, || {
+                                        match decoded {
+                                            Decoded::Raw(cfa) => {
+                                                upload_cfa(&device, &queue, &pool, cfa)
+                                            }
+                                            Decoded::Raster(raster) => {
+                                                upload_raster(&device, &queue, raster)
+                                            }
                                         }
-                                        Decoded::Raster(raster) => {
-                                            upload_raster(&device, &queue, raster)
-                                        }
-                                    }
-                                    .map_err(|e| format!("{}: {e:#}", path.display()))
+                                        .map_err(|e| format!("{}: {e:#}", path.display()))
+                                    })
                                 })
                                 .map(Box::new);
                             log::debug!(
@@ -190,7 +228,6 @@ impl Loader {
                             });
                             wake(&repaint);
                         });
-                        gate.set_opening(false);
                     }
                 })
                 .expect("could not start the decode thread");
@@ -226,7 +263,9 @@ impl Loader {
                     let Ok(path) = job else { return };
                     // An open may have started while this worker sat waiting for a job.
                     gate.wait_until_idle();
-                    let image = generate_thumbnail(&path);
+                    let image = guarded(&path, || Ok(generate_thumbnail(&path)))
+                        .ok()
+                        .flatten();
                     let _ = done_tx.send(Done::Thumbnail { path, image });
                     wake(&repaint);
                 })
@@ -512,5 +551,25 @@ mod tests {
         }
         assert_eq!(img.size, src.size);
         assert_eq!(img.pixels, src.pixels);
+    }
+
+    #[test]
+    fn a_panicking_decode_is_an_error_naming_the_file() {
+        let path = Path::new("/photos/broken.ARW");
+        let result: Result<(), String> = guarded(path, || panic!("index out of bounds"));
+        let err = result.unwrap_err();
+        assert!(err.contains("broken.ARW"), "{err}");
+        assert!(err.contains("index out of bounds"), "{err}");
+    }
+
+    #[test]
+    fn the_gate_reopens_even_when_the_open_panics() {
+        let gate = Gate::default();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _opening = gate.opening();
+            panic!("decoder crashed");
+        }));
+        // Would block forever if the gate had stayed closed.
+        gate.wait_until_idle();
     }
 }

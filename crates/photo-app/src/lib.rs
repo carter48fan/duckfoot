@@ -5,6 +5,7 @@
 pub mod batch;
 pub mod compact;
 pub mod dam;
+pub mod gpu_errors;
 pub mod inspector_map_3d;
 mod loader;
 pub mod platform;
@@ -626,26 +627,29 @@ impl PhotoApp {
         }
     }
 
-    fn poll_batch_export(&mut self) {
-        if let Some(queue) = &mut self.export_queue {
-            let status = queue.poll().clone();
-            if let batch::ExportStatus::Finished {
-                total,
-                success,
-                errors,
-            } = status
-            {
-                if errors.is_empty() {
-                    self.set_status(format!(
-                        "Batch export complete: {success}/{total} photos rendered."
-                    ));
-                } else {
-                    self.error = Some(format!(
-                        "Batch export finished with {} errors out of {total} jobs",
-                        errors.len()
-                    ));
-                }
+    fn poll_batch_export(&mut self, ctx: &egui::Context) {
+        let Some(queue) = &mut self.export_queue else {
+            return;
+        };
+        if let Some(batch::ExportStatus::Finished {
+            total,
+            success,
+            errors,
+        }) = queue.take_finished()
+        {
+            if errors.is_empty() {
+                self.set_status(format!(
+                    "Batch export complete: {success}/{total} photos rendered."
+                ));
+            } else {
+                self.set_status(format!(
+                    "Batch export finished with {} errors out of {total} jobs",
+                    errors.len()
+                ));
             }
+        } else if queue.is_running() {
+            // The worker does not wake the event loop; keep the progress bar moving.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -1492,7 +1496,10 @@ impl PhotoApp {
         self.poll_loader(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);
-        self.poll_batch_export();
+        self.poll_batch_export(&ctx);
+        if let Some(e) = gpu_errors::take() {
+            self.error = Some(format!("GPU error: {e}"));
+        }
         self.engine.poll_histogram(gpu.device);
         self.sync(gpu, ctx.pixels_per_point());
 
@@ -2625,13 +2632,13 @@ impl PhotoApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(loaded, |ui| {
                             if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
-                                .on_hover_text("Actual pixels (1)")
+                                .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
                                 .clicked()
                             {
                                 self.zoom_actual();
                             }
                             if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
-                                .on_hover_text("Fit to window (0)")
+                                .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
                                 .clicked()
                             {
                                 self.view = View::default();
