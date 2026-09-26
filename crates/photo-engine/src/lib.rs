@@ -30,7 +30,7 @@ pub use engine::{
     upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
     OUTPUT_FORMAT,
 };
-pub use export::{ExportFormat, ExportedImage};
+pub use export::{EncodeOptions, ExportFormat, ExportedImage, JPEG_QUALITY};
 pub use histogram::Histogram;
 pub use metadata::{read_raw_info, PhotoInfo};
 pub use params::{

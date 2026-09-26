@@ -5,24 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExportImageFormat {
-    Jpeg,
-    Png,
-    Tiff,
-    Webp,
-}
-
-impl ExportImageFormat {
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpg",
-            Self::Png => "png",
-            Self::Tiff => "tif",
-            Self::Webp => "webp",
-        }
-    }
-}
+/// The engine's own format list: batch and single export share one encoder.
+pub type ExportImageFormat = photo_engine::ExportFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum SizingOption {
@@ -80,24 +64,15 @@ impl SizingOption {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ColorProfile {
-    #[default]
-    Srgb,
-    DisplayP3,
-    AdobeRgb,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExportRecipe {
     pub id: String,
     pub name: String,
     pub enabled: bool,
     pub format: ExportImageFormat,
-    /// JPEG / WebP quality (1..=100)
+    /// JPEG / WebP quality (1..=100; WebP at 100 is lossless)
     pub quality: u8,
     pub sizing: SizingOption,
-    pub color_profile: ColorProfile,
     pub subfolder: Option<String>,
 }
 
@@ -106,42 +81,38 @@ impl ExportRecipe {
         vec![
             Self {
                 id: "web_jpeg_2048".into(),
-                name: "Web High-Res JPEG (2048px sRGB)".into(),
+                name: "Web JPEG (2048 px)".into(),
                 enabled: true,
                 format: ExportImageFormat::Jpeg,
                 quality: 85,
                 sizing: SizingOption::LongEdge(2048),
-                color_profile: ColorProfile::Srgb,
                 subfolder: Some("Web".into()),
             },
             Self {
                 id: "full_png".into(),
-                name: "Full-Resolution Lossless PNG".into(),
+                name: "Lossless PNG (full resolution)".into(),
                 enabled: false,
                 format: ExportImageFormat::Png,
                 quality: 100,
                 sizing: SizingOption::Original,
-                color_profile: ColorProfile::Srgb,
                 subfolder: None,
             },
             Self {
                 id: "print_tiff".into(),
-                name: "Master Print TIFF (Full-Res)".into(),
+                name: "Print TIFF (full resolution)".into(),
                 enabled: false,
                 format: ExportImageFormat::Tiff,
                 quality: 100,
                 sizing: SizingOption::Original,
-                color_profile: ColorProfile::AdobeRgb,
                 subfolder: Some("Print".into()),
             },
             Self {
                 id: "social_webp".into(),
-                name: "Social WebP (1080px)".into(),
+                name: "Social WebP (1080 px)".into(),
                 enabled: false,
                 format: ExportImageFormat::Webp,
                 quality: 82,
                 sizing: SizingOption::LongEdge(1080),
-                color_profile: ColorProfile::Srgb,
                 subfolder: Some("Social".into()),
             },
         ]

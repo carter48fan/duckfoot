@@ -4,14 +4,13 @@
 //! using an independent Engine instance on cloned wgpu device/queue handles.
 
 use std::fs;
-use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
 use photo_engine::{decode_raster, decode_raw, is_raster_path, Crop, Engine, PhotoStack};
 
-use super::recipe::{ExportImageFormat, ExportRecipe};
+use super::recipe::ExportRecipe;
 
 #[derive(Debug, Clone)]
 pub struct ExportJob {
@@ -272,65 +271,20 @@ fn process_single_job(
     // 2. Full-resolution export from shader pipeline (Invariant 2)
     let exported = engine.export(device, queue, &job.stack)?;
 
-    // 3. Convert buffer to RgbaImage
-    let mut rgba_img = image::RgbaImage::from_raw(exported.width, exported.height, exported.rgba)
-        .ok_or_else(|| anyhow::anyhow!("exported RGBA buffer size mismatch"))?;
-
-    // 4. Handle Sizing
-    let (target_w, target_h) = job
+    // 3. Size it and encode it, through the same encoder the single export uses.
+    let (w, h) = job
         .recipe
         .sizing
         .calculate_size(exported.width, exported.height);
-
-    if (target_w, target_h) != (exported.width, exported.height) {
-        rgba_img = image::imageops::resize(
-            &rgba_img,
-            target_w,
-            target_h,
-            image::imageops::FilterType::Lanczos3,
-        );
-    }
-
-    // 5. Ensure output directory exists
+    let exported = exported.resized(w, h)?;
     if let Some(parent) = job.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-
-    // 6. Encode according to recipe format
-    encode_and_save(&rgba_img, &job.output_path, &job.recipe)?;
-
-    Ok(())
-}
-
-fn encode_and_save(
-    img: &image::RgbaImage,
-    path: &Path,
-    recipe: &ExportRecipe,
-) -> anyhow::Result<()> {
-    use std::io::Write;
-    // Written beside the target and renamed over it: a cancelled or crashed batch never
-    // leaves a truncated file under a finished file's name.
-    photo_engine::fsio::atomic_write(path, |file| {
-        let mut writer = BufWriter::new(file);
-        match recipe.format {
-            ExportImageFormat::Jpeg => {
-                // The encoder reads each pixel as RGB and drops the (opaque) alpha, so no
-                // RGB copy of the frame is made.
-                image::codecs::jpeg::JpegEncoder::new_with_quality(
-                    &mut writer,
-                    recipe.quality.clamp(1, 100),
-                )
-                .encode_image(img)?;
-            }
-            ExportImageFormat::Png => img.write_to(&mut writer, image::ImageFormat::Png)?,
-            ExportImageFormat::Tiff => img.write_to(&mut writer, image::ImageFormat::Tiff)?,
-            ExportImageFormat::Webp => {
-                // Lossless: the `image` crate has no lossy WebP encoder.
-                let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-                rgb.write_to(&mut writer, image::ImageFormat::WebP)?;
-            }
-        }
-        writer.flush()?;
-        Ok(())
-    })
+    exported.write(
+        &job.output_path,
+        &photo_engine::EncodeOptions {
+            format: job.recipe.format,
+            quality: job.recipe.quality,
+        },
+    )
 }
