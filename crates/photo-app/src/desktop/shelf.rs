@@ -467,6 +467,8 @@ impl PhotoApp {
         let mut restore = None;
         let mut delete = None;
         let mut add = false;
+        // A snapshot records the framing too, which is only known once the photo decoded.
+        let can_snapshot = self.ready_image().is_some();
         group(
             ui,
             "Snapshots",
@@ -509,10 +511,10 @@ impl PhotoApp {
                     );
                     let submitted =
                         edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if widgets::button(ui, Kind::Secondary, "+ save", 52.0)
+                    if widgets::button_enabled(ui, can_snapshot, Kind::Secondary, "+ save", 52.0)
                         .on_hover_text("Save the current stack as a snapshot")
                         .clicked()
-                        || submitted
+                        || (submitted && can_snapshot)
                     {
                         add = true;
                     }
@@ -522,13 +524,8 @@ impl PhotoApp {
         );
 
         if add {
-            let name = if self.new_snapshot_name.trim().is_empty() {
-                format!("snapshot {}", self.snapshots.len() + 1)
-            } else {
-                self.new_snapshot_name.trim().to_string()
-            };
-            self.snapshots.push((name, self.stack.clone()));
-            self.new_snapshot_name.clear();
+            let name = std::mem::take(&mut self.new_snapshot_name);
+            self.take_snapshot(&name);
         }
         if let Some(i) = restore {
             self.history.checkpoint(&self.stack);
@@ -537,6 +534,7 @@ impl PhotoApp {
         }
         if let Some(i) = delete {
             self.snapshots.remove(i);
+            self.save_snapshots();
         }
     }
 

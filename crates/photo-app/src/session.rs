@@ -2,6 +2,10 @@
 
 use crate::*;
 
+/// How many photos' undo histories are kept after stepping away from them. Each is at
+/// most 256 stacks of a few hundred bytes.
+pub(crate) const HISTORY_KEPT: usize = 20;
+
 impl PhotoApp {
     /// Save the open photo's edits now (Ctrl+S), whether or not autosave would have.
     pub fn save_current_sidecar(&mut self) {
@@ -396,7 +400,7 @@ impl PhotoApp {
         self.error = None;
         self.sidecar_locked = false;
         self.decode_failed = false;
-        let (saved, metadata) = match photo_engine::load_sidecar_full(path) {
+        let (saved, metadata, snapshots) = match photo_engine::load_sidecar_full(path) {
             Ok(Some(data)) => {
                 if data.is_from_newer_version() {
                     self.sidecar_locked = true;
@@ -406,9 +410,14 @@ impl PhotoApp {
                         file_name(path)
                     ));
                 }
-                (data.stack, data.metadata)
+                let snapshots = data
+                    .snapshots
+                    .into_iter()
+                    .map(|s| (s.name, s.stack))
+                    .collect();
+                (data.stack, data.metadata, snapshots)
             }
-            Ok(None) => (None, photo_engine::AssetMetadata::default()),
+            Ok(None) => (None, photo_engine::AssetMetadata::default(), Vec::new()),
             Err(e) => {
                 // Holding edits this build cannot read is not the same as holding none:
                 // show it, and never write over it.
@@ -417,7 +426,7 @@ impl PhotoApp {
                     "{}: {e:#}. Its edits were not loaded, and the file is left untouched.",
                     file_name(path)
                 ));
-                (None, photo_engine::AssetMetadata::default())
+                (None, photo_engine::AssetMetadata::default(), Vec::new())
             }
         };
 
@@ -443,7 +452,24 @@ impl PhotoApp {
         self.saved_stack = saved;
         self.autosave_seen = self.stack.clone();
         self.autosave_due = None;
-        self.history = History::new();
+        // The history of the photo being left is parked, and this photo's taken back if
+        // it was edited earlier in the session: undo belongs to a photo, not to the app.
+        let history = self
+            .parked_histories
+            .iter()
+            .position(|(p, _)| p == path)
+            .map(|i| self.parked_histories.remove(i).1)
+            .unwrap_or_else(History::new);
+        let left = std::mem::replace(&mut self.history, history);
+        if let Some(previous) = self.loaded_path.take() {
+            if !left.past.is_empty() || !left.future.is_empty() {
+                self.parked_histories.push((previous, left));
+                if self.parked_histories.len() > HISTORY_KEPT {
+                    self.parked_histories.remove(0);
+                }
+            }
+        }
+        self.snapshots = snapshots;
         self.loaded_path = Some(path.to_path_buf());
         self.view = View::default();
         self.cropping = false;
@@ -591,5 +617,50 @@ impl PhotoApp {
             renderer_write(gpu).free_texture(&id);
         }
         self.engine.unload();
+    }
+
+    /// Write the open photo's snapshots into its sidecar, leaving the rest of it alone.
+    pub(crate) fn save_snapshots(&mut self) {
+        let Some(path) = self.loaded_path.clone() else {
+            return;
+        };
+        if self.sidecar_locked || self.decode_failed {
+            return;
+        }
+        let snapshots: Vec<photo_engine::Snapshot> = self
+            .snapshots
+            .iter()
+            .map(|(name, stack)| photo_engine::Snapshot {
+                name: name.clone(),
+                stack: stack.clone(),
+            })
+            .collect();
+        match photo_engine::update_sidecar(&path, |data| data.snapshots = snapshots.clone()) {
+            Ok(_) => {
+                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                    item.has_sidecar = true;
+                }
+            }
+            Err(e) => {
+                self.error = Some(format!(
+                    "Could not save snapshots for {}: {e:#}",
+                    file_name(&path)
+                ));
+            }
+        }
+    }
+
+    /// Save the open photo's current stack as a named snapshot, in its sidecar.
+    pub fn take_snapshot(&mut self, name: &str) {
+        if self.ready_image().is_none() {
+            return;
+        }
+        let name = if name.trim().is_empty() {
+            format!("snapshot {}", self.snapshots.len() + 1)
+        } else {
+            name.trim().to_string()
+        };
+        self.snapshots.push((name, self.stack.clone()));
+        self.save_snapshots();
     }
 }
