@@ -2,6 +2,9 @@
 
 use crate::*;
 
+/// How long the stage's corner readouts stay after the pointer stops moving, in seconds.
+const HUD_LINGER: f32 = 1.5;
+
 impl PhotoApp {
     pub(crate) fn workspace(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
@@ -351,9 +354,18 @@ impl PhotoApp {
                     );
                 }
 
-                // Corner readouts. What exports is exactly this texture, cropped; only the
-                // display scale differs.
-                if framed_view.width() > 420.0 {
+                // Corner readouts, only while the pointer is over the photo and moving: the
+                // UI must not sit on the media while it is being looked at (DESIGN.md).
+                let still_for = ui.ctx().input(|i| i.pointer.time_since_last_movement());
+                let hud = response.hovered() && still_for < HUD_LINGER;
+                if response.hovered() && still_for < HUD_LINGER {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(
+                        HUD_LINGER - still_for,
+                    ));
+                }
+                // What exports is exactly this texture, cropped; only the display scale
+                // differs.
+                if hud && framed_view.width() > 420.0 {
                     let (_, _, w, h) = crop.to_pixels(image_w, image_h);
                     hud_badge(
                         &painter,
@@ -378,7 +390,7 @@ impl PhotoApp {
                     );
                 }
                 let hist = self.engine.histogram();
-                if hist.peak > 0 {
+                if hud && hist.peak > 0 {
                     let clipped = hist.clipped_high().max(hist.clipped_low()) * 100.0;
                     let (text, colour) = if clipped >= 0.1 {
                         (format!("●  clipped {clipped:.1}%"), theme::DANGER)

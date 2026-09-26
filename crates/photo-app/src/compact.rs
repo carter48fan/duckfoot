@@ -144,11 +144,6 @@ impl PhotoApp {
         let landscape = self.layout == Layout::Landscape;
         let frame = |margin: Margin| egui::Frame::new().fill(theme::BG_950).inner_margin(margin);
 
-        // First run, where it can be remembered: show the tour once.
-        if self.tour_step.is_none() && !self.settings.tour_done && self.settings_dir.is_some() {
-            self.tour_step = Some(0);
-        }
-
         // Panel order is layout order: the top bar, then the navigation, then the sheet
         // against it, then the status line, and the stage takes what is left.
         self.compact_rects.top = self.compact_top_bar(ui);
@@ -525,7 +520,8 @@ impl PhotoApp {
                     self.select_mode = !self.select_mode;
                 }
             }
-            if widgets::chip(ui, false, "? tour")
+            // Offered, not imposed (DESIGN.md: no onboarding): lit until it has been seen.
+            if widgets::chip(ui, !self.settings.tour_done, "? tour")
                 .on_hover_text("How to get around on a phone")
                 .clicked()
             {
@@ -1593,14 +1589,11 @@ fn look_tile(ui: &mut egui::Ui, name: &str, swatch: [Color32; 2], chosen: bool) 
     let (rect, response) = ui.allocate_exact_size(vec2(72.0, 70.0), Sense::click());
     let painter = ui.painter();
     let chip = Rect::from_min_size(rect.min + vec2(4.0, 2.0), vec2(64.0, 44.0));
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(chip.left_top(), swatch[0]);
-    mesh.colored_vertex(chip.right_top(), swatch[0]);
-    mesh.colored_vertex(chip.right_bottom(), swatch[1]);
-    mesh.colored_vertex(chip.left_bottom(), swatch[1]);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(egui::Shape::mesh(mesh));
+    // Two flat halves, not a blend: DESIGN.md keeps gradients off everything next to the
+    // photo, and this row sits right under it.
+    let (top, bottom) = chip.split_top_bottom_at_fraction(0.5);
+    painter.rect_filled(top, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, swatch[0]);
+    painter.rect_filled(bottom, egui::CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 }, swatch[1]);
     let outline = if chosen {
         Stroke::new(2.0, theme::ACCENT)
     } else if response.hovered() {

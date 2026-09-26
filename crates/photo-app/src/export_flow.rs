@@ -271,7 +271,7 @@ impl PhotoApp {
                     ui.label(
                         RichText::new(preview_name)
                             .family(theme::mono_bold())
-                            .color(theme::LIME),
+                            .color(theme::TEXT_HI),
                     );
                 });
 
