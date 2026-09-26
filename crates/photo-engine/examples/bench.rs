@@ -424,10 +424,10 @@ fn main() -> anyhow::Result<()> {
     // The readback is asynchronous by design, so drive frames rather than blocking. The
     // first poll discards whatever was in flight for the previous image.
     for _ in 0..64 {
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         engine.render(&device, &queue, &PhotoStack::default(), None);
         wait(&device)?;
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         if engine.histogram().peak > 0 {
             break;
         }

@@ -1809,7 +1809,12 @@ impl PhotoApp {
         if let Some(e) = gpu_errors::take() {
             self.error = Some(format!("GPU error: {e}"));
         }
-        self.engine.poll_histogram(gpu.device);
+        self.engine.poll_histogram(gpu.device, gpu.queue);
+        if self.engine.histogram_busy() {
+            // The readback's callback does not wake the event loop, and on a touch screen
+            // nothing else may; come back for it.
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
         self.sync(gpu, ctx.pixels_per_point());
 
         if self.layout.is_compact() {
