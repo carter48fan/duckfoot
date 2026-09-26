@@ -104,6 +104,18 @@ pub(crate) fn list_row(
     };
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        let text = match right {
+            Some((tag, _)) if !tag.is_empty() => format!("{label}, {tag}"),
+            _ => label.to_string(),
+        };
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            style == RowStyle::Now,
+            text,
+        )
+    });
     let hovered = response.hovered() && style != RowStyle::Now;
     let painter = ui.painter();
     match style {
@@ -180,6 +192,14 @@ pub(crate) fn shelf_row(
 ) -> (egui::Response, bool) {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), SHELF_ROW_HEIGHT), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            active || selected,
+            photo_description(item),
+        )
+    });
     let hovered = ui.rect_contains_pointer(rect);
 
     let badge_text = if item.missing {
@@ -436,6 +456,14 @@ pub(crate) fn film_tile(
     picture: Option<(egui::TextureId, f32)>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(FILM_TILE, Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            active || selected,
+            photo_description(item),
+        )
+    });
     let hovered = response.hovered();
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, theme::BG_900);
@@ -641,6 +669,23 @@ pub(crate) fn snapshot_key(i: usize) -> String {
     } else {
         (i + 1).to_string()
     }
+}
+
+/// A shelved photo as a screen reader says it: name, stars, flag, missing.
+fn photo_description(item: &ShelfItem) -> String {
+    let mut text = item.name.clone();
+    if item.metadata.rating > 0 {
+        text += &format!(", {} stars", item.metadata.rating);
+    }
+    match item.metadata.flag {
+        photo_engine::Flag::Pick => text += ", pick",
+        photo_engine::Flag::Reject => text += ", rejected",
+        photo_engine::Flag::Unflagged => {}
+    }
+    if item.missing {
+        text += ", missing";
+    }
+    text
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {

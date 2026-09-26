@@ -21,6 +21,8 @@ anyhow.workspace = true
 log.workspace = true
 pollster = "1"
 
-# The desktop binary's logger; Android logs through logcat instead.
+# The desktop binary's logger; Android logs through logcat instead. Screen readers
+# (AccessKit) on the desktop; Android's goes through its own accessibility bridge later.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
+egui-winit = { workspace = true, features = ["accesskit"] }
