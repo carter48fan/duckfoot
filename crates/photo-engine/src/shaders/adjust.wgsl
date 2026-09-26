@@ -42,6 +42,7 @@ struct Adjust {
     eq_blue:    vec4<f32>,
     eq_purple:  vec4<f32>,
     eq_magenta: vec4<f32>,
+    frame:      vec4<f32>,   // the crop in the oriented frame: x, y, width, height (0..1)
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -409,43 +410,29 @@ fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
     return rgb + vec3<f32>(m);
 }
 
-fn angle_dist(a: f32, b: f32) -> f32 {
-    let d = abs(a - b) % 360.0;
-    return min(d, 360.0 - d);
-}
-
-fn band_weight(h: f32, center_hue: f32) -> f32 {
-    let d = angle_dist(h, center_hue);
-    return max(0.0, 1.0 - d / 40.0);
-}
-
 fn apply_color_eq(rgb: vec3<f32>) -> vec3<f32> {
     var hsv = rgb_to_hsv(rgb);
-    let h = hsv.x;
-    let w_red = band_weight(h, 0.0);
-    let w_orange = band_weight(h, 30.0);
-    let w_yellow = band_weight(h, 60.0);
-    let w_green = band_weight(h, 120.0);
-    let w_aqua = band_weight(h, 180.0);
-    let w_blue = band_weight(h, 240.0);
-    let w_purple = band_weight(h, 280.0);
-    let w_magenta = band_weight(h, 320.0);
+    // Each hue takes its two neighbouring bands' moves, blended by where it sits between
+    // their centres: a band's own hue gets exactly its move, and every hue's weights sum
+    // to one, so no hue is pushed harder (or softer) than the sliders say.
+    var centres = array<f32, 9>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 280.0, 320.0, 360.0);
+    var bands = array<vec4<f32>, 9>(
+        u.eq_red, u.eq_orange, u.eq_yellow, u.eq_green,
+        u.eq_aqua, u.eq_blue, u.eq_purple, u.eq_magenta, u.eq_red,
+    );
+    let h = clamp(hsv.x, 0.0, 359.999);
+    var i = 0;
+    for (var k = 0; k < 8; k = k + 1) {
+        if (h >= centres[k]) {
+            i = k;
+        }
+    }
+    let t = (h - centres[i]) / (centres[i + 1] - centres[i]);
+    let m = mix(bands[i].xyz, bands[i + 1].xyz, t);
 
-    let dh = w_red * u.eq_red.x + w_orange * u.eq_orange.x + w_yellow * u.eq_yellow.x
-           + w_green * u.eq_green.x + w_aqua * u.eq_aqua.x + w_blue * u.eq_blue.x
-           + w_purple * u.eq_purple.x + w_magenta * u.eq_magenta.x;
-
-    let ds = (w_red * u.eq_red.y + w_orange * u.eq_orange.y + w_yellow * u.eq_yellow.y
-            + w_green * u.eq_green.y + w_aqua * u.eq_aqua.y + w_blue * u.eq_blue.y
-            + w_purple * u.eq_purple.y + w_magenta * u.eq_magenta.y) * 0.01;
-
-    let dl = (w_red * u.eq_red.z + w_orange * u.eq_orange.z + w_yellow * u.eq_yellow.z
-            + w_green * u.eq_green.z + w_aqua * u.eq_aqua.z + w_blue * u.eq_blue.z
-            + w_purple * u.eq_purple.z + w_magenta * u.eq_magenta.z) * 0.01;
-
-    hsv.x = (hsv.x + dh + 360.0) % 360.0;
-    hsv.y = clamp(hsv.y * (1.0 + ds), 0.0, 1.0);
-    hsv.z = max(0.0, hsv.z * (1.0 + dl));
+    hsv.x = (hsv.x + m.x + 360.0) % 360.0;
+    hsv.y = clamp(hsv.y * (1.0 + m.y * 0.01), 0.0, 1.0);
+    hsv.z = max(0.0, hsv.z * (1.0 + m.z * 0.01));
 
     return hsv_to_rgb(hsv);
 }
@@ -470,6 +457,21 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = src / u.sizes.zw;
     var s = textureSampleLevel(sensor, sensor_sampler, uv, lod);
 
+    let split_pos = u.split.x;
+    let is_split = split_pos >= 0.0;
+    if (is_split) {
+        // The divider itself is drawn by the UI, at screen resolution, so it stays one
+        // line wide at every zoom instead of scaling with the image.
+        let norm_x = out_px.x / u.sizes.x;
+        // "Before" on the left of the split: the file as shot — as-shot WB, highlight
+        // recovery, camera matrix — from the sensor as it is, so before any sharpening.
+        if (norm_x < split_pos) {
+            var bc = balanced(s, u.as_shot_wb.rgb);
+            bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
+            return vec4<f32>(linear_to_srgb(clamp(bc, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+        }
+    }
+
     if (enabled(FLAG_SHARPEN)) {
         // Sharpening is a one-pixel kernel at full resolution. A reduced preview has to
         // show what that export looks like once shrunk to the screen — and a Laplacian
@@ -485,20 +487,6 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
-    }
-
-    let split_pos = u.split.x;
-    let is_split = split_pos >= 0.0;
-    if (is_split) {
-        // The divider itself is drawn by the UI, at screen resolution, so it stays one
-        // line wide at every zoom instead of scaling with the image.
-        let norm_x = out_px.x / u.sizes.x;
-        // "Before" baseline on the left side of the split: as-shot WB, highlight recovery, camera matrix -> sRGB
-        if (norm_x < split_pos) {
-            var bc = balanced(s, u.as_shot_wb.rgb);
-            bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
-            return vec4<f32>(linear_to_srgb(clamp(bc, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
-        }
     }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.
@@ -582,7 +570,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_VIGNETTE)) {
-        let norm_pos = out_px / u.sizes.xy - vec2<f32>(0.5, 0.5);
+        // Centred on the crop and scaled to it: the vignette frames what is exported.
+        let centre = u.frame.xy + u.frame.zw * 0.5;
+        let norm_pos = (out_px / u.sizes.xy - centre) / max(u.frame.zw, vec2<f32>(0.01));
         let dist = length(norm_pos) * 1.4142;
         let rad = max(u.vignette.y, 0.05);
         let v_falloff = smoothstep(rad * 0.4, rad, dist);
