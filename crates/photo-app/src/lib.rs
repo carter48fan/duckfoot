@@ -406,6 +406,11 @@ pub struct PhotoApp {
     pub compact_tab: Option<compact::Tab>,
     /// The module the phone layout's Edit sheet shows.
     pub compact_module: InspectorSectionId,
+    /// The phone layout's Library shows its rating, flag and search filters.
+    pub library_filters_open: bool,
+    /// A photo was asked for from outside the Library grid (a picker, a share); when it
+    /// lands the phone layout goes straight to Edit, where the photo is worked on.
+    edit_when_opened: bool,
     /// User-adjusted height for the portrait bottom sheet.
     pub compact_sheet_height: Option<f32>,
     /// User-adjusted width for the landscape side sheet.
@@ -494,6 +499,8 @@ impl PhotoApp {
             touch_seen: false,
             compact_tab: Some(compact::Tab::Library),
             compact_module: InspectorSectionId::Exposure,
+            library_filters_open: false,
+            edit_when_opened: false,
             compact_sheet_height: None,
             compact_sheet_width: None,
             swipe_from: None,
@@ -932,7 +939,10 @@ impl PhotoApp {
     fn poll_platform(&mut self, gpu: &Gpu) {
         for response in self.platform.poll() {
             match response {
-                platform::Response::OpenImage(path) => self.open_path(gpu, path),
+                platform::Response::OpenImage(path) => {
+                    self.edit_when_opened = true;
+                    self.open_path(gpu, path);
+                }
                 platform::Response::AddImages(paths) => self.add_to_shelf(gpu, paths),
                 platform::Response::BrowseFolder(dir) => {
                     self.folder_tree.current_folder = Some(dir);
@@ -1177,6 +1187,7 @@ impl PhotoApp {
             }
         }
         if let Some(first) = to_open {
+            self.edit_when_opened = true;
             self.open_path(gpu, first);
         }
     }
@@ -1236,7 +1247,10 @@ impl PhotoApp {
                             self.finish_open(gpu, path, source);
                         }
                         // DESIGN.md: failures surface in the UI, with the filename.
-                        Err(e) => self.error = Some(e),
+                        Err(e) => {
+                            self.error = Some(e);
+                            self.edit_when_opened = false;
+                        }
                     }
                 }
                 // Superseded by a newer request while it was decoding.
@@ -1294,7 +1308,11 @@ impl PhotoApp {
             // DESIGN.md: failures surface in the UI, with the filename.
             self.error = Some(format!("{}: {e:#}", path.display()));
             self.loaded_path = None;
+            self.edit_when_opened = false;
             return;
+        }
+        if std::mem::take(&mut self.edit_when_opened) {
+            self.compact_tab = Some(compact::Tab::Edit);
         }
 
         let (saved, metadata) = match photo_engine::load_sidecar_full(&path) {
@@ -2843,7 +2861,11 @@ impl PhotoApp {
                     ui.painter().text(
                         rect.left_center() + vec2(4.0, 0.0),
                         Align2::LEFT_CENTER,
-                        "Drop photos anywhere in the window to start a roll.",
+                        if widgets::is_touch(ui.ctx()) {
+                            "Open or add photos to start a roll."
+                        } else {
+                            "Drop photos anywhere in the window to start a roll."
+                        },
                         FontId::proportional(12.0),
                         theme::TEXT_DIM,
                     );
@@ -3543,6 +3565,7 @@ impl PhotoApp {
             return;
         }
         let c = zone.center();
+        let touch = widgets::is_touch(ui.ctx());
         painter.text(
             c - vec2(0.0, 44.0),
             Align2::CENTER_CENTER,
@@ -3553,14 +3576,22 @@ impl PhotoApp {
         painter.text(
             c - vec2(0.0, 12.0),
             Align2::CENTER_CENTER,
-            "Drop a camera RAW file",
+            if touch {
+                "Open a photo"
+            } else {
+                "Drop a camera RAW file"
+            },
             FontId::new(15.0, theme::sans_strong()),
             theme::TEXT_HI,
         );
         painter.text(
             c + vec2(0.0, 10.0),
             Align2::CENTER_CENTER,
-            "or click to open one",
+            if touch {
+                "tap here to choose one"
+            } else {
+                "or click to open one"
+            },
             FontId::proportional(12.5),
             theme::TEXT_DIM,
         );
@@ -4184,10 +4215,9 @@ impl PhotoApp {
                     ] {
                         let lit = !as_shot && (kelvin - pk).abs() < 5.0 && (tint - pt).abs() < 0.5;
                         let wb = scale.white_balance(pk, pt);
-                        let chip = ui.add_enabled_ui(wb.is_some(), |ui| {
-                            widgets::chip(ui, lit, label).on_hover_text(tip)
-                        });
-                        if chip.inner.clicked() {
+                        let chip =
+                            widgets::chip_enabled(ui, wb.is_some(), lit, label).on_hover_text(tip);
+                        if chip.clicked() {
                             preset = wb;
                         }
                     }
@@ -4334,7 +4364,12 @@ impl PhotoApp {
                 track!(curve_editor(ui, &mut self.stack.tone_curve.params));
                 let is_linear = self.stack.tone_curve.params == identity_nodes();
                 ui.horizontal(|ui| {
-                    ui.label(theme::tag("drag a node").color(theme::TEXT_FAINT));
+                    let hint = if widgets::is_touch(ui.ctx()) {
+                        "tap to add · drag · double-tap to remove"
+                    } else {
+                        "click to add · drag · double-click to remove"
+                    };
+                    ui.label(theme::tag(hint).color(theme::TEXT_FAINT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!is_linear, |ui| {
                             if widgets::chip(ui, false, "reset").clicked() {
@@ -5677,12 +5712,161 @@ fn format_bytes(bytes: u64) -> String {
 
 /// A minimal draggable curve editor. Endpoints are locked in x so the curve always spans
 /// the full range.
-fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
-    let width = ui.available_width();
-    let size = egui::vec2(width, (width * 0.62).clamp(120.0, 220.0));
-    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-    let painter = ui.painter_at(rect);
+/// Most nodes a curve takes. More than this is a curve nobody can steer.
+const CURVE_MAX_NODES: usize = 16;
+/// Closest two nodes may sit in x, so neither can pass the other.
+const CURVE_MIN_GAP: f32 = 0.02;
 
+/// The tone curve. Tap the graph to add a node on the curve; drag a node to move it (the
+/// grab keeps its offset, so it never jumps under the finger); double-tap a node, or drag
+/// it well off the graph, to remove it. The two end nodes stay at black and white in x.
+fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egui::Response {
+    if nodes.len() < 2 {
+        *nodes = identity_nodes();
+    }
+    if !nodes.is_sorted_by(|a, b| a.x <= b.x) {
+        nodes.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
+    let touch = widgets::is_touch(ui.ctx());
+    let width = ui.available_width();
+    let height = if touch {
+        // As tall as the sheet has room for under it, less the hint row, so the whole
+        // curve is in reach without scrolling the sheet.
+        let visible = ui.clip_rect().bottom() - ui.cursor().top() - 40.0;
+        (width * 0.7).min(visible).clamp(140.0, 280.0)
+    } else {
+        (width * 0.62).clamp(120.0, 220.0)
+    };
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let hit = widgets::sized(ui, 10.0, 22.0);
+    // Past this far outside the graph, a dragged node is dropped on release.
+    let tear = widgets::sized(ui, 24.0, 40.0);
+
+    let to_screen = |n: &CurveNode| {
+        egui::pos2(
+            rect.left() + n.x.clamp(0.0, 1.0) * rect.width(),
+            rect.bottom() - n.y.clamp(0.0, 1.0) * rect.height(),
+        )
+    };
+    let from_screen = |p: egui::Pos2| {
+        (
+            (p.x - rect.left()) / rect.width(),
+            (rect.bottom() - p.y) / rect.height(),
+        )
+    };
+    let nearest = |nodes: &[CurveNode], p: egui::Pos2| {
+        nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i, to_screen(n).distance(p)))
+            .filter(|(_, d)| *d <= hit)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    };
+    // Insert a node on the curve at `x`, if there is room for one there.
+    let insert = |nodes: &mut Vec<CurveNode>, x: f32| -> Option<usize> {
+        if nodes.len() >= CURVE_MAX_NODES || x <= CURVE_MIN_GAP || x >= 1.0 - CURVE_MIN_GAP {
+            return None;
+        }
+        let at = nodes.partition_point(|n| n.x < x);
+        let crowded = [at.checked_sub(1), Some(at)]
+            .into_iter()
+            .flatten()
+            .filter_map(|i| nodes.get(i))
+            .any(|n| (n.x - x).abs() < CURVE_MIN_GAP);
+        if crowded {
+            return None;
+        }
+        let lut = photo_engine::curve::build_lut(nodes);
+        let y = lut[(x * (lut.len() - 1) as f32).round() as usize].clamp(0.0, 1.0);
+        nodes.insert(at, CurveNode::new(x, y));
+        Some(at)
+    };
+
+    // The node being dragged and where on it it was grabbed, for the length of a gesture.
+    let grab_id = response.id.with("grab");
+    let mut grab: Option<(usize, egui::Vec2)> = ui.data(|d| d.get_temp(grab_id));
+    let mut changed = false;
+    let pointer = response.interact_pointer_pos();
+
+    if response.drag_started() {
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .or(pointer)
+            .unwrap_or(rect.center());
+        let picked = nearest(nodes, origin).or_else(|| {
+            let (x, _) = from_screen(origin);
+            let added = insert(nodes, x);
+            changed |= added.is_some();
+            added
+        });
+        grab = picked.map(|i| (i, to_screen(&nodes[i]) - origin));
+    }
+    let mut tearing = None;
+    if let (Some((i, offset)), Some(p), true) = (grab, pointer, response.dragged()) {
+        if i < nodes.len() {
+            let target = p + offset;
+            let (mut x, y) = from_screen(target);
+            let last = nodes.len() - 1;
+            x = if i == 0 {
+                0.0
+            } else if i == last {
+                1.0
+            } else {
+                x.clamp(
+                    nodes[i - 1].x + CURVE_MIN_GAP,
+                    nodes[i + 1].x - CURVE_MIN_GAP,
+                )
+            };
+            let moved = CurveNode::new(x, y.clamp(0.0, 1.0));
+            if nodes[i] != moved {
+                nodes[i] = moved;
+                changed = true;
+            }
+            let outside = rect.expand(tear);
+            if i != 0 && i != last && !outside.contains(target) {
+                tearing = Some(i);
+            }
+        }
+    }
+    if response.drag_stopped() {
+        if let (Some((i, offset)), Some(p)) = (grab, pointer) {
+            let last = nodes.len().saturating_sub(1);
+            if i != 0 && i < last && !rect.expand(tear).contains(p + offset) {
+                nodes.remove(i);
+                changed = true;
+            }
+        }
+        grab = None;
+    }
+    if response.double_clicked() {
+        if let Some(i) = pointer.and_then(|p| nearest(nodes, p)) {
+            if i != 0 && i != nodes.len() - 1 {
+                nodes.remove(i);
+                changed = true;
+            }
+        }
+    } else if response.clicked() {
+        if let Some(p) = pointer {
+            if nearest(nodes, p).is_none() {
+                changed |= insert(nodes, from_screen(p).0).is_some();
+            }
+        }
+    }
+    ui.data_mut(|d| match grab {
+        Some(g) => {
+            d.insert_temp(grab_id, g);
+        }
+        None => {
+            d.remove_temp::<(usize, egui::Vec2)>(grab_id);
+        }
+    });
+    if changed {
+        response.mark_changed();
+    }
+
+    let painter = ui.painter_at(rect.expand(tear));
     painter.rect_filled(rect, 3.0, theme::BG_950);
     // Quarter reticle and the identity diagonal, so a move reads against neutral.
     let grid = egui::Stroke::new(1.0, egui::Color32::from_gray(0x1a));
@@ -5698,42 +5882,17 @@ fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
         4.0,
     ));
 
-    let to_screen = |n: &CurveNode| {
-        egui::pos2(
-            rect.left() + n.x.clamp(0.0, 1.0) * rect.width(),
-            rect.bottom() - n.y.clamp(0.0, 1.0) * rect.height(),
-        )
-    };
-
-    if let Some(pointer) = response.interact_pointer_pos() {
-        if response.dragged() {
-            let x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let y = ((rect.bottom() - pointer.y) / rect.height()).clamp(0.0, 1.0);
-
-            // Grab the nearest node in x and move it. Endpoints keep their x.
-            let mut best = 0usize;
-            let mut best_d = f32::MAX;
-            for (i, n) in nodes.iter().enumerate() {
-                let d = (n.x - x).abs();
-                if d < best_d {
-                    best_d = d;
-                    best = i;
-                }
-            }
-            let last = nodes.len().saturating_sub(1);
-            if best != 0 && best != last {
-                nodes[best].x = x;
-            }
-            nodes[best].y = y;
-            nodes.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
-            response.mark_changed();
-        }
-    }
-
-    let lut = photo_engine::curve::build_lut(nodes);
-    let points: Vec<egui::Pos2> = (0..96)
+    // The curve as it will be once the gesture ends: without a node being torn off.
+    let shown: Vec<CurveNode> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != tearing)
+        .map(|(_, n)| *n)
+        .collect();
+    let lut = photo_engine::curve::build_lut(&shown);
+    let points: Vec<egui::Pos2> = (0..128)
         .map(|i| {
-            let t = i as f32 / 95.0;
+            let t = i as f32 / 127.0;
             let v = lut[(t * (lut.len() - 1) as f32) as usize];
             egui::pos2(
                 rect.left() + t * rect.width(),
@@ -5743,15 +5902,38 @@ fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
         .collect();
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(1.75, theme::ACCENT),
+        egui::Stroke::new(widgets::sized(ui, 1.75, 2.25), theme::ACCENT),
     ));
 
-    for n in nodes.iter() {
-        painter.circle(
-            to_screen(n),
-            3.5,
-            theme::TEXT_HI,
-            egui::Stroke::new(1.5, theme::ACCENT),
+    let active = grab.map(|(i, _)| i);
+    let r = widgets::sized(ui, 3.5, 6.0);
+    for (i, n) in nodes.iter().enumerate() {
+        let (fill, stroke) = if Some(i) == tearing {
+            (theme::BG_950, theme::DANGER)
+        } else if Some(i) == active {
+            (theme::ACCENT, theme::ACCENT_HI)
+        } else {
+            (theme::TEXT_HI, theme::ACCENT)
+        };
+        painter.circle(to_screen(n), r, fill, egui::Stroke::new(1.5, stroke));
+    }
+    // What the dragged node maps, in 8-bit levels, as the numbers every curve tool shows.
+    if let Some(n) = active.and_then(|i| nodes.get(i)) {
+        let text = if tearing.is_some() {
+            "release to remove".to_string()
+        } else {
+            format!("{:.0} → {:.0}", n.x * 255.0, n.y * 255.0)
+        };
+        painter.text(
+            rect.left_top() + egui::vec2(6.0, 5.0),
+            egui::Align2::LEFT_TOP,
+            text,
+            egui::FontId::monospace(widgets::sized(ui, 10.5, 12.0)),
+            if tearing.is_some() {
+                theme::DANGER
+            } else {
+                theme::TEXT
+            },
         );
     }
     painter.rect_stroke(
@@ -5761,7 +5943,15 @@ fn curve_editor(ui: &mut egui::Ui, nodes: &mut [CurveNode]) -> egui::Response {
         egui::StrokeKind::Inside,
     );
     if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        let over_node = response
+            .hover_pos()
+            .and_then(|p| nearest(nodes, p))
+            .is_some();
+        ui.ctx().set_cursor_icon(if over_node || active.is_some() {
+            egui::CursorIcon::Grab
+        } else {
+            egui::CursorIcon::Crosshair
+        });
     }
     response
 }
@@ -6049,5 +6239,84 @@ mod tests {
         // Never past the end, even when the viewport is wider than the strip.
         assert_eq!(visible_tiles(span(0.0, 50.0 * FILM_STRIDE), 3), 0..3);
         assert_eq!(visible_tiles(span(-5.0, 1.0), 0), 0..0);
+    }
+
+    /// The curve is 400 × 220 at the origin: tap adds a node on the curve, a drag moves
+    /// the node it starts on, a double-click removes it, and the ends keep their x.
+    #[test]
+    fn curve_nodes_are_added_moved_and_removed() {
+        let ctx = egui::Context::default();
+        let mut nodes = identity_nodes();
+        let t = std::cell::Cell::new(0.0);
+        let frame = |nodes: &mut Vec<CurveNode>, events: Vec<egui::Event>| {
+            t.set(t.get() + 0.05);
+            let input = egui::RawInput {
+                time: Some(t.get()),
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                curve_editor(ui, nodes);
+            });
+            out.textures_delta.clear();
+        };
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let at = |x: f32, y: f32| pos2(x * 400.0, 220.0 - y * 220.0);
+
+        frame(&mut nodes, vec![]);
+        // A tap well away from both ends adds a node where the curve already is.
+        let p = at(0.5, 0.9);
+        frame(
+            &mut nodes,
+            vec![egui::Event::PointerMoved(p), press(p, true)],
+        );
+        frame(&mut nodes, vec![press(p, false)]);
+        assert_eq!(nodes.len(), 3);
+        assert!((nodes[1].x - 0.5).abs() < 1e-3 && (nodes[1].y - 0.5).abs() < 1e-2);
+
+        // Drag it up: grabbed a little off-centre, it follows without jumping.
+        let from = at(0.5, 0.5) + vec2(3.0, 2.0);
+        frame(
+            &mut nodes,
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+        );
+        for i in 1..=6 {
+            let p = from - vec2(0.0, 44.0 * i as f32 / 6.0);
+            frame(&mut nodes, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&mut nodes, vec![press(from - vec2(0.0, 44.0), false)]);
+        assert_eq!(nodes.len(), 3);
+        assert!((nodes[1].x - 0.5).abs() < 1e-3, "x moved: {:?}", nodes[1]);
+        assert!((nodes[1].y - 0.7).abs() < 1e-2, "y: {:?}", nodes[1]);
+
+        // An end node moves only up and down.
+        let from = at(0.0, 0.0);
+        frame(
+            &mut nodes,
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+        );
+        for i in 1..=6 {
+            let p = from + vec2(40.0, -40.0) * (i as f32 / 6.0);
+            frame(&mut nodes, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&mut nodes, vec![press(from + vec2(40.0, -40.0), false)]);
+        assert_eq!(nodes[0].x, 0.0);
+        assert!((nodes[0].y - 40.0 / 220.0).abs() < 1e-2, "{:?}", nodes[0]);
+
+        // Double-clicking the middle node removes it; the ends cannot be removed.
+        t.set(t.get() + 1.0);
+        let p = at(0.5, 0.7);
+        frame(&mut nodes, vec![egui::Event::PointerMoved(p)]);
+        for pressed in [true, false, true, false] {
+            frame(&mut nodes, vec![press(p, pressed)]);
+        }
+        assert_eq!(nodes.len(), 2);
+        assert_eq!((nodes[0].x, nodes[1].x), (0.0, 1.0));
     }
 }

@@ -10,16 +10,16 @@
 //!
 //! | Tab | Holds |
 //! |---|---|
-//! | Library | open / add / import a folder, select mode, the current photo's rating and flag, filters, thumbnails, the shelf and folder tree |
-//! | Edit | crop, a / b, fine adjust, a scroller of the modules, and the chosen module's controls — one group at a time |
-//! | Scopes | the scope and its modes |
-//! | History | undo, redo, reset, copy / paste stack, save and revert the sidecar, snapshots, history |
+//! | Library | open / add / import a folder, the roll's thumbnails, the current photo's rating and flag; select mode, filters and the folder tree are one chip away |
+//! | Edit | rotate, crop, fine adjust, a scroller of the modules, and the chosen module's controls — one group at a time |
 //! | Export | the single export and batch export |
+//!
+//! Opening a photo from a picker goes straight to Edit: on a phone the photo is the point,
+//! and the roll is only how you got to it.
 
 use egui::containers::scroll_area::{DragScroll, ScrollSource};
 use egui::{
-    pos2, vec2, Align2, Color32, CursorIcon, FontId, Margin, Painter, Rect, RichText, Sense,
-    Stroke,
+    pos2, vec2, Align2, Color32, CursorIcon, FontId, Margin, Painter, Rect, RichText, Sense, Stroke,
 };
 
 use crate::widgets::{self, Kind};
@@ -110,10 +110,13 @@ impl PhotoApp {
         if let Some(tab) = self.compact_tab {
             let sheet = frame(Margin::same(0));
             if landscape {
-                let default_w = (screen.x * 0.48).clamp(340.0, 480.0);
+                let default_w = (screen.x * 0.42).clamp(300.0, 440.0);
                 let min_w = 280.0;
                 let max_w = (screen.x * 0.75).clamp(420.0, 680.0);
-                let w = self.compact_sheet_width.unwrap_or(default_w).clamp(min_w, max_w);
+                let w = self
+                    .compact_sheet_width
+                    .unwrap_or(default_w)
+                    .clamp(min_w, max_w);
                 egui::Panel::right("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
@@ -123,10 +126,13 @@ impl PhotoApp {
                         self.compact_sheet(ui, gpu, tab);
                     });
             } else {
-                let default_h = (screen.y * 0.55).clamp(380.0, 620.0);
-                let min_h = (screen.y * 0.28).clamp(200.0, 320.0);
+                let default_h = (screen.y * 0.42).clamp(300.0, 520.0);
+                let min_h = (screen.y * 0.24).clamp(180.0, 280.0);
                 let max_h = (screen.y * 0.82).clamp(480.0, 750.0);
-                let h = self.compact_sheet_height.unwrap_or(default_h).clamp(min_h, max_h);
+                let h = self
+                    .compact_sheet_height
+                    .unwrap_or(default_h)
+                    .clamp(min_h, max_h);
                 egui::Panel::bottom("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
@@ -152,10 +158,8 @@ impl PhotoApp {
         min_size: f32,
         max_size: f32,
     ) {
-        let (rect, response) = ui.allocate_exact_size(
-            vec2(ui.available_width(), 16.0),
-            Sense::click_and_drag(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::click_and_drag());
         let hot = response.hovered() || response.dragged();
         let pill = Rect::from_center_size(rect.center(), vec2(36.0, 4.0));
         ui.painter().rect_filled(
@@ -356,6 +360,7 @@ impl PhotoApp {
 
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             if widgets::button(ui, Kind::Primary, "Open…", 0.0).clicked() {
                 self.pick_and_open(ui.ctx());
             }
@@ -367,47 +372,54 @@ impl PhotoApp {
             }
         });
 
-        self.selection_bar(ui);
-        let displayed = self.displayed_indices();
-        self.film_tiles(ui, gpu, &displayed);
-        self.current_photo_marks(ui);
-
-        // Filters, as the desktop filmstrip has them, wrapped to the width.
+        // Everything past opening photos is a chip away, so the roll itself stays in view.
+        // Sorting is not filtering: only something that hides photos lights the chip.
+        let filtering = self.filter
+            != crate::dam::FilterState {
+                sort_by: self.filter.sort_by,
+                sort_descending: self.filter.sort_descending,
+                ..Default::default()
+            };
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            self.rating_filter(ui);
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            self.flag_filter(ui);
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            self.search_field(ui, 120.0);
-            self.sort_controls(ui, false);
-        });
-
-        ui.horizontal(|ui| {
-            let n = self.shelf.len();
-            if widgets::chip(ui, !self.folder_browser_open, &format!("Stills ({n})")).clicked() {
-                self.folder_browser_open = false;
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
+                self.folder_browser_open = !self.folder_browser_open;
             }
-            if widgets::chip(ui, self.folder_browser_open, "Folders").clicked() {
-                self.folder_browser_open = true;
+            if !self.shelf.is_empty() {
+                let label = if filtering { "filter •" } else { "filter" };
+                if widgets::chip(ui, self.library_filters_open || filtering, label).clicked() {
+                    self.library_filters_open = !self.library_filters_open;
+                }
+                if widgets::chip(ui, self.select_mode, "select").clicked() {
+                    self.select_mode = !self.select_mode;
+                }
             }
         });
+        if self.library_filters_open && !self.shelf.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.rating_filter(ui);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.flag_filter(ui);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.search_field(ui, 120.0);
+                self.sort_controls(ui, false);
+            });
+        }
+        if self.select_mode {
+            self.selection_bar(ui);
+        }
+
         if self.folder_browser_open {
             self.shelf_folders(ui, gpu);
         } else {
-            let mut to_open = None;
-            let mut to_remove = None;
-            self.shelf_group(ui, &mut to_open, &mut to_remove);
-            if let Some(path) = to_open {
-                self.open_path(gpu, path);
-            }
-            if let Some(idx) = to_remove {
-                self.shelf.remove(idx);
-            }
+            let displayed = self.displayed_indices();
+            self.film_tiles(ui, gpu, &displayed);
+            self.current_photo_marks(ui);
         }
     }
 
@@ -415,24 +427,18 @@ impl PhotoApp {
     /// how several photos get chosen for a batch export or a shared rating.
     fn selection_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, self.select_mode, "select").clicked() {
-                self.select_mode = !self.select_mode;
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if widgets::chip(ui, false, "all").clicked() {
+                let all: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
+                self.selection.select_all(&all);
             }
-            if self.select_mode {
-                if widgets::chip(ui, false, "all").clicked() {
-                    let all: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
-                    self.selection.select_all(&all);
-                }
-                if widgets::chip(ui, false, "none").clicked() {
-                    self.selection.clear();
-                }
+            if widgets::chip(ui, false, "none").clicked() {
+                self.selection.clear();
             }
-            // Opening a photo selects it, so one selected is just the open photo; the
-            // count and what acts on it matter from two, or once select mode is on.
             let n = self.selection.count();
-            if n > 1 || (self.select_mode && n > 0) {
+            if n > 0 {
                 ui.label(theme::tag(format!("{n} selected")).color(theme::ACCENT));
-                if widgets::button(ui, Kind::Secondary, "Remove from shelf", 0.0).clicked() {
+                if widgets::chip(ui, false, "remove").clicked() {
                     let selection = &self.selection;
                     self.shelf.retain(|it| !selection.is_selected(&it.path));
                     self.selection.clear();
@@ -460,9 +466,12 @@ impl PhotoApp {
             .unwrap_or((0, photo_engine::Flag::Unflagged));
         let mut set_rating = None;
         let mut set_flag = None;
+        // One row: stars, then pick / reject, each of which a second tap takes back off.
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(theme::dim(if many { "Selection:" } else { "This photo:" }));
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if many {
+                ui.label(theme::tag("selection").color(theme::ACCENT));
+            }
             for r in 0..=5u8 {
                 let label = if r == 0 {
                     "0".to_string()
@@ -473,17 +482,12 @@ impl PhotoApp {
                     set_rating = Some(r);
                 }
             }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(6.0);
             use photo_engine::Flag;
-            for (f, label) in [
-                (Flag::Pick, "pick"),
-                (Flag::Reject, "reject"),
-                (Flag::Unflagged, "unflag"),
-            ] {
-                if widgets::chip(ui, !many && flag == f && f != Flag::Unflagged, label).clicked() {
-                    set_flag = Some(f);
+            for (f, label) in [(Flag::Pick, "pick"), (Flag::Reject, "reject")] {
+                let on = !many && flag == f;
+                if widgets::chip(ui, on, label).clicked() {
+                    set_flag = Some(if on { Flag::Unflagged } else { f });
                 }
             }
         });
@@ -521,12 +525,24 @@ impl PhotoApp {
             })
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    // Turning the photo upright is the first thing most photos need, so it
+                    // sits here rather than inside the crop module. (A / B is in the top bar.)
                     ui.add_enabled_ui(loaded, |ui| {
-                        self.crop_chips(ui);
-                        if widgets::chip(ui, self.split_active, "a / b").clicked() {
-                            self.split_active = !self.split_active;
-                            self.needs_render = true;
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if widgets::chip(ui, false, "↶ rotate")
+                            .on_hover_text("Turn 90° anticlockwise")
+                            .clicked()
+                        {
+                            self.quick_turn(false);
                         }
+                        if widgets::chip(ui, false, "↷")
+                            .on_hover_text("Turn 90° clockwise")
+                            .clicked()
+                        {
+                            self.quick_turn(true);
+                        }
+                        self.crop_chips(ui);
                     });
                     if widgets::chip(ui, self.fine_adjust, "fine")
                         .on_hover_text("Sliders move ten times finer")
@@ -550,7 +566,7 @@ impl PhotoApp {
                     });
                 });
                 if loaded && !self.customize_open {
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     self.module_scroller(ui);
                 }
             });
@@ -564,9 +580,14 @@ impl PhotoApp {
             })
             .show(ui, |ui| {
                 egui::Frame::new()
-                    .inner_margin(Margin::symmetric(12, 6))
+                    .inner_margin(Margin {
+                        left: 12,
+                        right: 12,
+                        top: 2,
+                        bottom: 8,
+                    })
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         if self.customize_open {
                             self.customize_body(ui);
                         } else if loaded {
@@ -599,13 +620,16 @@ impl PhotoApp {
         egui::ScrollArea::horizontal()
             .id_salt("compact_modules")
             .auto_shrink([false, true])
+            // Tiles cut off at the edge already say there is more; a bar under them is
+            // only more height.
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .scroll_source(ScrollSource {
                 drag: DragScroll::Always,
                 ..Default::default()
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     for id in ids {
                         let (_, modified) = summarise(id, &self.stack, &defaults, &white);
                         let state = if !module_on(&self.stack, id) {
@@ -646,31 +670,29 @@ impl PhotoApp {
         };
         let mut changed = false;
         let mut started = false;
-        widgets::card(ui, true, |ui| {
-            let head = widgets::module_header(
-                ui,
-                id.title(),
-                module_enabled(&mut self.stack, id),
-                &summary,
-                summary_colour,
-                true,
-            );
-            if head.toggled {
-                changed = true;
-                started = true;
+        // No card around it: there is only ever one module on screen here, and a card's
+        // border and padding cost the sliders width a phone does not have.
+        let head = widgets::module_header(
+            ui,
+            id.title(),
+            module_enabled(&mut self.stack, id),
+            &summary,
+            summary_colour,
+            true,
+        );
+        if head.toggled {
+            changed = true;
+            started = true;
+        }
+        let mut body_changed = false;
+        self.module_body(ui, id, &mut body_changed, &mut started);
+        if body_changed {
+            // As on the desktop: touching a control turns its module on.
+            if let Some(on) = module_enabled(&mut self.stack, id) {
+                *on = true;
             }
-            ui.add_space(2.0);
-            let mut body_changed = false;
-            self.module_body(ui, id, &mut body_changed, &mut started);
-            if body_changed {
-                // As on the desktop: touching a control turns its module on.
-                if let Some(on) = module_enabled(&mut self.stack, id) {
-                    *on = true;
-                }
-            }
-            changed |= body_changed;
-            ui.add_space(4.0);
-        });
+        }
+        changed |= body_changed;
         if changed {
             self.focused_section = Some(id);
             self.needs_render = true;
@@ -678,6 +700,19 @@ impl PhotoApp {
         if started {
             self.history.checkpoint(&snapshot);
         }
+    }
+
+    /// A quarter turn from the Edit sheet's toolbar, as one undo step.
+    fn quick_turn(&mut self, clockwise: bool) {
+        let before = self.stack.clone();
+        if clockwise {
+            self.stack.geometry.rotate_right();
+        } else {
+            self.stack.geometry.rotate_left();
+        }
+        self.history.checkpoint(&before);
+        self.rebase_crop();
+        self.needs_render = true;
     }
 
     // ── Export ──────────────────────────────────────────────────────────────────────────
@@ -801,7 +836,7 @@ fn module_tile(
     state: Option<Color32>,
 ) -> egui::Response {
     let (monogram, name) = module_glyph(id);
-    let (rect, response) = ui.allocate_exact_size(vec2(64.0, 54.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(56.0, 44.0), Sense::click());
     let painter = ui.painter();
     let (fill, stroke, colour) = if chosen {
         (
@@ -822,21 +857,21 @@ fn module_tile(
         egui::StrokeKind::Inside,
     );
     painter.text(
-        pos2(rect.center().x, rect.top() + 20.0),
+        pos2(rect.center().x, rect.top() + 16.0),
         Align2::CENTER_CENTER,
         monogram,
-        FontId::new(16.0, theme::display()),
+        FontId::new(14.0, theme::display()),
         colour,
     );
     painter.text(
-        pos2(rect.center().x, rect.bottom() - 12.0),
+        pos2(rect.center().x, rect.bottom() - 10.0),
         Align2::CENTER_CENTER,
         name.to_uppercase(),
-        FontId::new(8.5, theme::mono_bold()),
+        FontId::new(8.0, theme::mono_bold()),
         colour,
     );
     if let Some(dot) = state {
-        painter.circle_filled(rect.right_top() + vec2(-8.0, 8.0), 3.0, dot);
+        painter.circle_filled(rect.right_top() + vec2(-6.0, 6.0), 2.5, dot);
     }
     response.on_hover_text(id.title())
 }
