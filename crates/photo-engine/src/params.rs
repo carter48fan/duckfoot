@@ -539,6 +539,45 @@ impl PhotoStack {
     }
 }
 
+impl PhotoStack {
+    /// This stack with anything a hand-edited or damaged sidecar could hold that the
+    /// pipeline cannot — an out-of-range turn count, a degenerate crop, a runaway curve —
+    /// brought back to something valid.
+    pub fn sanitised(&self) -> Self {
+        let mut s = self.clone();
+        let g = &mut s.geometry;
+        g.quarter_turns %= 4;
+        g.straighten_deg = finite_or(g.straighten_deg, 0.0).clamp(-45.0, 45.0);
+        g.crop = Crop {
+            x: finite_or(g.crop.x, 0.0),
+            y: finite_or(g.crop.y, 0.0),
+            width: finite_or(g.crop.width, 1.0),
+            height: finite_or(g.crop.height, 1.0),
+        }
+        .sanitised();
+
+        const MAX_NODES: usize = 64;
+        let nodes = &mut s.tone_curve.params;
+        nodes.truncate(MAX_NODES);
+        for n in nodes.iter_mut() {
+            n.x = finite_or(n.x, 0.0).clamp(0.0, 1.0);
+            n.y = finite_or(n.y, 0.0).clamp(0.0, 1.0);
+        }
+        if nodes.len() < 2 {
+            *nodes = crate::curve::identity_nodes();
+        }
+        s
+    }
+}
+
+fn finite_or(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
