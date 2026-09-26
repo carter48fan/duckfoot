@@ -297,6 +297,13 @@ impl History {
     }
 }
 
+/// What a notice's Undo button takes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoticeAction {
+    UndoPasteToAll,
+    UndoRemove,
+}
+
 /// Where the current edit stands relative to the sidecar on disk.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidecarState {
@@ -382,9 +389,19 @@ pub struct PhotoApp {
     parked_histories: Vec<(PathBuf, History)>,
     /// Files dropped on the window since the last frame; they are shelved together.
     pending_drops: Vec<PathBuf>,
+    /// The stack as it stood the last time nothing was being dragged: what Esc puts back
+    /// mid-drag (DESIGN.md: a drag has a live preview and a cancel).
+    stack_before_drag: PhotoStack,
+    /// A drag was held at the end of the last frame. egui itself drops a drag when Esc is
+    /// pressed, before the app sees the key, so this is how the app knows one was cut off.
+    was_dragging: bool,
     pub new_snapshot_name: String,
     /// Brief notifications in the status bar with timestamp.
     pub status_notification: Option<(String, Instant)>,
+    /// What the live notice's Undo button does, if it has one.
+    status_action: Option<NoticeAction>,
+    /// Photos last taken off the shelf, with where they sat, for the notice's Undo.
+    removed_from_shelf: Vec<(usize, ShelfItem)>,
     pub tonemap_3d_state: tonemap_3d::Tonemap3DState,
     pub inspector_map_state: inspector_map_3d::InspectorMapState,
     pub inspector_sections: Vec<InspectorSectionConfig>,
@@ -535,8 +552,12 @@ impl PhotoApp {
             snapshots: Vec::new(),
             parked_histories: Vec::new(),
             pending_drops: Vec::new(),
+            stack_before_drag: PhotoStack::default(),
+            was_dragging: false,
             new_snapshot_name: String::new(),
             status_notification: None,
+            status_action: None,
+            removed_from_shelf: Vec::new(),
             tonemap_3d_state: tonemap_3d::Tonemap3DState::default(),
             inspector_map_state: inspector_map_3d::InspectorMapState::default(),
             inspector_sections: InspectorSectionConfig::default_sections(),
@@ -703,6 +724,34 @@ impl PhotoApp {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_notification = Some((msg.into(), Instant::now()));
+        self.status_action = None;
+    }
+
+    /// A notice with an Undo button: DESIGN.md makes destructive actions undoable rather
+    /// than confirmed, and for the ones outside the stack's own history this is the undo.
+    pub(crate) fn set_status_undoable(&mut self, msg: impl Into<String>, action: NoticeAction) {
+        self.set_status(msg);
+        self.status_action = Some(action);
+    }
+
+    /// The notice to show now, if any, and when it comes down. Undoable notices stay up
+    /// long enough to reach for the button.
+    pub(crate) fn live_notice(&self) -> Option<(&str, Option<NoticeAction>, Duration)> {
+        let (msg, when) = self.status_notification.as_ref()?;
+        let life = if self.status_action.is_some() {
+            Duration::from_secs(8)
+        } else {
+            Duration::from_secs(4)
+        };
+        let left = life.checked_sub(when.elapsed())?;
+        Some((msg.as_str(), self.status_action, left))
+    }
+
+    pub(crate) fn run_notice_action(&mut self, action: NoticeAction) {
+        match action {
+            NoticeAction::UndoPasteToAll => self.undo_paste_to_all(),
+            NoticeAction::UndoRemove => self.undo_remove_from_shelf(),
+        }
     }
 
     /// The coarsest preview level still at least as dense as the screen: each level
@@ -835,7 +884,28 @@ impl PhotoApp {
         if let Some(dir) = self.pending_step.take() {
             self.step_photo(gpu, dir);
         }
+        self.was_dragging = ctx.dragged_id().is_some();
+        if !self.was_dragging && self.stack_before_drag != self.stack {
+            self.stack_before_drag = self.stack.clone();
+        }
         self.autosave(&ctx);
+    }
+
+    /// Esc during a drag — a slider, a curve node, a 3D handle — puts the stack back as it
+    /// was before the drag began, and takes back the undo step the drag opened.
+    pub(crate) fn cancel_drag(&mut self, ctx: &egui::Context) -> bool {
+        if !(self.was_dragging || ctx.dragged_id().is_some()) || self.cropping {
+            return false;
+        }
+        ctx.stop_dragging();
+        if self.stack != self.stack_before_drag {
+            if self.history.past.last() == Some(&self.stack_before_drag) {
+                self.history.past.pop();
+            }
+            self.stack = self.stack_before_drag.clone();
+            self.needs_render = true;
+        }
+        true
     }
 
     /// Write the edits a second after they stop changing. A drag changes the stack every

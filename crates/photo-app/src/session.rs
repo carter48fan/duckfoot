@@ -288,9 +288,10 @@ impl PhotoApp {
         }
         self.bulk_paste_undo = Some(before);
         if failed.is_empty() {
-            self.set_status(format!(
-                "Pasted onto {count} photos — Undo paste takes it back"
-            ));
+            self.set_status_undoable(
+                format!("Pasted onto {count} photos"),
+                NoticeAction::UndoPasteToAll,
+            );
         } else {
             self.error = Some(format!(
                 "Pasted onto {count} photos; could not write {}",
@@ -695,5 +696,54 @@ impl PhotoApp {
         if count > 1 {
             self.set_status(format!("Added {count} photos to the shelf"));
         }
+    }
+
+    /// Take photos off the shelf. Nothing on disk changes; the notice's Undo puts them
+    /// back where they were.
+    pub fn remove_from_shelf(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.loaded_path.as_ref().is_some_and(|p| paths.contains(p)) {
+            self.flush();
+        }
+        let mut removed = Vec::new();
+        let mut i = 0;
+        let mut index = 0;
+        while i < self.shelf.len() {
+            if paths.contains(&self.shelf[i].path) {
+                removed.push((index, self.shelf.remove(i)));
+            } else {
+                i += 1;
+            }
+            index += 1;
+        }
+        for (_, item) in &removed {
+            self.selection.selected.remove(&item.path);
+            // The texture goes with its handle.
+            self.thumbs.remove(&item.path);
+            self.thumbs_requested.remove(&item.path);
+        }
+        let n = removed.len();
+        self.removed_from_shelf = removed;
+        self.set_status_undoable(
+            if n == 1 {
+                "Removed 1 photo from the shelf".to_string()
+            } else {
+                format!("Removed {n} photos from the shelf")
+            },
+            NoticeAction::UndoRemove,
+        );
+    }
+
+    pub fn undo_remove_from_shelf(&mut self) {
+        let removed = std::mem::take(&mut self.removed_from_shelf);
+        let n = removed.len();
+        for (index, item) in removed {
+            let path = item.path.clone();
+            self.shelf.insert(index.min(self.shelf.len()), item);
+            self.request_thumbnail(&path);
+        }
+        self.set_status(format!("Put {n} back on the shelf"));
     }
 }

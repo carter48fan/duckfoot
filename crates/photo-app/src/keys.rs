@@ -37,6 +37,9 @@ impl PhotoApp {
             }
             return;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.cancel_drag(ctx) {
+            return;
+        }
         // DESIGN.md: hotkeys never fire while a text field has focus. Only a text field: a
         // button reached with Tab has focus too, and must not swallow every shortcut.
         if ctx.egui_wants_keyboard_input() {

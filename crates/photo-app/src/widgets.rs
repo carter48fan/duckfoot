@@ -327,13 +327,10 @@ fn rail_painted(
         *value = default;
     } else if touch {
         let fine = is_fine(ui.ctx());
-        if response.clicked() {
-            // Tapping jumps directly to the tapped position on the track.
-            if let Some(p) = response.interact_pointer_pos() {
-                let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
-                *value = lo + t * (hi - lo);
-            }
-        } else if response.dragged() {
+        // A tap does nothing: under a thumb, a tap is as often a scroll being stopped as
+        // a value being chosen, and jumping the slider for it edits the photo by accident.
+        // Double-tap resets; a drag moves the value from where it is.
+        if response.dragged() {
             let gesture_id = response.id.with("touch_gesture");
             if response.drag_started() {
                 let delta = response.drag_delta();
@@ -347,16 +344,11 @@ fn rail_painted(
                 .data(|d| d.get_temp::<bool>(gesture_id))
                 .unwrap_or(true);
             if is_sliding {
-                if fine {
-                    let dx = response.drag_delta().x;
-                    *value = (*value + dx / track.width() * (hi - lo) * 0.1).clamp(lo, hi);
-                } else if let Some(p) = response.interact_pointer_pos() {
-                    let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
-                    *value = lo + t * (hi - lo);
-                } else {
-                    let dx = response.drag_delta().x;
-                    *value = (*value + dx / track.width() * (hi - lo)).clamp(lo, hi);
-                }
+                // Relative, like a phone's own sliders: the thumb need not be under the
+                // finger, and the value never jumps to wherever the drag began.
+                let scale = if fine { 0.1 } else { 1.0 };
+                let dx = response.drag_delta().x;
+                *value = (*value + dx / track.width() * (hi - lo) * scale).clamp(lo, hi);
             } else {
                 let dy = response.drag_delta().y;
                 if dy.abs() > 0.0 {

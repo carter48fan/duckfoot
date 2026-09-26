@@ -187,7 +187,15 @@ pub(crate) fn shelf_row(
         ),
         vec2(badge_galley.size().x + 10.0, 18.0),
     );
-    let remove = ui.interact(badge, response.id.with("remove"), Sense::click());
+    // With a mouse the badge turns into Remove under the pointer. On touch there is no
+    // hover to warn first, so a tap near the edge would remove the photo: there it stays
+    // a size badge, and removing is in the row's menu.
+    let remove_sense = if widgets::is_touch(ui.ctx()) {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let remove = ui.interact(badge, response.id.with("remove"), remove_sense);
 
     let painter = ui.painter();
     let border = if active {
@@ -311,7 +319,7 @@ pub(crate) fn shelf_row(
         colour,
     );
 
-    if hovered {
+    if hovered && !widgets::is_touch(ui.ctx()) {
         let hot = remove.hovered();
         painter.rect(
             badge,
