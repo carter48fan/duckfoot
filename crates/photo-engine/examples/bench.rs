@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{DefaultRawDecoder, Engine, PhotoStack, RawDecoder};
 
 /// Read back a square from the middle of the image. 256 px keeps `bytes_per_row` at
 /// 1024 — already a multiple of wgpu's 256-byte copy alignment, so no padding dance.
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let t = Instant::now();
-    let cfa = RawloaderBackend.decode_file(std::path::Path::new(&path))?;
+    let cfa = DefaultRawDecoder.decode_file(std::path::Path::new(&path))?;
     let (w, h) = (cfa.width, cfa.height);
     println!(
         "decode       {:.0} ms   {w}×{h} ({:.1} MP)",

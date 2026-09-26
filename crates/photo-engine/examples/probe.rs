@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{RawDecoder, RawloaderBackend};
+use photo_engine::{DefaultRawDecoder, RawDecoder};
 
 fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).is_none() {
@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
 
     for arg in std::env::args().skip(1) {
         let started = Instant::now();
-        match RawloaderBackend.decode_file(std::path::Path::new(&arg)) {
+        match DefaultRawDecoder.decode_file(std::path::Path::new(&arg)) {
             Ok(img) => {
                 let ms = started.elapsed().as_secs_f64() * 1000.0;
                 println!("── {arg}");

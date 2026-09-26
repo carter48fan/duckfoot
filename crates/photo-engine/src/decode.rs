@@ -155,15 +155,20 @@ impl RawDecoder for RawlerBackend {
 }
 
 fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
-    let mut img = decode_reader_rawler(source)?;
+    Ok(with_dng_colour(decode_reader_rawler(source)?, source.buf()))
+}
+
+/// A decode that found no as-shot white balance of its own takes the DNG's colour tags
+/// (AsShotWhiteXY and the dual-illuminant matrices), as Pixel-style DNGs need.
+fn with_dng_colour(mut img: Decoded, bytes: &[u8]) -> CfaImage {
     if img.wb_missing {
-        if let Some(dng) = dng::colour(source.buf()) {
+        if let Some(dng) = dng::colour(bytes) {
             img.cfa.wb = dng.wb;
             img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
             img.cfa.daylight_wb = daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
         }
     }
-    Ok(img.cfa)
+    img.cfa
 }
 
 /// Default decoder: tries `rawler` first (~2,500 modern cameras including Sony A7 IV),
@@ -172,18 +177,30 @@ pub struct DefaultRawDecoder;
 
 impl RawDecoder for DefaultRawDecoder {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        RawlerBackend.decode_bytes(bytes).or_else(|e| {
-            log::debug!("rawler decode failed ({e:#}), falling back to rawloader");
-            RawloaderBackend.decode_bytes(bytes)
-        })
+        RawlerBackend
+            .decode_bytes(bytes)
+            .or_else(|first| rawloader_only(bytes).map_err(|second| both_failed(first, second)))
     }
 
     fn decode_file(&self, path: &Path) -> Result<CfaImage> {
-        RawlerBackend.decode_file(path).or_else(|e| {
-            log::debug!("rawler decode failed ({e:#}), falling back to rawloader");
-            RawloaderBackend.decode_file(path)
+        RawlerBackend.decode_file(path).or_else(|first| {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("{}: could not be read", path.display()))?;
+            rawloader_only(&bytes).map_err(|second| both_failed(first, second))
         })
     }
+}
+
+/// Each decoder is tried once. The error keeps both reasons: rawler's is usually the one
+/// that explains a modern camera, rawloader's an old one.
+fn both_failed(rawler: anyhow::Error, rawloader: anyhow::Error) -> anyhow::Error {
+    log::debug!("rawler: {rawler:#}; rawloader: {rawloader:#}");
+    anyhow::anyhow!("{rawler:#} (rawloader could not read it either: {rawloader:#})")
+}
+
+/// rawloader alone, with the DNG white-balance fallback, and no second try with rawler.
+fn rawloader_only(bytes: &[u8]) -> Result<CfaImage> {
+    Ok(with_dng_colour(decode_reader(&mut Cursor::new(bytes))?, bytes))
 }
 
 /// Convenience function to decode a RAW file using the default backend.
@@ -195,24 +212,7 @@ pub struct RawloaderBackend;
 
 impl RawDecoder for RawloaderBackend {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        let mut cursor = Cursor::new(bytes);
-        match decode_reader(&mut cursor) {
-            Ok(mut img) => {
-                if img.wb_missing {
-                    if let Some(dng) = dng::colour(bytes) {
-                        img.cfa.wb = dng.wb;
-                        img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
-                        img.cfa.daylight_wb =
-                            daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
-                    }
-                }
-                Ok(img.cfa)
-            }
-            Err(e) => {
-                log::debug!("rawloader backend failed ({e:#}), trying rawler backend");
-                RawlerBackend.decode_bytes(bytes)
-            }
-        }
+        rawloader_only(bytes)
     }
 }
 
