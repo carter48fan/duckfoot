@@ -99,7 +99,11 @@ impl PhotoApp {
             errors,
         }) = queue.take_finished()
         {
-            if errors.is_empty() {
+            if success + errors.len() < total {
+                self.set_status(format!(
+                    "Batch export cancelled: {success} of {total} written"
+                ));
+            } else if errors.is_empty() {
                 self.set_status(format!(
                     "Batch export complete: {success}/{total} photos rendered."
                 ));
@@ -246,14 +250,20 @@ impl PhotoApp {
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("DSC08450.ARW"));
 
+                // The preview uses the sample photo's own metadata, as the batch will.
+                let sample_info = photo_engine::read_info(&sample_path);
+                let sample_date = sample_info
+                    .as_ref()
+                    .and_then(|i| i.capture_date_compact())
+                    .or_else(|| photo_engine::file_date_compact(&sample_path));
                 let sample_ctx = batch::RenameContext {
                     source_path: &sample_path,
                     sequence_index: 0,
-                    camera_model: Some("Camera"),
+                    camera_model: sample_info.as_ref().map(|i| i.model.as_str()),
                     rating: 5,
                     custom_text: "",
                     target_extension: "jpg",
-                    date_override: None,
+                    date: sample_date.as_deref(),
                 };
                 let preview_name = self.batch_renamer.format_filename(&sample_ctx);
                 ui.horizontal(|ui| {
@@ -293,7 +303,18 @@ impl PhotoApp {
                             );
                         }
                     }
-                    if widgets::button(ui, Kind::Secondary, "Cancel Export", 120.0).clicked() {
+                    let cancelling = self
+                        .export_queue
+                        .as_ref()
+                        .is_some_and(|q| q.is_cancelling());
+                    if cancelling {
+                        ui.label(
+                            theme::tag("stopping after the photo being written…")
+                                .color(theme::TEXT_DIM),
+                        );
+                    } else if widgets::button(ui, Kind::Secondary, "Cancel Export", 120.0)
+                        .clicked()
+                    {
                         if let Some(queue) = &mut self.export_queue {
                             queue.cancel();
                         }
@@ -330,8 +351,14 @@ impl PhotoApp {
             return;
         };
 
+        // In shelf order, so {seq} numbers photos the way they are laid out, not the way
+        // a hash set happens to iterate.
         let selected_paths: Vec<PathBuf> = if !self.selection.is_empty() {
-            self.selection.selected.iter().cloned().collect()
+            self.shelf
+                .iter()
+                .filter(|it| self.selection.is_selected(&it.path))
+                .map(|it| it.path.clone())
+                .collect()
         } else if let Some(p) = &self.loaded_path {
             vec![p.clone()]
         } else {
@@ -350,8 +377,14 @@ impl PhotoApp {
         }
 
         let mut jobs = Vec::new();
+        let mut claimed = std::collections::HashSet::new();
 
         for (seq_idx, src_path) in selected_paths.iter().enumerate() {
+            let info = photo_engine::read_info(src_path);
+            let date = info
+                .as_ref()
+                .and_then(|i| i.capture_date_compact())
+                .or_else(|| photo_engine::file_date_compact(src_path));
             let (stack, crop, rating) = if Some(src_path) == self.loaded_path.as_ref() {
                 let rating = self
                     .shelf
@@ -376,23 +409,24 @@ impl PhotoApp {
             };
 
             for recipe in &active_recipes {
-                let target_dir = if let Some(sub) = &recipe.subfolder {
-                    out_dir.join(sub)
-                } else {
-                    out_dir.clone()
+                let target_dir = match &recipe.subfolder {
+                    Some(sub) => out_dir.join(batch::renamer::sanitize_component(sub)),
+                    None => out_dir.clone(),
                 };
 
                 let ctx = batch::RenameContext {
                     source_path: src_path,
                     sequence_index: seq_idx,
-                    camera_model: None,
+                    camera_model: info.as_ref().map(|i| i.model.as_str()),
                     rating,
                     custom_text: "",
                     target_extension: recipe.format.extension(),
-                    date_override: None,
+                    date: date.as_deref(),
                 };
 
-                if let Some(target_path) = self.batch_renamer.resolve_target_path(&target_dir, &ctx)
+                if let Some(target_path) =
+                    self.batch_renamer
+                        .resolve_target_path(&target_dir, &ctx, &mut claimed)
                 {
                     jobs.push(batch::ExportJob {
                         source_path: src_path.clone(),

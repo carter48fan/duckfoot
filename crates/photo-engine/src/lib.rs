@@ -32,7 +32,7 @@ pub use engine::{
 };
 pub use export::{EncodeOptions, ExportFormat, ExportedImage, JPEG_QUALITY};
 pub use histogram::Histogram;
-pub use metadata::{read_raw_info, PhotoInfo};
+pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Exposure, ExposureMode,
     Filmic, Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,

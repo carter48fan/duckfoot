@@ -200,7 +200,10 @@ fn both_failed(rawler: anyhow::Error, rawloader: anyhow::Error) -> anyhow::Error
 
 /// rawloader alone, with the DNG white-balance fallback, and no second try with rawler.
 fn rawloader_only(bytes: &[u8]) -> Result<CfaImage> {
-    Ok(with_dng_colour(decode_reader(&mut Cursor::new(bytes))?, bytes))
+    Ok(with_dng_colour(
+        decode_reader(&mut Cursor::new(bytes))?,
+        bytes,
+    ))
 }
 
 /// Convenience function to decode a RAW file using the default backend.
