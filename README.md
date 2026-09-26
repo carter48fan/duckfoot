@@ -153,6 +153,7 @@ You can also **drag a RAW file onto the window**.
 | **Photos** | |
 | `←` / `→` | previous / next photo, in the filmstrip's order |
 | `Ctrl+S` | save now (edits also save on their own) |
+| `Ctrl+E` | export this photo: size, format, metadata, then where |
 | `Ctrl+Shift+E` | batch export the selection |
 | **Editing** | |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
@@ -467,7 +468,7 @@ DESIGN.md invariant 8.
 | **Params** | capture sharpen, vignette | Working | Edge-preserving convolution & radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
 | **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
-| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, cropped & oriented, encoded off UI thread |
+| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits (PNG, TIFF); resize, output sharpening; EXIF and an sRGB profile embedded; cropped & oriented, encoded off the UI thread |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
@@ -481,7 +482,7 @@ DESIGN.md invariant 8.
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
-| **App** | export | Working | Export… button, format from the filename |
+| **App** | export | Working | Export dialog (Ctrl+E) and the phone's Export sheet share one settings panel with the batch recipes |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
 | **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
@@ -564,7 +565,7 @@ Checked items are done **and verified**, not merely written.
 - [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
       near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
 - [x] Preview at fit-to-window scale; full resolution reserved for export
-- [x] PNG/JPEG export through the same shader — the real test of invariant 2
+- [x] JPEG/PNG/TIFF/WebP export through the same shader — the real test of invariant 2
 - [x] Live histogram via a compute pass and a 4 KB readback
 - [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
 - [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)

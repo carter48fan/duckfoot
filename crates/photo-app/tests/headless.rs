@@ -1526,3 +1526,52 @@ fn a_screen_reader_is_told_what_each_control_is() {
     assert!(temp.1.is_some_and(|v| v > 1000.0), "{temp:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ctrl_e_opens_the_export_settings_and_they_are_remembered() {
+    let dir = scratch_dir("exportsettings");
+    let settings = dir.join("settings");
+    let a = dir.join("a.dng");
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    let ctrl_e = egui::RawInput {
+        events: vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+            egui::Event::Key {
+                key: egui::Key::E,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            },
+        ],
+        ..Default::default()
+    };
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+        h.settle(&mut app, Duration::from_secs(30));
+        h.frame(&mut app, ctrl_e);
+        assert!(app.export_dialog_open);
+        h.frame(
+            &mut app,
+            pointer(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]),
+        );
+        h.frame(&mut app, key(egui::Key::Escape));
+        assert!(!app.export_dialog_open);
+        app.export_settings.format = photo_engine::ExportFormat::Tiff;
+        app.export_settings.depth = photo_engine::BitDepth::Sixteen;
+        app.export_settings.sizing = photo_engine::Resize::LongEdge(3000);
+        app.shutdown();
+    }
+    let app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    assert_eq!(app.export_settings.format, photo_engine::ExportFormat::Tiff);
+    assert_eq!(app.export_settings.depth, photo_engine::BitDepth::Sixteen);
+    assert_eq!(
+        app.export_settings.sizing,
+        photo_engine::Resize::LongEdge(3000)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

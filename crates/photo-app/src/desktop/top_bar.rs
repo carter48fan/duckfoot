@@ -58,12 +58,12 @@ impl PhotoApp {
                         let export = ui
                             .add_enabled_ui(ready, |ui| {
                                 widgets::button(ui, Kind::Primary, "Export", 84.0).on_hover_text(
-                                    "Write the full-resolution image: JPEG, PNG, TIFF or WebP",
+                                    "Choose size, format and metadata, then where (Ctrl+E)",
                                 )
                             })
                             .inner;
                         if export.clicked() {
-                            self.pick_and_export(ui.ctx());
+                            self.export_dialog_open = true;
                         }
                         if widgets::button(ui, Kind::Secondary, "Open RAW…", 0.0).clicked() {
                             self.pick_and_open(ui.ctx());
