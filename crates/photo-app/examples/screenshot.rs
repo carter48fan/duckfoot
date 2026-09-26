@@ -1,11 +1,12 @@
 //! Render the whole app to a PNG, with no window: see a layout without the device it is
 //! for — the phone layout on a desktop, say.
 //!
-//!     cargo run --release -p photo-app --example screenshot -- out.png 412x892 [photo] [tab] [module]
+//!     cargo run --release -p photo-app --example screenshot -- out.png 412x892 [photo] [tab] [module] [tour step]
 //!
 //! Sizes are in points and drawn at 2 pixels per point, as a phone would. `tab` is
-//! library, edit, scopes, history, export or none, and picks the phone layout's sheet;
-//! `module` is a module's title, as in the Edit sheet ("exposure", "tone curve"…).
+//! library, presets, edit, export or none, and picks the phone layout's sheet;
+//! `module` is a module's title, as in the Edit sheet ("exposure", "tone curve"…), or `-`;
+//! `tour step` shows the phone tour at that step (from 0).
 //! Needs a Vulkan driver; Mesa's software one (lavapipe) is enough.
 
 use std::path::PathBuf;
@@ -41,7 +42,7 @@ fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("unknown tab {t}"))?,
         )),
     };
-    let module = args.next().map(|m| {
+    let module = args.next().filter(|m| m != "-").map(|m| {
         InspectorSectionId::all()
             .iter()
             .copied()
@@ -114,6 +115,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(module) = module {
         app.compact_module = module?;
+    }
+    if let Some(step) = args.next() {
+        app.show_tour_step(step.parse()?);
     }
     // Let the layout, the render and the histogram readback settle.
     for _ in 0..8 {

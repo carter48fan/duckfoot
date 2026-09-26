@@ -8,6 +8,8 @@ pub mod dam;
 pub mod inspector_map_3d;
 mod loader;
 pub mod platform;
+pub mod presets;
+pub mod settings;
 pub mod theme;
 pub mod tonemap_3d;
 pub mod widgets;
@@ -423,6 +425,18 @@ pub struct PhotoApp {
     pending_step: Option<isize>,
     /// Which arrangement this frame is laid out in; decided by the screen's size.
     layout: compact::Layout,
+    /// Where settings are kept, and what they say.
+    settings_dir: Option<PathBuf>,
+    settings: settings::Settings,
+    /// The phone's modules: which show in the Edit strip, in what order. Separate from
+    /// the desktop's, because a phone wants fewer.
+    pub compact_sections: Vec<InspectorSectionConfig>,
+    /// The look last applied from Presets, and what it was applied over.
+    preset: Option<compact::PresetState>,
+    /// The phone tour's current step, while it is showing.
+    tour_step: Option<usize>,
+    /// Where the phone layout's parts were last frame, for the tour to point at.
+    compact_rects: compact::Rects,
 }
 
 impl PhotoApp {
@@ -439,6 +453,13 @@ impl PhotoApp {
         }
         let loader =
             loader::Loader::new(gpu.device.clone(), gpu.queue.clone(), engine.upload_pool());
+        let settings_dir = platform.settings_dir();
+        let settings = settings::Settings::load(settings_dir.as_deref());
+        let compact_sections = settings
+            .compact_sections
+            .clone()
+            .map(settings::merge_sections)
+            .unwrap_or_else(settings::default_compact_sections);
         Self {
             engine,
             stack: PhotoStack::default(),
@@ -509,6 +530,12 @@ impl PhotoApp {
             swipe_from: None,
             pending_step: None,
             layout: compact::Layout::Desktop,
+            settings_dir,
+            settings,
+            compact_sections,
+            preset: None,
+            tour_step: None,
+            compact_rects: compact::Rects::default(),
         }
     }
 
@@ -983,6 +1010,25 @@ impl PhotoApp {
     }
 
     /// A decode is running, or thumbnails are still being built.
+    /// Show the phone tour from its first step.
+    pub fn start_tour(&mut self) {
+        self.tour_step = Some(0);
+    }
+
+    /// Show the phone tour at `step` (from 0), as its "next" would have.
+    pub fn show_tour_step(&mut self, step: usize) {
+        self.tour_step = Some(step);
+    }
+
+    /// The phone tour's step while it is showing.
+    pub fn tour_step(&self) -> Option<usize> {
+        self.tour_step
+    }
+
+    fn save_settings(&self) {
+        self.settings.save(self.settings_dir.as_deref());
+    }
+
     /// The size the photo's stage got last frame.
     pub fn stage_size(&self) -> egui::Vec2 {
         self.last_panel
@@ -1475,6 +1521,8 @@ impl PhotoApp {
         if ctx.input(|i| i.key_pressed(egui::Key::BrowserBack)) {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(focused));
+            } else if self.tour_step.is_some() {
+                self.end_tour();
             } else if self.cropping {
                 // As Esc: the framing in progress is thrown away.
                 self.cancel_crop();
@@ -4053,6 +4101,12 @@ impl PhotoApp {
             InspectorSectionId::Scope => {
                 if self.engine.image().is_none() {
                     ui.label(theme::dim("Open a photo to see its scopes.").size(12.0));
+                } else if self.layout.is_compact() {
+                    // Flat only on a phone: the 3D views need orbiting, which fights the
+                    // sheet's own scrolling under a thumb.
+                    let mut flat = self.inspector_map_state.clone();
+                    flat.mode = inspector_map_3d::InspectorMapMode::Plot2D;
+                    inspector_map_3d::render_inspector_map(ui, &mut flat, self.engine.histogram());
                 } else {
                     ui.horizontal_wrapped(|ui| {
                         self.scope_mode_chips(ui, false);
@@ -4481,7 +4535,19 @@ impl PhotoApp {
             InspectorSectionId::Filmic3D => {
                 let p = &mut self.stack.filmic.params;
                 let dp = d.filmic.params;
-                tonemap_3d::render_tonemap_3d(ui, &mut self.tonemap_3d_state, p, changed, started);
+                if self.layout.is_compact() {
+                    // Flat on a phone, as the scope is: the sliders below set the curve.
+                    tonemap_3d::filmic_presets(ui, p, changed, started);
+                    tonemap_3d::render_filmic_2d(ui, p);
+                } else {
+                    tonemap_3d::render_tonemap_3d(
+                        ui,
+                        &mut self.tonemap_3d_state,
+                        p,
+                        changed,
+                        started,
+                    );
+                }
                 ui.add_space(4.0);
                 track!(widgets::param_slider(
                     ui,
