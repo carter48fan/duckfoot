@@ -188,7 +188,8 @@ Hotkeys deliberately do not fire while a text field has focus.
 
 `.cr2 .cr3 .nef .nrw .arw .srf .sr2 .dng .orf .rw2 .raf .pef .raw`
 
-Decoding is `rawloader`'s — a few hundred camera models. Files it cannot handle fail with
+Decoding is `rawler`'s (~2,500 camera models), with `rawloader` as a fallback for anything
+rawler refuses. Files neither can handle fail with
 the filename and a reason in the status bar rather than silently rendering garbage.
 
 ---
@@ -283,7 +284,7 @@ cargo run --release -p photo-engine --example open_profile -- ~/Pictures/DSC0845
 Times each stage of what the app does on open (read, rawler decode, the full `decode_raw`
 the loader runs) and the embedded-preview path thumbnails and the stage stand-in use. Each
 stage runs five times and the fastest is reported, so the first cold read does not
-dominate. Unlike `probe` and `bench`, which go through rawloader, this measures the
+dominate. Like `probe` and `bench`, it goes through the decoder the app uses, and it measures the
 decoder the app actually uses.
 
 No camera files to hand? `synth_raw` writes a camera-sized DNG with a clipped highlight
@@ -441,7 +442,7 @@ DESIGN.md invariant 8.
 
 | Area | Symbol | Status | Notes |
 |---|---|---|---|
-| **Decode** | `RawloaderBackend` | Working | Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
+| **Decode** | `DefaultRawDecoder` | Working | rawler, then rawloader, each tried once. Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
 | **Decode** | measured white level | Working | Finds the real clip plateau in the data; Canon's per-ISO saturation no longer turns highlights magenta |
 | **Decode** | DNG `AsShotWhiteXY` | Working | Pixel-style DNGs; matrices interpolated by colour temperature per the DNG spec |
 | **Decode** | EXIF orientation | Working | Opens upright; the camera's turn is the starting geometry, not an edit |
