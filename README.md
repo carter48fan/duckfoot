@@ -284,8 +284,7 @@ cargo run --release -p photo-engine --example open_profile -- ~/Pictures/DSC0845
 Times each stage of what the app does on open (read, rawler decode, the full `decode_raw`
 the loader runs) and the embedded-preview path thumbnails and the stage stand-in use. Each
 stage runs five times and the fastest is reported, so the first cold read does not
-dominate. Like `probe` and `bench`, it goes through the decoder the app uses, and it measures the
-decoder the app actually uses.
+dominate. Like `probe` and `bench`, it goes through the decoder the app actually uses.
 
 No camera files to hand? `synth_raw` writes a camera-sized DNG with a clipped highlight
 and an embedded preview, so every stage has real work to do:
