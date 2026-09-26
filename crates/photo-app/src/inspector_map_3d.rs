@@ -39,7 +39,9 @@ impl Default for InspectorMapState {
             yaw: -0.65,  // ~ -37 degrees
             pitch: 0.38, // ~ +22 degrees
             zoom: 1.0,
-            mode: InspectorMapMode::Channels3D,
+            // The flat histogram is the one every photographer reads at a glance; the 3D
+            // views are a tap away.
+            mode: InspectorMapMode::Plot2D,
             large_view: false,
         }
     }
