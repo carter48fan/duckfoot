@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, RasterImage};
-use crate::export::{padded_bytes_per_row, unpad_rows, ExportedImage};
+use crate::export::{padded_bytes_per_row, ExportedImage};
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::params::{Geometry, PhotoStack};
 use crate::temperature::WhiteScale;
@@ -118,6 +118,8 @@ pub struct LoadedImage {
     mip_levels: u32,
     /// Kept so its memory can be recycled when this image is replaced by one the same size.
     sensor: wgpu::Texture,
+    /// Every level, as the adjust pass samples it; export binds it with its own uniforms.
+    sensor_view: wgpu::TextureView,
     sensor_extent: wgpu::Extent3d,
     /// The preview renders at 1/2^level of full resolution. 0 = full.
     preview_level: u32,
@@ -220,6 +222,12 @@ pub struct Engine {
     /// Where the mosaic texture goes once demosaic has read it, for the decode thread's
     /// next upload of the same size (see `UploadPool`).
     upload_pool: UploadPool,
+
+    /// Export's own uniforms, so an export never overwrites what the preview was drawn
+    /// with — the next frame shows the same image whether or not an export ran between.
+    export_buffer: wgpu::Buffer,
+    /// A smaller readback band than the device allows, for tests (`set_export_band_bytes`).
+    export_band_bytes: Option<u64>,
 }
 
 /// The green plane, which nothing reads once demosaic has run.
@@ -316,33 +324,36 @@ pub fn upload_cfa(
         height: cfa.height,
         depth_or_array_layers: 1,
     };
-    let texture = pool.take(extent).unwrap_or_else(|| {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cfa mosaic"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        })
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytemuck::cast_slice(&cfa.data),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(cfa.width * 2),
-            rows_per_image: Some(cfa.height),
-        },
-        extent,
-    );
+    let texture = scoped(device, "uploading the mosaic", || {
+        let texture = pool.take(extent).unwrap_or_else(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("cfa mosaic"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&cfa.data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(cfa.width * 2),
+                rows_per_image: Some(cfa.height),
+            },
+            extent,
+        );
+        texture
+    })?;
     Ok(UploadedImage {
         pixels: UploadedPixels::Mosaic {
             texture,
@@ -374,31 +385,34 @@ pub fn upload_raster(
         height: raster.height,
         depth_or_array_layers: 1,
     };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("raster upload"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: SENSOR_FORMAT,
-        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &raster.data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raster.width * 8),
-            rows_per_image: Some(raster.height),
-        },
-        extent,
-    );
+    let texture = scoped(device, "uploading the image", || {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster upload"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SENSOR_FORMAT,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &raster.data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raster.width * 8),
+                rows_per_image: Some(raster.height),
+            },
+            extent,
+        );
+        texture
+    })?;
     Ok(UploadedImage {
         pixels: UploadedPixels::Linear { texture },
         extent,
@@ -547,12 +561,16 @@ impl Engine {
         let adjust_pipeline =
             fullscreen_pipeline(device, "adjust", &adjust_shader, &adjust_bgl, OUTPUT_FORMAT);
 
-        let adjust_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("adjust uniforms"),
-            size: std::mem::size_of::<AdjustUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let uniform_buffer = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<AdjustUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let adjust_buffer = uniform_buffer("adjust uniforms");
+        let export_buffer = uniform_buffer("export uniforms");
 
         let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("tone curve lut"),
@@ -671,7 +689,53 @@ impl Engine {
             scratch: None,
             retired_sensor: None,
             upload_pool: UploadPool::default(),
+            export_buffer,
+            export_band_bytes: None,
         }
+    }
+
+    /// Read exports back in bands of at most `bytes` rather than the device's own limit.
+    /// For tests, so a small image still exercises a many-band readback; `None` restores
+    /// the default of `min(max_buffer_size, 64 MiB)`.
+    #[doc(hidden)]
+    pub fn set_export_band_bytes(&mut self, bytes: Option<u64>) {
+        self.export_band_bytes = bytes;
+    }
+
+    /// The adjust pass's inputs: the sensor, one of the two uniform buffers, the curve LUT.
+    fn adjust_bind(
+        &self,
+        device: &wgpu::Device,
+        sensor_view: &wgpu::TextureView,
+        uniforms: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adjust bind"),
+            layout: &self.adjust_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(sensor_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                },
+            ],
+        })
+    }
+
+    fn export_band_bytes(&self, device: &wgpu::Device) -> u64 {
+        let cap = device.limits().max_buffer_size.min(MAX_BAND_BYTES);
+        self.export_band_bytes.map_or(cap, |b| b.min(cap)).max(1)
     }
 
     pub fn image(&self) -> Option<&LoadedImage> {
@@ -742,6 +806,11 @@ impl Engine {
             model,
         } = uploaded;
         let (width, height) = (extent.width, extent.height);
+
+        // Everything this allocates — sensor, mips, green plane, preview — is the most a
+        // photo ever asks of the GPU. A refusal is an `Err` for the caller to show, and the
+        // image already loaded stays loaded.
+        let scopes = ErrorScopes::push(device);
 
         let mip_levels = mip_count(width, height);
         let sensor = match self.retired_sensor.take() {
@@ -906,28 +975,8 @@ impl Engine {
         let output_texture = output_texture(device, preview_w, preview_h);
         let output_view = output_texture.create_view(&Default::default());
 
-        let adjust_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("adjust bind"),
-            layout: &self.adjust_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&sensor_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.adjust_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&self.lut_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
-                },
-            ],
-        });
+        let adjust_bind = self.adjust_bind(device, &sensor_view, &self.adjust_buffer);
+        scopes.pop("loading the image onto the GPU")?;
 
         // Any histogram in flight describes the previous image.
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
@@ -948,6 +997,7 @@ impl Engine {
             preview_level,
             sensor_extent: extent,
             sensor,
+            sensor_view,
             output_view,
             output_texture,
             adjust_bind,
@@ -965,9 +1015,13 @@ impl Engine {
     /// Everything about the frame comes from `stack`: its turns set the output size and
     /// its crop the region written, whatever `set_geometry` was last told.
     ///
-    /// Blocks until the GPU has finished and the buffer is mapped. At 24 MP the readback
-    /// is ~98 MB, so this belongs off the UI thread in anything interactive. The preview's
-    /// uniforms are overwritten, so render again before the next frame is shown.
+    /// Blocks until the GPU has finished and every band is read — at most `GPU_TIMEOUT`
+    /// per wait, so a lost device is an error rather than a hang. At 24 MP the readback is
+    /// ~98 MB, so this belongs off the UI thread in anything interactive. Export has its
+    /// own uniforms, so the preview is untouched and needs no re-render afterwards.
+    ///
+    /// A GPU that refuses an allocation or a command here returns an `Err`; it does not
+    /// panic (B6), since losing the app on an export would lose every unsaved edit with it.
     pub fn export(
         &mut self,
         device: &wgpu::Device,
@@ -983,70 +1037,37 @@ impl Engine {
         let (out_w, out_h) = stack
             .geometry
             .output_size(image.sensor_width, image.sensor_height);
-        let full = output_texture(device, out_w, out_h);
-        let full_view = full.create_view(&Default::default());
-        self.write_uniforms(queue, stack, None, (out_w, out_h), (out_w, out_h), 0);
+        check_size(device, out_w, out_h)?;
+        let sizes = ((out_w, out_h), (out_w, out_h), 0);
+        self.write_uniforms(queue, stack, None, sizes, true);
 
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export encoder"),
-        });
-        draw_fullscreen(
-            &mut encoder,
-            "export adjust pass",
-            &self.adjust_pipeline,
-            &image.adjust_bind,
-            &full_view,
-        );
+        // Rendered whole, once: the adjust pass reads neighbourhoods (clarity, dehaze,
+        // sharpen), so it cannot be split into bands without seams. Only the copy is.
+        let full = scoped(device, "export render", || {
+            let full = output_texture(device, out_w, out_h);
+            let bind = self.adjust_bind(device, &image.sensor_view, &self.export_buffer);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("export encoder"),
+            });
+            draw_fullscreen(
+                &mut encoder,
+                "export adjust pass",
+                &self.adjust_pipeline,
+                &bind,
+                &full.create_view(&Default::default()),
+            );
+            queue.submit([encoder.finish()]);
+            full
+        })?;
 
         // The crop is not baked into the texture, so export is where it becomes real: copy
         // only the region the user framed. See `params::Crop` for why it is not in the shader.
-        let (ox, oy, width, height) = stack.geometry.crop.to_pixels(out_w, out_h);
-
-        let stride = padded_bytes_per_row(width);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("export readback"),
-            size: stride as u64 * height as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &full,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-
-        let slice = buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        })?;
-
-        let rgba = {
-            let mapped = slice.get_mapped_range()?;
-            unpad_rows(&mapped, width, height)?
-        };
-        buffer.unmap();
+        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
+        let (_, _, width, height) = rect;
+        let rgba = read_back(device, queue, &full, rect, self.export_band_bytes(device))?;
 
         Ok(ExportedImage {
             width,
@@ -1081,8 +1102,17 @@ impl Engine {
             return;
         };
         let (w, h) = image.preview_size();
-        image.output_texture = output_texture(device, w, h);
-        image.output_view = image.output_texture.create_view(&Default::default());
+        match scoped(device, "the preview texture", || {
+            output_texture(device, w, h)
+        }) {
+            Ok(texture) => {
+                image.output_view = texture.create_view(&Default::default());
+                image.output_texture = texture;
+            }
+            // Preview-sized, so this is a device in real trouble. The old texture is still
+            // valid to draw and show, which beats a panic mid-frame.
+            Err(e) => log::error!("{e:#}; keeping the previous preview"),
+        }
         // Whatever readback is in flight describes a texture that no longer exists.
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
         self.histogram = Histogram::default();
@@ -1134,7 +1164,7 @@ impl Engine {
         let target = image.preview_size();
         let level = image.preview_level;
         let out_size = (image.width, image.height);
-        self.write_uniforms(queue, stack, split_x, out_size, target, level);
+        self.write_uniforms(queue, stack, split_x, (out_size, target, level), false);
         let Some(image) = &self.image else { return };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1229,9 +1259,8 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
         split_x: Option<f32>,
-        out_size: (u32, u32),
-        target: (u32, u32),
-        level: u32,
+        (out_size, target, level): ((u32, u32), (u32, u32), u32),
+        for_export: bool,
     ) {
         let Some(image) = &self.image else { return };
 
@@ -1266,7 +1295,11 @@ impl Engine {
         let cb = stack.color_balance.params;
 
         queue.write_buffer(
-            &self.adjust_buffer,
+            if for_export {
+                &self.export_buffer
+            } else {
+                &self.adjust_buffer
+            },
             0,
             bytemuck::bytes_of(&AdjustUniforms {
                 cam0: [m[0][0], m[0][1], m[0][2], 0.0],
@@ -1429,8 +1462,10 @@ const GPU_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// wgpu's default for an error nothing captured is to panic, which on a large export means
 /// losing the app — and with it any unsaved edit — to an allocation the device refused.
 struct ErrorScopes {
-    oom: wgpu::ErrorScopeGuard,
+    // Declared innermost first: an early return drops the fields in this order, and wgpu
+    // panics unless scopes pop in the reverse of the order they were pushed.
     validation: wgpu::ErrorScopeGuard,
+    oom: wgpu::ErrorScopeGuard,
 }
 
 impl ErrorScopes {
@@ -1647,4 +1682,62 @@ fn draw_fullscreen(
     pass.set_bind_group(0, bind, &[]);
     // Three vertices, no vertex buffer — the shader derives an oversized triangle.
     pass.draw(0..3, 0..1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device of any kind — the no-op adapter is enough, since wgpu validates on the CPU.
+    fn device() -> wgpu::Device {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions::enabled(),
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        pollster::block_on(adapter.request_device(&Default::default()))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_refused_allocation_is_an_error_not_a_panic() {
+        let device = device();
+        let too_big = device.limits().max_buffer_size + 1;
+        let result = scoped(&device, "a huge buffer", || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: too_big,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let err = result.expect_err("an over-limit buffer was accepted");
+        assert!(err.to_string().starts_with("a huge buffer: "), "{err}");
+
+        // The scopes are gone again: a good allocation afterwards is fine.
+        scoped(&device, "a small buffer", || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn scopes_dropped_early_pop_in_order() {
+        // An early `?` drops the guards instead of popping them; wgpu panics if that
+        // happens in the wrong order.
+        let device = device();
+        let outer = ErrorScopes::push(&device);
+        drop(ErrorScopes::push(&device));
+        drop(outer);
+    }
 }
