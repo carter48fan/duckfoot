@@ -669,3 +669,29 @@ fn a_curve_node_moves_the_display_value_it_sits_on() {
         "a node at 0.5 -> 0.6 showed 50% grey as {lifted:?}, not 153"
     );
 }
+
+#[test]
+fn a_uniform_colour_is_uniform_out_to_the_frame_edge() {
+    let gpu = gpu_or_skip!();
+    // One colour everywhere. Every pixel, edge and corner included, must come out as the
+    // centre does: reading past the edge must keep the mosaic's colour phase, or the
+    // outermost pixels are interpolated from the wrong channel and come out tinted.
+    let cfa = testkit::cfa_from_fn(40, 30, |_, _| [0.45, 0.2, 0.08]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let out = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    let at = |x: u32, y: u32| {
+        let i = ((y * out.width + x) * 4) as usize;
+        [out.rgba[i], out.rgba[i + 1], out.rgba[i + 2]]
+    };
+    let centre = at(out.width / 2, out.height / 2);
+    for y in 0..out.height {
+        for x in 0..out.width {
+            let px = at(x, y);
+            let off = (0..3).map(|c| px[c].abs_diff(centre[c])).max().unwrap();
+            assert!(off <= 1, "({x}, {y}) is {px:?}, the centre {centre:?}");
+        }
+    }
+}

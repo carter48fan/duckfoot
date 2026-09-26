@@ -21,7 +21,10 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    // Odd dimensions: the last row/column of the parent is clamped rather than dropped.
+    // A child level is floor(parent / 2) on each side, so an odd parent's last row or
+    // column has no child of its own and is dropped; the clamp only guards the read. The
+    // shift that leaves is under one texel of the child, too small to see at the zoom that
+    // samples it.
     let last = vec2<i32>(textureDimensions(src)) - vec2<i32>(1, 1);
     let p = vec2<i32>(pos.xy) * 2;
     let a = textureLoad(src, min(p, last), 0);
