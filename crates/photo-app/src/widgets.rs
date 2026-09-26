@@ -67,6 +67,28 @@ pub fn sized(ui: &Ui, desktop: f32, touch: f32) -> f32 {
     }
 }
 
+/// The smallest a control's hit area may be for a finger, in points: Apple's 44 pt and
+/// Android's 48 dp, rounded to the smaller.
+pub const MIN_TOUCH_TARGET: f32 = 44.0;
+
+/// Allocate `size` for a control's paint, and give it a hit area of at least
+/// [`MIN_TOUCH_TARGET`] on touch, centred on it. Controls keep their compact look — the
+/// phone sheets are low on purpose — without being hard to hit.
+pub fn allocate_control(ui: &mut Ui, size: Vec2, sense: Sense) -> (Rect, Response) {
+    let (rect, painted) = ui.allocate_exact_size(size, Sense::hover());
+    if !is_touch(ui.ctx()) {
+        return (rect, ui.interact(rect, painted.id.with("hit"), sense));
+    }
+    let grow = vec2(
+        ((MIN_TOUCH_TARGET - rect.width()) / 2.0).max(0.0),
+        ((MIN_TOUCH_TARGET - rect.height()) / 2.0).max(0.0),
+    );
+    (
+        rect,
+        ui.interact(rect.expand2(grow), painted.id.with("hit"), sense),
+    )
+}
+
 /// A toggle chip: small bold monospace caps. The barrel switcher, scope modes, the stage
 /// toolbar's CROP and A / B.
 pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
@@ -91,7 +113,7 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (rect, response) = allocate_control(ui, size, sense);
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = if selected {
@@ -159,7 +181,7 @@ pub fn button_enabled(
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (rect, response) = allocate_control(ui, size, sense);
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = match (kind, enabled, hovered) {
@@ -183,8 +205,7 @@ pub fn button_enabled(
 /// A square icon button, ghost-styled. `glyph` must exist in egui's bundled fallback fonts.
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::splat(sized(ui, 26.0, 32.0)), Sense::click());
+    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 26.0, 32.0)), Sense::click());
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => TEXT_FAINT,
@@ -233,7 +254,7 @@ pub fn paint_checkbox(painter: &Painter, rect: Rect, on: bool, hovered: bool) {
 }
 
 pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+    let (rect, mut response) = allocate_control(ui, Vec2::splat(14.0), Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -245,7 +266,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
 /// An on / off switch sized for a thumb: a 38×22 track in a 48×34 target. Amber with the
 /// knob to the right when on.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(vec2(48.0, 34.0), Sense::click());
+    let (rect, mut response) = allocate_control(ui, vec2(48.0, 34.0), Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();

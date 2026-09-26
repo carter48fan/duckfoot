@@ -359,9 +359,10 @@ impl PhotoApp {
                 let still_for = ui.ctx().input(|i| i.pointer.time_since_last_movement());
                 let hud = response.hovered() && still_for < HUD_LINGER;
                 if response.hovered() && still_for < HUD_LINGER {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(
-                        HUD_LINGER - still_for,
-                    ));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs_f32(
+                            HUD_LINGER - still_for,
+                        ));
                 }
                 // What exports is exactly this texture, cropped; only the display scale
                 // differs.

@@ -613,7 +613,66 @@ impl PhotoApp {
         if unclean {
             app.set_status("Duckfoot did not close cleanly last time; edits up to then were saved");
         }
+        app.restore_session(gpu);
         app
+    }
+
+    /// Put back how the app was left: arrangement, recipes, the shelf and the open photo.
+    /// Photos no longer where they were are skipped.
+    fn restore_session(&mut self, gpu: &Gpu) {
+        let s = self.settings.clone();
+        if let Some(sections) = s.inspector_sections {
+            self.inspector_sections =
+                settings::merge_sections_with(sections, InspectorSectionConfig::default_sections());
+        }
+        if let Some(single) = s.single_open {
+            self.single_open = single;
+        }
+        if let Some(width) = s.inspector_width {
+            self.inspector_width = width.clamp(240.0, 640.0);
+        }
+        if let Some(open) = s.shelf_open {
+            self.shelf_open = open;
+        }
+        if let Some(recipes) = s.export_recipes {
+            self.export_recipes = recipes;
+        }
+        if let Some(pattern) = s.rename_pattern {
+            self.batch_renamer.pattern = pattern;
+        }
+        let shelf: Vec<PathBuf> = s.shelf.into_iter().filter(|p| p.is_file()).collect();
+        if !shelf.is_empty() {
+            self.add_to_shelf(gpu, shelf);
+            if let Some(last) = s.last_open.filter(|p| p.is_file()) {
+                self.open_path(gpu, last);
+            }
+            // A restored session opens where it was left, not on the Edit sheet.
+            self.edit_when_opened = false;
+        }
+    }
+
+    /// Record the session for the next launch. Cheap (a list of paths), and called when
+    /// edits are flushed, so it is as current as the edits are.
+    fn persist_session(&mut self) {
+        if self.settings_dir.is_none() {
+            return;
+        }
+        let s = &mut self.settings;
+        s.inspector_sections = Some(self.inspector_sections.clone());
+        s.single_open = Some(self.single_open);
+        s.inspector_width = Some(self.inspector_width);
+        s.shelf_open = Some(self.shelf_open);
+        s.export_recipes = Some(self.export_recipes.clone());
+        s.rename_pattern = Some(self.batch_renamer.pattern.clone());
+        s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
+        s.last_open = self.loaded_path.clone();
+        self.save_settings();
+    }
+
+    /// Set the size of the whole interface and remember it.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.settings.ui_scale = scale.clamp(0.85, 1.5);
+        self.save_settings();
     }
 
     pub fn is_stack_edited(&self) -> bool {
@@ -823,6 +882,12 @@ impl PhotoApp {
 
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let ctx = ui.ctx().clone();
+        // The text-size setting, and only it: egui's own Ctrl+/- zoom would fight it.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let scale = self.settings.ui_scale.clamp(0.85, 1.5);
+        if (ctx.zoom_factor() - scale).abs() > 1e-3 {
+            ctx.set_zoom_factor(scale);
+        }
         // Phones, and tablets held upright, get the navigation-bar layout (`compact`): the
         // desktop's side panels need a screen both wide and tall.
         let screen = ui.max_rect().size();
