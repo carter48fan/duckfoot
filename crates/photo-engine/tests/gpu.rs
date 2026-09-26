@@ -115,9 +115,7 @@ fn export_equals_preview_at_level_0() {
         let mut stack = busy_stack();
         stack.geometry.quarter_turns = turns;
         let (pw, ph, shown) = preview(gpu, &mut engine, &stack, 0);
-        let exported = engine
-            .export(&gpu.device, &gpu.queue, &stack, Crop::default())
-            .unwrap();
+        let exported = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
         assert_eq!((exported.width, exported.height), (pw, ph));
         // Same shader, same uniforms, same texture: not close, identical (invariant 2).
         assert!(
@@ -147,10 +145,7 @@ fn a_flat_field_fills_exactly_one_histogram_bin() {
         }
     }
     let hist = engine.histogram().clone();
-    let value = engine
-        .export(&gpu.device, &gpu.queue, &stack, Crop::default())
-        .unwrap()
-        .rgba[1] as usize;
+    let value = engine.export(&gpu.device, &gpu.queue, &stack).unwrap().rgba[1] as usize;
 
     for (name, bins) in [
         ("red", &hist.red),
@@ -165,4 +160,64 @@ fn a_flat_field_fills_exactly_one_histogram_bin() {
             "{name}: a uniform frame of {value} filled bins {populated:?}"
         );
     }
+}
+
+/// Rows `y0..y0+h`, columns `x0..x0+w` of a tightly packed RGBA8 image `width` wide.
+fn sub_rect(px: &[u8], width: u32, (x0, y0, w, h): (u32, u32, u32, u32)) -> Vec<u8> {
+    let row = width as usize * 4;
+    (y0..y0 + h)
+        .flat_map(|y| {
+            let start = y as usize * row + x0 as usize * 4;
+            px[start..start + w as usize * 4].iter().copied()
+        })
+        .collect()
+}
+
+#[test]
+fn a_rotated_export_takes_its_size_and_crop_from_the_stack() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (64, 48);
+    let scene = testkit::cfa_from_fn(w, h, testkit::smooth_scene(w, h));
+
+    // What batch export does: load, then export a stack that turns the frame, with no
+    // `set_geometry` in between. The engine still thinks the frame is landscape.
+    let mut batch = Engine::new(&gpu.device);
+    batch.load(&gpu.device, &gpu.queue, scene).unwrap();
+    let mut stack = PhotoStack::default();
+    stack.geometry.quarter_turns = 1;
+    stack.geometry.crop = Crop {
+        x: 0.25,
+        y: 0.125,
+        width: 0.5,
+        height: 0.75,
+    };
+    let exported = batch.export(&gpu.device, &gpu.queue, &stack).unwrap();
+
+    // Portrait, and cropped in the portrait frame.
+    let rect = stack.geometry.crop.to_pixels(h, w);
+    assert_eq!((exported.width, exported.height), (rect.2, rect.3));
+    assert_eq!((rect.2, rect.3), (24, 48));
+
+    // Pixel for pixel what the editor shows for that stack, where geometry was applied.
+    let mut editor = Engine::new(&gpu.device);
+    editor
+        .load(
+            &gpu.device,
+            &gpu.queue,
+            testkit::cfa_from_fn(w, h, testkit::smooth_scene(w, h)),
+        )
+        .unwrap();
+    let (pw, ph, shown) = preview(gpu, &mut editor, &stack, 0);
+    assert_eq!((pw, ph), (h, w));
+    assert!(
+        exported.rgba == sub_rect(&shown, pw, rect),
+        "the batch export is not the frame the editor shows"
+    );
+    // No black bars: the smooth scene has no black anywhere.
+    let black = exported
+        .rgba
+        .chunks_exact(4)
+        .filter(|p| p[..3] == [0, 0, 0])
+        .count();
+    assert_eq!(black, 0, "{black} black pixels in a scene that has none");
 }
