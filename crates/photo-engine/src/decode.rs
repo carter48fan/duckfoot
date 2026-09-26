@@ -348,6 +348,11 @@ fn orientation_geometry(o: rawloader::Orientation) -> Geometry {
 
 /// The EXIF orientation of a TIFF-structured RAW (most of them: ARW, NEF, CR2, DNG,
 /// PEF…), read without decoding anything. `None` for other containers.
+/// The geometry for an EXIF orientation value (1-8).
+pub(crate) fn orientation_from_exif(value: u16) -> Geometry {
+    orientation_geometry_rawler(rawler::Orientation::from_u16(value))
+}
+
 pub(crate) fn tiff_orientation(bytes: &[u8]) -> Option<Geometry> {
     const ORIENTATION: u16 = 0x0112;
     let v = dng::tag(bytes, ORIENTATION)?;
