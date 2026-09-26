@@ -166,19 +166,23 @@ impl PhotoApp {
                 }
                 ui.add_space(6.0);
 
-                // Filter & Sort bar
+                // Two rows: what is shown, then how it is ordered and what to do with the
+                // selection. One row with a right-aligned half ran the halves into each other
+                // on a narrow stage.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     self.rating_filter(ui);
                     ui.separator();
                     self.flag_filter(ui);
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    self.search_field(ui, 140.0);
                     ui.separator();
-                    self.search_field(ui, 75.0);
-
-                    // Sort & Batch Actions (right aligned)
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.sort_controls(ui, true);
-                        if !self.selection.is_empty() {
+                    self.sort_controls(ui, false);
+                    if !self.selection.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if widgets::button(
                                 ui,
                                 Kind::Primary,
@@ -192,8 +196,8 @@ impl PhotoApp {
                             if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
                                 self.selection.clear();
                             }
-                        }
-                    });
+                        });
+                    }
                 });
                 ui.add_space(6.0);
 
