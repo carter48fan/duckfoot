@@ -175,7 +175,8 @@ impl PhotoApp {
                     self.open_path(gpu, path);
                 }
                 if let Some(idx) = to_remove {
-                    self.shelf.remove(idx);
+                    let path = self.shelf[idx].path.clone();
+                    self.remove_from_shelf(&[path]);
                 }
             });
     }
@@ -392,6 +393,10 @@ impl PhotoApp {
                                 .family(theme::mono_bold())
                                 .color(theme::ACCENT),
                         );
+                        if ui.button("Remove from shelf").clicked() {
+                            *to_remove = Some(i);
+                            ui.close();
+                        }
                         ui.separator();
                         ui.label(theme::dim("Flags:"));
                         ui.horizontal(|ui| {

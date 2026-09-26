@@ -6,6 +6,7 @@ impl PhotoApp {
     // ── Status bar ──────────────────────────────────────────────────────────────────────
 
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let mut notice_action = None;
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -83,18 +84,22 @@ impl PhotoApp {
                                     )
                                     .truncate(),
                                 );
-                            } else if let Some((msg, when)) = &self.status_notification {
-                                if when.elapsed().as_secs_f32() < 4.0 {
-                                    widgets::dot(ui, theme::ACCENT);
-                                    ui.add(
-                                        egui::Label::new(
-                                            theme::num(msg).size(11.5).color(theme::ACCENT),
-                                        )
-                                        .truncate(),
-                                    );
-                                } else {
-                                    ui.label(theme::tag("ready").color(theme::TEXT_FAINT));
+                            } else if let Some((msg, undo, left)) = self.live_notice() {
+                                // Wake to take it down: nothing else may repaint.
+                                ui.ctx().request_repaint_after(left);
+                                widgets::dot(ui, theme::ACCENT);
+                                let msg = msg.to_string();
+                                if let Some(action) = undo {
+                                    if widgets::chip(ui, true, "undo").clicked() {
+                                        notice_action = Some(action);
+                                    }
                                 }
+                                ui.add(
+                                    egui::Label::new(
+                                        theme::num(msg).size(11.5).color(theme::ACCENT),
+                                    )
+                                    .truncate(),
+                                );
                             } else {
                                 ui.label(theme::tag("ready").color(theme::TEXT_FAINT));
                             }
@@ -102,6 +107,9 @@ impl PhotoApp {
                     });
                 });
             });
+        if let Some(action) = notice_action {
+            self.run_notice_action(action);
+        }
     }
 
     /// Display scale as a percentage of 1:1, for the status bar.

@@ -688,7 +688,8 @@ fn test_touch_slider_tap_and_drag() {
     });
     out1.textures_delta.clear();
 
-    // Frame 2: tap at x=150 on the rail (right of centre x=100) -> jumps towards +1.0
+    // Frame 2: tap at x=150 on the rail (right of centre x=100): a tap on touch is as
+    // often a scroll being stopped as a value being chosen, so it leaves the value alone.
     let tap_pos = egui::pos2(150.0, 19.0);
     let button = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -713,9 +714,9 @@ fn test_touch_slider_tap_and_drag() {
         photo_app::widgets::rail(ui, &mut value, -2.0..=2.0, 200.0, 0.0);
     });
     out2.textures_delta.clear();
-    assert!(
-        value > 0.5,
-        "tap should jump value towards +1.0, got {value}"
+    assert_eq!(
+        value, 0.0,
+        "a tap must not move a touch slider, got {value}"
     );
 
     // Double click to reset: after 1 second, two clicks within 0.15s
@@ -830,6 +831,9 @@ fn test_touch_slider_tap_and_drag() {
         value > 1.0,
         "horizontal drag should slide value, got {value}"
     );
+    // Relative: 80 px of a 4-unit rail about 200 px wide is about +1.6 from 0, not the
+    // absolute position under the finger (+1.6 too here, so check it moved by the drag).
+    assert!(value < 2.0, "a drag moved it past its travel: {value}");
 
     let mut out_h3 = ctx.run_ui(
         egui::RawInput {
@@ -1229,6 +1233,81 @@ fn a_drop_of_several_files_shelves_them_all_and_stepping_follows_the_filter() {
     app.filter.flag = photo_app::dam::FlagFilter::PicksOnly;
     h.frame(&mut app, key(egui::Key::ArrowRight));
     assert_eq!(app.loaded_path(), Some(paths[2].as_path()));
+    h.settle(&mut app, Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn escape_mid_drag_puts_the_stack_back() {
+    let dir = scratch_dir("escdrag");
+    let a = dir.join("a.dng");
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    let before = app.stack().clone();
+
+    // A real drag, held on the stage; while it is held the value moves, as a slider's does
+    // frame by frame.
+    let at = egui::pos2(700.0, 450.0);
+    let press = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame(
+        &mut app,
+        pointer(vec![egui::Event::PointerMoved(at), press(at, true)]),
+    );
+    for dx in [10.0, 20.0, 30.0] {
+        h.frame(
+            &mut app,
+            pointer(vec![egui::Event::PointerMoved(at + egui::vec2(dx, 0.0))]),
+        );
+    }
+    assert!(h.ctx.dragged_id().is_some(), "the drag is held");
+    app.edit(|s| s.exposure.params.ev = 1.3);
+    let mut esc = key(egui::Key::Escape);
+    esc.events
+        .insert(0, egui::Event::PointerMoved(at + egui::vec2(40.0, 0.0)));
+    h.frame(&mut app, esc);
+    assert_eq!(
+        app.stack(),
+        &before,
+        "Esc restored the stack from before the drag"
+    );
+    assert!(!app.undo(), "and the drag's undo step went with it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn removing_from_the_shelf_can_be_taken_back() {
+    let dir = scratch_dir("remove");
+    let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone(), c.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.selection.select_all(&[a.clone(), b.clone(), c.clone()]);
+
+    app.remove_from_shelf(&[b.clone()]);
+    assert_eq!(app.shelf.len(), 2);
+    assert!(
+        !app.selection.is_selected(&b),
+        "a removed photo leaves the selection"
+    );
+    assert!(b.exists(), "the file itself is never touched");
+
+    app.undo_remove_from_shelf();
+    let order: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(order, vec![a, b, c], "back where it was");
     h.settle(&mut app, Duration::from_secs(30));
     let _ = std::fs::remove_dir_all(&dir);
 }

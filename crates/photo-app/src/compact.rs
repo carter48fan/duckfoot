@@ -568,9 +568,8 @@ impl PhotoApp {
             if n > 0 {
                 ui.label(theme::tag(format!("{n} selected")).color(theme::ACCENT));
                 if widgets::chip(ui, false, "remove").clicked() {
-                    let selection = &self.selection;
-                    self.shelf.retain(|it| !selection.is_selected(&it.path));
-                    self.selection.clear();
+                    let paths: Vec<PathBuf> = self.selection.selected.iter().cloned().collect();
+                    self.remove_from_shelf(&paths);
                 }
             }
         });
@@ -1225,25 +1224,22 @@ impl PhotoApp {
     /// One line over the stage when there is something to say: an error, a notice, or an
     /// export being written / completed. The desktop's status bar has no room here.
     fn compact_status(&mut self, ui: &mut egui::Ui) {
-        let notice = self
-            .status_notification
-            .as_ref()
-            .filter(|(_, when)| when.elapsed().as_secs_f32() < 4.0);
+        let mut action = None;
         let (text, colour) = if let Some(err) = &self.error {
             (err.clone(), theme::DANGER)
         } else if let Export::Writing { path, .. } = &self.export {
             (format!("writing {}", file_name(path)), theme::ACCENT)
-        } else if let Some((msg, when)) = notice {
+        } else if let Some((msg, undo, left)) = self.live_notice() {
             // A finished export arrives here as a notice, so it comes down with the rest
             // rather than holding the line until the next export.
             // Wake to take the notice down when its time is up.
-            let left = 4.0 - when.elapsed().as_secs_f32();
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f32(left.max(0.0)));
-            (msg.clone(), theme::ACCENT)
+            ui.ctx().request_repaint_after(left);
+            action = undo;
+            (msg.to_string(), theme::ACCENT)
         } else {
             return;
         };
+        let mut run = None;
         egui::Panel::bottom("compact_status")
             .frame(
                 egui::Frame::new()
@@ -1253,9 +1249,26 @@ impl PhotoApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     widgets::dot(ui, colour);
-                    ui.add(egui::Label::new(theme::num(text).size(11.5).color(colour)).truncate());
+                    if let Some(a) = action {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::chip(ui, true, "undo").clicked() {
+                                run = Some(a);
+                            }
+                            ui.add(
+                                egui::Label::new(theme::num(&text).size(11.5).color(colour))
+                                    .truncate(),
+                            );
+                        });
+                    } else {
+                        ui.add(
+                            egui::Label::new(theme::num(text).size(11.5).color(colour)).truncate(),
+                        );
+                    }
                 });
             });
+        if let Some(a) = run {
+            self.run_notice_action(a);
+        }
     }
     // ── Tour ────────────────────────────────────────────────────────────────────────────
 
