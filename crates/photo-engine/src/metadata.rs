@@ -55,6 +55,104 @@ impl PhotoInfo {
     }
 }
 
+/// `YYYYMMDD` of when the file was last modified, in UTC: the date a photo with no
+/// capture time of its own is filed under.
+pub fn file_date_compact(path: &Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    Some(format!("{y:04}{m:02}{d:02}"))
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// The metadata of any photo the app opens: RAW through rawler, JPEG/PNG/TIFF/WebP
+/// through their EXIF block. `None` if there is none to read.
+pub fn read_info(path: &Path) -> Option<PhotoInfo> {
+    if crate::is_raster_path(path) {
+        read_raster_info(path)
+    } else {
+        read_raw_info(path)
+    }
+}
+
+/// The EXIF of a JPEG, PNG, TIFF or WebP.
+pub fn read_raster_info(path: &Path) -> Option<PhotoInfo> {
+    use exif::{In, Tag, Value};
+    let file = std::fs::File::open(path).ok()?;
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::BufReader::new(file))
+        .ok()?;
+    let field = |tag| exif.get_field(tag, In::PRIMARY).map(|f| &f.value);
+    let text = |tag| match field(tag)? {
+        Value::Ascii(parts) => parts
+            .first()
+            .map(|b| {
+                String::from_utf8_lossy(b)
+                    .trim()
+                    .trim_end_matches('\0')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    };
+    let rational = |tag| match field(tag)? {
+        Value::Rational(v) => v.first().filter(|r| r.denom != 0).map(|r| (r.num, r.denom)),
+        _ => None,
+    };
+    let as_f32 = |r: Option<(u32, u32)>| r.map(|(n, d)| n as f32 / d as f32);
+    let uint = |tag| field(tag).and_then(|v| v.get_uint(0));
+    let dms = |tag| match field(tag)? {
+        Value::Rational(v) if v.len() == 3 && v.iter().all(|r| r.denom != 0) => {
+            Some(v[0].to_f64() + v[1].to_f64() / 60.0 + v[2].to_f64() / 3600.0)
+        }
+        _ => None,
+    };
+    let gps = match (dms(Tag::GPSLatitude), dms(Tag::GPSLongitude)) {
+        (Some(mut lat), Some(mut lon)) => {
+            if text(Tag::GPSLatitudeRef).as_deref() == Some("S") {
+                lat = -lat;
+            }
+            if text(Tag::GPSLongitudeRef).as_deref() == Some("W") {
+                lon = -lon;
+            }
+            Some((lat, lon))
+        }
+        _ => None,
+    };
+    Some(PhotoInfo {
+        make: text(Tag::Make).unwrap_or_default(),
+        model: text(Tag::Model).unwrap_or_default(),
+        lens: text(Tag::LensModel),
+        exposure_time: rational(Tag::ExposureTime),
+        f_number: as_f32(rational(Tag::FNumber)),
+        iso: uint(Tag::PhotographicSensitivity),
+        focal_length: as_f32(rational(Tag::FocalLength)),
+        captured: text(Tag::DateTimeOriginal).or_else(|| text(Tag::DateTime)),
+        gps,
+        artist: text(Tag::Artist),
+        copyright: text(Tag::Copyright),
+        orientation: uint(Tag::Orientation)
+            .map(|o| crate::decode::orientation_from_exif(o as u16))
+            .unwrap_or_default(),
+    })
+}
+
 /// The metadata of the RAW at `path`, or `None` if its container cannot be read. A
 /// parser that panics on a hostile header costs this one photo its Info, nothing more.
 pub fn read_raw_info(path: &Path) -> Option<PhotoInfo> {
@@ -161,5 +259,24 @@ mod tests {
         std::fs::write(&path, b"II*\0not a raw").unwrap();
         assert_eq!(read_raw_info(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_jpeg_without_exif_has_no_info_and_does_not_fail() {
+        let dir = std::env::temp_dir().join(format!("duckfoot-meta-jpg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.jpg");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]))
+            .save(&path)
+            .unwrap();
+        assert_eq!(read_info(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn days_since_the_epoch_become_calendar_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_720), (2026, 9, 24));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
     }
 }

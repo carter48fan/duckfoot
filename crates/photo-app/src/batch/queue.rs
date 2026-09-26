@@ -68,6 +68,9 @@ pub struct ExportQueue {
     cmd_tx: Sender<WorkerCommand>,
     progress_rx: Receiver<ExportProgressMsg>,
     current_status: ExportStatus,
+    /// Cancel was asked for; the worker stops after the photo it is on, and the status
+    /// stays Running until it says it has.
+    cancelling: bool,
 }
 
 impl ExportQueue {
@@ -164,6 +167,7 @@ impl ExportQueue {
             cmd_tx,
             progress_rx,
             current_status: ExportStatus::Idle,
+            cancelling: false,
         }
     }
 
@@ -179,9 +183,18 @@ impl ExportQueue {
         let _ = self.cmd_tx.send(WorkerCommand::StartBatch(jobs));
     }
 
+    /// Stop after the photo being written. Every output is written through a temporary
+    /// file, so nothing half-written is left behind; the queue reports Finished, with
+    /// fewer written than asked for, once the worker has actually stopped.
     pub fn cancel(&mut self) {
-        let _ = self.cmd_tx.send(WorkerCommand::Cancel);
-        self.current_status = ExportStatus::Idle;
+        if self.is_running() {
+            self.cancelling = true;
+            let _ = self.cmd_tx.send(WorkerCommand::Cancel);
+        }
+    }
+
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
     }
 
     pub fn poll(&mut self) -> &ExportStatus {
@@ -220,6 +233,7 @@ impl ExportQueue {
                         success,
                         errors,
                     } => {
+                        self.cancelling = false;
                         self.current_status = ExportStatus::Finished {
                             total,
                             success,
