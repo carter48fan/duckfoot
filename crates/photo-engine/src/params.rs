@@ -88,6 +88,30 @@ pub struct Filmic {
     pub contrast: f32,
 }
 
+impl Filmic {
+    /// The display value (sRGB-encoded, 0..=1) the adjust shader's filmic curve gives a
+    /// scene-linear value — the same curve as `filmic_curve` in adjust.wgsl, for the views
+    /// that draw it. Kept beside the shader's by a test on both.
+    pub fn display_value(&self, v: f32) -> f32 {
+        const MID_GREY: f32 = 0.18;
+        // Mid grey as it shows with filmic off: 118/255.
+        const MID_GREY_DISPLAY: f32 = 0.46135;
+        let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+        let black_ev = self.black_ev;
+        let range = (self.white_ev - black_ev).max(0.01);
+        let k = self.contrast.max(0.01) / (self.latitude / 100.0).max(0.01);
+        let x_grey = ((MID_GREY.log2() - black_ev) / range).clamp(0.001, 0.999);
+        let s0 = sigmoid(-k * x_grey);
+        let s1 = sigmoid(k * (1.0 - x_grey));
+        let span = (s1 - s0).max(1e-6);
+        let x = ((v.max(1e-10).log2() - black_ev) / range).clamp(0.0, 1.0);
+        let y = ((sigmoid(k * (x - x_grey)) - s0) / span).clamp(0.0, 1.0);
+        let y_grey = ((0.5 - s0) / span).clamp(1e-4, 1.0 - 1e-4);
+        let power = (MID_GREY_DISPLAY.log2() / y_grey.log2()).clamp(0.2, 5.0);
+        y.max(1e-7).powf(power)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorBalance {
     pub lift: Rgb,
@@ -803,5 +827,15 @@ mod tests {
         let old: PhotoStack = serde_json::from_value(json).unwrap();
         assert_eq!(old.curve_domain, CurveDomain::Linear);
         assert_eq!(PhotoStack::default().curve_domain, CurveDomain::Display);
+    }
+
+    #[test]
+    fn filmic_on_the_cpu_lands_where_the_shader_does() {
+        // The GPU test pins the shader at these values; this pins the CPU copy the
+        // tonemap views draw, so the two cannot drift.
+        let f = PhotoStack::default().filmic.params;
+        assert!((f.display_value(0.18) * 255.0 - 118.0).abs() <= 1.5);
+        assert!(f.display_value(2f32.powf(f.black_ev)) * 255.0 <= 2.0);
+        assert!(f.display_value(2f32.powf(f.white_ev)) * 255.0 >= 253.0);
     }
 }
