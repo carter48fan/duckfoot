@@ -411,8 +411,10 @@ pub struct PhotoApp {
     /// A photo was asked for from outside the Library grid (a picker, a share); when it
     /// lands the phone layout goes straight to Edit, where the photo is worked on.
     edit_when_opened: bool,
-    /// User-adjusted height for the portrait bottom sheet.
-    pub compact_sheet_height: Option<f32>,
+    /// The Edit sheet shows the chosen module's controls; off, only the module strip.
+    pub compact_controls_open: bool,
+    /// The height the portrait sheet's content wanted last frame; it gets that, up to a cap.
+    compact_sheet_fit: Option<f32>,
     /// User-adjusted width for the landscape side sheet.
     pub compact_sheet_width: Option<f32>,
     /// Where a swipe across the stage began, to step photos when it ends.
@@ -501,8 +503,9 @@ impl PhotoApp {
             compact_module: InspectorSectionId::Exposure,
             library_filters_open: false,
             edit_when_opened: false,
-            compact_sheet_height: None,
+            compact_controls_open: true,
             compact_sheet_width: None,
+            compact_sheet_fit: None,
             swipe_from: None,
             pending_step: None,
             layout: compact::Layout::Desktop,
@@ -980,6 +983,11 @@ impl PhotoApp {
     }
 
     /// A decode is running, or thumbnails are still being built.
+    /// The size the photo's stage got last frame.
+    pub fn stage_size(&self) -> egui::Vec2 {
+        self.last_panel
+    }
+
     pub fn is_busy(&self) -> bool {
         self.loading.is_some() || self.thumbs_requested.len() > self.thumbs_answered
     }
@@ -1313,6 +1321,7 @@ impl PhotoApp {
         }
         if std::mem::take(&mut self.edit_when_opened) {
             self.compact_tab = Some(compact::Tab::Edit);
+            self.compact_controls_open = true;
         }
 
         let (saved, metadata) = match photo_engine::load_sidecar_full(&path) {
@@ -4321,8 +4330,12 @@ impl PhotoApp {
                     }
                 });
 
-                ui.add_space(4.0);
-                widgets::mini_knee_curve(ui, p.ev, p.rolloff);
+                // A picture of the shoulder, where there is room for one: on a phone the
+                // mode chips say the same in a line.
+                if !widgets::is_touch(ui.ctx()) {
+                    ui.add_space(4.0);
+                    widgets::mini_knee_curve(ui, p.ev, p.rolloff);
+                }
             }
             InspectorSectionId::Tonal => {
                 let p = &mut self.stack.tonal.params;

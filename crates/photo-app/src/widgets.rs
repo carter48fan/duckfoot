@@ -152,7 +152,7 @@ pub fn button_enabled(
     );
     let size = vec2(
         (galley.size().x + sized(ui, 22.0, 24.0)).max(min_width),
-        sized(ui, 26.0, 32.0),
+        sized(ui, 26.0, 30.0),
     );
     let sense = if enabled {
         Sense::click()
