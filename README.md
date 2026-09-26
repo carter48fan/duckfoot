@@ -157,6 +157,7 @@ You can also **drag a RAW file onto the window**.
 | **Editing** | |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
 | `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
+| `Ctrl+Alt+V` | the same edits as the photo open before this one |
 | `C` | crop tool on / off |
 | `Enter` / `Esc` | apply / cancel the crop |
 | `[` / `]` | rotate 90° left / right |

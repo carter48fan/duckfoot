@@ -538,65 +538,62 @@ impl PhotoApp {
             self.take_snapshot(&name);
         }
         if let Some(i) = restore {
-            self.history.checkpoint(&self.stack);
-            self.stack = self.snapshots[i].1.clone();
-            self.needs_render = true;
+            self.recall_snapshot(i);
         }
         if let Some(i) = delete {
-            self.snapshots.remove(i);
-            self.save_snapshots();
+            self.delete_snapshot(i);
         }
     }
 
     pub(crate) fn history_group(&mut self, ui: &mut egui::Ui) {
+        let steps = self.history.timeline(&self.stack).len() - 1;
+        group(
+            ui,
+            "History",
+            |ui| {
+                ui.label(theme::tag(format!("{steps} steps")).color(theme::ACCENT));
+            },
+            |ui| self.history_rows(ui),
+        );
+    }
+
+    /// Every step of the open photo's history, newest first; a click jumps to it.
+    pub(crate) fn history_rows(&mut self, ui: &mut egui::Ui) {
         let now = self.history.past.len();
         let mut jump = None;
         {
             let timeline = self.history.timeline(&self.stack);
-            let steps = timeline.len() - 1;
-            group(
-                ui,
-                "History",
-                |ui| {
-                    ui.label(theme::tag(format!("{steps} steps")).color(theme::ACCENT));
-                },
-                |ui| {
-                    // Newest first. Rows above NOW are redo steps: not applied, so faint.
-                    for k in (0..timeline.len()).rev() {
-                        let label = if k == 0 {
-                            if self.history.truncated {
-                                "oldest kept"
-                            } else {
-                                "opened"
-                            }
-                            .to_string()
-                        } else {
-                            describe_change(timeline[k - 1], timeline[k])
-                        };
-                        let (style, right) = if k == now {
-                            (RowStyle::Now, "NOW".to_string())
-                        } else if k > now {
-                            (RowStyle::Faint, k.to_string())
-                        } else {
-                            (RowStyle::Normal, k.to_string())
-                        };
-                        let colour = if k == now {
-                            theme::ACCENT
-                        } else {
-                            theme::TEXT_FAINT
-                        };
-                        if list_row(ui, &label, style, Some((&right, colour))).clicked() && k != now
-                        {
-                            jump = Some(k);
-                        }
+            // Rows above NOW are redo steps: not applied, so faint.
+            for k in (0..timeline.len()).rev() {
+                let label = if k == 0 {
+                    if self.history.truncated {
+                        "oldest kept"
+                    } else {
+                        "opened"
                     }
-                },
-            );
+                    .to_string()
+                } else {
+                    describe_change(timeline[k - 1], timeline[k])
+                };
+                let (style, right) = if k == now {
+                    (RowStyle::Now, "NOW".to_string())
+                } else if k > now {
+                    (RowStyle::Faint, k.to_string())
+                } else {
+                    (RowStyle::Normal, k.to_string())
+                };
+                let colour = if k == now {
+                    theme::ACCENT
+                } else {
+                    theme::TEXT_FAINT
+                };
+                if list_row(ui, &label, style, Some((&right, colour))).clicked() && k != now {
+                    jump = Some(k);
+                }
+            }
         }
         if let Some(k) = jump {
-            if self.history.jump_to(&mut self.stack, k) {
-                self.needs_render = true;
-            }
+            self.jump_history(k);
         }
     }
 }

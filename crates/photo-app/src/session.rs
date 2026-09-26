@@ -244,6 +244,38 @@ impl PhotoApp {
         self.set_status("Pasted adjustments from clipboard");
     }
 
+    /// The edits of the photo open before this one, on this one's framing: stepping
+    /// through a burst, each frame takes the last one's look in one tap, and the
+    /// clipboard is left alone. A previous photo with no edits passes on the defaults.
+    pub fn same_as_previous(&mut self) {
+        let Some(prev) = self.previous_photo.clone() else {
+            return;
+        };
+        if self.loaded_path.is_none() {
+            return;
+        }
+        let look = match photo_engine::load_sidecar(&prev) {
+            Ok(stack) => stack.unwrap_or_default(),
+            Err(e) => {
+                self.error = Some(format!("{}: {e:#}", file_name(&prev)));
+                return;
+            }
+        };
+        let pasted = Self::pasted_onto(&look, &self.stack);
+        if pasted == self.stack {
+            self.set_status(format!("Already the same as {}", file_name(&prev)));
+            return;
+        }
+        self.history.checkpoint(&self.stack);
+        self.stack = pasted;
+        self.needs_render = true;
+        self.set_status(format!("Same edits as {}", file_name(&prev)));
+    }
+
+    pub fn can_same_as_previous(&self) -> bool {
+        self.previous_photo.is_some() && self.can_edit()
+    }
+
     /// Paste onto every photo on the shelf. Each keeps its own framing, the open photo
     /// takes the paste as an undoable edit, and the sidecars it replaced are kept so the
     /// whole paste can be taken back with [`Self::undo_paste_to_all`].
@@ -291,7 +323,7 @@ impl PhotoApp {
         if failed.is_empty() {
             self.set_status_undoable(
                 format!("Pasted onto {count} photos"),
-                NoticeAction::UndoPasteToAll,
+                NoticeAction::PasteToAll,
             );
         } else {
             self.error = Some(format!(
@@ -466,6 +498,7 @@ impl PhotoApp {
             .unwrap_or_else(History::new);
         let left = std::mem::replace(&mut self.history, history);
         if let Some(previous) = self.loaded_path.take() {
+            self.previous_photo = Some(previous.clone());
             if !left.past.is_empty() || !left.future.is_empty() {
                 self.parked_histories.push((previous, left));
                 if self.parked_histories.len() > HISTORY_KEPT {
@@ -668,6 +701,62 @@ impl PhotoApp {
         self.save_snapshots();
     }
 
+    /// Snapshot `i`'s stack, as one undo step.
+    pub fn recall_snapshot(&mut self, i: usize) {
+        let Some((_, stack)) = self.snapshots.get(i) else {
+            return;
+        };
+        if *stack == self.stack {
+            return;
+        }
+        let stack = stack.clone();
+        self.history.checkpoint(&self.stack);
+        self.stack = stack;
+        self.needs_render = true;
+    }
+
+    /// Delete snapshot `i`; the notice's Undo puts it back.
+    pub fn delete_snapshot(&mut self, i: usize) {
+        let (Some(path), true) = (self.loaded_path.clone(), i < self.snapshots.len()) else {
+            return;
+        };
+        let snapshot = self.snapshots.remove(i);
+        self.save_snapshots();
+        let msg = format!("Deleted snapshot \u{201c}{}\u{201d}", snapshot.0);
+        self.deleted_snapshot = Some((path, i, snapshot));
+        self.set_status_undoable(msg, NoticeAction::DeleteSnapshot);
+    }
+
+    pub fn undo_delete_snapshot(&mut self) {
+        let Some((path, i, snapshot)) = self.deleted_snapshot.take() else {
+            return;
+        };
+        if self.loaded_path.as_ref() != Some(&path) {
+            // Another photo is open now: put it back in the file it came from.
+            let _ = photo_engine::update_sidecar(&path, |data| {
+                let at = i.min(data.snapshots.len());
+                data.snapshots.insert(
+                    at,
+                    photo_engine::Snapshot {
+                        name: snapshot.0.clone(),
+                        stack: snapshot.1.clone(),
+                    },
+                );
+            });
+            return;
+        }
+        let at = i.min(self.snapshots.len());
+        self.snapshots.insert(at, snapshot);
+        self.save_snapshots();
+    }
+
+    /// Undo or redo to step `k` of the open photo's history.
+    pub fn jump_history(&mut self, k: usize) {
+        if self.history.jump_to(&mut self.stack, k) {
+            self.needs_render = true;
+        }
+    }
+
     /// A file or folder dropped on the window. The shell sends one call per file, so they
     /// are collected here and shelved together on the next frame, instead of each
     /// superseding the one before and only the last surviving.
@@ -733,7 +822,7 @@ impl PhotoApp {
             } else {
                 format!("Removed {n} photos from the shelf")
             },
-            NoticeAction::UndoRemove,
+            NoticeAction::Remove,
         );
     }
 

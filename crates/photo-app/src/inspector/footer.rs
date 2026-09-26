@@ -117,12 +117,12 @@ impl PhotoApp {
             });
     }
 
-    /// "PNG / JPEG · 8-BIT · sRGB ········ 6048 × 4024": what an export writes.
+    /// "JPEG · PNG · TIFF · WEBP · 8-BIT · sRGB ···· 6048 × 4024": what an export writes.
     pub(crate) fn export_format_line(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Not `theme::tag`: that uppercases, and it is sRGB, not SRGB.
             ui.label(
-                RichText::new("PNG / JPEG · 8-BIT · sRGB")
+                RichText::new("JPEG · PNG · TIFF · WEBP · 8-BIT · sRGB")
                     .family(theme::mono_bold())
                     .size(10.5)
                     .extra_letter_spacing(0.3)

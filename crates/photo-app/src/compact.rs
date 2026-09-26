@@ -65,6 +65,16 @@ impl Tab {
     }
 }
 
+/// What the Presets sheet lists: the built-in looks, this photo's snapshots, or its
+/// history. Snapshots and history are saved looks of one photo, so they live here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresetsView {
+    #[default]
+    Looks,
+    Snapshots,
+    History,
+}
+
 /// The look last applied from Presets. `applied` is the stack it produced: while the
 /// photo's stack still equals it, the look is live and its strength can be changed; once
 /// anything else is edited the look is simply part of the photo.
@@ -73,7 +83,14 @@ pub struct PresetState {
     look: usize,
     strength: f32,
     base: PhotoStack,
-    applied: PhotoStack,
+    pub(crate) applied: PhotoStack,
+}
+
+impl PresetState {
+    /// Which of [`LOOKS`] it is.
+    pub(crate) fn look(&self) -> usize {
+        self.look
+    }
 }
 
 /// Where the phone layout's parts were last frame.
@@ -644,6 +661,27 @@ impl PhotoApp {
             ui.label(theme::dim("Open a photo to try a look on it.").size(12.0));
             return;
         }
+        ui.horizontal(|ui| {
+            for (view, label) in [
+                (PresetsView::Looks, "looks"),
+                (PresetsView::Snapshots, "snapshots"),
+                (PresetsView::History, "history"),
+            ] {
+                if widgets::chip(ui, self.presets_view == view, label).clicked() {
+                    self.presets_view = view;
+                }
+            }
+        });
+        match self.presets_view {
+            PresetsView::Looks => self.looks_body(ui, false),
+            PresetsView::Snapshots => self.phone_snapshots(ui),
+            PresetsView::History => self.history_rows(ui),
+        }
+    }
+
+    /// The looks as tiles, and the live look's strength. `wrap` lays the tiles out in
+    /// rows (the desktop inspector); otherwise they are one row to swipe (the phone).
+    pub(crate) fn looks_body(&mut self, ui: &mut egui::Ui, wrap: bool) {
         // A look is live while nothing else has been edited since it was applied.
         let live = self
             .preset
@@ -651,35 +689,40 @@ impl PhotoApp {
             .filter(|p| p.applied == self.stack)
             .map(|p| (p.look, p.strength));
         let mut pick: Option<Option<usize>> = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("compact_looks")
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .scroll_source(ScrollSource {
-                drag: DragScroll::Always,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let original = [Color32::from_gray(0x55), Color32::from_gray(0x22)];
-                    if look_tile(ui, "original", original, live.is_none())
-                        .on_hover_text("Without a look")
-                        .clicked()
-                    {
-                        pick = Some(None);
-                    }
-                    for (i, look) in LOOKS.iter().enumerate() {
-                        let chosen = live.is_some_and(|(l, _)| l == i);
-                        if look_tile(ui, look.name, look.swatch, chosen)
-                            .on_hover_text(look.tip)
-                            .clicked()
-                        {
-                            pick = Some(Some(i));
-                        }
-                    }
+        let tiles = |ui: &mut egui::Ui, pick: &mut Option<Option<usize>>| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            let original = [Color32::from_gray(0x55), Color32::from_gray(0x22)];
+            if look_tile(ui, "original", original, live.is_none())
+                .on_hover_text("Without a look")
+                .clicked()
+            {
+                *pick = Some(None);
+            }
+            for (i, look) in LOOKS.iter().enumerate() {
+                let chosen = live.is_some_and(|(l, _)| l == i);
+                if look_tile(ui, look.name, look.swatch, chosen)
+                    .on_hover_text(look.tip)
+                    .clicked()
+                {
+                    *pick = Some(Some(i));
+                }
+            }
+        };
+        if wrap {
+            ui.horizontal_wrapped(|ui| tiles(ui, &mut pick));
+        } else {
+            egui::ScrollArea::horizontal()
+                .id_salt("compact_looks")
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .scroll_source(ScrollSource {
+                    drag: DragScroll::Always,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| tiles(ui, &mut pick));
                 });
-            });
+        }
 
         match pick {
             Some(Some(i)) if live.map(|(l, _)| l) != Some(i) => {
@@ -716,8 +759,53 @@ impl PhotoApp {
                 ))
                 .size(11.5),
             );
+        } else if wrap {
+            ui.label(theme::dim("Click a look to try it; its strength appears here.").size(11.5));
         } else {
             ui.label(theme::dim("Tap a look to try it. Swipe the row for more.").size(11.5));
+        }
+    }
+
+    /// This photo's snapshots: tap one to go back to it, hold it to delete it.
+    fn phone_snapshots(&mut self, ui: &mut egui::Ui) {
+        use crate::parts::{list_row, RowStyle};
+        let mut recall = None;
+        let mut delete = None;
+        for (i, (name, stack)) in self.snapshots.iter().enumerate() {
+            let style = if *stack == self.stack {
+                RowStyle::Match
+            } else {
+                RowStyle::Normal
+            };
+            let row = list_row(ui, name, style, None);
+            if row.clicked() {
+                recall = Some(i);
+            }
+            row.context_menu(|ui| {
+                if ui.button("Delete snapshot").clicked() {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        if self.snapshots.is_empty() {
+            ui.label(
+                theme::dim("None yet. A snapshot keeps this photo's edits as they are now.")
+                    .size(11.5),
+            );
+        } else {
+            ui.label(theme::dim("Tap to go back to one; hold to delete it.").size(11.5));
+        }
+        let ready = self.ready_image().is_some();
+        let width = ui.available_width();
+        if widgets::button_enabled(ui, ready, Kind::Secondary, "+ snapshot", width).clicked() {
+            self.take_snapshot("");
+        }
+        if let Some(i) = recall {
+            self.recall_snapshot(i);
+        }
+        if let Some(i) = delete {
+            self.delete_snapshot(i);
         }
     }
 
@@ -1116,6 +1204,17 @@ impl PhotoApp {
             }
             if button(ui, editable && has_clip, Kind::Secondary, "Paste", 0.0).clicked() {
                 self.paste_adjustments();
+            }
+            if button(
+                ui,
+                self.can_same_as_previous(),
+                Kind::Secondary,
+                "Same as previous",
+                0.0,
+            )
+            .clicked()
+            {
+                self.same_as_previous();
             }
             if self.can_undo_paste_to_all() {
                 if button(ui, true, Kind::Secondary, "Undo paste", 0.0).clicked() {

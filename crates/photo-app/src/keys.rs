@@ -97,7 +97,10 @@ impl PhotoApp {
             (
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S),
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::C),
-                i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::V),
+                i.modifiers.command
+                    && !i.modifiers.shift
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::V),
                 i.key_pressed(egui::Key::Backslash),
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::A),
                 i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E),
@@ -111,6 +114,9 @@ impl PhotoApp {
         }
         if paste {
             self.paste_adjustments();
+        }
+        if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::V)) {
+            self.same_as_previous();
         }
         if split_toggle {
             self.split_active = !self.split_active;

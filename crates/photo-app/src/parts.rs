@@ -96,7 +96,14 @@ pub(crate) fn list_row(
     style: RowStyle,
     right: Option<(&str, Color32)>,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    // A finger's height on touch, where these are the phone's Snapshots and History.
+    let height = if widgets::is_touch(ui.ctx()) {
+        widgets::MIN_TOUCH_TARGET
+    } else {
+        22.0
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let hovered = response.hovered() && style != RowStyle::Now;
     let painter = ui.painter();
     match style {

@@ -82,6 +82,46 @@ impl PhotoApp {
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
+                    // The phone's Presets, folded to one line until asked for; it scrolls with
+                    // the pipeline, which it would otherwise push off a short window.
+                    if loaded && !self.customize_open {
+                        let head = widgets::band(ui, |ui| {
+                            ui.label(theme::head("Looks"));
+                            if let Some(p) =
+                                self.preset.as_ref().filter(|p| p.applied == self.stack)
+                            {
+                                ui.label(
+                                    theme::tag(presets::LOOKS[p.look()].name).color(theme::ACCENT),
+                                );
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let tip = if self.looks_open {
+                                    "Fold the looks away"
+                                } else {
+                                    "Start from a look"
+                                };
+                                widgets::icon(
+                                    ui,
+                                    if self.looks_open { "▾" } else { "▸" },
+                                    false,
+                                    tip,
+                                )
+                            })
+                            .inner
+                        });
+                        if head.inner.clicked() || head.response.interact(Sense::click()).clicked()
+                        {
+                            self.looks_open = !self.looks_open;
+                        }
+                        if self.looks_open {
+                            egui::Frame::new()
+                                .inner_margin(Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 6.0;
+                                    self.looks_body(ui, true);
+                                });
+                        }
+                    }
                     egui::Frame::new()
                         .inner_margin(Margin::symmetric(10, 10))
                         .show(ui, |ui| {
