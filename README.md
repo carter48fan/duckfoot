@@ -147,40 +147,46 @@ You can also **drag a RAW file onto the window**.
 
 ### Controls
 
+<!-- keymap:start (generated from crates/photo-app/src/keymap.rs) -->
 | | |
 |---|---|
-| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo |
-| `Ctrl+S` | save sidecar (`.duckfoot`) |
-| `Ctrl+C` / `Ctrl+V` | copy / paste adjustment stack |
-| `\` | toggle before / after split view |
-| `C` / `Esc` | toggle crop tool / cancel crop gesture |
-| `[` / `]` | rotate 90° CCW / CW |
-| `H` / `V` | mirror / flip horizontal / vertical |
-| Scroll wheel / pinch over the image | zoom about the cursor |
-| Drag the image | pan, once zoomed in (at fit there is nothing to pan) |
-| `←` / `→` | previous / next photo on the shelf |
-| `Ctrl+0` / `Ctrl+1` / `Z` | fit to window / 100% (1:1) / toggle between them |
+| **Photos** | |
+| `←` / `→` | previous / next photo, in the filmstrip's order |
+| `Ctrl+S` | save now (edits also save on their own) |
+| `Ctrl+Shift+E` | batch export the selection |
+| **Editing** | |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
+| `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
+| `C` | crop tool on / off |
+| `Enter` / `Esc` | apply / cancel the crop |
+| `[` / `]` | rotate 90° left / right |
+| `H` / `V` | mirror / flip |
+| `Esc` while dragging | put the control back where the drag started |
+| **View** | |
+| `\` | before / after split |
+| `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
+| `?` or `F1` | this list of shortcuts |
+| **Library** | |
 | `0`–`5` | star rating for the selection (`0` clears) |
 | `P` / `X` / `U` | flag as pick / reject / clear the flag |
 | `Ctrl+A` | select every photo on the shelf |
-| `Ctrl+Shift+E` | batch export the selection |
-| `Enter` | apply the crop |
-| Drag a slider | live re-render; one undo step per gesture, not per frame |
+| `Shift`+click / `Ctrl`+click | select a range / add to the selection |
+| **Mouse and touch** | |
+| Scroll or pinch over the photo | zoom about the pointer |
+| Drag the photo | pan, once zoomed in |
+| Drag a slider | live; one undo step per gesture |
 | `Shift` while dragging a slider | ten times finer |
-| Double-click a slider or its label | back to default (the tick on the rail) |
-| Drag in the curve box | move the nearest node; endpoints keep their x |
-| Drag in 3D Map / Tonemap | interactive 3D orbit camera (yaw & pitch) |
-| `Ctrl`+scroll on a 3D view | zoom its camera (a plain wheel scrolls the sidebar) |
-| Double-click on 3D view | reset 3D camera angle and zoom |
+| Double-click a slider or its label | back to its default |
+| Drag in the curve | move the nearest point; the ends keep their place |
+| Drag a 3D view | orbit it; `Ctrl`+scroll zooms, double-click resets |
 | Click a module's header | open it and close the others; `Shift`+click opens it alongside |
 | Touch a control in a module that's off | turns the module on |
-| Checkbox by a module name | enable/disable that stage of the chain |
-| `⚙` in the Pipeline header | show/hide and reorder modules; the one-open-at-a-time switch |
-| `↕` in the Pipeline header | expand all / collapse all modules |
-| `◧` / `◫` / `◨` in the top bar | shelf on/off · split view · inspector width (300px ↔ 460px) |
-| Click a History row | jump to that step — undoes or redoes to it |
-| Drag the split divider | move it; at fit, dragging anywhere on the image moves it |
-| Double-click the split divider | centre it |
+| Click a History row | jump to that step |
+| Drag the split divider | move it; double-click centres it |
+| Drop files on the window | add them to the shelf and open the first |
+<!-- keymap:end -->
+
+Press `?` in the app for the same list. On a Mac, `Ctrl` is `⌘`.
 
 Hotkeys deliberately do not fire while a text field has focus.
 

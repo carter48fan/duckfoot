@@ -119,6 +119,8 @@ fn main() -> anyhow::Result<()> {
     if let Some(step) = args.next() {
         app.show_tour_step(step.parse()?);
     }
+    // DUCKFOOT_SHOT_SHORTCUTS=1: the `?` sheet over it all.
+    app.shortcuts_open = std::env::var_os("DUCKFOOT_SHOT_SHORTCUTS").is_some();
     // Let the layout, the render and the histogram readback settle.
     for _ in 0..8 {
         frame(&mut app);

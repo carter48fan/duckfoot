@@ -9,6 +9,8 @@ impl PhotoApp {
         if ctx.input(|i| i.key_pressed(egui::Key::BrowserBack)) {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(focused));
+            } else if self.shortcuts_open {
+                self.shortcuts_open = false;
             } else if self.tour_step.is_some() {
                 self.end_tour();
             } else if self.cropping {
@@ -43,6 +45,23 @@ impl PhotoApp {
         // DESIGN.md: hotkeys never fire while a text field has focus. Only a text field: a
         // button reached with Tab has focus too, and must not swallow every shortcut.
         if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        // `?` (or F1) opens the shortcut sheet; while it is up, keys only close it.
+        let sheet = ctx.input(|i| {
+            i.key_pressed(egui::Key::F1)
+                || i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Text(t) if t == "?"))
+        });
+        if self.shortcuts_open {
+            if sheet || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.shortcuts_open = false;
+            }
+            return;
+        }
+        if sheet && !self.layout.is_compact() {
+            self.shortcuts_open = true;
             return;
         }
         // Nor behind a dialog, where they would change the photo out of sight.
