@@ -21,6 +21,7 @@ mod export_flow;
 mod icons;
 mod inspector;
 mod keys;
+mod modules;
 mod parts;
 mod requests;
 mod session;
@@ -29,6 +30,7 @@ mod view;
 use curve_editor::*;
 use icons::*;
 use inspector::summary::*;
+use modules::*;
 use parts::*;
 
 use std::collections::{HashMap, HashSet};
@@ -39,7 +41,6 @@ use std::time::{Duration, Instant};
 use std::sync::RwLock;
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Margin, Rect, RichText, Sense, Stroke};
-use photo_engine::params::Module;
 use photo_engine::{
     find_sidecar, identity_nodes, load_sidecar, Crop, CurveNode, Engine, Geometry, PhotoStack,
     WhiteScale,
@@ -91,25 +92,6 @@ impl InspectorSectionId {
             Self::Sharpen,
             Self::Vignette,
         ]
-    }
-
-    pub fn title(&self) -> &'static str {
-        match self {
-            Self::Scope => "scope",
-            Self::Geometry => "crop & rotate",
-            Self::WhiteBalance => "white balance",
-            Self::Exposure => "exposure",
-            Self::Tonal => "shadows & highlights",
-            Self::ToneCurve => "tone curve",
-            Self::Clarity => "clarity & texture",
-            Self::Dehaze => "dehaze",
-            Self::ColorEq => "color eq (8-band)",
-            Self::Filmic3D => "filmic rgb",
-            Self::ColorBalance => "colour balance",
-            Self::Vibrance => "vibrance",
-            Self::Sharpen => "sharpen",
-            Self::Vignette => "vignette",
-        }
     }
 }
 
