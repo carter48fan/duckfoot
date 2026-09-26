@@ -74,6 +74,12 @@ impl PhotoApp {
                 i.key_pressed(egui::Key::ArrowRight),
             )
         });
+        // A slider reached with Tab takes the arrows for itself.
+        let (prev, next) = if widgets::rail_has_focus(ctx) {
+            (false, false)
+        } else {
+            (prev, next)
+        };
         if prev {
             self.step_photo(gpu, -1);
         }

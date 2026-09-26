@@ -1596,6 +1596,9 @@ enum BarIcon {
 fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::Response {
     let enabled = ui.is_enabled();
     let (rect, response) = widgets::allocate_control(ui, vec2(32.0, 32.0), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tip)
+    });
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => theme::TEXT_FAINT,
@@ -1693,6 +1696,14 @@ fn swipe(ui: &mut egui::Ui, rect: Rect, id: egui::Id, vertical: bool) -> Option<
 /// A look in the Presets row: its two colours over its name, outlined when chosen.
 fn look_tile(ui: &mut egui::Ui, name: &str, swatch: [Color32; 2], chosen: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(72.0, 70.0), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            true,
+            chosen,
+            format!("look: {name}"),
+        )
+    });
     let painter = ui.painter();
     let chip = Rect::from_min_size(rect.min + vec2(4.0, 2.0), vec2(64.0, 44.0));
     // Two flat halves, not a blend: DESIGN.md keeps gradients off everything next to the
@@ -1766,6 +1777,9 @@ fn strip_tab(
         vec2(galley.size().x + 2.0 * pad, STRIP_H),
         Sense::click(),
     );
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, chosen, text)
+    });
     let colour = if !enabled {
         theme::TEXT_FAINT
     } else if chosen {
@@ -1801,6 +1815,9 @@ fn strip_tab(
 /// A glyph in the Edit strip, for an action rather than a module.
 fn strip_icon(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
     let (rect, response) = widgets::allocate_control(ui, vec2(34.0, STRIP_H), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+    });
     let colour = if response.hovered() {
         theme::TEXT_HI
     } else {

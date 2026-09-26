@@ -1491,3 +1491,38 @@ fn a_missing_photo_stays_on_the_shelf_and_the_filter_comes_back() {
     assert_eq!(app.loaded_path(), Some(a.as_path()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_screen_reader_is_told_what_each_control_is() {
+    let dir = scratch_dir("accesskit");
+    let a = dir.join("a.dng");
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    h.ctx.enable_accesskit();
+    h.frame(&mut app, Default::default());
+    let output = h.frame(&mut app, Default::default());
+    let update = output
+        .platform_output
+        .accesskit_update
+        .expect("a tree once a reader asked");
+    let labels: Vec<(String, Option<f64>)> = update
+        .nodes
+        .iter()
+        .filter_map(|(_, n)| n.label().map(|l| (l.to_string(), n.numeric_value())))
+        .collect();
+    let has = |want: &str| labels.iter().any(|(l, _)| l == want);
+    for want in ["Export", "Open RAW…", "a.dng", "Shortcuts (? or F1)"] {
+        assert!(has(want), "no {want:?} among {labels:?}");
+    }
+    // A slider says its name and its value, not its position along the rail.
+    let temp = labels
+        .iter()
+        .find(|(l, _)| l == "temp (K)")
+        .expect("the WB slider");
+    assert!(temp.1.is_some_and(|v| v > 1000.0), "{temp:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

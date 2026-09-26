@@ -45,6 +45,14 @@ pub fn set_fine(ctx: &egui::Context, on: bool) {
     set_flag(ctx, "duckfoot.fine", on);
 }
 
+const FOCUSED_RAIL: &str = "duckfoot.focused_rail";
+
+/// A slider has keyboard focus, so ← and → are its, not the photo stepper's.
+pub fn rail_has_focus(ctx: &egui::Context) -> bool {
+    let rail = ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new(FOCUSED_RAIL)));
+    rail.is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
+}
+
 pub fn is_fine(ctx: &egui::Context) -> bool {
     flag(ctx, "duckfoot.fine")
 }
@@ -91,6 +99,21 @@ pub fn allocate_control(ui: &mut Ui, size: Vec2, sense: Sense) -> (Rect, Respons
 
 /// A toggle chip: small bold monospace caps. The barrel switcher, scope modes, the stage
 /// toolbar's CROP and A / B.
+/// What a painter-drawn control is, for screen readers (AccessKit), and a ring round it
+/// while it has keyboard focus, so Tab shows where it is. The ring is outside `rect`, so
+/// the control's own painting, done after, never covers it.
+pub fn describe(ui: &Ui, response: &Response, rect: Rect, info: impl Fn() -> egui::WidgetInfo) {
+    response.widget_info(info);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            4,
+            Stroke::new(1.5, ACCENT_HI),
+            StrokeKind::Outside,
+        );
+    }
+}
+
 pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
     chip_enabled(ui, true, selected, text)
 }
@@ -114,6 +137,9 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
         Sense::hover()
     };
     let (rect, response) = allocate_control(ui, size, sense);
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, text)
+    });
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = if selected {
@@ -182,6 +208,9 @@ pub fn button_enabled(
         Sense::hover()
     };
     let (rect, response) = allocate_control(ui, size, sense);
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text)
+    });
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = match (kind, enabled, hovered) {
@@ -206,6 +235,10 @@ pub fn button_enabled(
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
     let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 26.0, 32.0)), Sense::click());
+    // The tooltip says what it does; the glyph alone would be read as "question mark".
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tooltip)
+    });
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => TEXT_FAINT,
@@ -259,6 +292,10 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
         *on = !*on;
         response.mark_changed();
     }
+    let checked = *on;
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, "module on")
+    });
     paint_checkbox(ui.painter(), rect, *on, response.hovered());
     response
 }
@@ -271,6 +308,10 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
         *on = !*on;
         response.mark_changed();
     }
+    let checked = *on;
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, "on")
+    });
     let track = Rect::from_center_size(rect.center(), vec2(38.0, 22.0));
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
     let hovered = response.hovered();
@@ -314,7 +355,27 @@ pub fn rail(
 ) -> Response {
     let (lo, hi) = (*range.start(), *range.end());
     let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
-    rail_painted(ui, value, range, width, default, origin, None)
+    let spec = RailSpec {
+        default,
+        origin,
+        gradient: None,
+        label: "",
+        readout: f64::from(*value),
+    };
+    rail_painted(ui, value, range, width, spec)
+}
+
+/// Everything about a rail but where it is and what it holds.
+struct RailSpec<'a> {
+    /// Where the reset tick sits, and where a double-click returns to.
+    default: f32,
+    /// Where the amber fill starts.
+    origin: f32,
+    gradient: Option<[Color32; 2]>,
+    /// What a screen reader calls it, and the value it reads out (which on a scaled
+    /// slider is not the rail position).
+    label: &'a str,
+    readout: f64,
 }
 
 /// `rail`, optionally with a two-colour gradient for a track instead of the amber fill —
@@ -324,10 +385,15 @@ fn rail_painted(
     value: &mut f32,
     range: RangeInclusive<f32>,
     width: f32,
-    default: f32,
-    origin: f32,
-    gradient: Option<[Color32; 2]>,
+    spec: RailSpec,
 ) -> Response {
+    let RailSpec {
+        default,
+        origin,
+        gradient,
+        label,
+        readout,
+    } = spec;
     let touch = is_touch(ui.ctx());
     let row_h = sized(ui, 18.0, 32.0);
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
@@ -344,6 +410,49 @@ fn rail_painted(
     let x_of = |v: f32| track.left() + ((v - lo) / (hi - lo)).clamp(0.0, 1.0) * track.width();
 
     let before = *value;
+    let enabled = ui.is_enabled();
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::slider(enabled, readout, label)
+    });
+    if response.has_focus() {
+        // Reached with Tab, ← and → move it (Shift finer) instead of moving the focus on
+        // or stepping to another photo.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    ..Default::default()
+                },
+            )
+        });
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(FOCUSED_RAIL), response.id));
+        let (left, right, shift) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.modifiers.shift,
+            )
+        });
+        let step = (hi - lo) * if shift { 0.002 } else { 0.02 };
+        if left {
+            *value = (*value - step).max(lo);
+        }
+        if right {
+            *value = (*value + step).min(hi);
+        }
+    }
+    // A screen reader's increment and decrement, a step at a time.
+    let (up, down) = ui.input(|i| {
+        use egui::accesskit::Action;
+        (
+            i.num_accesskit_action_requests(response.id, Action::Increment),
+            i.num_accesskit_action_requests(response.id, Action::Decrement),
+        )
+    });
+    let step = (hi - lo) * 0.02;
+    *value = (*value + step * (up as f32 - down as f32)).clamp(lo, hi);
     if response.double_clicked() {
         *value = default;
     } else if touch {
@@ -407,7 +516,6 @@ fn rail_painted(
 
     let (x0, x1) = (x_of(origin), x_of(*value));
 
-    let enabled = ui.is_enabled();
     let hot = enabled && (response.hovered() || response.dragged());
     let fill = if enabled { ACCENT } else { TEXT_FAINT };
 
@@ -547,28 +655,31 @@ pub fn scaled_slider(
         let (lo, hi) = (*range.start(), *range.end());
         let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
         let mut t = (scale.to_rail)(*value);
-        let slid = rail_painted(
-            ui,
-            &mut t,
-            0.0..=1.0,
-            rail_w,
-            (scale.to_rail)(default),
-            (scale.to_rail)(origin),
-            scale.gradient,
-        );
+        let spec = RailSpec {
+            default: (scale.to_rail)(default),
+            origin: (scale.to_rail)(origin),
+            gradient: scale.gradient,
+            label,
+            readout: f64::from(*value),
+        };
+        let slid = rail_painted(ui, &mut t, 0.0..=1.0, rail_w, spec);
         if slid.changed() {
             *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
         }
-        let typed = ui.add_sized(
-            [value_w, sized(ui, 18.0, 26.0)],
-            egui::DragValue::new(value)
-                .range(range)
-                .fixed_decimals(decimals)
-                .speed(scale.speed)
-                // A typed value lands once, on Enter or leaving the field: one undo step,
-                // not one per keystroke (and no half-typed values on the image).
-                .update_while_editing(false),
-        );
+        label_response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+        let typed = ui
+            .add_sized(
+                [value_w, sized(ui, 18.0, 26.0)],
+                egui::DragValue::new(value)
+                    .range(range)
+                    .fixed_decimals(decimals)
+                    .speed(scale.speed)
+                    // A typed value lands once, on Enter or leaving the field: one undo step,
+                    // not one per keystroke (and no half-typed values on the image).
+                    .update_while_editing(false),
+            )
+            .labelled_by(label_response.id);
         label_response | slid | typed
     })
     .inner
@@ -645,6 +756,9 @@ pub fn module_header(
     focused: bool,
 ) -> ModuleHeader {
     let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    describe(ui, &response, row, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title)
+    });
 
     let mut toggled = false;
     let mut active = true;
@@ -714,6 +828,9 @@ pub fn module_header(
 /// An underlined tab, sized to share the row equally with `count` siblings.
 pub fn tab(ui: &mut Ui, selected: bool, text: &str, width: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text)
+    });
     let colour = if selected {
         ACCENT
     } else if response.hovered() {

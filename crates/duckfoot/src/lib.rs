@@ -26,6 +26,16 @@ pub enum UserEvent {
     Repaint(Duration),
     /// Something outside egui changed (a picker answered, say); draw a frame.
     Wake,
+    /// A screen reader asked for the interface, or to act on part of it.
+    #[cfg(not(target_os = "android"))]
+    AccessKit(egui_winit::accesskit_winit::Event),
+}
+
+#[cfg(not(target_os = "android"))]
+impl From<egui_winit::accesskit_winit::Event> for UserEvent {
+    fn from(event: egui_winit::accesskit_winit::Event) -> Self {
+        UserEvent::AccessKit(event)
+    }
 }
 
 /// What a bootstrap hands to [`run`].
@@ -358,7 +368,9 @@ impl Shell {
                 Window::default_attributes()
                     .with_title("Duckfoot — Photo")
                     .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
-                    .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0)),
+                    .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0))
+                    // Shown once AccessKit is attached, which must happen before.
+                    .with_visible(false),
             )?,
         );
         let surface = self.instance.create_surface(window.clone())?;
@@ -396,7 +408,8 @@ impl Shell {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
 
-        let egui_winit = egui_winit::State::new(
+        #[allow(unused_mut)]
+        let mut egui_winit = egui_winit::State::new(
             self.egui_ctx.clone(),
             self.egui_ctx.viewport_id(),
             &window,
@@ -406,6 +419,11 @@ impl Shell {
             // full-size embedded RAW preview, say), whatever the GPU can actually hold.
             Some(gpu.device.limits().max_texture_dimension_2d as usize),
         );
+        // Screen readers see egui's widget tree through AccessKit. egui builds the tree
+        // only once one asks (InitialTreeRequested), so it costs nothing otherwise.
+        #[cfg(not(target_os = "android"))]
+        egui_winit.init_accesskit(event_loop, &window, self.proxy.clone());
+        window.set_visible(true);
 
         if self.app.is_none() {
             let mut app = PhotoApp::with_platform(&gpu.gpu(), (self.options.platform)());
@@ -447,6 +465,20 @@ impl ApplicationHandler<UserEvent> for Shell {
         match event {
             UserEvent::Repaint(delay) => self.schedule_repaint(event_loop, delay),
             UserEvent::Wake => self.request_redraw(),
+            #[cfg(not(target_os = "android"))]
+            UserEvent::AccessKit(event) => {
+                use egui_winit::accesskit_winit::WindowEvent as A;
+                match event.window_event {
+                    A::InitialTreeRequested => self.egui_ctx.enable_accesskit(),
+                    A::ActionRequested(request) => {
+                        if let Some(w) = self.window.as_mut() {
+                            w.egui_winit.on_accesskit_action_request(request);
+                        }
+                    }
+                    A::AccessibilityDeactivated => self.egui_ctx.disable_accesskit(),
+                }
+                self.request_redraw();
+            }
         }
     }
 
