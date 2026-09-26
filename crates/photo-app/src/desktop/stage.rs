@@ -1,0 +1,500 @@
+//! The stage: the photo, crop framing, split view and the empty state.
+
+use crate::*;
+
+impl PhotoApp {
+    pub(crate) fn workspace(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::same(16)),
+            )
+            .show(ui, |ui| {
+                if let Some((path, preview)) = &self.stage_preview {
+                    if self.loading.as_ref().is_some_and(|(p, _)| p == path) {
+                        stage_preview(ui, preview, path);
+                        return;
+                    }
+                }
+                if self.texture_id.is_none() || self.ready_image().is_none() {
+                    self.empty_stage(ui);
+                    return;
+                }
+                let (Some(id), Some((image_w, image_h))) = (
+                    self.texture_id,
+                    self.ready_image().map(|i| (i.width, i.height)),
+                ) else {
+                    return;
+                };
+
+                // Only the crop is on screen outside crop mode: `img` is the size of what is
+                // shown, and `frame_of` finds where the whole frame would sit around it.
+                let full = egui::vec2(image_w as f32, image_h as f32);
+                let region = self.shown_region();
+                let img = full * egui::vec2(region.width, region.height);
+                let frame_of = |shown: egui::Rect| {
+                    let size = shown.size() / egui::vec2(region.width, region.height);
+                    egui::Rect::from_min_size(
+                        shown.min - size * egui::vec2(region.x, region.y),
+                        size,
+                    )
+                };
+                let (rect, response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                self.last_panel = rect.size();
+                if rect.width() < 1.0 || rect.height() < 1.0 {
+                    return;
+                }
+
+                // Scale at which the whole frame fits. Everything is expressed relative to
+                // this so that resizing the window never changes what you are looking at.
+                let fit = (rect.width() / img.x).min(rect.height() / img.y);
+                let max_zoom = (MAX_ZOOM_SCALE / fit).max(1.0);
+
+                let scale_now = fit * self.view.zoom;
+                let dest_now = egui::Rect::from_center_size(
+                    rect.center() - self.view.pan * scale_now,
+                    img * scale_now,
+                );
+                // At fit the whole frame is visible and there is nothing to pan to.
+                let at_fit = self.view.zoom <= 1.0 + 1e-3;
+
+                // The before/after divider is its own widget, registered after the image so
+                // it sits on top: grabbing it can never start a pan. The hit strip is wider
+                // than the line it draws.
+                // The split is a fraction of the whole frame (that is what the shader tests),
+                // so it is placed against the frame, not the crop.
+                let frame_now = frame_of(dest_now);
+                let divider = (self.split_active && !self.cropping).then(|| {
+                    let x = (frame_now.left() + self.split_pos * frame_now.width())
+                        .clamp(dest_now.left(), dest_now.right());
+                    let strip = Rect::from_x_y_ranges(x - 12.0..=x + 12.0, dest_now.y_range())
+                        .intersect(rect);
+                    ui.interact(
+                        strip,
+                        ui.id().with("split_divider"),
+                        Sense::click_and_drag(),
+                    )
+                });
+                let mut move_divider_to = None;
+                if let Some(div) = &divider {
+                    if div.hovered() || div.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if div.double_clicked() {
+                        self.split_pos = 0.5;
+                        self.needs_render = true;
+                    } else if div.is_pointer_button_down_on() {
+                        move_divider_to = div.interact_pointer_pos();
+                    }
+                }
+                // With nothing to pan at fit, a drag anywhere on the image moves the divider.
+                if self.split_active && !self.cropping && at_fit && response.dragged() {
+                    move_divider_to = response.interact_pointer_pos();
+                }
+                self.split_dragging = move_divider_to.is_some();
+                if let Some(p) = move_divider_to {
+                    let x = p.x.clamp(dest_now.left(), dest_now.right());
+                    let fraction = ((x - frame_now.left()) / frame_now.width()).clamp(0.0, 1.0);
+                    if (fraction - self.split_pos).abs() > 1e-4 {
+                        self.split_pos = fraction;
+                        self.needs_render = true;
+                    }
+                }
+
+                if self.cropping {
+                    // In crop mode a drag frames the picture instead of moving it: from
+                    // outside the crop it draws a new one, from inside it slides this one.
+                    // Nothing is checkpointed per drag — Apply makes the session one step.
+                    let to_norm = |p: egui::Pos2| {
+                        egui::pos2(
+                            ((p.x - frame_now.left()) / frame_now.width()).clamp(0.0, 1.0),
+                            ((p.y - frame_now.top()) / frame_now.height()).clamp(0.0, 1.0),
+                        )
+                    };
+                    let current = self.stack.geometry.crop.sanitised();
+                    let inside = |p: egui::Pos2| {
+                        !current.is_full_frame()
+                            && (current.x..=current.x + current.width).contains(&p.x)
+                            && (current.y..=current.y + current.height).contains(&p.y)
+                    };
+                    if response.drag_started() {
+                        self.crop_drag = response.interact_pointer_pos().map(to_norm).map(|p| {
+                            if inside(p) {
+                                CropDrag::Move {
+                                    grab: p,
+                                    start: current,
+                                }
+                            } else {
+                                CropDrag::Draw { anchor: p }
+                            }
+                        });
+                    }
+                    if let (Some(drag), Some(now)) =
+                        (self.crop_drag, response.interact_pointer_pos().map(to_norm))
+                    {
+                        if response.dragged() || response.drag_stopped() {
+                            let crop = match drag {
+                                CropDrag::Draw { anchor } => Crop {
+                                    x: anchor.x.min(now.x),
+                                    y: anchor.y.min(now.y),
+                                    width: (now.x - anchor.x).abs(),
+                                    height: (now.y - anchor.y).abs(),
+                                },
+                                CropDrag::Move { grab, start } => Crop {
+                                    x: start.x + now.x - grab.x,
+                                    y: start.y + now.y - grab.y,
+                                    ..start
+                                },
+                            }
+                            .sanitised();
+                            if crop != self.stack.geometry.crop {
+                                self.stack.geometry.crop = crop;
+                                self.needs_render = true;
+                            }
+                        }
+                    }
+                    if response.drag_stopped() {
+                        self.crop_drag = None;
+                    }
+                    if let Some(p) = response.hover_pos() {
+                        let moving = matches!(self.crop_drag, Some(CropDrag::Move { .. }));
+                        if moving || (self.crop_drag.is_none() && inside(to_norm(p))) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+                        }
+                    }
+                } else if response.dragged() && !at_fit && !self.split_dragging {
+                    self.view.pan -= response.drag_delta() / scale_now;
+                }
+                // On touch, a sideways swipe at fit — where a drag has nothing to pan — steps
+                // to the next or previous photo, as ← and → do.
+                if widgets::is_touch(ui.ctx()) && at_fit && !self.cropping && !self.split_active {
+                    if response.drag_started() {
+                        self.swipe_from = response.interact_pointer_pos();
+                    }
+                    if response.drag_stopped() {
+                        let end = response.interact_pointer_pos();
+                        if let (Some(from), Some(to)) = (self.swipe_from.take(), end) {
+                            let d = to - from;
+                            if d.x.abs() > 60.0 && d.x.abs() > 2.0 * d.y.abs() {
+                                self.pending_step = Some(if d.x < 0.0 { 1 } else { -1 });
+                            }
+                        }
+                    }
+                }
+
+                if let Some(pointer) = response.hover_pos() {
+                    // Wheel, plus pinch / Ctrl+wheel, which egui reports as a zoom factor.
+                    let (scroll, pinch) = ui
+                        .ctx()
+                        .input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+                    let factor = (scroll * 0.004).exp() * pinch;
+                    if factor != 1.0 {
+                        let before = fit * self.view.zoom;
+                        let centre = rect.center() - self.view.pan * before;
+                        // The image point under the cursor, in image pixels from centre.
+                        let anchor = (pointer - centre) / before;
+
+                        self.view.zoom = (self.view.zoom * factor).clamp(1.0, max_zoom);
+
+                        // Keep that point under the cursor rather than zooming to centre.
+                        let after = fit * self.view.zoom;
+                        self.view.pan = (rect.center() - pointer) / after + anchor;
+                    }
+                }
+
+                let scale = fit * self.view.zoom;
+                // Pan only as far as the image still covers the view: at fit that is
+                // nowhere, so the frame cannot be knocked off-centre by a stray drag.
+                let slack = ((img * scale - rect.size()) * 0.5).max(egui::Vec2::ZERO) / scale;
+                self.view.pan = self.view.pan.clamp(-slack, slack);
+
+                let dest = egui::Rect::from_center_size(
+                    rect.center() - self.view.pan * scale,
+                    img * scale,
+                );
+                let frame = frame_of(dest);
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.image(
+                    id,
+                    dest,
+                    egui::Rect::from_min_size(
+                        egui::pos2(region.x, region.y),
+                        egui::vec2(region.width, region.height),
+                    ),
+                    egui::Color32::WHITE,
+                );
+                // The frame the image sits in: a hairline, not a shadow.
+                let framed_view = dest.intersect(rect);
+                painter.rect_stroke(
+                    framed_view,
+                    0.0,
+                    Stroke::new(1.0, theme::RAIL),
+                    egui::StrokeKind::Outside,
+                );
+
+                // While framing, the whole picture is shown and the crop drawn over it:
+                // everything outside is dimmed, and thirds are marked.
+                let crop = self.stack.geometry.crop.sanitised();
+                if self.cropping {
+                    let framed = egui::Rect::from_min_size(
+                        dest.min + egui::vec2(crop.x * dest.width(), crop.y * dest.height()),
+                        egui::vec2(crop.width * dest.width(), crop.height * dest.height()),
+                    );
+                    let veil = egui::Color32::from_black_alpha(170);
+                    // Four bands rather than a stencil: cheap, exact, and no extra pass.
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), framed.top())),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), framed.bottom()),
+                            rect.max,
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), framed.top()),
+                            egui::pos2(framed.left(), framed.bottom()),
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(framed.right(), framed.top()),
+                            egui::pos2(rect.right(), framed.bottom()),
+                        ),
+                        0.0,
+                        veil,
+                    );
+                    painter.rect_stroke(
+                        framed,
+                        0.0,
+                        egui::Stroke::new(1.0, theme::ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                    let thin = egui::Stroke::new(1.0, theme::TEXT.linear_multiply(0.25));
+                    for i in 1..3 {
+                        let t = i as f32 / 3.0;
+                        let x = framed.left() + framed.width() * t;
+                        let y = framed.top() + framed.height() * t;
+                        painter.line_segment(
+                            [egui::pos2(x, framed.top()), egui::pos2(x, framed.bottom())],
+                            thin,
+                        );
+                        painter.line_segment(
+                            [egui::pos2(framed.left(), y), egui::pos2(framed.right(), y)],
+                            thin,
+                        );
+                    }
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "CROP · drag to frame · drag inside to move · Enter apply · Esc cancel",
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+
+                if self.split_active {
+                    let split_screen_x = (frame.left() + self.split_pos * frame.width())
+                        .clamp(dest.left(), dest.right());
+                    let (top, bottom) = (framed_view.top(), framed_view.bottom());
+                    painter.vline(
+                        split_screen_x,
+                        top..=bottom,
+                        Stroke::new(2.0, theme::ACCENT),
+                    );
+
+                    let badge_y = top + 14.0;
+                    if self.split_pos > 0.08 {
+                        hud_badge(
+                            &painter,
+                            pos2(split_screen_x - 8.0, badge_y),
+                            Align2::RIGHT_TOP,
+                            "BEFORE",
+                            theme::TEXT_HI,
+                            Color32::from_gray(0x2a),
+                        );
+                    }
+                    if self.split_pos < 0.92 {
+                        hud_badge(
+                            &painter,
+                            pos2(split_screen_x + 8.0, badge_y),
+                            Align2::LEFT_TOP,
+                            "AFTER",
+                            theme::ACCENT,
+                            theme::ACCENT,
+                        );
+                    }
+
+                    let handle = pos2(split_screen_x, (top + bottom) / 2.0);
+                    painter.circle(handle, 15.0, theme::BG_950, Stroke::new(2.0, theme::ACCENT));
+                    painter.text(
+                        handle,
+                        Align2::CENTER_CENTER,
+                        "⇆",
+                        FontId::proportional(15.0),
+                        theme::ACCENT,
+                    );
+                }
+
+                // Corner readouts. What exports is exactly this texture, cropped; only the
+                // display scale differs.
+                if framed_view.width() > 420.0 {
+                    let (_, _, w, h) = crop.to_pixels(image_w, image_h);
+                    hud_badge(
+                        &painter,
+                        framed_view.left_bottom() + vec2(12.0, -12.0),
+                        Align2::LEFT_BOTTOM,
+                        &format!(
+                            "exports these pixels · {w} × {h} · shown at {:.0}%",
+                            scale * 100.0
+                        ),
+                        Color32::from_gray(0xcc),
+                        theme::RAIL,
+                    );
+                }
+                if let Some((path, _)) = &self.loading {
+                    hud_badge(
+                        &painter,
+                        framed_view.left_top() + vec2(12.0, 12.0),
+                        Align2::LEFT_TOP,
+                        &format!("opening {}…", file_name(path)),
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+                let hist = self.engine.histogram();
+                if hist.peak > 0 {
+                    let clipped = hist.clipped_high().max(hist.clipped_low()) * 100.0;
+                    let (text, colour) = if clipped >= 0.1 {
+                        (format!("●  clipped {clipped:.1}%"), theme::DANGER)
+                    } else {
+                        (format!("clipped {clipped:.1}%"), theme::TEXT_DIM)
+                    };
+                    hud_badge(
+                        &painter,
+                        framed_view.right_bottom() + vec2(-12.0, -12.0),
+                        Align2::RIGHT_BOTTOM,
+                        &text,
+                        colour,
+                        theme::RAIL,
+                    );
+                }
+
+                if self.cropping {
+                    if ui.ctx().output(|o| o.cursor_icon) != egui::CursorIcon::Move {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
+                } else if self.split_dragging {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                } else if !at_fit && response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if !at_fit && response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+            });
+    }
+
+    /// No image yet: a drop target that is also the Open button, and the reason the last
+    /// file failed, in place (DESIGN.md: failures surface in the UI, with the filename).
+    pub(crate) fn empty_stage(&mut self, ui: &mut egui::Ui) {
+        let area = ui.available_rect_before_wrap();
+        let zone = Rect::from_center_size(
+            area.center(),
+            vec2((area.width() - 32.0).clamp(160.0, 440.0), 180.0),
+        );
+        let response = ui.interact(zone, ui.id().with("drop_zone"), Sense::click());
+        let dragging_in = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        let hot = response.hovered() || dragging_in;
+
+        let painter = ui.painter();
+        widgets::dashed_rect(
+            painter,
+            zone,
+            if hot {
+                theme::ACCENT
+            } else {
+                Color32::from_gray(0x2a)
+            },
+        );
+        if let Some((path, _)) = &self.loading {
+            painter.text(
+                zone.center(),
+                Align2::CENTER_CENTER,
+                format!("decoding {}…", file_name(path)),
+                FontId::new(13.0, theme::mono_bold()),
+                theme::ACCENT,
+            );
+            return;
+        }
+        let c = zone.center();
+        let touch = widgets::is_touch(ui.ctx());
+        painter.text(
+            c - vec2(0.0, 44.0),
+            Align2::CENTER_CENTER,
+            "⬆",
+            FontId::proportional(22.0),
+            theme::ACCENT,
+        );
+        painter.text(
+            c - vec2(0.0, 12.0),
+            Align2::CENTER_CENTER,
+            if touch {
+                "Open a photo"
+            } else {
+                "Drop a camera RAW file"
+            },
+            FontId::new(15.0, theme::sans_strong()),
+            theme::TEXT_HI,
+        );
+        painter.text(
+            c + vec2(0.0, 10.0),
+            Align2::CENTER_CENTER,
+            if touch {
+                "tap here to choose one"
+            } else {
+                "or click to open one"
+            },
+            FontId::proportional(12.5),
+            theme::TEXT_DIM,
+        );
+        painter.text(
+            c + vec2(0.0, 40.0),
+            Align2::CENTER_CENTER,
+            "ARW · CR2 · CR3 · NEF · RAF · ORF · RW2 · DNG",
+            FontId::monospace(10.5),
+            theme::TEXT_FAINT,
+        );
+        if let Some(err) = &self.error {
+            let galley = painter.layout(
+                err.clone(),
+                FontId::monospace(11.5),
+                theme::DANGER,
+                zone.width(),
+            );
+            painter.galley(
+                pos2(
+                    zone.center().x - galley.size().x / 2.0,
+                    zone.bottom() + 16.0,
+                ),
+                galley,
+                theme::DANGER,
+            );
+        }
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            self.pick_and_open(ui.ctx());
+        }
+    }
+}
