@@ -20,6 +20,7 @@ use photo_engine::testkit::{self, read_texture};
 use photo_engine::{Crop, Engine, PhotoStack};
 
 struct Gpu {
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
@@ -44,7 +45,11 @@ fn gpu() -> Option<&'static Gpu> {
             ..Default::default()
         }))
         .ok()?;
-        Some(Gpu { device, queue })
+        Some(Gpu {
+            adapter,
+            device,
+            queue,
+        })
     });
     if gpu.is_none() {
         let required = std::env::var_os("DUCKFOOT_REQUIRE_GPU").is_some_and(|v| v != "0");
@@ -220,4 +225,76 @@ fn a_rotated_export_takes_its_size_and_crop_from_the_stack() {
         .filter(|p| p[..3] == [0, 0, 0])
         .count();
     assert_eq!(black, 0, "{black} black pixels in a scene that has none");
+}
+
+#[test]
+fn a_banded_export_equals_a_single_shot_one() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (100, 70);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(
+            &gpu.device,
+            &gpu.queue,
+            testkit::cfa_from_fn(w, h, testkit::smooth_scene(w, h)),
+        )
+        .unwrap();
+    let mut stack = busy_stack();
+    // An offset crop, so each band's source origin is exercised too.
+    stack.geometry.crop = Crop {
+        x: 0.13,
+        y: 0.21,
+        width: 0.6,
+        height: 0.7,
+    };
+    let whole = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+
+    // One padded row is 256 bytes at this width: bands of one row, then of three, then a
+    // size that is not a whole number of rows.
+    for band in [1, 256 * 3, 1000] {
+        engine.set_export_band_bytes(Some(band));
+        let banded = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+        assert_eq!((banded.width, banded.height), (whole.width, whole.height));
+        assert!(
+            banded.rgba == whole.rgba,
+            "bands of {band} bytes changed the export"
+        );
+    }
+}
+
+#[test]
+fn export_fits_under_a_small_device_buffer_limit() {
+    let gpu = gpu_or_skip!();
+    // The B7 crash in miniature: a device whose largest buffer is smaller than the frame.
+    // Before banding this was one 512 KiB readback buffer, a validation error, and a panic.
+    let limit = 256 << 10;
+    let (device, queue) = pollster::block_on(gpu.adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("small buffers"),
+        required_limits: wgpu::Limits {
+            max_buffer_size: limit,
+            ..wgpu::Limits::downlevel_defaults().using_resolution(gpu.adapter.limits())
+        },
+        ..Default::default()
+    }))
+    .unwrap();
+    let (w, h) = (512, 256);
+    let mut engine = Engine::new(&device);
+    engine
+        .load(
+            &device,
+            &queue,
+            testkit::cfa_from_fn(w, h, testkit::smooth_scene(w, h)),
+        )
+        .unwrap();
+    let stack = PhotoStack::default();
+    let exported = engine.export(&device, &queue, &stack).unwrap();
+    assert!(exported.rgba.len() as u64 > limit);
+    assert_eq!((exported.width, exported.height), (w, h));
+
+    engine.render(&device, &queue, &stack, None);
+    let shown = read_texture(&device, &queue, engine.image().unwrap().output_texture()).unwrap();
+    assert!(
+        exported.rgba == shown,
+        "the banded export is not the preview"
+    );
 }
