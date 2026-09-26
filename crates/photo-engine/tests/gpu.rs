@@ -144,7 +144,7 @@ fn a_flat_field_fills_exactly_one_histogram_bin() {
         gpu.device
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
-        engine.poll_histogram(&gpu.device);
+        engine.poll_histogram(&gpu.device, &gpu.queue);
         if engine.histogram().peak > 0 {
             break;
         }
@@ -610,5 +610,37 @@ fn the_before_half_of_the_split_is_the_file_as_shot() {
     assert!(
         render(&sharpened) == render(&PhotoStack::default()),
         "the before half was sharpened"
+    );
+}
+
+#[test]
+fn the_last_render_of_a_drag_is_the_one_the_histogram_shows() {
+    let gpu = gpu_or_skip!();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(64, 48, 0.1))
+        .unwrap();
+    // A drag: two renders with no collection between them. The first is measured; the
+    // second finds the readback busy and is owed its measurement.
+    let first = PhotoStack::default();
+    let mut last = PhotoStack::default();
+    last.exposure.params.ev = 2.0;
+    engine.render(&gpu.device, &gpu.queue, &first, None);
+    engine.render(&gpu.device, &gpu.queue, &last, None);
+    // Then nothing changes: no render, only the polling an idle app does while
+    // `histogram_busy` says to come back.
+    let mut polls = 0;
+    while engine.histogram_busy() && polls < 500 {
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        engine.poll_histogram(&gpu.device, &gpu.queue);
+        polls += 1;
+    }
+    assert!(!engine.histogram_busy(), "the histogram never settled");
+    let value = engine.export(&gpu.device, &gpu.queue, &last).unwrap().rgba[1] as usize;
+    assert!(
+        engine.histogram().luma[value] > 0,
+        "the scopes show an earlier frame, not the last render's {value}"
     );
 }

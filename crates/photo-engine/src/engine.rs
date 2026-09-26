@@ -216,6 +216,11 @@ pub struct Engine {
     /// opening a photo would show the previous one's scopes.
     hist_epoch: u64,
     hist_inflight_epoch: u64,
+    /// A render that could not be measured because a readback was still in flight, and
+    /// what to measure once it is not: the region of the preview and its level. Without
+    /// this the last frame of a drag was often never measured, and the scopes showed a
+    /// state from partway through it until the next edit.
+    hist_owed: Option<([u32; 4], u32)>,
 
     /// The preview level, kept across images: the window has not changed size just
     /// because the photo did, so the next one opens straight at the right resolution.
@@ -679,6 +684,7 @@ impl Engine {
             histogram: Histogram::default(),
             hist_epoch: 0,
             hist_inflight_epoch: 0,
+            hist_owed: None,
             green_pipeline,
             green_bgl,
             rb_pipeline,
@@ -1195,76 +1201,38 @@ impl Engine {
             &image.output_view,
         );
 
+        // Scopes describe what the photograph will be, so they measure inside the crop — a
+        // histogram of pixels the user has framed out is actively misleading — and only
+        // the "after" side of a split.
+        let (ox, oy, w, h) = stack.geometry.crop.to_pixels(target.0, target.1);
+        let (ox, w) = match split_x {
+            Some(split) => {
+                let divider = (split.clamp(0.0, 1.0) * target.0 as f32) as u32;
+                let start = ox.max(divider).min(ox + w);
+                if start < ox + w {
+                    (start, ox + w - start)
+                } else {
+                    (ox, w)
+                }
+            }
+            None => (ox, w),
+        };
+        let region = [ox, oy, w, h];
+
         // Only queue a new histogram when the previous one has been collected. Otherwise a
-        // fast drag would pile up map requests against a buffer that is already mapped.
+        // fast drag would pile up map requests against a buffer that is already mapped;
+        // the frame is owed a measurement instead, paid by `poll_histogram`.
         let measuring = self.hist_state.is_idle();
         if measuring {
-            // Scopes describe what the photograph will be, so they measure inside the crop.
-            // A histogram of pixels the user has framed out is actively misleading.
-            let (ox, oy, w, h) = stack.geometry.crop.to_pixels(target.0, target.1);
-            // A preview at level L already has 4^L fewer pixels; keep roughly the same
-            // sample count rather than striding over what is left.
-            let stride = (HISTOGRAM_STRIDE >> level).max(1);
-            queue.write_buffer(
-                &self.hist_params,
-                0,
-                bytemuck::bytes_of(&HistogramParams {
-                    region: [ox, oy, w, h],
-                    stride: [stride, 0, 0, 0],
-                }),
-            );
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("histogram bind"),
-                layout: &self.hist_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&image.output_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.hist_bins.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.hist_params.as_entire_binding(),
-                    },
-                ],
-            });
-
-            encoder.clear_buffer(&self.hist_bins, 0, None);
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("histogram pass"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.hist_pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                let groups_x = w.div_ceil(stride).div_ceil(16).max(1);
-                let groups_y = h.div_ceil(stride).div_ceil(16).max(1);
-                debug_assert!(groups_x > 0 && groups_y > 0);
-                pass.dispatch_workgroups(groups_x, groups_y, 1);
-            }
-            encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);
+            self.hist_owed = None;
+            self.encode_histogram(device, queue, &mut encoder, region, level);
+        } else {
+            self.hist_owed = Some((region, level));
         }
 
         queue.submit([encoder.finish()]);
-
         if measuring {
-            self.hist_inflight_epoch = self.hist_epoch;
-            self.hist_state.set_pending();
-            let state = self.hist_state.clone();
-            self.hist_staging
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    // A failed map leaves the previous histogram on screen, which is a
-                    // better outcome than a panic in a scope widget.
-                    if result.is_ok() {
-                        state.set_ready();
-                    } else {
-                        state.set_idle();
-                    }
-                });
+            self.start_histogram_readback();
         }
     }
 
@@ -1449,10 +1417,105 @@ impl Engine {
         &self.histogram
     }
 
-    /// Collect a finished histogram readback. Cheap, and safe to call every frame.
-    pub fn poll_histogram(&mut self, device: &wgpu::Device) {
+    /// Record the histogram compute pass for `region` of the current output.
+    fn encode_histogram(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        region: [u32; 4],
+        level: u32,
+    ) {
+        let Some(image) = &self.image else { return };
+        let [_, _, w, h] = region;
+        // A preview at level L already has 4^L fewer pixels; keep roughly the same sample
+        // count rather than striding over what is left.
+        let stride = (HISTOGRAM_STRIDE >> level).max(1);
+        queue.write_buffer(
+            &self.hist_params,
+            0,
+            bytemuck::bytes_of(&HistogramParams {
+                region,
+                stride: [stride, 0, 0, 0],
+            }),
+        );
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("histogram bind"),
+            layout: &self.hist_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&image.output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.hist_bins.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.hist_params.as_entire_binding(),
+                },
+            ],
+        });
+
+        encoder.clear_buffer(&self.hist_bins, 0, None);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.hist_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            let groups_x = w.div_ceil(stride).div_ceil(16).max(1);
+            let groups_y = h.div_ceil(stride).div_ceil(16).max(1);
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.hist_bins, 0, &self.hist_staging, 0, BUFFER_BYTES);
+    }
+
+    /// After the histogram pass is submitted: map its result for `poll_histogram`.
+    fn start_histogram_readback(&mut self) {
+        self.hist_inflight_epoch = self.hist_epoch;
+        self.hist_state.set_pending();
+        let state = self.hist_state.clone();
+        self.hist_staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                // A failed map leaves the previous histogram on screen, which is a better
+                // outcome than a panic in a scope widget.
+                if result.is_ok() {
+                    state.set_ready();
+                } else {
+                    state.set_idle();
+                }
+            });
+    }
+
+    /// A histogram is in flight or owed: the caller should come back next frame even if
+    /// nothing else changes, or the scopes will sit on a stale reading.
+    pub fn histogram_busy(&self) -> bool {
+        !self.hist_state.is_idle() || self.hist_owed.is_some()
+    }
+
+    /// Collect a finished histogram and, once the readback is free, measure the frame a
+    /// render was owed. Cheap, and safe to call every frame.
+    pub fn poll_histogram(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         // Drives wgpu's map callbacks; without this the readback never completes.
         let _ = device.poll(wgpu::PollType::Poll);
+        self.collect_histogram();
+        if self.hist_state.is_idle() {
+            if let Some((region, level)) = self.hist_owed.take() {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("histogram encoder"),
+                });
+                self.encode_histogram(device, queue, &mut encoder, region, level);
+                queue.submit([encoder.finish()]);
+                self.start_histogram_readback();
+            }
+        }
+    }
+
+    fn collect_histogram(&mut self) {
         if !self.hist_state.is_ready() {
             return;
         }
