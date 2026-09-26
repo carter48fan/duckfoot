@@ -37,17 +37,30 @@ fn colour_at(x: i32, y: i32) -> u32 {
     return u.cfa[u32(y & 1) * 2u + u32(x & 1)];
 }
 
-fn clamp_x(x: i32) -> i32 {
-    return clamp(x, 0, i32(u.size.x) - 1);
+// A coordinate off the edge, mirrored about the edge photosite: an even distance from
+// where it was asked for, so it keeps the pattern's colour (see demosaic_green.wgsl).
+fn reflect_edge(v: i32, n: i32) -> i32 {
+    var r = v;
+    if (r < 0) {
+        r = -r;
+    }
+    if (r > n - 1) {
+        r = 2 * (n - 1) - r;
+    }
+    return clamp(r, 0, n - 1);
 }
 
-fn clamp_y(y: i32) -> i32 {
-    return clamp(y, 0, i32(u.size.y) - 1);
+fn edge_x(x: i32) -> i32 {
+    return reflect_edge(x, i32(u.size.x));
+}
+
+fn edge_y(y: i32) -> i32 {
+    return reflect_edge(y, i32(u.size.y));
 }
 
 fn sample_at(x: i32, y: i32) -> f32 {
-    let sx = clamp_x(x);
-    let sy = clamp_y(y);
+    let sx = edge_x(x);
+    let sy = edge_y(y);
     let raw = f32(textureLoad(mosaic, vec2<i32>(sx, sy), 0).r);
     let c = colour_at(sx, sy);
     let b = u.black[c];
@@ -55,7 +68,7 @@ fn sample_at(x: i32, y: i32) -> f32 {
 }
 
 fn green_at(x: i32, y: i32) -> f32 {
-    return textureLoad(green_plane, vec2<i32>(clamp_x(x), clamp_y(y)), 0).r;
+    return textureLoad(green_plane, vec2<i32>(edge_x(x), edge_y(y)), 0).r;
 }
 
 /// The colour difference `sample - green` at a neighbour, which is the quantity that

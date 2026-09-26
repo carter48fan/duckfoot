@@ -38,13 +38,28 @@ fn colour_at(x: i32, y: i32) -> u32 {
     return u.cfa[u32(y & 1) * 2u + u32(x & 1)];
 }
 
+// A coordinate off the edge, mirrored about the edge photosite: -1 reads 1, w reads w - 2.
+// Always an even distance from where it was asked for, so it lands on the same colour of
+// the pattern — clamping to the edge instead read the neighbouring colour, and the outer
+// pixel or two came out tinted.
+fn reflect_edge(v: i32, n: i32) -> i32 {
+    var r = v;
+    if (r < 0) {
+        r = -r;
+    }
+    if (r > n - 1) {
+        r = 2 * (n - 1) - r;
+    }
+    return clamp(r, 0, n - 1);
+}
+
 // Normalised against this photosite's own black/white level. No upper clamp: values above
 // 1.0 are real headroom and the highlight reconstruction downstream needs to see them.
 fn sample_at(x: i32, y: i32) -> f32 {
     let w = i32(u.size.x);
     let h = i32(u.size.y);
-    let sx = clamp(x, 0, w - 1);
-    let sy = clamp(y, 0, h - 1);
+    let sx = reflect_edge(x, w);
+    let sy = reflect_edge(y, h);
     let raw = f32(textureLoad(mosaic, vec2<i32>(sx, sy), 0).r);
     let c = colour_at(sx, sy);
     let b = u.black[c];
