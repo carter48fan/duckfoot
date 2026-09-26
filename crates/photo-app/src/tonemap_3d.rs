@@ -49,6 +49,137 @@ impl Default for Tonemap3DState {
     }
 }
 
+/// The filmic presets as a row of chips. A click sets all four values as one step.
+pub fn filmic_presets(
+    ui: &mut egui::Ui,
+    filmic: &mut Filmic,
+    changed: &mut bool,
+    started: &mut bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::tag("presets").color(theme::TEXT_DIM));
+        if widgets::chip(ui, false, "neutral")
+            .on_hover_text("Balanced photographic tone curve")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 3.5;
+            filmic.black_ev = -8.0;
+            filmic.latitude = 20.0;
+            filmic.contrast = 1.1;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "dynamic")
+            .on_hover_text("Wide dynamic range with highlight & shadow preservation")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 5.0;
+            filmic.black_ev = -10.0;
+            filmic.latitude = 35.0;
+            filmic.contrast = 1.0;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "punchy")
+            .on_hover_text("High-contrast commercial look with crisp blacks")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 3.0;
+            filmic.black_ev = -7.0;
+            filmic.latitude = 16.0;
+            filmic.contrast = 1.35;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "film flat")
+            .on_hover_text("Soft shoulder and toe for cinematic film grading")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 4.2;
+            filmic.black_ev = -6.5;
+            filmic.latitude = 42.0;
+            filmic.contrast = 0.92;
+            *changed = true;
+        }
+    });
+}
+
+/// The filmic curve flat: scene EV across, display value up, with the white and black
+/// points marked. Read-only — the sliders under it set the values — so on a phone it
+/// never fights the sheet's scrolling the way the orbiting 3D view does.
+pub fn render_filmic_2d(ui: &mut egui::Ui, filmic: &Filmic) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(width, (width * 0.42).clamp(110.0, 170.0)),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, theme::BG_950);
+    let ev_min = (filmic.black_ev - 1.5).min(-12.0);
+    let ev_max = (filmic.white_ev + 1.5).max(6.0);
+    let x_of = |ev: f32| rect.left() + (ev - ev_min) / (ev_max - ev_min) * rect.width();
+    let y_of = |v: f32| rect.bottom() - 6.0 - v.clamp(0.0, 1.0) * (rect.height() - 12.0);
+    let grid = Stroke::new(1.0, Color32::from_gray(0x1a));
+    let mut ev = ev_min.ceil();
+    while ev <= ev_max {
+        if (ev as i32) % 2 == 0 {
+            painter.vline(x_of(ev), rect.y_range(), grid);
+        }
+        ev += 1.0;
+    }
+    for v in [0.25, 0.5, 0.75] {
+        painter.hline(rect.x_range(), y_of(v), grid);
+    }
+    for (ev, colour, label) in [
+        (
+            filmic.black_ev,
+            Color32::from_rgb(0x6a, 0x8c, 0xff),
+            "black",
+        ),
+        (
+            filmic.white_ev,
+            Color32::from_rgb(0xff, 0xd0, 0x6a),
+            "white",
+        ),
+    ] {
+        let x = x_of(ev);
+        painter.vline(
+            x,
+            rect.y_range(),
+            Stroke::new(1.0, colour.gamma_multiply(0.6)),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, rect.top() + 3.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::monospace(9.5),
+            colour,
+        );
+    }
+    let points: Vec<Pos2> = (0..=96)
+        .map(|i| {
+            let ev = ev_min + (ev_max - ev_min) * i as f32 / 96.0;
+            let v = eval_filmic(2.0_f32.powf(ev), filmic);
+            egui::pos2(x_of(ev), y_of(v))
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, Stroke::new(2.0, theme::ACCENT)));
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.bottom() - 3.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "scene EV →",
+        egui::FontId::monospace(9.5),
+        theme::TEXT_FAINT,
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// Evaluates the filmic sigmoid transfer function for a linear value `v`.
 pub fn eval_filmic(v: f32, f: &Filmic) -> f32 {
     if v <= 0.0 {
@@ -137,54 +268,7 @@ pub fn render_tonemap_3d(
         });
     });
 
-    // 1-Click Tonemap Presets
-    ui.horizontal_wrapped(|ui| {
-        ui.label(theme::tag("presets").color(theme::TEXT_DIM));
-        if widgets::chip(ui, false, "neutral")
-            .on_hover_text("Balanced photographic tone curve")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 3.5;
-            filmic.black_ev = -8.0;
-            filmic.latitude = 20.0;
-            filmic.contrast = 1.1;
-            *changed = true;
-        }
-        if widgets::chip(ui, false, "dynamic")
-            .on_hover_text("Wide dynamic range with highlight & shadow preservation")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 5.0;
-            filmic.black_ev = -10.0;
-            filmic.latitude = 35.0;
-            filmic.contrast = 1.0;
-            *changed = true;
-        }
-        if widgets::chip(ui, false, "punchy")
-            .on_hover_text("High-contrast commercial look with crisp blacks")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 3.0;
-            filmic.black_ev = -7.0;
-            filmic.latitude = 16.0;
-            filmic.contrast = 1.35;
-            *changed = true;
-        }
-        if widgets::chip(ui, false, "film flat")
-            .on_hover_text("Soft shoulder and toe for cinematic film grading")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 4.2;
-            filmic.black_ev = -6.5;
-            filmic.latitude = 42.0;
-            filmic.contrast = 0.92;
-            *changed = true;
-        }
-    });
+    filmic_presets(ui, filmic, changed, started);
 
     let height = 230.0;
     let (rect, response) = ui.allocate_exact_size(

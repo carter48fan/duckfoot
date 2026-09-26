@@ -297,6 +297,11 @@ impl Platform for AndroidPlatform {
         Some(self.pictures.clone())
     }
 
+    fn settings_dir(&self) -> Option<PathBuf> {
+        // Private to the app, like the library it sits beside.
+        self.library.parent().map(|p| p.join("settings"))
+    }
+
     fn leave(&mut self) {
         self.bridge.call_void("leave", "()V", &[]);
     }
