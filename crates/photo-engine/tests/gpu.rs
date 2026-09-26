@@ -298,3 +298,81 @@ fn export_fits_under_a_small_device_buffer_limit() {
         "the banded export is not the preview"
     );
 }
+
+/// Render patches of exact linear scene values and return each patch's centre pixel.
+fn render_patches(gpu: &Gpu, stack: &PhotoStack, patches: &[[f32; 3]]) -> Vec<[u8; 3]> {
+    const SIDE: u32 = 8;
+    let n = patches.len() as u32;
+    let raster = testkit::raster_from_fn(SIDE * n, SIDE, |x, _| patches[(x / SIDE) as usize]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+    (0..n)
+        .map(|i| {
+            let at = ((SIDE / 2 * out.width + i * SIDE + SIDE / 2) * 4) as usize;
+            [out.rgba[at], out.rgba[at + 1], out.rgba[at + 2]]
+        })
+        .collect()
+}
+
+/// Hue in degrees of a linear RGB triple.
+fn hue(c: [f32; 3]) -> f32 {
+    let [r, g, b] = c;
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let d = max - min;
+    let h = if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h * 60.0
+}
+
+#[test]
+fn filmic_maps_mid_grey_to_mid_grey_and_its_range_to_black_and_white() {
+    let gpu = gpu_or_skip!();
+    let mut stack = PhotoStack::default();
+    stack.filmic.enabled = true;
+    let f = stack.filmic.params;
+    // The defaults this is all derived against.
+    assert_eq!(
+        (f.white_ev, f.black_ev, f.latitude, f.contrast),
+        (3.5, -8.0, 20.0, 1.1)
+    );
+
+    let red = [0.5, 0.1, 0.05];
+    let out = render_patches(
+        gpu,
+        &stack,
+        &[
+            [0.18; 3],
+            [2f32.powf(f.black_ev); 3],
+            [2f32.powf(f.white_ev); 3],
+            red,
+        ],
+    );
+    let [grey, black, white, shown_red] = [out[0], out[1], out[2], out[3]];
+    println!("filmic: grey {grey:?}  black {black:?}  white {white:?}  red {shown_red:?}");
+
+    // Filmic off shows 0.18 as 118. Encoding the sigmoid twice showed it as 184, and lifted
+    // black_ev to 69 — the flat, grey look.
+    assert!(
+        grey.iter().all(|&v| v.abs_diff(118) <= 2),
+        "mid grey came out {grey:?}, not 118"
+    );
+    assert!(black.iter().all(|&v| v <= 2), "black_ev came out {black:?}");
+    assert!(
+        white.iter().all(|&v| v >= 253),
+        "white_ev came out {white:?}"
+    );
+
+    // Applied to the pixel's brightness, not to each channel: the hue survives.
+    let shown = shown_red.map(testkit::srgb_to_linear);
+    let drift = (hue(shown) - hue(red)).abs();
+    assert!(
+        drift <= 3.0,
+        "a saturated red moved {drift:.1}° in hue ({red:?} -> {shown:?})"
+    );
+}
