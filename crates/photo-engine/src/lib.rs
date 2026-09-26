@@ -13,6 +13,7 @@ pub mod engine;
 pub mod export;
 pub mod fsio;
 pub mod histogram;
+pub mod metadata;
 pub mod params;
 pub mod preview;
 pub mod sidecar;
@@ -31,6 +32,7 @@ pub use engine::{
 };
 pub use export::{ExportFormat, ExportedImage};
 pub use histogram::Histogram;
+pub use metadata::{read_raw_info, PhotoInfo};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Exposure, ExposureMode,
     Filmic, Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,

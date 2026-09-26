@@ -202,7 +202,11 @@ pub fn load_embedded_preview(path: &Path, want: u32) -> Option<Preview> {
     let bytes: &[u8] = &map;
     let jpeg = find_embedded_jpeg(bytes, want)?;
     let (width, height, rgb) = decode_jpeg_scaled(jpeg.data, want)?;
-    let orientation = crate::decode::tiff_orientation(bytes).unwrap_or_default();
+    // CR3 and RAF keep their orientation outside any TIFF header; without the fallback
+    // their thumbnails and stand-ins came out unrotated.
+    let orientation = crate::decode::tiff_orientation(bytes)
+        .or_else(|| crate::metadata::read_raw_info(path).map(|i| i.orientation))
+        .unwrap_or_default();
     Some(Preview {
         width,
         height,
@@ -212,9 +216,8 @@ pub fn load_embedded_preview(path: &Path, want: u32) -> Option<Preview> {
 }
 
 /// How the camera meant `path` to be viewed, read from its header without decoding any
-/// pixels: the first megabyte holds the orientation tag of every TIFF-based RAW. For
-/// containers that keep it elsewhere (CR3, RAF) this is the identity, and the decode is
-/// what finds it.
+/// pixels: the first megabyte holds the orientation tag of every TIFF-based RAW, and
+/// rawler's metadata parser finds it in the containers that keep it elsewhere (CR3, RAF).
 pub fn file_orientation(path: &Path) -> Geometry {
     use std::io::Read;
     if crate::is_raster_path(path) {
@@ -224,10 +227,12 @@ pub fn file_orientation(path: &Path) -> Geometry {
     }
     let mut head = Vec::new();
     let read = File::open(path).and_then(|f| f.take(1 << 20).read_to_end(&mut head));
-    match read {
-        Ok(_) => crate::decode::tiff_orientation(&head).unwrap_or_default(),
-        Err(_) => Geometry::default(),
+    if read.is_err() {
+        return Geometry::default();
     }
+    crate::decode::tiff_orientation(&head)
+        .or_else(|| crate::metadata::read_raw_info(path).map(|i| i.orientation))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
