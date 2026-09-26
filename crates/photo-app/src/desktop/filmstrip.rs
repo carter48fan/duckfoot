@@ -417,6 +417,12 @@ impl PhotoApp {
                             |ui| film_tile(ui, item, active, selected, pending, picture),
                         )
                         .inner;
+                    let tile_resp = match item.info.as_ref().map(crate::info::one_line) {
+                        Some(line) if !line.is_empty() => {
+                            tile_resp.on_hover_text(format!("{}\n{line}", item.name))
+                        }
+                        _ => tile_resp,
+                    };
                     if tile_resp.clicked() {
                         let (ctrl, shift) = ui.input(|i| {
                             (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
