@@ -920,6 +920,8 @@ impl PhotoApp {
     /// Every module with a switch for whether the strip shows it, and arrows to reorder.
     /// The scope and filmic start off here: flat on a phone, and a switch away.
     fn compact_modules_list(&mut self, ui: &mut egui::Ui) {
+        self.ui_scale_row(ui);
+        ui.add_space(4.0);
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label(theme::tag("modules in the strip").color(theme::TEXT_DIM));
@@ -1489,7 +1491,7 @@ enum BarIcon {
 /// bar's line, as the font's glyphs are not.
 fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    let (rect, response) = widgets::allocate_control(ui, vec2(32.0, 32.0), Sense::click());
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => theme::TEXT_FAINT,
@@ -1592,8 +1594,26 @@ fn look_tile(ui: &mut egui::Ui, name: &str, swatch: [Color32; 2], chosen: bool) 
     // Two flat halves, not a blend: DESIGN.md keeps gradients off everything next to the
     // photo, and this row sits right under it.
     let (top, bottom) = chip.split_top_bottom_at_fraction(0.5);
-    painter.rect_filled(top, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, swatch[0]);
-    painter.rect_filled(bottom, egui::CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 }, swatch[1]);
+    painter.rect_filled(
+        top,
+        egui::CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        },
+        swatch[0],
+    );
+    painter.rect_filled(
+        bottom,
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 4,
+            se: 4,
+        },
+        swatch[1],
+    );
     let outline = if chosen {
         Stroke::new(2.0, theme::ACCENT)
     } else if response.hovered() {
@@ -1637,8 +1657,11 @@ fn strip_tab(
         Color32::PLACEHOLDER,
     );
     let pad = 10.0;
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(galley.size().x + 2.0 * pad, STRIP_H), Sense::click());
+    let (rect, response) = widgets::allocate_control(
+        ui,
+        vec2(galley.size().x + 2.0 * pad, STRIP_H),
+        Sense::click(),
+    );
     let colour = if !enabled {
         theme::TEXT_FAINT
     } else if chosen {
@@ -1673,7 +1696,7 @@ fn strip_tab(
 
 /// A glyph in the Edit strip, for an action rather than a module.
 fn strip_icon(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(34.0, STRIP_H), Sense::click());
+    let (rect, response) = widgets::allocate_control(ui, vec2(34.0, STRIP_H), Sense::click());
     let colour = if response.hovered() {
         theme::TEXT_HI
     } else {

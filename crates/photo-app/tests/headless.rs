@@ -1311,3 +1311,57 @@ fn removing_from_the_shelf_can_be_taken_back() {
     h.settle(&mut app, Duration::from_secs(30));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A platform with somewhere to keep settings, and nothing else.
+struct RememberingPlatform(PathBuf);
+
+impl Platform for RememberingPlatform {
+    fn request(&mut self, _request: Request) {}
+    fn poll(&mut self) -> Vec<Response> {
+        Vec::new()
+    }
+    fn settings_dir(&self) -> Option<PathBuf> {
+        Some(self.0.clone())
+    }
+}
+
+#[test]
+fn the_shelf_and_the_open_photo_come_back_on_the_next_launch() {
+    let dir = scratch_dir("session");
+    let settings = dir.join("settings");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+        h.settle(&mut app, Duration::from_secs(30));
+        app.open_path(&h.gpu(), b.clone());
+        h.settle(&mut app, Duration::from_secs(30));
+        app.set_ui_scale(1.15);
+        app.shutdown();
+    }
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    h.settle(&mut app, Duration::from_secs(30));
+    let shelf: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(shelf, vec![a, b.clone()]);
+    assert_eq!(
+        app.loaded_path(),
+        Some(b.as_path()),
+        "the photo left open is open"
+    );
+    assert!(
+        (h.ctx.zoom_factor() - 1.15).abs() < 1e-3,
+        "the text size came back"
+    );
+    assert_eq!(
+        app.error(),
+        None,
+        "a clean shutdown leaves no unclean-exit notice"
+    );
+    h.ctx.set_zoom_factor(1.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

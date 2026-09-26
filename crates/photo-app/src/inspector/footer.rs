@@ -4,6 +4,8 @@ use crate::*;
 
 impl PhotoApp {
     pub(crate) fn customize_body(&mut self, ui: &mut egui::Ui) {
+        self.ui_scale_row(ui);
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, Kind::Secondary, "Reset order", 0.0)
                 .on_hover_text("Restore the default pipeline order")
@@ -169,5 +171,22 @@ impl PhotoApp {
                 }
             });
         });
+    }
+
+    /// Text size for the whole interface: S M L XL XXL.
+    pub(crate) fn ui_scale_row(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::tag("text size").color(theme::TEXT_DIM));
+            for (scale, label) in settings::UI_SCALES {
+                let on = (self.settings.ui_scale - scale).abs() < 0.01;
+                if widgets::chip(ui, on, label).clicked() {
+                    chosen = Some(scale);
+                }
+            }
+        });
+        if let Some(scale) = chosen {
+            self.set_ui_scale(scale);
+        }
     }
 }

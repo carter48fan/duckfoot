@@ -25,6 +25,7 @@ impl PhotoApp {
     /// be written, and says why.
     pub fn flush(&mut self) -> bool {
         self.autosave_due = None;
+        self.persist_session();
         if self.loaded_path.is_none() {
             return true;
         }

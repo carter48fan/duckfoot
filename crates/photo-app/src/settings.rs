@@ -1,5 +1,6 @@
-//! The little the app remembers between runs: whether the phone tour has been seen, and
-//! which modules the phone's Edit strip shows, in what order. One JSON file in the
+//! What the app remembers between runs: the shelf and the photo left open, how the
+//! inspector and the phone's Edit strip are arranged, the text size, the export recipes
+//! and the rename pattern, and whether the phone tour has been seen. One JSON file in the
 //! platform's settings directory; with no directory (tests, the screenshot tool) nothing
 //! is remembered and nothing is written.
 
@@ -7,14 +8,53 @@ use std::path::{Path, PathBuf};
 
 use crate::{InspectorSectionConfig, InspectorSectionId};
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The phone tour has been finished or skipped.
     pub tour_done: bool,
     /// The phone Edit strip's modules. `None` until the user changes them.
     pub compact_sections: Option<Vec<InspectorSectionConfig>>,
+    /// The desktop inspector's modules, in order, and which are shown.
+    pub inspector_sections: Option<Vec<InspectorSectionConfig>>,
+    pub single_open: Option<bool>,
+    pub inspector_width: Option<f32>,
+    pub shelf_open: Option<bool>,
+    /// Size of the whole interface, 0.85..=1.5: text, controls, spacing.
+    pub ui_scale: f32,
+    /// The shelf as it was left, and the photo that was open.
+    pub shelf: Vec<PathBuf>,
+    pub last_open: Option<PathBuf>,
+    pub export_recipes: Option<Vec<crate::batch::ExportRecipe>>,
+    pub rename_pattern: Option<String>,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            tour_done: false,
+            compact_sections: None,
+            inspector_sections: None,
+            single_open: None,
+            inspector_width: None,
+            shelf_open: None,
+            ui_scale: 1.0,
+            shelf: Vec::new(),
+            last_open: None,
+            export_recipes: None,
+            rename_pattern: None,
+        }
+    }
+}
+
+/// The interface sizes the text-size setting offers.
+pub const UI_SCALES: [(f32, &str); 5] = [
+    (0.85, "S"),
+    (1.0, "M"),
+    (1.15, "L"),
+    (1.3, "XL"),
+    (1.5, "XXL"),
+];
 
 impl Settings {
     pub fn load(dir: Option<&Path>) -> Self {
@@ -61,13 +101,22 @@ pub fn default_compact_sections() -> Vec<InspectorSectionConfig> {
 /// appended in its default state, and any it names twice or that no longer exists
 /// dropped.
 pub fn merge_sections(saved: Vec<InspectorSectionConfig>) -> Vec<InspectorSectionConfig> {
+    merge_sections_with(saved, default_compact_sections())
+}
+
+/// `saved`, with anything it does not know about — modules added since it was written —
+/// appended from `defaults`, and duplicates dropped.
+pub fn merge_sections_with(
+    saved: Vec<InspectorSectionConfig>,
+    defaults: Vec<InspectorSectionConfig>,
+) -> Vec<InspectorSectionConfig> {
     let mut out: Vec<InspectorSectionConfig> = Vec::new();
     for s in saved {
         if !out.iter().any(|o| o.id == s.id) {
             out.push(s);
         }
     }
-    for d in default_compact_sections() {
+    for d in defaults {
         if !out.iter().any(|o| o.id == d.id) {
             out.push(d);
         }
@@ -88,15 +137,28 @@ mod tests {
         Settings {
             tour_done: true,
             compact_sections: Some(saved.clone()),
+            ui_scale: 1.3,
+            shelf: vec![PathBuf::from("/photos/a.ARW")],
+            ..Default::default()
         }
         .save(Some(&dir));
         let loaded = Settings::load(Some(&dir));
         assert!(loaded.tour_done);
+        assert_eq!(loaded.ui_scale, 1.3);
+        assert_eq!(loaded.shelf, vec![PathBuf::from("/photos/a.ARW")]);
         let merged = merge_sections(loaded.compact_sections.unwrap());
         assert_eq!(merged[1].id, saved[1].id);
         assert_eq!(merged.last().unwrap().id, InspectorSectionId::Vignette);
         assert_eq!(merged.len(), InspectorSectionId::all().len());
         assert!(!Settings::load(None).tour_done);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_from_an_older_build_load_with_defaults_for_the_rest() {
+        let old: Settings = serde_json::from_str(r#"{"tour_done": true}"#).unwrap();
+        assert!(old.tour_done);
+        assert_eq!(old.ui_scale, 1.0);
+        assert!(old.shelf.is_empty());
     }
 }

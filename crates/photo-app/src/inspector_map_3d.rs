@@ -625,4 +625,3 @@ fn render_3d_surface(
         ));
     }
 }
-
