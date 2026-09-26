@@ -13,33 +13,37 @@ findings, and a few the audit agents found that did not make the report's summar
 tracked only by prose. Features are `F-xx` (alpha floor) and `W-xx` (worth considering).
 Refactors are `D-xx`.
 
-Each work package (WP) is sized as roughly one PR. Estimates are single-developer days and
-are deliberately rough.
+Each work package (WP) is sized as roughly one PR. The plan tracks tasks, not time: there
+are no estimates, only what is done and what is next.
+
+**Owner's direction (2026-09):** the repository is private and not yet open source. The
+goal is to finish the product first; release candidates and licensing are decided after.
+Licensing work (DEC-1, Phase 6's licence items) is **deferred**, not dropped. DEC-2 is
+**confirmed** as recommended. Keys, zooms, controls, local adjustments and spot heal are
+left to the implementer's judgement, so the recommendations for DEC-3 onwards are adopted.
 
 ---
 
 ## 1. Shape of the plan
 
-| Phase | Goal | Est. | Gate to leave the phase |
+| Phase | Goal | Status | Gate to leave the phase |
 |---|---|---|---|
-| **0** | Stop the bleeding | 3 d | No public binaries; no known crash from a bad file; X-Trans refused loudly |
-| **1** | Never lose work (includes **U-01**) | 7 d | Kill -9 / Android LMK / quit / photo switch never lose an edit; headless tests prove it |
-| **2** | Foundation: test harness + refactor | 10 d | Real-GPU pixel tests in CI; module registry; `Command` enum; `lib.rs` split |
-| **3** | Correct pixels | 9 d | Filmic, export geometry, banded export, NaN, preview≈export at every zoom — all under GPU tests |
-| **4** | Interaction, batch, design | 10 d | Batch and renamer correct; drags cancel; accessibility floor; layout parity |
-| **5** | Robustness, performance, platforms | 12 d | Fuzzed decoders; memory-bounded on a 4 GB phone; Windows/macOS built *and tested* |
-| **6** | Release engineering and licensing | 5 d | Licence notices; hardened CI signing; versioned and changelogged |
-| **7** | Alpha feature floor (F-01 … F-10) | 30 d | Feature checklist in [§9](#9-alpha-release-gate) |
+| **0** | Stop the bleeding | done | No public binaries; no known crash from a bad file; X-Trans refused loudly |
+| **1** | Never lose work (includes **U-01**) | done | Kill -9 / Android LMK / quit / photo switch never lose an edit; headless tests prove it |
+| **2** | Foundation: test harness + refactor | done | Real-GPU pixel tests in CI; module registry; `Command` enum; `lib.rs` split |
+| **3** | Correct pixels | done | Filmic, export geometry, banded export, NaN, preview≈export at every zoom — all under GPU tests |
+| **4** | Interaction, batch, design | done (recipe editor with F-02) | Batch and renamer correct; drags cancel; accessibility floor; layout parity |
+| **5** | Robustness, performance, platforms | next | Fuzzed decoders; memory-bounded on a 4 GB phone; Windows/macOS built *and tested* |
+| **6** | Release engineering and licensing | licensing deferred; CI hardening partly done | Licence notices; hardened CI signing; versioned and changelogged |
+| **7** | Alpha feature floor (F-01 … F-10) | in progress | Feature checklist in [§9](#9-alpha-release-gate) |
 | — | **Alpha release** | | [§9](#9-alpha-release-gate) all green |
-| **8** | Worth considering (W-01 … W-14) | 40 d+ | Post-alpha roadmap |
+| **8** | Worth considering (W-01 … W-14) | after alpha | Post-alpha roadmap |
 
 **Critical path:** 0 → 1 → 2 → 3 → 7.
 
 **Parallel tracks:**
 - Phase 6 can start any time after Phase 0.
 - Phases 4 and 5 can interleave with 3 once Phase 2's refactor has landed.
-
-About **86 dev-days to alpha** for one person, less with two tracks running at once.
 
 **Ordering rule:** the refactor (Phase 2) comes *before* the feature floor on purpose. Every
 new module today touches about nine parallel tables (audit §7). Local adjustments,
@@ -54,8 +58,8 @@ Each has a recommendation. The plan assumes the recommendation unless you say ot
 
 | # | Decision | Recommendation |
 |---|---|---|
-| **DEC-1** | **LGPL route** for rawler (B5) | **Ship with the source.** Duckfoot is itself open source, so LGPL-2.1 §6's relink requirement can be met by shipping the complete corresponding source. Attach `duckfoot-<ver>-source.tar.gz` (with `cargo vendor` output) to every release, include the LGPL text, and add a "Source & licences" entry in About. This takes a day, versus weeks for a C-ABI decoder `cdylib`. *Not legal advice — confirm with whoever advises you.* |
-| **DEC-2** | Where do sliders land on navigation (U-01)? | On the **incoming photo's own saved edits** if it has a sidecar, otherwise **defaults** plus the camera's orientation. Resetting a previously edited photo to defaults would look like data loss. If you literally want defaults every time, say so; it is a one-line change in WP1.2. |
+| **DEC-1** | **LGPL route** for rawler (B5) | **Deferred** by the owner until release candidates are chosen; the analysis stands. **Ship with the source.** Duckfoot is itself open source, so LGPL-2.1 §6's relink requirement can be met by shipping the complete corresponding source. Attach `duckfoot-<ver>-source.tar.gz` (with `cargo vendor` output) to every release, include the LGPL text, and add a "Source & licences" entry in About. This takes a day, versus weeks for a C-ABI decoder `cdylib`. *Not legal advice — confirm with whoever advises you.* |
+| **DEC-2** | Where do sliders land on navigation (U-01)? | **Confirmed by the owner, and shipped.** On the **incoming photo's own saved edits** if it has a sidecar, otherwise **defaults** plus the camera's orientation. Resetting a previously edited photo to defaults would look like data loss. If you literally want defaults every time, say so; it is a one-line change in WP1.2. |
 | **DEC-3** | Keys `0`–`5` (H5) | **Plain `0`–`5` = rating** (the Lightroom and darktable convention). **Cmd/Ctrl+`0` = fit, Cmd/Ctrl+`1` = 100%.** Fix the README and tooltips to match. |
 | **DEC-4** | Departures from the look-and-feel rules (M-32) | **Conform the code** for the look tiles' gradients, the glow ring, the permanent HUD pills, the decorative lime, and red for non-destructive warnings. **Amend DESIGN.md** for three things: the WB rail gradient (it is information, not decoration), clipping-overlay colours (F-06), and the tour, which becomes an opt-in "Show me around" chip instead of starting automatically. |
 | **DEC-5** | Do local adjustments (W-01) and spot heal (W-02) fit the thesis? | **Yes, as a fixed set:** at most 8 masks, three mask types, one fixed parameter block; heal as a list of spots. No layers, no blend modes, no mask arithmetic. This keeps the fixed-order, fused-pass design intact. |
@@ -181,7 +185,7 @@ one-click way to carry a look along a roll.
 Each WP lists its **items**, its **implementation** notes (files verified at `0ab2f42`), and
 its **done when** criteria. "Test" means an automated test lands in the same PR.
 
-### Phase 0 — Stop the bleeding (≈3 d)
+### Phase 0 — Stop the bleeding
 
 **WP0.1 Release visibility** — B4, L-28 (stray tag)
 - **Implementation:**
@@ -229,7 +233,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
   `lib.rs:~2628/2634` to "Cmd+1" / "Cmd+0". Fix README:162 and add the missing keys (P, X,
   U, 0–5, Z, Ctrl+A, Ctrl+Shift+E, Enter). WP4.8 later generates this table from code.
 
-### Phase 1 — Never lose work (≈7 d)
+### Phase 1 — Never lose work
 
 **WP1.1 `flush()` and autosave** — B1, M-01
 - **Implementation:**
@@ -334,7 +338,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
     exists, but Revert (back to the saved sidecar) is not.
   - A **Reset all** that is a checkpointed command.
 
-### Phase 2 — Foundation (≈10 d)
+### Phase 2 — Foundation
 
 **WP2.1 Real-GPU test harness** — test gap
 - **CI:** install `mesa-vulkan-drivers` (lavapipe) on `ubuntu-latest` and set
@@ -436,7 +440,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
   `ExportSettings` grows into F-02's option set.
 - **Test:** the same settings produce identical bytes from the single and batch paths.
 
-### Phase 3 — Correct pixels (≈9 d). Each WP lands with its GPU test from WP2.1.
+### Phase 3 — Correct pixels. Each WP lands with its GPU test from WP2.1.
 
 **WP3.1 Filmic transfer** — B9 (DEC-7)
 - **Implementation:**
@@ -529,7 +533,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
     without input.
 - **Test:** the last frame of a drag is always measured.
 
-### Phase 4 — Interaction, batch, design (≈10 d)
+### Phase 4 — Interaction, batch, design
 
 **WP4.1 Batch export correctness** — H2, H6, M-07, M-38, L-04 (DEC-6)
 - **Renamer:**
@@ -634,7 +638,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **On launch:** reopen the shelf. Missing files are shown greyed with "missing", not
   dropped. Reopen the last photo.
 
-### Phase 5 — Robustness, performance, platforms (≈12 d)
+### Phase 5 — Robustness, performance, platforms
 
 **WP5.1 Hostile input** — B6 (second part), L-12
 - **Size check first:** read the dimensions from rawler metadata before decoding pixels.
@@ -731,7 +735,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
   (default 4), skipping hidden and system folders. It is cancellable and shows progress,
   and runs on the loader thread (WP5.3).
 
-### Phase 6 — Release engineering and licensing (≈5 d, parallel)
+### Phase 6 — Release engineering and licensing (parallel)
 
 **WP6.1 Licence compliance** — B5 (DEC-1)
 - **Notices:** `cargo about generate` produces `THIRD_PARTY_LICENSES.html` in every
@@ -783,13 +787,13 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **DESIGN.md:** the §3 amendments.
 - **Code comments:** the uniform size (`engine.rs:66`) and the curve comment.
 
-### Phase 7 — Alpha feature floor (≈30 d)
+### Phase 7 — Alpha feature floor
 
 **F-01 Autosave and crash recovery.** Delivered by WP1.1: debounced autosave, flush on every
 lifecycle exit, and the unclean-exit notice. **Done when:** `kill -9` during an edit loses at
 most 1 s of work; Android LMK kills lose nothing that settled.
 
-**F-02 Export options, metadata, 16-bit** (≈6 d)
+**F-02 Export options, metadata, 16-bit**
 - **`ExportSettings`:**
   - **Format:** JPEG, PNG-8, PNG-16, TIFF-8, TIFF-16, WebP.
   - **Quality.**
@@ -820,7 +824,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** round-trip the EXIF fields through the `image` decoder; the ICC is present;
   16-bit TIFF preserves more than 256 levels; dither produces no mean shift.
 
-**F-03 Noise reduction** (≈6 d)
+**F-03 Noise reduction**
 - **Module "Denoise":** Luminance, Luminance detail, Chroma, Chroma smoothness. The default
   strength scales with ISO from the metadata (F-10).
 - **Chroma:** runs **inline in the fused pass**, as an edge-aware (bilateral) average of
@@ -833,7 +837,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** PSNR on a synthetic noisy flat field plus edge target improves by at least
   6 dB; the edge MTF50 drop is at most 10% at defaults; preview matches export (WP2.1).
 
-**F-04 Lens correction** (≈6 d; DEC-8)
+**F-04 Lens correction** (DEC-8)
 - **Module "Lens":**
   - **Profile:** automatic from EXIF `LensModel` against the bundled lensfun XML (parsed
     with `quick-xml`). It gives distortion (ptlens/poly3), TCA and vignetting. A manual
@@ -852,7 +856,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** a synthetic barrel-distorted grid is straightened to within 0.5 px RMS; a CA
   target is fixed to within 0.3 px; the lensfun parser has tests.
 
-**F-05 WB eyedropper, Auto WB, Auto tone** (≈4 d; DESIGN §3.2)
+**F-05 WB eyedropper, Auto WB, Auto tone** (DESIGN §3.2)
 - **Eyedropper:** click the stage and read back a 5×5 patch of the **sensor** (pre-WB
   camera RGB) at the inverse-mapped coordinate. Multipliers that neutralise it become a
   `Command::SetWb`. Hotkey `W`; a chip on phone.
@@ -868,14 +872,14 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** a grey card at 3200 K is neutralised within ΔE 2; auto tone on synthetic
   under- and over-exposures converges.
 
-**F-06 On-image clipping overlay** (≈1.5 d)
+**F-06 On-image clipping overlay**
 - **Implementation:** a preview-only uniform flag, like the split, so export never sees it.
   Pixels with any channel ≥ 1.0 after the chain show one colour and pixels ≤ 0 another
   (DEC-4 amends the semantic colours). Hotkey `J`; press-and-hold on the clip % badge; a
   toggle chip on phone.
 - **Test:** export with the flag set is byte-identical to export without it.
 
-**F-07 Crop handles and aspect lock** (≈3 d)
+**F-07 Crop handles and aspect lock**
 - **Handles:** 8 handles (edges and corners), move by dragging inside, and **rotate by
   dragging outside** (drives straighten).
 - **Aspect:** Original, 1:1, 4:5, 5:4, 3:2, 2:3, 16:9, 9:16, Free, Custom W:H. `X` swaps the
@@ -886,7 +890,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** the aspect is preserved while dragging corners; the crop is clamped inside the
   constrained region (F-04).
 
-**F-08 X-Trans and raster fidelity** (≈5 d)
+**F-08 X-Trans and raster fidelity**
 - **X-Trans:** a Markesteijn one-pass demosaic in WGSL, with the 6×6 CFA passed as a
   uniform array. It replaces WP0.3's refusal. Highlight reconstruction is reused.
 - **Raster (M-16):**
@@ -899,7 +903,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 
 **F-09 Session persistence.** Delivered by WP4.9.
 
-**F-10 Metadata panel** (≈2 d)
+**F-10 Metadata panel**
 - **`photo_engine::metadata::PhotoInfo`:** camera, lens, shutter, aperture, ISO, focal
   length (and 35 mm equivalent), date and time with offset, dimensions, file size, GPS (as
   text — no map, local-first), copyright and artist. It comes from rawler `Exif` for RAWs
@@ -910,7 +914,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Used by:** the renamer's `{date}` and `{camera}` (WP4.1), the ISO-scaled Denoise
   defaults (F-03), lens matching (F-04) and EXIF out (F-02).
 
-### Phase 8 — Worth considering, post-alpha (≈40 d+), in priority order
+### Phase 8 — Worth considering, post-alpha, in priority order
 
 | ID | Feature | Shape | Est. |
 |---|---|---|---|
