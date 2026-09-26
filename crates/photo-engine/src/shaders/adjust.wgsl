@@ -267,8 +267,12 @@ fn blurred(uv: vec2<f32>, level: f32) -> vec4<f32> {
 fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>) -> f32 {
     // Stops, floored so that noise in the deep shadows is not read as detail.
     let floor_y = 0.002;
-    // The coarsest the band can be pushed is the chain's last level; a band finer than the
-    // preview itself is invisible at this zoom and simply drops out.
+    // Clarity's bands are absolute levels (~4 px against ~32 px), the same at every zoom,
+    // so a reduced preview boosts what the export will. Texture's band — the pixel against
+    // ~4 px — is finer than a preview at fit can show; what the downscaled export keeps of
+    // it is a shift in each region's level that no mip records. The nearest thing the
+    // preview has is its own finest band, which measures closer to the export than
+    // dropping the band does (pinned by the GPU test `a_reduced_preview_shows_…`).
     let fine_level = max(2.0, lod + 1.0);
     let coarse_level = max(5.0, fine_level);
 
@@ -467,15 +471,19 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var s = textureSampleLevel(sensor, sensor_sampler, uv, lod);
 
     if (enabled(FLAG_SHARPEN)) {
-        // One texel of whichever level is being sampled, so a reduced preview sharpens at
-        // its own scale. That is an approximation of the export, and the only one.
+        // Sharpening is a one-pixel kernel at full resolution. A reduced preview has to
+        // show what that export looks like once shrunk to the screen — and a Laplacian
+        // averages to almost nothing under a shrink: the Laplacian of a level-L texel is
+        // 4^L times the average of the full-resolution ones under it. So it is taken at
+        // this level's scale and scaled back by 4^-L, which is exact at 1:1 and faithful
+        // at fit, where sharpening is correctly all but invisible.
         // All four channels: the neutral in `a` is part of the pixel's light too.
         let step = exp2(lod) / u.sizes.zw;
         let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), lod);
         let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), lod);
         let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), lod);
         let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod);
-        let laplacian = s * 4.0 - (s_up + s_dn + s_lf + s_rt);
+        let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
     }
 
