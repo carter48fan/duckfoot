@@ -1365,3 +1365,27 @@ fn the_shelf_and_the_open_photo_come_back_on_the_next_launch() {
     h.ctx.set_zoom_factor(1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn question_mark_shows_the_shortcuts_and_keys_wait_behind_it() {
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    let text = |t: &str| egui::RawInput {
+        events: vec![egui::Event::Text(t.into())],
+        ..Default::default()
+    };
+    h.frame(&mut app, text("?"));
+    assert!(app.shortcuts_open);
+    // Behind the sheet a shortcut does nothing but the sheet's own keys.
+    let split = app.split_active;
+    h.frame(&mut app, key(egui::Key::Backslash));
+    assert_eq!(app.split_active, split);
+    assert!(app.shortcuts_open);
+    h.frame(&mut app, key(egui::Key::Escape));
+    assert!(!app.shortcuts_open);
+    h.frame(&mut app, key(egui::Key::F1));
+    assert!(app.shortcuts_open);
+    h.frame(&mut app, text("?"));
+    assert!(!app.shortcuts_open);
+}

@@ -57,8 +57,9 @@ impl PhotoApp {
                         let ready = self.ready_image().is_some() && !busy;
                         let export = ui
                             .add_enabled_ui(ready, |ui| {
-                                widgets::button(ui, Kind::Primary, "Export", 84.0)
-                                    .on_hover_text("Write the full-resolution image as PNG or JPEG")
+                                widgets::button(ui, Kind::Primary, "Export", 84.0).on_hover_text(
+                                    "Write the full-resolution image: JPEG, PNG, TIFF or WebP",
+                                )
                             })
                             .inner;
                         if export.clicked() {
@@ -68,6 +69,11 @@ impl PhotoApp {
                             self.pick_and_open(ui.ctx());
                         }
                         ui.add_space(4.0);
+                        if widgets::icon(ui, "?", self.shortcuts_open, "Shortcuts (? or F1)")
+                            .clicked()
+                        {
+                            self.shortcuts_open = !self.shortcuts_open;
+                        }
 
                         // Right-to-left, so these read shelf · split · inspector on screen.
                         pod(ui, |ui| {

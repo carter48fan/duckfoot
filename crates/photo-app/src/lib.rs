@@ -20,6 +20,7 @@ mod desktop;
 mod export_flow;
 mod icons;
 mod inspector;
+mod keymap;
 mod keys;
 mod modules;
 mod parts;
@@ -443,6 +444,8 @@ pub struct PhotoApp {
     pub export_recipes: Vec<batch::ExportRecipe>,
     pub export_queue: Option<batch::ExportQueue>,
     pub batch_dialog_open: bool,
+    /// The `?` sheet of every shortcut.
+    pub shortcuts_open: bool,
     pub batch_output_dir: Option<PathBuf>,
     pub color_eq_tab: ColorEqTab,
     /// File pickers and storage locations, supplied by the bootstrap.
@@ -587,6 +590,7 @@ impl PhotoApp {
                 gpu.queue.clone(),
             )),
             batch_dialog_open: false,
+            shortcuts_open: false,
             batch_output_dir: None,
             color_eq_tab: ColorEqTab::default(),
             platform,
@@ -945,6 +949,7 @@ impl PhotoApp {
             self.stage_toolbar(ui);
             self.workspace(ui);
             self.batch_export_dialog(ui);
+            self.shortcuts_overlay(&ctx);
         }
         if let Some(dir) = self.pending_step.take() {
             self.step_photo(gpu, dir);
