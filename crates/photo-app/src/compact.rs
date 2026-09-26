@@ -133,6 +133,9 @@ impl Layout {
 }
 
 const NAV_BAR: f32 = 48.0;
+/// Height of the top bar. Fixed, so everything in it can be centred on one line: a row
+/// that grows as its items arrive centres the early ones on the height it had so far.
+const TOP_BAR: f32 = 40.0;
 const NAV_RAIL: f32 = 56.0;
 /// Height of the Edit sheet's module strip.
 const STRIP_H: f32 = 34.0;
@@ -267,8 +270,8 @@ impl PhotoApp {
         }
     }
 
-    /// The photo's name, then what is wanted from any tab: zoom, fine adjust, reset,
-    /// a / b, undo and redo. Returns where it was drawn.
+    /// The mark and the photo's name, then what is wanted from any tab: zoom, fine
+    /// adjust, reset, a / b, undo and redo. Returns where it was drawn.
     fn compact_top_bar(&mut self, ui: &mut egui::Ui) -> Rect {
         egui::Panel::top("compact_top")
             .frame(
@@ -276,16 +279,29 @@ impl PhotoApp {
                     .fill(theme::BG_950)
                     .inner_margin(Margin::symmetric(10, 0)),
             )
+            .resizable(false)
+            .exact_size(TOP_BAR)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // The whole bar's height up front, so every item is centred on it.
+                let row = ui.available_rect_before_wrap();
+                let line = egui::UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center));
+                ui.scope_builder(line, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    widgets::brand_mark(ui, 18.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // Right to left: redo, undo, a / b, reset, fine, zoom read left to
-                        // right.
+                        // right. The icons are painted rather than taken from the fallback
+                        // font, whose arrows and squares each come at their own size and
+                        // height.
                         let can_redo = !self.history.future.is_empty();
                         let can_undo = !self.history.past.is_empty();
                         if ui
-                            .add_enabled_ui(can_redo, |ui| widgets::icon(ui, "↷", false, "Redo"))
+                            .add_enabled_ui(can_redo, |ui| {
+                                bar_icon(ui, BarIcon::Redo, false, "Redo")
+                            })
                             .inner
                             .clicked()
                             && self.history.redo(&mut self.stack)
@@ -293,7 +309,9 @@ impl PhotoApp {
                             self.needs_render = true;
                         }
                         if ui
-                            .add_enabled_ui(can_undo, |ui| widgets::icon(ui, "↶", false, "Undo"))
+                            .add_enabled_ui(can_undo, |ui| {
+                                bar_icon(ui, BarIcon::Undo, false, "Undo")
+                            })
                             .inner
                             .clicked()
                             && self.history.undo(&mut self.stack)
@@ -302,7 +320,7 @@ impl PhotoApp {
                         }
                         let loaded = self.engine.image().is_some();
                         ui.add_enabled_ui(loaded, |ui| {
-                            if widgets::icon(ui, "◫", self.split_active, "Before / after split")
+                            if bar_icon(ui, BarIcon::Split, self.split_active, "Before / after")
                                 .clicked()
                             {
                                 self.split_active = !self.split_active;
@@ -310,7 +328,9 @@ impl PhotoApp {
                             }
                         });
                         ui.add_enabled_ui(loaded && self.is_stack_edited(), |ui| {
-                            if widgets::icon(ui, "⟲", false, "Reset every adjustment").clicked() {
+                            if bar_icon(ui, BarIcon::Reset, false, "Reset every adjustment")
+                                .clicked()
+                            {
                                 self.reset_to_default();
                             }
                         });
@@ -1417,6 +1437,81 @@ const TOUR: [TourStep; 6] = [
         tab: None,
     },
 ];
+
+/// The top bar's icons.
+#[derive(Clone, Copy)]
+enum BarIcon {
+    Undo,
+    Redo,
+    Split,
+    Reset,
+}
+
+/// A top-bar icon: painted strokes in a 32 × 32 target, all one size and centred on the
+/// bar's line, as the font's glyphs are not.
+fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::Response {
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    let hovered = enabled && response.hovered();
+    let colour = match (enabled, active, hovered) {
+        (false, ..) => theme::TEXT_FAINT,
+        (true, true, _) => theme::ACCENT,
+        (true, false, true) => theme::TEXT_HI,
+        (true, false, false) => Color32::from_gray(0xcc),
+    };
+    let painter = ui.painter();
+    if hovered || active {
+        painter.rect_filled(rect, 3, theme::BG_850);
+    }
+    let c = rect.center();
+    let stroke = Stroke::new(1.6, colour);
+    match icon {
+        // A hook over the top, arrowhead down at the end it turns back to.
+        BarIcon::Undo => arc_arrow(painter, c + vec2(0.0, 1.5), 5.5, 30.0, -180.0, stroke),
+        BarIcon::Redo => arc_arrow(painter, c + vec2(0.0, 1.5), 5.5, 150.0, 360.0, stroke),
+        // Most of a circle, turning back on itself.
+        BarIcon::Reset => arc_arrow(painter, c, 6.0, 200.0, -95.0, stroke),
+        // Before | after.
+        BarIcon::Split => {
+            let frame = Rect::from_center_size(c, vec2(15.0, 12.0));
+            painter.rect_stroke(frame, 1.5, stroke, egui::StrokeKind::Middle);
+            painter.vline(c.x, frame.y_range(), stroke);
+            let left = Rect::from_min_max(frame.min, pos2(c.x, frame.max.y)).shrink(2.0);
+            painter.rect_filled(left, 0.5, colour.gamma_multiply(0.45));
+        }
+    }
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.on_hover_text(tip)
+}
+
+/// An arc about `c` from `from` to `to` degrees (screen angles: 0 is right, 90 down),
+/// with an arrowhead at `to` pointing the way the arc runs.
+fn arc_arrow(painter: &Painter, c: egui::Pos2, r: f32, from: f32, to: f32, stroke: Stroke) {
+    let at = |deg: f32| {
+        let a = deg.to_radians();
+        c + vec2(a.cos(), a.sin()) * r
+    };
+    let steps = 24;
+    let points: Vec<egui::Pos2> = (0..=steps)
+        .map(|i| at(from + (to - from) * i as f32 / steps as f32))
+        .collect();
+    let end = at(to);
+    let dir = (end - at(to - (to - from).signum() * 8.0)).normalized();
+    let perp = vec2(-dir.y, dir.x);
+    let tip = end + dir * 2.0;
+    painter.add(egui::Shape::line(points, stroke));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            tip,
+            tip - dir * 4.5 + perp * 3.2,
+            tip - dir * 4.5 - perp * 3.2,
+        ],
+        stroke.color,
+        Stroke::NONE,
+    ));
+}
 
 /// A sideways flick across `rect` that no control under it claimed: `+1` for a flick
 /// towards the start (left, or up when `vertical`), meaning "next", `-1` the other way.
