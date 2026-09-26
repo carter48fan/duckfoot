@@ -72,6 +72,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Ctrl+C` / `Ctrl+V`",
         "copy / paste the adjustments (crop and rotation stay put)",
     ),
+    s(
+        Editing,
+        "`Ctrl+Alt+V`",
+        "the same edits as the photo open before this one",
+    ),
     s(Editing, "`C`", "crop tool on / off"),
     s(Editing, "`Enter` / `Esc`", "apply / cancel the crop"),
     s(Editing, "`[` / `]`", "rotate 90° left / right"),

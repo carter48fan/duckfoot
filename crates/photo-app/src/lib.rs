@@ -301,8 +301,9 @@ impl History {
 /// What a notice's Undo button takes back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoticeAction {
-    UndoPasteToAll,
-    UndoRemove,
+    PasteToAll,
+    Remove,
+    DeleteSnapshot,
 }
 
 /// Where the current edit stands relative to the sidecar on disk.
@@ -446,6 +447,14 @@ pub struct PhotoApp {
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
+    /// The photo open before this one, for "Same as previous".
+    pub(crate) previous_photo: Option<PathBuf>,
+    /// The snapshot last deleted, the photo it belonged to and where it stood.
+    pub(crate) deleted_snapshot: Option<(PathBuf, usize, (String, PhotoStack))>,
+    /// Which list the phone's Presets sheet shows.
+    pub(crate) presets_view: compact::PresetsView,
+    /// The desktop inspector's Looks band is open.
+    pub looks_open: bool,
     pub batch_output_dir: Option<PathBuf>,
     pub color_eq_tab: ColorEqTab,
     /// File pickers and storage locations, supplied by the bootstrap.
@@ -591,6 +600,10 @@ impl PhotoApp {
             )),
             batch_dialog_open: false,
             shortcuts_open: false,
+            previous_photo: None,
+            deleted_snapshot: None,
+            presets_view: compact::PresetsView::default(),
+            looks_open: false,
             batch_output_dir: None,
             color_eq_tab: ColorEqTab::default(),
             platform,
@@ -812,8 +825,9 @@ impl PhotoApp {
 
     pub(crate) fn run_notice_action(&mut self, action: NoticeAction) {
         match action {
-            NoticeAction::UndoPasteToAll => self.undo_paste_to_all(),
-            NoticeAction::UndoRemove => self.undo_remove_from_shelf(),
+            NoticeAction::PasteToAll => self.undo_paste_to_all(),
+            NoticeAction::Remove => self.undo_remove_from_shelf(),
+            NoticeAction::DeleteSnapshot => self.undo_delete_snapshot(),
         }
     }
 

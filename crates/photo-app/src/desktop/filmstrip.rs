@@ -515,7 +515,7 @@ impl PhotoApp {
         }
     }
 
-    /// Undo · Redo | Reset all · Copy stack · Paste · Paste to all. `right_to_left` callers
+    /// Undo · Redo | Reset all · Copy stack · Paste · Previous · Paste to all. `right_to_left` callers
     /// get them reversed, so they read the same way on screen either way.
     pub(crate) fn filmstrip_actions(&mut self, ui: &mut egui::Ui, right_to_left: bool) {
         #[derive(Clone, Copy)]
@@ -526,6 +526,7 @@ impl PhotoApp {
             Reset,
             Copy,
             Paste,
+            Previous,
             PasteAll,
         }
         let mut order = [
@@ -535,6 +536,7 @@ impl PhotoApp {
             Action::Reset,
             Action::Copy,
             Action::Paste,
+            Action::Previous,
             Action::PasteAll,
         ];
         if right_to_left {
@@ -598,6 +600,23 @@ impl PhotoApp {
                         .clicked()
                     {
                         self.paste_adjustments();
+                    }
+                }
+                Action::Previous => {
+                    if button(
+                        ui,
+                        self.can_same_as_previous(),
+                        Kind::Secondary,
+                        "Previous",
+                        0.0,
+                    )
+                    .on_hover_text(
+                        "The same edits as the photo open before this one; crop and \
+                             rotation stay (Ctrl+Alt+V)",
+                    )
+                    .clicked()
+                    {
+                        self.same_as_previous();
                     }
                 }
                 Action::PasteAll if self.can_undo_paste_to_all() => {

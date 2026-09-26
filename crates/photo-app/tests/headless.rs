@@ -945,7 +945,8 @@ fn phone_swipes_presets_and_tour() {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     let sheet_top = app.sheet_rect().top();
-    let row = sheet_top + 8.0 + 24.0;
+    // Under the looks / snapshots / history chips.
+    let row = sheet_top + 8.0 + 34.0 + 24.0;
     let before = app.stack().clone();
     tap(&h, &mut app, PORTRAIT, egui::pos2(12.0 + 78.0 + 36.0, row));
     assert!(app.stack().vibrance.enabled, "vivid turns vibrance on");
@@ -963,7 +964,7 @@ fn phone_swipes_presets_and_tour() {
         &h,
         &mut app,
         PORTRAIT,
-        egui::pos2(48.0, sheet_top + 8.0 + 24.0),
+        egui::pos2(48.0, sheet_top + 8.0 + 34.0 + 24.0),
     );
     assert_eq!(app.stack(), &before, "original takes the look back off");
 
@@ -1388,4 +1389,74 @@ fn question_mark_shows_the_shortcuts_and_keys_wait_behind_it() {
     assert!(app.shortcuts_open);
     h.frame(&mut app, text("?"));
     assert!(!app.shortcuts_open);
+}
+
+#[test]
+fn same_as_previous_carries_the_last_photos_look_but_not_its_framing() {
+    let dir = scratch_dir("previous");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(
+        !app.can_same_as_previous(),
+        "the first photo has no previous"
+    );
+
+    app.edit(|s| {
+        s.exposure.params.ev = 0.7;
+        s.geometry.rotate_right();
+    });
+    app.open_path(&h.gpu(), b.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    let framing = app.stack().geometry;
+    app.same_as_previous();
+    assert_eq!(app.stack().exposure.params.ev, 0.7);
+    assert_eq!(app.stack().geometry, framing, "B keeps its own rotation");
+    assert!(app.undo(), "one undo step");
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_deleted_snapshot_comes_back_from_the_notice() {
+    let dir = scratch_dir("snapdelete");
+    let a = dir.join("a.dng");
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.take_snapshot("one");
+    app.edit(|s| s.exposure.params.ev = 0.3);
+    app.take_snapshot("two");
+    app.delete_snapshot(0);
+    assert_eq!(app.snapshots.len(), 1);
+    assert_eq!(
+        photo_engine::load_sidecar_full(&a)
+            .unwrap()
+            .unwrap()
+            .snapshots
+            .len(),
+        1
+    );
+    app.undo_delete_snapshot();
+    let names: Vec<&str> = app.snapshots.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["one", "two"], "back where it was");
+    assert_eq!(
+        photo_engine::load_sidecar_full(&a)
+            .unwrap()
+            .unwrap()
+            .snapshots
+            .len(),
+        2
+    );
+    app.recall_snapshot(0);
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
