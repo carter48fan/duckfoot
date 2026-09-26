@@ -278,20 +278,12 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
     if !cfa.is_valid() {
         bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
     }
-    let cfa2x2 = [
-        cfa.color_at(0, 0) as u32,
-        cfa.color_at(0, 1) as u32,
-        cfa.color_at(1, 0) as u32,
-        cfa.color_at(1, 1) as u32,
-    ];
-    if cfa2x2.iter().any(|c| *c > 2) {
-        bail!(
-            "{} {}: CFA pattern '{}' has a fourth colour — not supported yet (@stub)",
-            raw.make,
-            raw.model,
-            cfa.to_string()
-        );
-    }
+    let cfa2x2 = bayer_tile(
+        (cfa.width, cfa.height),
+        |row, col| cfa.color_at(row, col),
+        &cfa.to_string(),
+        (&raw.make, &raw.model),
+    )?;
 
     let mut black = [0.0f32; 4];
     let mut white = [65535.0f32; 4];
@@ -488,19 +480,12 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
     }
     let cfa = raw_cfa.shift(cl, ct);
-    let cfa2x2 = [
-        cfa.color_at(0, 0) as u32,
-        cfa.color_at(0, 1) as u32,
-        cfa.color_at(1, 0) as u32,
-        cfa.color_at(1, 1) as u32,
-    ];
-    if cfa2x2.iter().any(|c| *c > 2) {
-        bail!(
-            "{} {}: CFA pattern '{cfa}' has a fourth colour — not supported yet (@stub)",
-            raw.make,
-            raw.model
-        );
-    }
+    let cfa2x2 = bayer_tile(
+        (cfa.width, cfa.height),
+        |row, col| cfa.color_at(row, col),
+        &cfa.to_string(),
+        (&raw.make, &raw.model),
+    )?;
 
     // rawler gives black per 2×2 *position* (hence the shift); the shader wants it per
     // colour. White is per component, so every position of a mosaic already agrees.
@@ -553,6 +538,41 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         },
         wb_missing,
     })
+}
+
+/// The CFA as the 2×2 Bayer tile the demosaic shaders index, in `CfaImage::cfa2x2` order.
+///
+/// The shaders only know a 2×2 repeat, so anything else is refused here rather than
+/// demosaiced wrongly. Fuji's X-Trans is 6×6: taking its top-left 2×2 as if it were Bayer
+/// opened every modern RAF with maze artefacts and the wrong colour, and no error at all.
+/// A larger pattern that does repeat every 2×2 (some files spell Bayer as 2×8) is fine.
+fn bayer_tile(
+    (width, height): (usize, usize),
+    colour_at: impl Fn(usize, usize) -> usize,
+    name: &str,
+    (make, model): (&str, &str),
+) -> Result<[u32; 4]> {
+    let periodic = width % 2 == 0
+        && height % 2 == 0
+        && (0..height).all(|r| (0..width).all(|c| colour_at(r, c) == colour_at(r % 2, c % 2)));
+    if !periodic {
+        if (width, height) == (6, 6) {
+            bail!("{make} {model}: X-Trans sensor — not supported yet (@stub)");
+        }
+        bail!("{make} {model}: {width}×{height} CFA pattern '{name}' — not supported yet (@stub)");
+    }
+    let tile = [
+        colour_at(0, 0) as u32,
+        colour_at(0, 1) as u32,
+        colour_at(1, 0) as u32,
+        colour_at(1, 1) as u32,
+    ];
+    if tile.iter().any(|c| *c > 2) {
+        bail!(
+            "{make} {model}: CFA pattern '{name}' has a fourth colour — not supported yet (@stub)"
+        );
+    }
+    Ok(tile)
 }
 
 /// Per-position values of a 2×2 block as per-colour ones, in the `CfaImage::black` layout.
@@ -1221,6 +1241,65 @@ mod tests {
         let black = by_colour([2047.0, 2049.0, 2051.0, 2045.0], &[1, 2, 0, 1]);
         assert_eq!(black, [2051.0, 2046.0, 2049.0, 2046.0]);
         assert_eq!(by_colour([512.0; 4], &RGGB), [512.0; 4]);
+    }
+
+    /// The Fuji X-T2's X-Trans layout, as rawloader's camera table records it.
+    const XTRANS: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
+
+    fn rawloader_tile(pattern: &str, shift: (usize, usize)) -> Result<[u32; 4]> {
+        let cfa = rawloader::CFA::new(pattern).shift(shift.0, shift.1);
+        bayer_tile(
+            (cfa.width, cfa.height),
+            |r, c| cfa.color_at(r, c),
+            &cfa.to_string(),
+            ("FUJIFILM", "X-T2"),
+        )
+    }
+
+    fn rawler_tile(pattern: &str, shift: (usize, usize)) -> Result<[u32; 4]> {
+        let cfa = rawler::CFA::new(pattern).shift(shift.0, shift.1);
+        bayer_tile(
+            (cfa.width, cfa.height),
+            |r, c| cfa.color_at(r, c),
+            &cfa.to_string(),
+            ("FUJIFILM", "X-T2"),
+        )
+    }
+
+    #[test]
+    fn an_xtrans_pattern_is_refused_by_both_decoders() {
+        // Every phase of it, since a crop can land the 6×6 tile anywhere: its top-left 2×2
+        // is a plausible Bayer tile at some offsets, which is how it used to slip through.
+        for shift in [(0, 0), (1, 0), (0, 1), (3, 2), (5, 5)] {
+            for tile in [rawloader_tile(XTRANS, shift), rawler_tile(XTRANS, shift)] {
+                let err = tile.expect_err("an X-Trans CFA was accepted as Bayer");
+                assert_eq!(
+                    err.to_string(),
+                    "FUJIFILM X-T2: X-Trans sensor — not supported yet (@stub)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bayer_patterns_pass_with_their_phase() {
+        assert_eq!(rawloader_tile("RGGB", (0, 0)).unwrap(), RGGB);
+        assert_eq!(rawler_tile("RGGB", (0, 0)).unwrap(), RGGB);
+        // An odd crop offset on both axes turns RGGB into BGGR.
+        assert_eq!(rawloader_tile("RGGB", (1, 1)).unwrap(), [2, 1, 1, 0]);
+        assert_eq!(rawler_tile("RGGB", (1, 1)).unwrap(), [2, 1, 1, 0]);
+        // Bayer spelled as a 2×8 repeat is still Bayer.
+        assert_eq!(rawler_tile("RGGBRGGBRGGBRGGB", (0, 0)).unwrap(), RGGB);
+    }
+
+    #[test]
+    fn other_unsupported_patterns_say_what_they_are() {
+        // Not 2×2-periodic, and not X-Trans either.
+        let err = rawler_tile("RGGBGRBGRGGBRGGB", (0, 0)).unwrap_err();
+        assert!(err.to_string().contains("2×8 CFA pattern"), "{err}");
+        // A fourth colour (RGBE) still has its own refusal.
+        let err = rawler_tile("RGEB", (0, 0)).unwrap_err();
+        assert!(err.to_string().contains("fourth colour"), "{err}");
     }
 
     #[test]

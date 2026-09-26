@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{Crop, Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{Engine, PhotoStack, RawDecoder, RawloaderBackend};
 
 /// Read back a square from the middle of the image. 256 px keeps `bytes_per_row` at
 /// 1024 — already a multiple of wgpu's 256-byte copy alignment, so no padding dance.
@@ -196,7 +196,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- export the full frame and read it back off disk --------------------------------
     let t = Instant::now();
-    let exported = engine.export(&device, &queue, &stack, Crop::default())?;
+    let exported = engine.export(&device, &queue, &stack)?;
     println!(
         "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -323,7 +323,7 @@ fn main() -> anyhow::Result<()> {
     engine.load(&device, &queue, clipped)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let blown = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+    let blown = engine.export(&device, &queue, &PhotoStack::default())?;
     // Sample away from the border so the demosaic has full neighbourhoods.
     let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
     let px = &blown.rgba[mid..mid + 3];
@@ -372,7 +372,7 @@ fn main() -> anyhow::Result<()> {
     engine.load(&device, &queue, stripes)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let out = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+    let out = engine.export(&device, &queue, &PhotoStack::default())?;
 
     // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
     let mut worst = 0i32;
@@ -434,7 +434,7 @@ fn main() -> anyhow::Result<()> {
     }
     let hist = engine.histogram().clone();
     let expected = {
-        let flat_px = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+        let flat_px = engine.export(&device, &queue, &PhotoStack::default())?;
         flat_px.rgba[1] as usize
     };
     let populated: Vec<usize> = hist

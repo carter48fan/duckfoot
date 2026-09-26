@@ -81,8 +81,9 @@ pub struct Filmic {
     ///
     /// The shader divides the normalised log position by `latitude / 100`, so this is the
     /// sigmoid's softness: small values give a steep S-curve, large values flatten it.
-    /// Anything much above ~60 compresses the whole image toward mid grey — at 200 the
-    /// output spanned only 0.43..0.57 and every photograph came out as a flat slab.
+    /// The curve is renormalised so `black_ev` always lands on black, `white_ev` on white
+    /// and 0.18 on mid grey (adjust.wgsl `filmic_curve`), so a large latitude flattens the
+    /// S toward a plain log curve rather than squeezing the picture into grey.
     pub latitude: f32,
     pub contrast: f32,
 }
