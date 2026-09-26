@@ -3,15 +3,16 @@
 //! sheet is built from the same pieces the desktop's panels are — only arranged for a
 //! small, touch-driven screen.
 //!
-//! Upright, the bar runs along the bottom and the sheet rises above it. Turned sideways
+//! Upright, the bar runs along the bottom and the sheet rises above it, only as tall as
+//! what it holds. Turned sideways
 //! there is little height to spare, so the bar becomes a rail down the right edge and the
 //! sheet opens beside it. Tapping the open tab again closes the sheet and gives the stage
 //! the whole screen.
 //!
 //! | Tab | Holds |
 //! |---|---|
-//! | Library | open / add / import a folder, the roll's thumbnails, the current photo's rating and flag; select mode, filters and the folder tree are one chip away |
-//! | Edit | rotate, crop, fine adjust, a scroller of the modules, and the chosen module's controls — one group at a time |
+//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, filters and select mode |
+//! | Edit | the chosen module's controls over a one-line strip: turn, every module by name, fine adjust, reset, choose modules |
 //! | Export | the single export and batch export |
 //!
 //! Opening a photo from a picker goes straight to Edit: on a phone the photo is the point,
@@ -83,8 +84,10 @@ impl Layout {
     }
 }
 
-const NAV_BAR: f32 = 60.0;
-const NAV_RAIL: f32 = 68.0;
+const NAV_BAR: f32 = 48.0;
+const NAV_RAIL: f32 = 56.0;
+/// Height of the Edit sheet's module strip.
+const STRIP_H: f32 = 34.0;
 
 impl PhotoApp {
     pub(crate) fn compact_layout(&mut self, ui: &mut egui::Ui, gpu: &Gpu, screen: egui::Vec2) {
@@ -96,7 +99,7 @@ impl PhotoApp {
         self.compact_top_bar(ui);
         if landscape {
             egui::Panel::right("compact_nav")
-                .frame(frame(Margin::symmetric(0, 6)).fill(theme::BG_925))
+                .frame(frame(Margin::symmetric(0, 4)).fill(theme::BG_925))
                 .resizable(false)
                 .exact_size(NAV_RAIL)
                 .show(ui, |ui| self.compact_nav(ui, true));
@@ -110,9 +113,9 @@ impl PhotoApp {
         if let Some(tab) = self.compact_tab {
             let sheet = frame(Margin::same(0));
             if landscape {
-                let default_w = (screen.x * 0.42).clamp(300.0, 440.0);
-                let min_w = 280.0;
-                let max_w = (screen.x * 0.75).clamp(420.0, 680.0);
+                let default_w = (screen.x * 0.38).clamp(280.0, 400.0);
+                let min_w = 260.0;
+                let max_w = (screen.x * 0.7).clamp(400.0, 640.0);
                 let w = self
                     .compact_sheet_width
                     .unwrap_or(default_w)
@@ -122,25 +125,34 @@ impl PhotoApp {
                     .resizable(false)
                     .exact_size(w)
                     .show(ui, |ui| {
-                        self.compact_sheet_handle(ui, true, default_w, min_w, max_w);
-                        self.compact_sheet(ui, gpu, tab);
+                        self.compact_sheet_handle(ui, default_w, min_w, max_w);
+                        let cap = ui.available_height();
+                        self.compact_sheet(ui, gpu, tab, cap);
                     });
             } else {
-                let default_h = (screen.y * 0.42).clamp(300.0, 520.0);
-                let min_h = (screen.y * 0.24).clamp(180.0, 280.0);
-                let max_h = (screen.y * 0.82).clamp(480.0, 750.0);
+                // Only as tall as what it holds, and never taller than this: the photo is
+                // the subject, and keeps the rest of the screen. What it holds is measured
+                // as it is laid out, so the height follows it a frame behind.
+                let cap = (screen.y * 0.45).clamp(200.0, 480.0);
+                // A couple of points' slack for the panel's own hairline and rounding, so
+                // content that fits never shows a scroll bar.
                 let h = self
-                    .compact_sheet_height
-                    .unwrap_or(default_h)
-                    .clamp(min_h, max_h);
-                egui::Panel::bottom("compact_sheet")
+                    .compact_sheet_fit
+                    .map_or(cap, |fit| fit + 2.0)
+                    .clamp(40.0, cap);
+                let wanted = egui::Panel::bottom("compact_sheet")
                     .frame(sheet)
                     .resizable(false)
                     .exact_size(h)
-                    .show(ui, |ui| {
-                        self.compact_sheet_handle(ui, false, default_h, min_h, max_h);
-                        self.compact_sheet(ui, gpu, tab);
-                    });
+                    .show(ui, |ui| self.compact_sheet(ui, gpu, tab, cap))
+                    .inner;
+                if self
+                    .compact_sheet_fit
+                    .is_none_or(|fit| (fit - wanted).abs() > 0.5)
+                {
+                    self.compact_sheet_fit = Some(wanted);
+                    ui.ctx().request_repaint();
+                }
             }
         }
         self.compact_status(ui);
@@ -148,51 +160,39 @@ impl PhotoApp {
         self.batch_export_dialog(ui);
     }
 
-    /// Touch-friendly drawer grab handle at the top of the compact sheet.
-    /// Dragging resizes the sheet; double-tapping resets to default size.
+    /// A thin grip down the side sheet's inner edge: drag to widen or narrow the sheet,
+    /// double-tap to put it back. Upright, the sheet sizes itself to what it holds.
     fn compact_sheet_handle(
         &mut self,
         ui: &mut egui::Ui,
-        landscape: bool,
         default_size: f32,
         min_size: f32,
         max_size: f32,
     ) {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::click_and_drag());
+        let panel = ui.max_rect();
+        let rect = Rect::from_min_max(panel.left_top(), pos2(panel.left() + 12.0, panel.bottom()));
+        let response = ui.interact(rect, ui.id().with("sheet_grip"), Sense::click_and_drag());
         let hot = response.hovered() || response.dragged();
-        let pill = Rect::from_center_size(rect.center(), vec2(36.0, 4.0));
+        let pill =
+            Rect::from_center_size(pos2(rect.left() + 4.0, rect.center().y), vec2(3.0, 32.0));
         ui.painter().rect_filled(
             pill,
-            2.0,
+            1.5,
             if hot {
                 theme::TEXT_HI
             } else {
-                Color32::from_gray(0x44)
+                Color32::from_gray(0x33)
             },
         );
-        if landscape {
-            if hot {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-            }
-            if response.dragged() {
-                let dx = response.drag_delta().x;
-                let current = self.compact_sheet_width.unwrap_or(default_size);
-                self.compact_sheet_width = Some((current - dx).clamp(min_size, max_size));
-            } else if response.double_clicked() {
-                self.compact_sheet_width = None;
-            }
-        } else {
-            if hot {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
-            }
-            if response.dragged() {
-                let dy = response.drag_delta().y;
-                let current = self.compact_sheet_height.unwrap_or(default_size);
-                self.compact_sheet_height = Some((current - dy).clamp(min_size, max_size));
-            } else if response.double_clicked() {
-                self.compact_sheet_height = None;
-            }
+        if hot {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        if response.dragged() {
+            let dx = response.drag_delta().x;
+            let current = self.compact_sheet_width.unwrap_or(default_size);
+            self.compact_sheet_width = Some((current - dx).clamp(min_size, max_size));
+        } else if response.double_clicked() {
+            self.compact_sheet_width = None;
         }
     }
 
@@ -203,11 +203,11 @@ impl PhotoApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(10, 4)),
+                    .inner_margin(Margin::symmetric(10, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    widgets::brand_mark(ui, 22.0);
+                    widgets::brand_mark(ui, 16.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // Right to left: redo, undo, a / b, zoom read left to right.
@@ -305,20 +305,20 @@ impl PhotoApp {
                 let bar = if vertical {
                     Rect::from_center_size(
                         pos2(cell.left() + 1.5, cell.center().y),
-                        vec2(3.0, 28.0),
+                        vec2(2.0, 24.0),
                     )
                 } else {
-                    Rect::from_center_size(pos2(cell.center().x, cell.top() + 1.5), vec2(28.0, 3.0))
+                    Rect::from_center_size(pos2(cell.center().x, cell.top() + 1.0), vec2(24.0, 2.0))
                 };
                 painter.rect_filled(bar, 1.5, theme::ACCENT);
             }
-            let icon_centre = pos2(cell.center().x, cell.center().y - 8.0);
+            let icon_centre = pos2(cell.center().x, cell.center().y - 6.0);
             paint_tab_icon(painter, icon_centre, tab, colour);
             painter.text(
-                pos2(cell.center().x, cell.center().y + 14.0),
+                pos2(cell.center().x, cell.center().y + 13.0),
                 Align2::CENTER_CENTER,
                 tab.label().to_uppercase(),
-                FontId::new(9.5, theme::mono_bold()),
+                FontId::new(8.5, theme::mono_bold()),
                 colour,
             );
             if response.clicked() {
@@ -328,51 +328,51 @@ impl PhotoApp {
         ui.allocate_rect(area, Sense::hover());
     }
 
-    fn compact_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu, tab: Tab) {
-        // Edit keeps its module scroller pinned and scrolls only the controls under it;
-        // every other sheet scrolls as a whole.
+    /// `cap` is the most height the sheet may take; it takes less when it holds less.
+    /// Returns the height its content wants, scrolled parts included in full.
+    fn compact_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu, tab: Tab, cap: f32) -> f32 {
+        // Edit keeps its module strip pinned and scrolls only the controls over it; every
+        // other sheet scrolls as a whole.
         if tab == Tab::Edit {
-            self.edit_sheet(ui);
-            return;
+            return self.edit_sheet(ui, cap);
         }
         egui::ScrollArea::vertical()
             .id_salt(("compact_sheet", tab.label()))
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
+            .max_height(cap)
             .scroll_source(ScrollSource {
                 drag: DragScroll::Always,
                 ..Default::default()
             })
             .show(ui, |ui| {
                 egui::Frame::new()
-                    .inner_margin(Margin::symmetric(12, 10))
+                    .inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 8.0;
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         match tab {
                             Tab::Library => self.library_sheet(ui, gpu),
                             Tab::Export => self.export_sheet(ui),
                             Tab::Edit => unreachable!("handled above"),
                         }
                     });
-            });
+            })
+            .content_size
+            .y
     }
 
     // ── Library ─────────────────────────────────────────────────────────────────────────
 
+    /// The roll, then one row of actions under it. Filters, select mode and the folder
+    /// tree are chips in that row, and take room only while they are on.
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if widgets::button(ui, Kind::Primary, "Open…", 0.0).clicked() {
-                self.pick_and_open(ui.ctx());
-            }
-            if widgets::button(ui, Kind::Secondary, "+ Add", 0.0).clicked() {
-                self.pick_and_shelve(ui.ctx());
-            }
-            if widgets::button(ui, Kind::Secondary, "Folder…", 0.0).clicked() {
-                self.request(ui.ctx(), crate::platform::Request::BrowseFolder);
-            }
-        });
+        if self.folder_browser_open {
+            self.shelf_folders(ui, gpu);
+        } else {
+            let displayed = self.displayed_indices();
+            self.film_tiles(ui, gpu, &displayed);
+            self.current_photo_marks(ui);
+        }
 
-        // Everything past opening photos is a chip away, so the roll itself stays in view.
         // Sorting is not filtering: only something that hides photos lights the chip.
         let filtering = self.filter
             != crate::dam::FilterState {
@@ -381,7 +381,18 @@ impl PhotoApp {
                 ..Default::default()
             };
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
+                self.pick_and_open(ui.ctx());
+            }
+            ui.add_space(4.0);
+            if widgets::chip(ui, false, "+ add").clicked() {
+                self.pick_and_shelve(ui.ctx());
+            }
+            if widgets::chip(ui, false, "folder…").clicked() {
+                self.request(ui.ctx(), crate::platform::Request::BrowseFolder);
+            }
+            divider(ui, 28.0);
             if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
                 self.folder_browser_open = !self.folder_browser_open;
             }
@@ -412,14 +423,6 @@ impl PhotoApp {
         }
         if self.select_mode {
             self.selection_bar(ui);
-        }
-
-        if self.folder_browser_open {
-            self.shelf_folders(ui, gpu);
-        } else {
-            let displayed = self.displayed_indices();
-            self.film_tiles(ui, gpu, &displayed);
-            self.current_photo_marks(ui);
         }
     }
 
@@ -514,96 +517,63 @@ impl PhotoApp {
 
     // ── Edit ────────────────────────────────────────────────────────────────────────────
 
-    fn edit_sheet(&mut self, ui: &mut egui::Ui) {
+    /// The chosen module's controls over a one-line strip of every module. Tapping the
+    /// chosen module again folds its controls away, leaving only the strip.
+    /// Returns the height it wants, as [`Self::compact_sheet`] does.
+    fn edit_sheet(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
         let loaded = self.engine.image().is_some();
-        egui::Frame::new()
-            .inner_margin(Margin {
-                left: 12,
-                right: 12,
-                top: 8,
-                bottom: 4,
-            })
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    // Turning the photo upright is the first thing most photos need, so it
-                    // sits here rather than inside the crop module. (A / B is in the top bar.)
-                    ui.add_enabled_ui(loaded, |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if widgets::chip(ui, false, "↶ rotate")
-                            .on_hover_text("Turn 90° anticlockwise")
-                            .clicked()
-                        {
-                            self.quick_turn(false);
-                        }
-                        if widgets::chip(ui, false, "↷")
-                            .on_hover_text("Turn 90° clockwise")
-                            .clicked()
-                        {
-                            self.quick_turn(true);
-                        }
-                        self.crop_chips(ui);
-                    });
-                    if widgets::chip(ui, self.fine_adjust, "fine")
-                        .on_hover_text("Sliders move ten times finer")
-                        .clicked()
-                    {
-                        self.fine_adjust = !self.fine_adjust;
-                    }
-                    if widgets::chip(ui, self.customize_open, "modules")
-                        .on_hover_text("Choose which modules show, and their order")
-                        .clicked()
-                    {
-                        self.customize_open = !self.customize_open;
-                    }
-                    ui.add_enabled_ui(loaded && self.is_stack_edited(), |ui| {
-                        if widgets::chip(ui, false, "reset")
-                            .on_hover_text("Reset all adjustments to baseline")
-                            .clicked()
-                        {
-                            self.reset_to_default();
-                        }
-                    });
-                });
-                if loaded && !self.customize_open {
-                    ui.add_space(4.0);
-                    self.module_scroller(ui);
-                }
-            });
-
-        egui::ScrollArea::vertical()
-            .id_salt("compact_edit")
-            .auto_shrink([false, false])
-            .scroll_source(ScrollSource {
-                drag: DragScroll::Always,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                egui::Frame::new()
-                    .inner_margin(Margin {
-                        left: 12,
-                        right: 12,
-                        top: 2,
-                        bottom: 8,
-                    })
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        if self.customize_open {
-                            self.customize_body(ui);
-                        } else if loaded {
-                            self.single_module(ui, self.compact_module);
-                        } else {
-                            ui.label(theme::dim("Open a photo to edit it.").size(12.0));
-                            if widgets::button(ui, Kind::Primary, "Open…", 0.0).clicked() {
-                                self.pick_and_open(ui.ctx());
+        let body_open = !loaded || self.customize_open || self.compact_controls_open;
+        let top = ui.cursor().top();
+        // How much more the controls want than they were given this frame.
+        let mut hidden = 0.0;
+        if body_open {
+            let body = egui::ScrollArea::vertical()
+                .id_salt("compact_edit")
+                .auto_shrink([false, true])
+                .max_height((cap - STRIP_H - 1.0).max(80.0))
+                .scroll_source(ScrollSource {
+                    drag: DragScroll::Always,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(Margin {
+                            left: 12,
+                            right: 12,
+                            top: 6,
+                            bottom: 4,
+                        })
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            if self.customize_open {
+                                self.customize_body(ui);
+                            } else if loaded {
+                                self.single_module(ui, self.compact_module);
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.label(theme::dim("Open a photo to edit it.").size(12.0));
+                                    if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
+                                        self.pick_and_open(ui.ctx());
+                                    }
+                                });
                             }
-                        }
-                    });
-            });
+                        });
+                });
+            hidden = (body.content_size.y - body.inner_rect.height()).max(0.0);
+        }
+        if loaded {
+            if body_open {
+                let y = ui.cursor().top();
+                ui.painter()
+                    .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
+            }
+            self.module_strip(ui);
+        }
+        ui.cursor().top() - top + hidden
     }
 
-    /// A tile per module, in the order Customize gives them, scrolled sideways.
-    fn module_scroller(&mut self, ui: &mut egui::Ui) {
+    /// Turn, then every module by name, then fine / reset / modules — one scrolling line.
+    fn module_strip(&mut self, ui: &mut egui::Ui) {
         let ids: Vec<InspectorSectionId> = self
             .inspector_sections
             .iter()
@@ -618,10 +588,8 @@ impl PhotoApp {
         let defaults = self.baseline.clone();
         let white = self.white_scale();
         egui::ScrollArea::horizontal()
-            .id_salt("compact_modules")
+            .id_salt("compact_strip")
             .auto_shrink([false, true])
-            // Tiles cut off at the edge already say there is more; a bar under them is
-            // only more height.
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .scroll_source(ScrollSource {
                 drag: DragScroll::Always,
@@ -629,27 +597,75 @@ impl PhotoApp {
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(4.0);
+                    // Framing a crop: finishing it comes before anything else.
+                    if self.cropping {
+                        if strip_tab(ui, "✓ apply", true, true, None).clicked() {
+                            self.apply_crop();
+                        }
+                        if strip_tab(ui, "✕ cancel", false, false, None).clicked() {
+                            self.cancel_crop();
+                        }
+                        divider(ui, STRIP_H);
+                    }
+                    if strip_icon(ui, "↶", "Turn 90° anticlockwise").clicked() {
+                        self.quick_turn(false);
+                    }
+                    if strip_icon(ui, "↷", "Turn 90° clockwise").clicked() {
+                        self.quick_turn(true);
+                    }
+                    divider(ui, STRIP_H);
                     for id in ids {
                         let (_, modified) = summarise(id, &self.stack, &defaults, &white);
-                        let state = if !module_on(&self.stack, id) {
-                            None
-                        } else if modified {
-                            Some(theme::ACCENT)
-                        } else {
-                            Some(theme::TEXT_DIM)
-                        };
-                        let chosen = self.compact_module == id;
-                        let response = module_tile(ui, id, chosen, state);
+                        let dot = (module_on(&self.stack, id) && modified).then_some(theme::ACCENT);
+                        let chosen = self.compact_module == id && !self.customize_open;
+                        let open = chosen && self.compact_controls_open;
+                        let response = strip_tab(ui, module_short_name(id), chosen, open, dot)
+                            .on_hover_text(id.title());
                         if chosen && self.reveal_section == Some(id) {
                             response.scroll_to_me(None);
                             self.reveal_section = None;
                         }
                         if response.clicked() {
-                            self.compact_module = id;
+                            if chosen {
+                                self.compact_controls_open = !self.compact_controls_open;
+                            } else {
+                                self.compact_module = id;
+                                self.compact_controls_open = true;
+                                self.customize_open = false;
+                            }
                             self.focused_section = Some(id);
                         }
                     }
+                    divider(ui, STRIP_H);
+                    if strip_tab(ui, "fine", self.fine_adjust, false, None)
+                        .on_hover_text("Sliders move ten times finer")
+                        .clicked()
+                    {
+                        self.fine_adjust = !self.fine_adjust;
+                    }
+                    let edited = self.is_stack_edited();
+                    let reset = ui
+                        .add_enabled_ui(edited, |ui| strip_tab(ui, "reset", false, false, None))
+                        .inner
+                        .on_hover_text("Reset all adjustments to baseline");
+                    if reset.clicked() {
+                        self.reset_to_default();
+                    }
+                    if strip_tab(
+                        ui,
+                        "modules",
+                        self.customize_open,
+                        self.customize_open,
+                        None,
+                    )
+                    .on_hover_text("Choose which modules show, and their order")
+                    .clicked()
+                    {
+                        self.customize_open = !self.customize_open;
+                    }
+                    ui.add_space(8.0);
                 });
             });
     }
@@ -827,72 +843,101 @@ impl PhotoApp {
     }
 }
 
-/// A module's tile in the Edit scroller: a monogram over a short name, with a dot when the
-/// module is on (amber once it changes the photo).
-fn module_tile(
+/// A name in the Edit strip: amber when it is the chosen one, underlined while its
+/// controls are open, with a dot when the module changes the photo.
+fn strip_tab(
     ui: &mut egui::Ui,
-    id: InspectorSectionId,
+    text: &str,
     chosen: bool,
-    state: Option<Color32>,
+    open: bool,
+    dot: Option<Color32>,
 ) -> egui::Response {
-    let (monogram, name) = module_glyph(id);
-    let (rect, response) = ui.allocate_exact_size(vec2(56.0, 44.0), Sense::click());
-    let painter = ui.painter();
-    let (fill, stroke, colour) = if chosen {
-        (
-            theme::BG_850,
-            theme::ACCENT.linear_multiply(0.8),
-            theme::ACCENT,
-        )
+    let enabled = ui.is_enabled();
+    let galley = ui.painter().layout_no_wrap(
+        text.to_uppercase(),
+        FontId::new(11.0, theme::mono_bold()),
+        Color32::PLACEHOLDER,
+    );
+    let pad = 10.0;
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(galley.size().x + 2.0 * pad, STRIP_H), Sense::click());
+    let colour = if !enabled {
+        theme::TEXT_FAINT
+    } else if chosen {
+        theme::ACCENT
     } else if response.hovered() {
-        (theme::BG_850, theme::BORDER_HI, theme::TEXT_HI)
+        theme::TEXT_HI
     } else {
-        (theme::BG_900, theme::BORDER, Color32::from_gray(0xcc))
+        Color32::from_gray(0xa8)
     };
-    painter.rect(
-        rect,
-        4,
-        fill,
-        Stroke::new(1.0, stroke),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        pos2(rect.center().x, rect.top() + 16.0),
-        Align2::CENTER_CENTER,
-        monogram,
-        FontId::new(14.0, theme::display()),
-        colour,
-    );
-    painter.text(
-        pos2(rect.center().x, rect.bottom() - 10.0),
-        Align2::CENTER_CENTER,
-        name.to_uppercase(),
-        FontId::new(8.0, theme::mono_bold()),
-        colour,
-    );
-    if let Some(dot) = state {
-        painter.circle_filled(rect.right_top() + vec2(-6.0, 6.0), 2.5, dot);
+    let painter = ui.painter();
+    let text_rect = Rect::from_center_size(rect.center(), galley.size());
+    painter.galley(text_rect.min, galley, colour);
+    if open {
+        let bar = Rect::from_min_max(
+            pos2(text_rect.left(), rect.bottom() - 3.0),
+            pos2(text_rect.right(), rect.bottom() - 1.0),
+        );
+        painter.rect_filled(bar, 1.0, theme::ACCENT);
     }
-    response.on_hover_text(id.title())
+    if let Some(dot) = dot {
+        painter.circle_filled(
+            pos2(text_rect.right() + 4.0, text_rect.top() + 1.0),
+            2.0,
+            dot,
+        );
+    }
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response
 }
 
-/// A module's monogram and short name, for the Edit scroller.
-fn module_glyph(id: InspectorSectionId) -> (&'static str, &'static str) {
+/// A glyph in the Edit strip, for an action rather than a module.
+fn strip_icon(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(34.0, STRIP_H), Sense::click());
+    let colour = if response.hovered() {
+        theme::TEXT_HI
+    } else {
+        Color32::from_gray(0xcc)
+    };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(17.0),
+        colour,
+    );
+    response.on_hover_text(tip)
+}
+
+/// A short hairline between groups in a row.
+fn divider(ui: &mut egui::Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0, height), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        Rect::from_center_size(rect.center(), vec2(1.0, height * 0.5)).y_range(),
+        Stroke::new(1.0, theme::BORDER_HI),
+    );
+}
+
+/// A module's name in the Edit strip: short enough that several fit across a phone.
+fn module_short_name(id: InspectorSectionId) -> &'static str {
     match id {
-        InspectorSectionId::Scope => ("Sc", "scope"),
-        InspectorSectionId::Geometry => ("Cr", "crop"),
-        InspectorSectionId::WhiteBalance => ("WB", "white bal"),
-        InspectorSectionId::Exposure => ("EV", "exposure"),
-        InspectorSectionId::Tonal => ("S/H", "shadows"),
-        InspectorSectionId::ToneCurve => ("Cv", "curve"),
-        InspectorSectionId::Clarity => ("Cl", "clarity"),
-        InspectorSectionId::Dehaze => ("Dh", "dehaze"),
-        InspectorSectionId::ColorEq => ("EQ", "color eq"),
-        InspectorSectionId::Filmic3D => ("Fm", "filmic"),
-        InspectorSectionId::ColorBalance => ("CB", "balance"),
-        InspectorSectionId::Vibrance => ("Vb", "vibrance"),
-        InspectorSectionId::Sharpen => ("Sh", "sharpen"),
-        InspectorSectionId::Vignette => ("Vg", "vignette"),
+        InspectorSectionId::Scope => "scope",
+        InspectorSectionId::Geometry => "crop",
+        InspectorSectionId::WhiteBalance => "wb",
+        InspectorSectionId::Exposure => "exposure",
+        InspectorSectionId::Tonal => "tone",
+        InspectorSectionId::ToneCurve => "curve",
+        InspectorSectionId::Clarity => "clarity",
+        InspectorSectionId::Dehaze => "dehaze",
+        InspectorSectionId::ColorEq => "color",
+        InspectorSectionId::Filmic3D => "filmic",
+        InspectorSectionId::ColorBalance => "balance",
+        InspectorSectionId::Vibrance => "vibrance",
+        InspectorSectionId::Sharpen => "sharpen",
+        InspectorSectionId::Vignette => "vignette",
     }
 }
 

@@ -489,12 +489,12 @@ fn tap(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, at: egui::Pos2) {
 fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
     let n = Tab::ALL.len() as f32;
     if size.x > size.y {
-        let rail = 68.0;
-        let top = 34.0; // under the top bar
+        let rail = 56.0;
+        let top = 32.0; // under the top bar
         let cell = (size.y - top) / n;
         egui::pos2(size.x - rail / 2.0, top + cell * (i as f32 + 0.5))
     } else {
-        let bar = 60.0;
+        let bar = 48.0;
         let cell = size.x / n;
         egui::pos2(cell * (i as f32 + 0.5), size.y - bar / 2.0)
     }
@@ -605,11 +605,12 @@ fn back_select_mode_and_swipe_work_without_a_keyboard() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The drawer has a comfortable touch height, its grab handle resizes and snaps it,
-/// and sliders respond to touch tapping and dragging.
+/// Upright, the sheet is only as tall as what it holds, so the photo keeps most of the
+/// screen; tapping the chosen module in the Edit strip folds its controls away, and
+/// tapping it again brings them back.
 #[test]
-fn drawer_resize_and_touch_slider_interaction() {
-    let dir = scratch_dir("slider_touch");
+fn the_edit_sheet_stays_low_and_folds_to_its_strip() {
+    let dir = scratch_dir("low_sheet");
     let a = dir.join("a.dng");
     write_dng(&a, 640, 426);
 
@@ -618,90 +619,31 @@ fn drawer_resize_and_touch_slider_interaction() {
     h.frame_sized(&mut app, PORTRAIT, Default::default());
     app.add_to_shelf(&h.gpu(), vec![a.clone()]);
     h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.compact_tab,
+        Some(Tab::Edit),
+        "the first photo opens to Edit"
+    );
 
-    // Open Edit tab
-    app.compact_tab = Some(Tab::Edit);
     app.compact_module = photo_app::InspectorSectionId::Exposure;
-    h.frame_sized(&mut app, PORTRAIT, Default::default());
-
-    // Verify sheet starts at default height (42% of 892 ≈ 374.6)
-    assert!(app.compact_sheet_height.is_none());
-    let default_h = 892.0 * 0.42;
-
-    // Drag the handle at the top of the sheet: its top is 60 (the bar) + the sheet up
-    // from the bottom, and the handle is the 14pt strip under that.
-    let handle_pos = egui::pos2(206.0, 892.0 - 60.0 - default_h + 7.0);
-    let button = |pos, pressed| egui::Event::PointerButton {
-        pos,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: Default::default(),
-    };
-    h.frame_sized(
-        &mut app,
-        PORTRAIT,
-        pointer(vec![egui::Event::PointerMoved(handle_pos)]),
-    );
-    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(handle_pos, true)]));
-    // Drag UPWARDS by 50px
-    let dragged_pos = handle_pos - egui::vec2(0.0, 50.0);
-    h.frame_sized(
-        &mut app,
-        PORTRAIT,
-        pointer(vec![egui::Event::PointerMoved(dragged_pos)]),
-    );
-    h.frame_sized(
-        &mut app,
-        PORTRAIT,
-        pointer(vec![button(dragged_pos, false)]),
-    );
-
-    // The drawer should now be taller
-    assert!(app.compact_sheet_height.is_some());
-    let h_val = app.compact_sheet_height.unwrap();
+    // The sheet takes its content's height a frame after the content changes.
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let open = app.stage_size().y;
     assert!(
-        h_val > default_h + 40.0,
-        "expected sheet height > {}, got {h_val}",
-        default_h + 40.0
+        open > PORTRAIT.y * 0.5,
+        "the photo should keep over half the screen, got {open}"
     );
 
-    // Double-click handle at its new position to snap back to default
-    let new_handle_pos = egui::pos2(206.0, 892.0 - 60.0 - h_val + 7.0);
-    h.frame_sized(
-        &mut app,
-        PORTRAIT,
-        pointer(vec![egui::Event::PointerMoved(new_handle_pos)]),
-    );
-    let click_input = |t: f64, pressed| egui::RawInput {
-        time: Some(t),
-        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, PORTRAIT)),
-        events: vec![
-            egui::Event::PointerMoved(new_handle_pos),
-            egui::Event::PointerButton {
-                pos: new_handle_pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            },
-        ],
-        ..Default::default()
-    };
-    let gpu = h.gpu();
-    let _ = h
-        .ctx
-        .run_ui(click_input(10.01, true), |ui| app.update(ui, &gpu));
-    let _ = h
-        .ctx
-        .run_ui(click_input(10.05, false), |ui| app.update(ui, &gpu));
-    let _ = h
-        .ctx
-        .run_ui(click_input(10.10, true), |ui| app.update(ui, &gpu));
-    let _ = h
-        .ctx
-        .run_ui(click_input(10.15, false), |ui| app.update(ui, &gpu));
+    app.compact_controls_open = false;
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let folded = app.stage_size().y;
     assert!(
-        app.compact_sheet_height.is_none(),
-        "double-click should reset sheet height to default"
+        folded > open + 100.0 && folded > PORTRAIT.y * 0.75,
+        "folded to its strip, the sheet should give the photo the room back: {open} → {folded}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
