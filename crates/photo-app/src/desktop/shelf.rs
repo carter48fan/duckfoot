@@ -434,7 +434,12 @@ impl PhotoApp {
         );
 
         if let Some(target) = row_shift {
-            let all_paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
+            // The range runs through the photos as listed, filter and sort included.
+            let all_paths: Vec<PathBuf> = self
+                .displayed_indices()
+                .into_iter()
+                .map(|i| self.shelf[i].path.clone())
+                .collect();
             self.selection.select_range(target, &all_paths);
         }
         if let Some(target) = row_ctrl {

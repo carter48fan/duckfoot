@@ -173,6 +173,11 @@ impl PhotoApp {
                     if response.drag_started() {
                         self.swipe_from = response.interact_pointer_pos();
                     }
+                    // A second finger makes it a pinch, never a swipe: pinching in at fit
+                    // stays at fit, and its first finger's travel must not change photo.
+                    if ui.ctx().multi_touch().is_some() {
+                        self.swipe_from = None;
+                    }
                     if response.drag_stopped() {
                         let end = response.interact_pointer_pos();
                         if let (Some(from), Some(to)) = (self.swipe_from.take(), end) {
