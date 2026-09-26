@@ -1400,6 +1400,167 @@ impl Engine {
     }
 }
 
+/// The largest readback buffer export allocates, whatever the device would allow.
+///
+/// A 24 MP frame is ~98 MB of RGBA and a 100 MP one ~400 MB, while `downlevel_defaults`
+/// caps a buffer at 256 MiB — so one buffer per export crashed every large export. Bands
+/// of this size keep the GPU-side cost of a readback flat at any resolution, and it is
+/// still few enough round trips (four at 100 MP) that the sync cost doesn't show.
+pub(crate) const MAX_BAND_BYTES: u64 = 64 << 20;
+
+/// How long a readback waits on the GPU before calling it lost. Generous — a 100 MP render
+/// on a software rasteriser takes seconds — but finite: a device that has gone away must
+/// turn into an error, not a UI thread blocked forever.
+const GPU_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Validation and out-of-memory errors from a block of GPU work, returned as an `Err`.
+///
+/// wgpu's default for an error nothing captured is to panic, which on a large export means
+/// losing the app — and with it any unsaved edit — to an allocation the device refused.
+struct ErrorScopes {
+    oom: wgpu::ErrorScopeGuard,
+    validation: wgpu::ErrorScopeGuard,
+}
+
+impl ErrorScopes {
+    fn push(device: &wgpu::Device) -> Self {
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        Self { oom, validation }
+    }
+
+    /// Scopes pop in reverse order. On native wgpu the result is ready as soon as the pop
+    /// returns, so it is read without an executor; a backend that could only answer later
+    /// is treated as having reported nothing.
+    fn pop(self, what: &str) -> Result<()> {
+        let validation = ready_now(self.validation.pop()).flatten();
+        let oom = ready_now(self.oom.pop()).flatten();
+        match validation.or(oom) {
+            Some(wgpu::Error::OutOfMemory { .. }) => bail!("{what}: the GPU is out of memory"),
+            Some(e) => bail!("{what}: {e}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// `f`, with any GPU error it raises returned as an `Err` instead of a panic.
+fn scoped<T>(device: &wgpu::Device, what: &str, f: impl FnOnce() -> T) -> Result<T> {
+    let scopes = ErrorScopes::push(device);
+    let value = f();
+    scopes.pop(what)?;
+    Ok(value)
+}
+
+/// Poll a future once. For wgpu futures that native backends resolve immediately.
+fn ready_now<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
+
+/// Block until `index` has executed, or fail after `GPU_TIMEOUT`.
+fn wait_for(device: &wgpu::Device, index: wgpu::SubmissionIndex) -> Result<()> {
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(GPU_TIMEOUT),
+        })
+        .map_err(|e| anyhow::anyhow!("the GPU did not finish: {e}"))?;
+    Ok(())
+}
+
+/// Copy `(x, y, width, height)` of an RGBA8 texture back to the CPU, tightly packed.
+///
+/// In horizontal bands of at most `band_bytes`, through one reused `MAP_READ` buffer, so no
+/// buffer is ever larger than the band however large the image (see `MAX_BAND_BYTES`). The
+/// texture is rendered once beforehand; only the copy is split.
+pub(crate) fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    (ox, oy, width, height): (u32, u32, u32, u32),
+    band_bytes: u64,
+) -> Result<Vec<u8>> {
+    let stride = padded_bytes_per_row(width);
+    let row = width as usize * 4;
+    // At least one row, whatever the limit: a row is never more than 64 KiB × 4.
+    let band_rows = (band_bytes / stride as u64).clamp(1, height.max(1) as u64) as u32;
+
+    let mut out = Vec::new();
+    out.try_reserve_exact(row * height as usize)
+        .map_err(|_| anyhow::anyhow!("no memory for a {width}×{height} export"))?;
+
+    let buffer = scoped(device, "export readback buffer", || {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("export readback"),
+            size: stride as u64 * band_rows as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    })?;
+
+    let mut y = 0;
+    while y < height {
+        let rows = band_rows.min(height - y);
+        let scopes = ErrorScopes::push(device);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("export readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: ox,
+                    y: oy + y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(rows),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+        let index = queue.submit([encoder.finish()]);
+        scopes.pop("export readback")?;
+
+        let slice = buffer.slice(..stride as u64 * rows as u64);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        wait_for(device, index)?;
+        match rx.try_recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => bail!("export readback: {e}"),
+            Err(_) => bail!("export readback: the GPU never mapped the buffer"),
+        }
+        {
+            let mapped = slice.get_mapped_range()?;
+            for r in 0..rows as usize {
+                let start = r * stride as usize;
+                out.extend_from_slice(&mapped[start..start + row]);
+            }
+        }
+        buffer.unmap();
+        y += rows;
+    }
+    Ok(out)
+}
+
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
