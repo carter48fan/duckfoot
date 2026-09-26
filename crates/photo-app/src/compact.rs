@@ -301,9 +301,8 @@ impl PhotoApp {
                             })
                             .inner
                             .clicked()
-                            && self.history.redo(&mut self.stack)
                         {
-                            self.needs_render = true;
+                            self.redo();
                         }
                         if ui
                             .add_enabled_ui(can_undo, |ui| {
@@ -311,9 +310,8 @@ impl PhotoApp {
                             })
                             .inner
                             .clicked()
-                            && self.history.undo(&mut self.stack)
                         {
-                            self.needs_render = true;
+                            self.undo();
                         }
                         let loaded = self.ready_image().is_some();
                         ui.add_enabled_ui(loaded, |ui| {

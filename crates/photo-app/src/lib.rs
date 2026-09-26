@@ -620,9 +620,24 @@ impl PhotoApp {
         }
     }
 
-    /// Step back one edit, as Ctrl+Z does.
+    /// Step back one edit — Ctrl+Z, and every Undo button. While a crop is being framed,
+    /// undo abandons that framing rather than the step before it.
     pub fn undo(&mut self) -> bool {
+        if self.cropping {
+            self.cancel_crop();
+            return true;
+        }
         let moved = self.history.undo(&mut self.stack);
+        self.needs_render |= moved;
+        moved
+    }
+
+    /// Step forward one undone edit — Ctrl+Shift+Z, and every Redo button.
+    pub fn redo(&mut self) -> bool {
+        if self.cropping {
+            return false;
+        }
+        let moved = self.history.redo(&mut self.stack);
         self.needs_render |= moved;
         moved
     }

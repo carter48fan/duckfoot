@@ -29,8 +29,13 @@ impl PhotoApp {
             }
             return;
         }
-        // DESIGN.md: hotkeys never fire while a text field has focus.
-        if ctx.memory(|m| m.focused().is_some()) {
+        // DESIGN.md: hotkeys never fire while a text field has focus. Only a text field: a
+        // button reached with Tab has focus too, and must not swallow every shortcut.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        // Nor behind a dialog, where they would change the photo out of sight.
+        if self.batch_dialog_open {
             return;
         }
         let (prev, next) = ctx.input(|i| {
@@ -51,14 +56,11 @@ impl PhotoApp {
                 i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z),
             )
         });
-        if undo && self.cropping {
-            // Mid-framing, undo means "not this framing": the steps before it stay.
-            self.cancel_crop();
-        } else if undo && self.history.undo(&mut self.stack) {
-            self.needs_render = true;
+        if undo {
+            self.undo();
         }
-        if redo && self.history.redo(&mut self.stack) {
-            self.needs_render = true;
+        if redo {
+            self.redo();
         }
 
         let (save, copy, paste, split_toggle, ctrl_a, batch_export) = ctx.input(|i| {

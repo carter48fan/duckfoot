@@ -551,7 +551,10 @@ pub fn scaled_slider(
             egui::DragValue::new(value)
                 .range(range)
                 .fixed_decimals(decimals)
-                .speed(scale.speed),
+                .speed(scale.speed)
+                // A typed value lands once, on Enter or leaving the field: one undo step,
+                // not one per keystroke (and no half-typed values on the image).
+                .update_while_editing(false),
         );
         label_response | slid | typed
     })
