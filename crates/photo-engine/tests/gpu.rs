@@ -425,3 +425,96 @@ fn the_nan_paint_sees_a_value_that_went_infinite() {
     let bad = out.rgba.chunks_exact(4).filter(|p| p[3] != 255).count();
     assert!(bad > 0, "an infinite exposure gain was not flagged");
 }
+
+/// Box-downscale an sRGB RGBA8 image by `f` in linear light, as the preview's mips do.
+fn downscale(px: &[u8], w: u32, h: u32, f: u32) -> Vec<[f32; 3]> {
+    let (ow, oh) = (w / f, h / f);
+    let mut out = Vec::with_capacity((ow * oh) as usize);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut acc = [0.0f32; 3];
+            for y in oy * f..(oy + 1) * f {
+                for x in ox * f..(ox + 1) * f {
+                    let i = ((y * w + x) * 4) as usize;
+                    for c in 0..3 {
+                        acc[c] += testkit::srgb_to_linear(px[i + c]);
+                    }
+                }
+            }
+            out.push(acc.map(|v| v / (f * f) as f32));
+        }
+    }
+    out
+}
+
+/// Mean absolute difference, in linear light × 255, between a preview at `level` and the
+/// full-resolution export downscaled to the preview's size.
+fn preview_vs_export(gpu: &Gpu, stack: &PhotoStack, level: u32) -> f32 {
+    let (w, h) = (256u32, 192u32);
+    let scene = testkit::smooth_scene(w, h);
+    // Fine detail on top of the smooth scene: the band sharpen and texture act on.
+    let cfa = testkit::cfa_from_fn(w, h, |x, y| {
+        let base = scene(x, y);
+        let stripe = if (x / 2 + y / 3) % 2 == 0 { 1.15 } else { 0.87 };
+        base.map(|v| v * stripe)
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let exported = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+    let (pw, ph, shown) = preview(gpu, &mut engine, stack, level);
+    let f = 1 << level;
+    assert_eq!((pw, ph), (exported.width / f, exported.height / f));
+    let small = downscale(&exported.rgba, exported.width, exported.height, f);
+    let mut sum = 0.0;
+    for (i, e) in small.iter().enumerate() {
+        for c in 0..3 {
+            sum += (testkit::srgb_to_linear(shown[i * 4 + c]) - e[c]).abs();
+        }
+    }
+    sum / (small.len() * 3) as f32 * 255.0
+}
+
+#[test]
+fn a_reduced_preview_shows_what_the_downscaled_export_will() {
+    let gpu = gpu_or_skip!();
+    // What the mip-based preview differs by with nothing scale-dependent on: the
+    // tolerance the scale-dependent modules are measured against.
+    let plain = PhotoStack::default();
+    let base = preview_vs_export(gpu, &plain, 2);
+
+    let mut sharp = PhotoStack::default();
+    sharp.sharpen.enabled = true;
+    sharp.sharpen.params.amount = 1.0;
+    let sharpened = preview_vs_export(gpu, &sharp, 2);
+
+    let mut punchy = PhotoStack::default();
+    punchy.clarity.enabled = true;
+    punchy.clarity.params.clarity = 60.0;
+    let clarity = preview_vs_export(gpu, &punchy, 2);
+
+    let mut textured = PhotoStack::default();
+    textured.clarity.enabled = true;
+    textured.clarity.params.texture = 100.0;
+    let texture = preview_vs_export(gpu, &textured, 2);
+
+    println!(
+        "preview vs export at level 2: plain {base:.2}, sharpen {sharpened:.2}, \
+         clarity {clarity:.2}, texture {texture:.2}"
+    );
+    // Sharpening in preview texels made fit view 11 over the export here; clarity is on
+    // absolute levels. Both now match the export as closely as a plain render does.
+    assert!(
+        sharpened <= base + 1.0,
+        "sharpen: {sharpened:.2} vs {base:.2} plain"
+    );
+    assert!(
+        clarity <= base + 1.0,
+        "clarity: {clarity:.2} vs {base:.2} plain"
+    );
+    // Texture's band is below a fit preview's resolution; it is approximated (see
+    // `local_contrast`) and held to that approximation's measured accuracy.
+    assert!(
+        texture <= base + 2.5,
+        "texture: {texture:.2} vs {base:.2} plain"
+    );
+}
