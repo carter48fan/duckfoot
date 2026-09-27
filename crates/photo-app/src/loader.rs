@@ -406,7 +406,7 @@ fn thumbnail(cfa: &CfaImage) -> egui::ColorImage {
                 let mut x = tx * cell;
                 while x + 1 < ((tx + 1) * cell).min(w) {
                     for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                        let c = cfa.cfa2x2[dy * 2 + dx] as usize;
+                        let c = cfa.cfa.colour_at(y + dy, x + dx) as usize;
                         sum[c] += cfa.data[(y + dy) * w + x + dx] as f32;
                         n[c] += 1;
                     }

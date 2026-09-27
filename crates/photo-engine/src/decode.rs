@@ -29,9 +29,8 @@ pub struct CfaImage {
     pub data: Vec<u16>,
     pub width: u32,
     pub height: u32,
-    /// CFA colour index (0=R, 1=G, 2=B) at each position of the 2×2 block, row-major:
-    /// `[(0,0), (0,1), (1,0), (1,1)]`. Already phase-corrected for the crop.
-    pub cfa2x2: [u32; 4],
+    /// Which colour each photosite measured. Already phase-corrected for the crop.
+    pub cfa: CfaPattern,
     /// Black level per CFA colour index.
     pub black: [f32; 4],
     /// White level per CFA colour index.
@@ -51,6 +50,68 @@ pub struct CfaImage {
     pub model: String,
 }
 
+/// A colour filter array's repeating tile: a 2×2 Bayer tile, or Fuji's 6×6 X-Trans.
+/// Colour indices 0 = R, 1 = G, 2 = B, row-major in `colours`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CfaPattern {
+    pub width: u32,
+    pub height: u32,
+    pub colours: [u8; 36],
+}
+
+impl CfaPattern {
+    /// A Bayer tile, `[(0,0), (0,1), (1,0), (1,1)]`.
+    pub const fn bayer(tile: [u32; 4]) -> Self {
+        let mut colours = [0u8; 36];
+        colours[0] = tile[0] as u8;
+        colours[1] = tile[1] as u8;
+        colours[2] = tile[2] as u8;
+        colours[3] = tile[3] as u8;
+        Self {
+            width: 2,
+            height: 2,
+            colours,
+        }
+    }
+
+    /// A 6×6 tile from its rows, as "GGRGGB…" (36 letters).
+    pub fn xtrans(pattern: &str) -> Option<Self> {
+        let colours: Vec<u8> = pattern
+            .chars()
+            .map(|c| match c {
+                'R' => Some(0),
+                'G' => Some(1),
+                'B' => Some(2),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        Some(Self {
+            width: 6,
+            height: 6,
+            colours: colours.try_into().ok()?,
+        })
+    }
+
+    pub fn colour_at(&self, row: usize, col: usize) -> u32 {
+        let (w, h) = (self.width as usize, self.height as usize);
+        self.colours[(row % h) * w + col % w] as u32
+    }
+
+    pub fn is_bayer(&self) -> bool {
+        (self.width, self.height) == (2, 2)
+    }
+
+    /// The top-left 2×2, which for Bayer is the whole pattern.
+    pub fn tile2x2(&self) -> [u32; 4] {
+        [
+            self.colour_at(0, 0),
+            self.colour_at(0, 1),
+            self.colour_at(1, 0),
+            self.colour_at(1, 1),
+        ]
+    }
+}
+
 impl CfaImage {
     pub fn megapixels(&self) -> f32 {
         (self.width as f32 * self.height as f32) / 1_000_000.0
@@ -61,8 +122,11 @@ impl CfaImage {
 pub struct RasterImage {
     pub width: u32,
     pub height: u32,
-    /// 4 half-floats per pixel (R, G, B, A=0.0) in linear space (8 bytes per pixel).
+    /// 4 half-floats per pixel (R, G, B, A=0.0) in linear space (8 bytes per pixel), in the
+    /// file's own primaries.
     pub data: Vec<u8>,
+    /// Those primaries → linear sRGB: the identity for sRGB, which is most files.
+    pub cam_to_srgb: [[f32; 3]; 3],
     pub orientation: Geometry,
     pub make: String,
     pub model: String,
@@ -76,48 +140,118 @@ impl RasterImage {
 
 /// Decode standard raster image formats into linear camera space.
 pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
+    use image::ImageDecoder;
     use rayon::prelude::*;
 
-    let img = image::load_from_memory(bytes).context("decoding raster image format")?;
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .context("reading raster image format")?
+        .into_decoder()
+        .context("decoding raster image format")?;
+    // A profile that cannot be read is sRGB's fault-tolerant default, as every browser
+    // treats it; one that is sRGB takes the fast path below.
+    let profile = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .and_then(|icc| crate::icc::MatrixTrc::parse(&icc))
+        .filter(|p| !p.is_srgb());
+    let img = image::DynamicImage::from_decoder(decoder).context("decoding raster image format")?;
     let orientation = raster_orientation(bytes);
-    // Free for the JPEG case, which decodes to RGB8 already. Alpha is not carried: the
-    // sensor texture's alpha is the highlight-reconstruction neutral, not coverage.
-    let rgb = img.into_rgb8();
-    let (width, height) = rgb.dimensions();
-
-    // sRGB byte → linear, already as half-float bits: one table lookup per channel instead
-    // of a transfer function and a float conversion per channel per pixel.
-    let lut: [[u8; 2]; 256] = std::array::from_fn(|i| {
-        let c = i as f32 / 255.0;
-        let linear = if c <= 0.04045 {
+    let (width, height) = (img.width(), img.height());
+    let srgb_curve = |c: f32| {
+        if c <= 0.04045 {
             c / 12.92
         } else {
             ((c + 0.055) / 1.055).powf(2.4)
-        };
-        half::f16::from_f32(linear).to_le_bytes()
-    });
+        }
+    };
+    let linear = |channel: usize, c: f32| match &profile {
+        Some(p) => p.curves[channel].eval(c),
+        None => srgb_curve(c),
+    };
+    let f16 = |v: f32| half::f16::from_f32(v).to_le_bytes();
 
     // 4 half-floats per pixel = 8 bytes per pixel; A = 0.0, the reconstruction neutral.
+    // Alpha is not carried: the sensor texture's alpha is that neutral, not coverage.
     let mut data = vec![0u8; width as usize * height as usize * 8];
-    let row_in = width as usize * 3;
     let row_out = width as usize * 8;
-    if row_in > 0 {
+    // Each channel through a table of every value it can take, already as half-float
+    // bits: one lookup per channel instead of a transfer function and a conversion.
+    fn by_table<T: Copy + Into<usize> + Sync>(
+        data: &mut [u8],
+        row_out: usize,
+        pixels: &[T],
+        luts: &[Vec<[u8; 2]>; 3],
+    ) {
+        use rayon::prelude::*;
+        let row_in = row_out / 8 * 3;
+        if row_in == 0 {
+            return;
+        }
         data.par_chunks_mut(row_out)
-            .zip(rgb.as_raw().par_chunks(row_in))
+            .zip(pixels.par_chunks(row_in))
             .for_each(|(out, src)| {
-                let (texels, pixels) = (out.as_chunks_mut::<8>().0, src.as_chunks::<3>().0);
-                for (o, p) in texels.iter_mut().zip(pixels) {
-                    o[0..2].copy_from_slice(&lut[p[0] as usize]);
-                    o[2..4].copy_from_slice(&lut[p[1] as usize]);
-                    o[4..6].copy_from_slice(&lut[p[2] as usize]);
+                for (o, p) in out.chunks_exact_mut(8).zip(src.chunks_exact(3)) {
+                    for c in 0..3 {
+                        o[c * 2..c * 2 + 2].copy_from_slice(&luts[c][p[c].into()]);
+                    }
                 }
             });
+    }
+    let table = |levels: usize| -> [Vec<[u8; 2]>; 3] {
+        std::array::from_fn(|c| {
+            (0..levels)
+                .map(|i| f16(linear(c, i as f32 / (levels - 1) as f32)))
+                .collect()
+        })
+    };
+    let deep = matches!(
+        img,
+        image::DynamicImage::ImageLuma16(_)
+            | image::DynamicImage::ImageLumaA16(_)
+            | image::DynamicImage::ImageRgb16(_)
+            | image::DynamicImage::ImageRgba16(_)
+    );
+    let float = matches!(
+        img,
+        image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_)
+    );
+    if float {
+        // Float TIFFs hold light itself unless a profile says otherwise.
+        let rgb = img.into_rgb32f();
+        let row_in = width as usize * 3;
+        if row_in > 0 {
+            data.par_chunks_mut(row_out)
+                .zip(rgb.as_raw().par_chunks(row_in))
+                .for_each(|(out, src)| {
+                    for (o, p) in out.chunks_exact_mut(8).zip(src.chunks_exact(3)) {
+                        for c in 0..3 {
+                            let v = match &profile {
+                                Some(pr) => pr.curves[c].eval(p[c]),
+                                None => p[c].max(0.0),
+                            };
+                            o[c * 2..c * 2 + 2].copy_from_slice(&f16(v));
+                        }
+                    }
+                });
+        }
+    } else if deep {
+        // 16 bits kept as 16: a smooth sky in a 16-bit TIFF is why it was saved as one.
+        by_table(&mut data, row_out, img.into_rgb16().as_raw(), &table(65536));
+    } else {
+        by_table(&mut data, row_out, img.into_rgb8().as_raw(), &table(256));
     }
 
     Ok(RasterImage {
         width,
         height,
         data,
+        // Pixels stay in their own primaries, as a RAW's stay in the camera's, and the
+        // adjust pass converts: nothing a wide-gamut file holds goes negative on the way.
+        cam_to_srgb: profile.map_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], |p| {
+            p.to_srgb
+        }),
         orientation,
         make: "Raster".to_string(),
         model: "Image".to_string(),
@@ -281,7 +415,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
     if !cfa.is_valid() {
         bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
     }
-    let cfa2x2 = bayer_tile(
+    let pattern = cfa_pattern(
         (cfa.width, cfa.height),
         |row, col| cfa.color_at(row, col),
         &cfa.to_string(),
@@ -296,7 +430,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
         // A white level at or below black would make the normalisation divide by zero.
         white[i] = if w > black[i] { w } else { black[i] + 1.0 };
     }
-    let white = measured_white(&data, width, &cfa2x2, &black, &white);
+    let white = measured_white(&data, width, &pattern, &black, &white);
 
     let wb_missing = raw.wb_coeffs[..3]
         .iter()
@@ -312,7 +446,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             data,
             width: width as u32,
             height: height as u32,
-            cfa2x2,
+            cfa: pattern,
             black,
             white,
             wb,
@@ -488,7 +622,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
     }
     let cfa = raw_cfa.shift(cl, ct);
-    let cfa2x2 = bayer_tile(
+    let pattern = cfa_pattern(
         (cfa.width, cfa.height),
         |row, col| cfa.color_at(row, col),
         &cfa.to_string(),
@@ -497,7 +631,10 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
 
     // rawler gives black per 2×2 *position* (hence the shift); the shader wants it per
     // colour. White is per component, so every position of a mosaic already agrees.
-    let raw_black = by_colour(raw.blacklevel.shift(cl, ct).as_bayer_array(), &cfa2x2);
+    let raw_black = by_colour(
+        raw.blacklevel.shift(cl, ct).as_bayer_array(),
+        &pattern.tile2x2(),
+    );
     let raw_white = raw.whitelevel.as_bayer_array();
     let mut black = [0.0f32; 4];
     let mut white = [65535.0f32; 4];
@@ -506,7 +643,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         let w = raw_white[i];
         white[i] = if w > black[i] { w } else { black[i] + 1.0 };
     }
-    let white = measured_white(&data, width, &cfa2x2, &black, &white);
+    let white = measured_white(&data, width, &pattern, &black, &white);
 
     let xyz_to_cam = extract_xyz_to_cam_rawler(&raw);
 
@@ -534,7 +671,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             data,
             width: width as u32,
             height: height as u32,
-            cfa2x2,
+            cfa: pattern,
             black,
             white,
             wb,
@@ -548,39 +685,51 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
     })
 }
 
-/// The CFA as the 2×2 Bayer tile the demosaic shaders index, in `CfaImage::cfa2x2` order.
+/// The CFA as a pattern the demosaic shaders know: a 2×2 Bayer tile, or a 6×6 X-Trans one.
 ///
-/// The shaders only know a 2×2 repeat, so anything else is refused here rather than
-/// demosaiced wrongly. Fuji's X-Trans is 6×6: taking its top-left 2×2 as if it were Bayer
-/// opened every modern RAF with maze artefacts and the wrong colour, and no error at all.
-/// A larger pattern that does repeat every 2×2 (some files spell Bayer as 2×8) is fine.
-fn bayer_tile(
+/// Anything else is refused here rather than demosaiced wrongly: taking an unknown
+/// pattern's top-left 2×2 as if it were Bayer is how X-Trans files used to open with maze
+/// artefacts, the wrong colour and no error at all. A larger pattern that does repeat
+/// every 2×2 (some files spell Bayer as 2×8) is Bayer.
+fn cfa_pattern(
     (width, height): (usize, usize),
     colour_at: impl Fn(usize, usize) -> usize,
     name: &str,
     (make, model): (&str, &str),
-) -> Result<[u32; 4]> {
-    let periodic = width % 2 == 0
-        && height % 2 == 0
-        && (0..height).all(|r| (0..width).all(|c| colour_at(r, c) == colour_at(r % 2, c % 2)));
-    if !periodic {
-        if (width, height) == (6, 6) {
-            bail!("{make} {model}: X-Trans sensor — not supported yet (@stub)");
-        }
+) -> Result<CfaPattern> {
+    let periodic = |pw: usize, ph: usize| {
+        width % pw == 0
+            && height % ph == 0
+            && (0..height).all(|r| (0..width).all(|c| colour_at(r, c) == colour_at(r % ph, c % pw)))
+    };
+    let (pw, ph) = if periodic(2, 2) {
+        (2, 2)
+    } else if periodic(6, 6) {
+        (6, 6)
+    } else {
         bail!("{make} {model}: {width}×{height} CFA pattern '{name}' — not supported yet (@stub)");
-    }
-    let tile = [
-        colour_at(0, 0) as u32,
-        colour_at(0, 1) as u32,
-        colour_at(1, 0) as u32,
-        colour_at(1, 1) as u32,
-    ];
-    if tile.iter().any(|c| *c > 2) {
+    };
+    let colours_used: Vec<usize> = (0..ph)
+        .flat_map(|r| (0..pw).map(move |c| (r, c)))
+        .map(|(r, c)| colour_at(r, c))
+        .collect();
+    if colours_used.iter().any(|c| *c > 2) {
         bail!(
             "{make} {model}: CFA pattern '{name}' has a fourth colour — not supported yet (@stub)"
         );
     }
-    Ok(tile)
+    if (0..3).any(|c| !colours_used.contains(&c)) {
+        bail!("{make} {model}: CFA pattern '{name}' lacks a colour — not supported yet (@stub)");
+    }
+    let mut colours = [0u8; 36];
+    for (slot, c) in colours.iter_mut().zip(&colours_used) {
+        *slot = *c as u8;
+    }
+    Ok(CfaPattern {
+        width: pw as u32,
+        height: ph as u32,
+        colours,
+    })
 }
 
 /// Per-position values of a 2×2 block as per-colour ones, in the `CfaImage::black` layout.
@@ -642,11 +791,11 @@ fn crop_in_place(
 fn measured_white(
     data: &[u16],
     width: usize,
-    cfa2x2: &[u32; 4],
+    cfa: &CfaPattern,
     black: &[f32; 4],
     declared: &[f32; 4],
 ) -> [f32; 4] {
-    let hist = top_histogram(data, width, cfa2x2, black, declared);
+    let hist = top_histogram(data, width, cfa, black, declared);
     plateau_white(&hist, black, declared)
 }
 
@@ -662,7 +811,7 @@ fn measured_white(
 fn top_histogram(
     data: &[u16],
     width: usize,
-    cfa2x2: &[u32; 4],
+    cfa: &CfaPattern,
     black: &[f32; 4],
     declared: &[f32; 4],
 ) -> Vec<[u32; 3]> {
@@ -674,18 +823,18 @@ fn top_histogram(
     let lo = (floor.floor() as i64 - 8 * 66 - 2).clamp(0, 65535) as u16;
     let bins = 65536 - lo as usize;
 
-    // Even row counts per job, so every job starts on the same CFA row phase.
-    let rows_per_job = 64;
+    // A multiple of every pattern's height (2 and 6), so every job starts on the same CFA
+    // row phase.
+    let rows_per_job = 96;
     let mut top = data
         .par_chunks((width * rows_per_job).max(1))
         .fold(
             || vec![[0u32; 3]; bins],
             |mut hist, block| {
                 for (row, line) in block.chunks_exact(width).enumerate() {
-                    let pattern = [cfa2x2[(row & 1) * 2], cfa2x2[(row & 1) * 2 + 1]];
                     for (col, &v) in line.iter().enumerate() {
                         if v >= lo {
-                            hist[(v - lo) as usize][pattern[col & 1] as usize] += 1;
+                            hist[(v - lo) as usize][cfa.colour_at(row, col) as usize] += 1;
                         }
                     }
                 }
@@ -1254,9 +1403,9 @@ mod tests {
     /// The Fuji X-T2's X-Trans layout, as rawloader's camera table records it.
     const XTRANS: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
 
-    fn rawloader_tile(pattern: &str, shift: (usize, usize)) -> Result<[u32; 4]> {
+    fn rawloader_tile(pattern: &str, shift: (usize, usize)) -> Result<CfaPattern> {
         let cfa = rawloader::CFA::new(pattern).shift(shift.0, shift.1);
-        bayer_tile(
+        cfa_pattern(
             (cfa.width, cfa.height),
             |r, c| cfa.color_at(r, c),
             &cfa.to_string(),
@@ -1264,9 +1413,9 @@ mod tests {
         )
     }
 
-    fn rawler_tile(pattern: &str, shift: (usize, usize)) -> Result<[u32; 4]> {
+    fn rawler_tile(pattern: &str, shift: (usize, usize)) -> Result<CfaPattern> {
         let cfa = rawler::CFA::new(pattern).shift(shift.0, shift.1);
-        bayer_tile(
+        cfa_pattern(
             (cfa.width, cfa.height),
             |r, c| cfa.color_at(r, c),
             &cfa.to_string(),
@@ -1275,29 +1424,42 @@ mod tests {
     }
 
     #[test]
-    fn an_xtrans_pattern_is_refused_by_both_decoders() {
+    fn an_xtrans_pattern_is_read_as_its_whole_6x6_tile_at_every_phase() {
         // Every phase of it, since a crop can land the 6×6 tile anywhere: its top-left 2×2
-        // is a plausible Bayer tile at some offsets, which is how it used to slip through.
+        // is a plausible Bayer tile at some offsets, which is how it used to slip through
+        // as Bayer.
+        let tile = CfaPattern::xtrans(XTRANS).unwrap();
         for shift in [(0, 0), (1, 0), (0, 1), (3, 2), (5, 5)] {
-            for tile in [rawloader_tile(XTRANS, shift), rawler_tile(XTRANS, shift)] {
-                let err = tile.expect_err("an X-Trans CFA was accepted as Bayer");
-                assert_eq!(
-                    err.to_string(),
-                    "FUJIFILM X-T2: X-Trans sensor — not supported yet (@stub)"
-                );
+            for got in [rawloader_tile(XTRANS, shift), rawler_tile(XTRANS, shift)] {
+                let got = got.expect("X-Trans refused");
+                assert_eq!((got.width, got.height), (6, 6));
+                for r in 0..6 {
+                    for c in 0..6 {
+                        assert_eq!(
+                            got.colour_at(r, c),
+                            tile.colour_at(r + shift.1, c + shift.0),
+                            "shift {shift:?} at ({r}, {c})"
+                        );
+                    }
+                }
             }
         }
     }
 
     #[test]
     fn bayer_patterns_pass_with_their_phase() {
-        assert_eq!(rawloader_tile("RGGB", (0, 0)).unwrap(), RGGB);
-        assert_eq!(rawler_tile("RGGB", (0, 0)).unwrap(), RGGB);
+        let tile = |p: Result<CfaPattern>| {
+            let p = p.unwrap();
+            assert!(p.is_bayer());
+            p.tile2x2()
+        };
+        assert_eq!(tile(rawloader_tile("RGGB", (0, 0))), RGGB);
+        assert_eq!(tile(rawler_tile("RGGB", (0, 0))), RGGB);
         // An odd crop offset on both axes turns RGGB into BGGR.
-        assert_eq!(rawloader_tile("RGGB", (1, 1)).unwrap(), [2, 1, 1, 0]);
-        assert_eq!(rawler_tile("RGGB", (1, 1)).unwrap(), [2, 1, 1, 0]);
+        assert_eq!(tile(rawloader_tile("RGGB", (1, 1))), [2, 1, 1, 0]);
+        assert_eq!(tile(rawler_tile("RGGB", (1, 1))), [2, 1, 1, 0]);
         // Bayer spelled as a 2×8 repeat is still Bayer.
-        assert_eq!(rawler_tile("RGGBRGGBRGGBRGGB", (0, 0)).unwrap(), RGGB);
+        assert_eq!(tile(rawler_tile("RGGBRGGBRGGBRGGB", (0, 0))), RGGB);
     }
 
     #[test]
@@ -1308,6 +1470,34 @@ mod tests {
         // A fourth colour (RGBE) still has its own refusal.
         let err = rawler_tile("RGEB", (0, 0)).unwrap_err();
         assert!(err.to_string().contains("fourth colour"), "{err}");
+    }
+
+    #[test]
+    fn a_16_bit_png_keeps_its_levels() {
+        use image::ImageEncoder;
+        // A ramp finer than 8 bits can hold: 1024 distinct values across a row.
+        let (w, h) = (1024u32, 2u32);
+        let px: Vec<u16> = (0..w * h)
+            .flat_map(|i| {
+                let v = ((i % w) * 16 + 20000) as u16;
+                [v, v, v]
+            })
+            .collect();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                bytemuck::cast_slice(&px),
+                w,
+                h,
+                image::ExtendedColorType::Rgb16,
+            )
+            .unwrap();
+        let raster = decode_raster(&png).unwrap();
+        let reds: std::collections::HashSet<[u8; 2]> = raster.data[..w as usize * 8]
+            .chunks(8)
+            .map(|t| [t[0], t[1]])
+            .collect();
+        assert!(reds.len() > 700, "{} levels", reds.len());
     }
 
     #[test]
@@ -1336,7 +1526,13 @@ mod tests {
                 2048 + (i % 7919) as u16
             }
         });
-        let white = measured_white(&data, w, &RGGB, &[2048.0; 4], &[12277.0; 4]);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
         for (c, w) in white.iter().take(3).enumerate() {
             assert_eq!(*w, 11000.0, "colour {c}");
         }
@@ -1347,7 +1543,13 @@ mod tests {
         // A smooth ramp that never reaches a single repeated top value.
         let (w, h) = (200, 200);
         let data = flat_mosaic(w, h, |i| 2048 + (i % 9000) as u16);
-        let white = measured_white(&data, w, &RGGB, &[2048.0; 4], &[12277.0; 4]);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
         assert_eq!(white, [12277.0; 4]);
     }
 
@@ -1361,7 +1563,13 @@ mod tests {
                 2048 + (i % 9000) as u16
             }
         });
-        let white = measured_white(&data, w, &RGGB, &[2048.0; 4], &[12277.0; 4]);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
         assert_eq!(white, [12277.0; 4]);
     }
 
@@ -1373,7 +1581,13 @@ mod tests {
             _ if i % 10 == 0 => 11000,
             _ => 2048 + (i % 7919) as u16,
         });
-        let white = measured_white(&data, w, &RGGB, &[2048.0; 4], &[12277.0; 4]);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
         for (c, w) in white.iter().take(3).enumerate() {
             assert_eq!(*w, 11000.0, "colour {c}");
         }
@@ -1392,19 +1606,24 @@ mod tests {
                 2048 + (i % 7000) as u16
             }
         });
-        let white = measured_white(&data, w, &RGGB, &[2048.0; 4], &[12277.0; 4]);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
         assert_eq!(white[0], 13583.0);
         assert_eq!(white[1], 13583.0);
         assert_eq!(white[2], 13583.0);
     }
 
     /// The histogram as it was built before `top_histogram`: every photosite, one thread.
-    fn full_histogram(data: &[u16], width: usize, cfa2x2: &[u32; 4]) -> Vec<[u32; 3]> {
+    fn full_histogram(data: &[u16], width: usize, cfa: &CfaPattern) -> Vec<[u32; 3]> {
         let mut hist = vec![[0u32; 3]; 65536];
         for (row, line) in data.chunks_exact(width).enumerate() {
-            let pattern = [cfa2x2[(row & 1) * 2], cfa2x2[(row & 1) * 2 + 1]];
             for (col, &v) in line.iter().enumerate() {
-                hist[v as usize][pattern[col & 1] as usize] += 1;
+                hist[v as usize][cfa.colour_at(row, col) as usize] += 1;
             }
         }
         hist
@@ -1433,8 +1652,12 @@ mod tests {
         ];
         for data in cases {
             let (black, declared) = ([2048.0; 4], [12277.0; 4]);
-            let full = plateau_white(&full_histogram(&data, w, &RGGB), &black, &declared);
-            let part = measured_white(&data, w, &RGGB, &black, &declared);
+            let full = plateau_white(
+                &full_histogram(&data, w, &CfaPattern::bayer(RGGB)),
+                &black,
+                &declared,
+            );
+            let part = measured_white(&data, w, &CfaPattern::bayer(RGGB), &black, &declared);
             assert_eq!(full, part);
         }
     }

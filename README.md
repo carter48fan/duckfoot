@@ -460,7 +460,7 @@ DESIGN.md invariant 8.
 | **Decode** | `RawDecoder` trait | Working | `rawler` is a drop-in behind it |
 | **Decode** | non-mosaic (`cpp != 1`) | `@stub` | Refuses loudly rather than mis-indexing |
 | **Decode** | float-encoded RAW | `@stub` | Some DNGs; refuses loudly |
-| **Decode** | 4-colour CFA (CYGM / X-Trans) | `@stub` | Only 2×2 RGB patterns |
+| **Decode** | 4-colour CFA (CYGM) | `@stub` | 2×2 Bayer and 6×6 X-Trans RGB patterns only |
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
 | **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |

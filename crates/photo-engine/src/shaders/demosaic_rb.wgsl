@@ -16,9 +16,9 @@
 // highlight reconstruction folded in (see `reconstruct` below).
 
 struct Demosaic {
-    size:  vec4<u32>,
-    cfa:   vec4<u32>,
-    black: vec4<f32>,
+    size:  vec4<u32>,              // xy = width, height; zw = pattern size, 2×2 here
+    cfa:   array<vec4<u32>, 9>,    // colour index per pattern position, row-major
+    black: vec4<f32>,              // per CFA colour index
     white: vec4<f32>,
 }
 
@@ -34,7 +34,8 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 }
 
 fn colour_at(x: i32, y: i32) -> u32 {
-    return u.cfa[u32(y & 1) * 2u + u32(x & 1)];
+    let i = u32(y & 1) * 2u + u32(x & 1);
+    return u.cfa[0][i];
 }
 
 // A coordinate off the edge, mirrored about the edge photosite: an even distance from

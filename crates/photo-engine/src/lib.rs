@@ -26,8 +26,8 @@ pub mod testkit;
 
 pub use curve::{identity_nodes, CurveNode};
 pub use decode::{
-    decode_raster, decode_raw, raster_orientation, CfaImage, DefaultRawDecoder, RasterImage,
-    RawDecoder, RawlerBackend, RawloaderBackend,
+    decode_raster, decode_raw, raster_orientation, CfaImage, CfaPattern, DefaultRawDecoder,
+    RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{
     sensor_point, upload_cfa, upload_raster, AutoTone, Engine, LoadedImage, UploadPool,
@@ -160,6 +160,10 @@ mod tests {
             ("downsample.wgsl", include_str!("shaders/downsample.wgsl")),
             ("histogram.wgsl", include_str!("shaders/histogram.wgsl")),
             ("denoise.wgsl", include_str!("shaders/denoise.wgsl")),
+            (
+                "demosaic_xtrans.wgsl",
+                include_str!("shaders/demosaic_xtrans.wgsl"),
+            ),
             ("clip_mask.wgsl", include_str!("shaders/clip_mask.wgsl")),
         ];
 

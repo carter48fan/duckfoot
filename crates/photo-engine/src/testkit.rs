@@ -39,10 +39,23 @@ pub const WHITE: u16 = 16383;
 /// photosite records only its own channel, exactly as a sensor does, with unit white
 /// balance and an identity matrix.
 pub fn cfa_from_fn(width: u32, height: u32, scene: impl Fn(u32, u32) -> [f32; 3]) -> CfaImage {
+    mosaic_from_fn(crate::decode::CfaPattern::bayer(RGGB), width, height, scene)
+}
+
+/// The Fuji X-T2's X-Trans tile.
+pub const XTRANS: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
+
+/// `cfa_from_fn` through any colour filter pattern (X-Trans, say).
+pub fn mosaic_from_fn(
+    pattern: crate::decode::CfaPattern,
+    width: u32,
+    height: u32,
+    scene: impl Fn(u32, u32) -> [f32; 3],
+) -> CfaImage {
     let mut data = Vec::with_capacity(width as usize * height as usize);
     for y in 0..height {
         for x in 0..width {
-            let colour = RGGB[((y % 2) * 2 + (x % 2)) as usize] as usize;
+            let colour = pattern.colour_at(y as usize, x as usize) as usize;
             let v = scene(x, y)[colour].clamp(0.0, 1.0) * WHITE as f32;
             data.push(v.round() as u16);
         }
@@ -51,7 +64,7 @@ pub fn cfa_from_fn(width: u32, height: u32, scene: impl Fn(u32, u32) -> [f32; 3]
         data,
         width,
         height,
-        cfa2x2: RGGB,
+        cfa: pattern,
         black: [0.0; 4],
         white: [WHITE as f32; 4],
         wb: [1.0, 1.0, 1.0],
@@ -101,6 +114,7 @@ pub fn raster_from_fn(
         width,
         height,
         data,
+        cam_to_srgb: IDENTITY,
         orientation: Geometry::default(),
         make: "synthetic".into(),
         model: "testkit".into(),
