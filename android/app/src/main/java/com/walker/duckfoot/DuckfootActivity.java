@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -220,6 +221,19 @@ public class DuckfootActivity extends NativeActivity {
             finishAndRemoveTask();
             android.os.Process.killProcess(android.os.Process.myPid());
         });
+    }
+
+    /**
+     * Where an edge swipe is the app's (the tab bar, the module strip) rather than the
+     * system's Back: {@code left, top, right, bottom} in window pixels, four ints each.
+     * Android honours up to 200 dp of each edge.
+     */
+    public void setGestureExclusion(int[] flat) {
+        List<Rect> rects = new ArrayList<>();
+        for (int i = 0; i + 3 < flat.length; i += 4) {
+            rects.add(new Rect(flat[i], flat[i + 1], flat[i + 2], flat[i + 3]));
+        }
+        runOnUiThread(() -> getWindow().getDecorView().setSystemGestureExclusionRects(rects));
     }
 
     /** Back with nothing left to close: background the app, keeping its state. */

@@ -103,6 +103,8 @@ pub struct Rects {
     nav: Rect,
     sheet: Rect,
     stage: Rect,
+    /// The Edit sheet's module strip, swiped sideways.
+    strip: Rect,
 }
 
 impl Default for Rects {
@@ -112,6 +114,7 @@ impl Default for Rects {
             nav: Rect::NOTHING,
             sheet: Rect::NOTHING,
             stage: Rect::NOTHING,
+            strip: Rect::NOTHING,
         }
     }
 }
@@ -185,6 +188,7 @@ impl PhotoApp {
                 .rect
         };
         self.compact_rects.sheet = Rect::NOTHING;
+        self.compact_rects.strip = Rect::NOTHING;
         if let Some(tab) = self.compact_tab {
             let sheet = frame(Margin::same(0));
             if landscape {
@@ -248,6 +252,23 @@ impl PhotoApp {
         );
         self.batch_export_dialog(ui);
         self.tour(ui);
+    }
+
+    /// Where a sideways swipe is the app's and not the system's Back (M-24): the bars
+    /// swiped along to change tab or module. Android caps what an app may take from each
+    /// edge at 200 dp of height, so the photo itself, swiped for the next photo, keeps
+    /// the system's gesture at its edges.
+    pub(crate) fn gesture_strips(&self) -> Vec<Rect> {
+        if !self.layout.is_compact() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if self.layout == Layout::Portrait {
+            out.push(self.compact_rects.nav);
+        }
+        out.push(self.compact_rects.strip);
+        out.retain(|r| r.is_positive() && r.height() <= 200.0);
+        out
     }
 
     /// A thin grip down the side sheet's inner edge: drag to widen or narrow the sheet,
@@ -1352,7 +1373,10 @@ impl PhotoApp {
                 ui.painter()
                     .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
             }
+            let before = ui.cursor().top();
             self.module_strip(ui);
+            self.compact_rects.strip =
+                Rect::from_x_y_ranges(ui.max_rect().x_range(), before..=ui.cursor().top());
         }
         ui.cursor().top() - top + hidden
     }
