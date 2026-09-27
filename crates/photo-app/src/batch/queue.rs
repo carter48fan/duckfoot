@@ -272,13 +272,14 @@ fn process_single_job(
     engine: &mut Engine,
     job: &ExportJob,
 ) -> anyhow::Result<()> {
-    // 1. Decode source into engine
-    if is_raster_path(&job.source_path) {
-        let bytes = fs::read(&job.source_path)?;
+    // 1. Decode source into engine (a virtual copy's bytes are its photo's)
+    let file = photo_engine::copies::source_file(&job.source_path);
+    if is_raster_path(&file) {
+        let bytes = fs::read(&file)?;
         let raster = decode_raster(&bytes)?;
         engine.load_raster(device, queue, raster)?;
     } else {
-        let cfa = decode_raw(&job.source_path)?;
+        let cfa = decode_raw(&file)?;
         engine.load(device, queue, cfa)?;
     }
 
@@ -290,6 +291,6 @@ fn process_single_job(
     if let Some(parent) = job.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let info = photo_engine::read_info(&job.source_path);
+    let info = photo_engine::read_info(&file);
     exported.save(&job.output_path, settings, info.as_ref())
 }

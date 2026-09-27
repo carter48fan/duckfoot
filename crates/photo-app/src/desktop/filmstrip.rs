@@ -153,9 +153,13 @@ impl PhotoApp {
             let descending = self.filter.sort_descending;
             let order = |ord: std::cmp::Ordering| if descending { ord.reverse() } else { ord };
             match self.filter.sort_by {
-                dam::SortBy::FileName => {
-                    displayed.sort_by(|&a, &b| order(shelf[a].name.cmp(&shelf[b].name)))
-                }
+                // A virtual copy follows its photo.
+                dam::SortBy::FileName => displayed.sort_by(|&a, &b| {
+                    order(
+                        (&shelf[a].sort_name, shelf[a].copy)
+                            .cmp(&(&shelf[b].sort_name, shelf[b].copy)),
+                    )
+                }),
                 dam::SortBy::Rating => displayed.sort_by(|&a, &b| {
                     order(shelf[a].metadata.rating.cmp(&shelf[b].metadata.rating))
                 }),
@@ -402,6 +406,7 @@ impl PhotoApp {
         let mut action_rating = None;
         let mut action_flag = None;
         let mut action_export = false;
+        let mut action_copy = None;
 
         egui::ScrollArea::horizontal()
             .auto_shrink([false, true])
@@ -546,6 +551,10 @@ impl PhotoApp {
                                 }
                             }
                         });
+                        if ui.button("Virtual copy (Ctrl+')").clicked() {
+                            action_copy = Some(item.path.clone());
+                            ui.close();
+                        }
                         if ui.button("Batch Multi-Export…").clicked() {
                             action_export = true;
                             ui.close();
@@ -582,6 +591,10 @@ impl PhotoApp {
         }
         if action_export {
             self.batch_dialog_open = true;
+        }
+        if let Some(path) = action_copy {
+            self.make_virtual_copy(gpu, &path);
+            return;
         }
         if let Some(path) = to_open {
             self.open_path(gpu, path);

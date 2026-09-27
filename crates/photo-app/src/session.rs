@@ -64,7 +64,8 @@ impl PhotoApp {
         // The camera orientation is the baseline of an unsaved photo; writing before it is
         // known would record the photo as unrotated for good.
         if self.orientation_pending && self.saved_stack.is_none() {
-            let orientation = photo_engine::file_orientation(&path);
+            let orientation =
+                photo_engine::file_orientation(&photo_engine::copies::source_file(&path));
             self.apply_orientation(orientation);
         }
         let metadata = self
@@ -305,7 +306,9 @@ impl PhotoApp {
             let previous = std::fs::read(&sidecar).ok();
             let result = photo_engine::update_sidecar(&path, |data| {
                 let own = data.stack.clone().unwrap_or_else(|| PhotoStack {
-                    geometry: photo_engine::file_orientation(&path),
+                    geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(
+                        &path,
+                    )),
                     ..PhotoStack::default()
                 });
                 data.stack = Some(self.pasted_onto(&copied, &own));
@@ -379,8 +382,48 @@ impl PhotoApp {
         }
     }
 
+    /// A virtual copy of `of` (W-05): its edits and marks as they stand, with a history of
+    /// its own, shelved after it and its other copies, and opened.
+    pub fn make_virtual_copy(&mut self, gpu: &Gpu, of: &std::path::Path) {
+        if self.loaded_path.as_deref() == Some(of) {
+            self.flush();
+        }
+        let copy =
+            photo_engine::copies::next_copy(of, |p| self.shelf.iter().any(|it| it.path == p));
+        let (stack, metadata) = match photo_engine::load_sidecar_full(of) {
+            Ok(Some(data)) => (data.stack, data.metadata),
+            _ => (None, photo_engine::AssetMetadata::default()),
+        };
+        // An unedited photo's copy starts from the camera's orientation, as it would.
+        let stack = stack.unwrap_or_else(|| PhotoStack {
+            geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(of)),
+            ..PhotoStack::default()
+        });
+        if let Err(e) = photo_engine::save_sidecar_full(&copy, Some(&stack), &metadata) {
+            self.error = Some(format!("Could not make a copy of {}: {e:#}", file_name(of)));
+            return;
+        }
+        let source = photo_engine::copies::source_file(of).into_owned();
+        let same_photo =
+            |p: &std::path::Path| photo_engine::copies::source_file(p).as_ref() == source;
+        let at = match self.shelf.iter().position(|it| it.path == of) {
+            Some(i) => {
+                i + 1
+                    + self.shelf[i + 1..]
+                        .iter()
+                        .take_while(|it| same_photo(&it.path))
+                        .count()
+            }
+            None => self.shelf.len(),
+        };
+        self.request_thumbnail(&copy);
+        self.shelf.insert(at, ShelfItem::new(copy.clone()));
+        self.open_path(gpu, copy.clone());
+        self.set_status(format!("Virtual copy: {}", file_name(&copy)));
+    }
+
     pub(crate) fn request_thumbnail(&mut self, path: &std::path::Path) {
-        if !path.exists() {
+        if !photo_engine::copies::source_file(path).exists() {
             return;
         }
         if self.thumbs_requested.insert(path.to_path_buf()) {
@@ -424,7 +467,7 @@ impl PhotoApp {
     /// straight away and appear when the pixels land; rotate, flip, crop and white balance
     /// wait for the decode, which is what knows the photo's true orientation and camera.
     pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
-        if !path.exists() {
+        if !photo_engine::copies::source_file(&path).exists() {
             if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                 item.missing = true;
             }

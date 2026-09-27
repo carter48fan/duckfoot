@@ -176,6 +176,10 @@ pub struct ShelfItem {
     /// What the file says about how it was taken; `None` until the loader has read it,
     /// or if the file says nothing.
     pub info: Option<photo_engine::PhotoInfo>,
+    /// The name it sorts by, a virtual copy's photo's, and which copy it is (1 for the
+    /// photo itself).
+    pub sort_name: String,
+    pub copy: u32,
 }
 
 impl ShelfItem {
@@ -187,13 +191,20 @@ impl ShelfItem {
                 find_sidecar(&path).is_some(),
             ),
         };
+        let file = photo_engine::copies::source_file(&path).into_owned();
+        let (sort_name, copy) = match photo_engine::copies::parse(&path) {
+            Some((source, n)) => (file_name(&source), n),
+            None => (file_name(&path), 1),
+        };
         Self {
             name: file_name(&path),
+            sort_name,
+            copy,
             is_edited: false,
             has_sidecar,
             metadata,
-            bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-            missing: !path.exists(),
+            bytes: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+            missing: !file.exists(),
             info: None,
             path,
         }
@@ -824,7 +835,10 @@ impl PhotoApp {
         let shelf = s.shelf;
         if !shelf.is_empty() {
             self.add_to_shelf(gpu, shelf);
-            if let Some(last) = s.last_open.filter(|p| p.is_file()) {
+            if let Some(last) = s
+                .last_open
+                .filter(|p| photo_engine::copies::source_file(p).is_file())
+            {
                 self.open_path(gpu, last);
             }
             // A restored session opens where it was left, not on the Edit sheet.

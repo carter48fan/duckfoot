@@ -168,6 +168,11 @@ impl PhotoApp {
         if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::V)) {
             self.same_as_previous();
         }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Quote)) {
+            if let Some(path) = self.loaded_path.clone() {
+                self.make_virtual_copy(gpu, &path);
+            }
+        }
         if split_toggle {
             self.split_active = !self.split_active;
             self.needs_render = true;

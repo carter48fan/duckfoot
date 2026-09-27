@@ -2270,10 +2270,12 @@ fn straightening_keeps_the_crop_on_the_photo_unless_told_not_to() {
 fn undo_reaches_back_past_a_restart() {
     let dir = scratch_dir("persistent-undo");
     let raw = dir.join("a.dng");
+    let settings = dir.join("settings");
     write_dng(&raw, 320, 214);
     let h = Headless::new();
     {
-        let mut app = PhotoApp::new(&h.gpu());
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
         app.open_path(&h.gpu(), raw.clone());
         h.settle(&mut app, Duration::from_secs(30));
@@ -2281,7 +2283,8 @@ fn undo_reaches_back_past_a_restart() {
         app.edit(|s| s.exposure.params.ev = 1.0);
         app.shutdown();
     }
-    let mut app = PhotoApp::new(&h.gpu());
+    let mut app =
+        PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
     h.frame(&mut app, Default::default());
     app.open_path(&h.gpu(), raw.clone());
     h.settle(&mut app, Duration::from_secs(30));
@@ -2291,5 +2294,55 @@ fn undo_reaches_back_past_a_restart() {
     assert!(app.undo());
     assert_eq!(app.stack().exposure.params.ev, 0.0);
     assert!(!app.undo(), "and no further than the first edit");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_virtual_copy_is_edited_apart_and_found_again_with_its_folder() {
+    let dir = scratch_dir("virtual-copies");
+    let raw = dir.join("a.dng");
+    let settings = dir.join("settings");
+    write_dng(&raw, 320, 214);
+    let h = Headless::new();
+    let mut app =
+        PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.edit(|s| s.exposure.params.ev = 0.5);
+    app.make_virtual_copy(&h.gpu(), &raw);
+    h.settle(&mut app, Duration::from_secs(30));
+    let copy = dir.join("a (v2).dng");
+    assert_eq!(app.loaded_path(), Some(copy.as_path()));
+    assert_eq!(app.error(), None, "the copy opens its photo");
+    assert_eq!(
+        app.stack().exposure.params.ev,
+        0.5,
+        "starts from the photo's edits"
+    );
+    assert!(!app.undo(), "with a history of its own");
+    app.edit(|s| s.exposure.params.ev = -1.0);
+    let names: Vec<_> = app.shelf.iter().map(|it| it.name.clone()).collect();
+    assert_eq!(names, ["a.dng", "a (v2).dng"]);
+    app.open_path(&h.gpu(), raw.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.stack().exposure.params.ev,
+        0.5,
+        "the photo kept its own"
+    );
+    app.shutdown();
+
+    // A folder read again finds the copy from its sidecar, after its photo.
+    let mut app =
+        PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+    h.frame(&mut app, Default::default());
+    app.open_session_folder(&h.gpu(), dir.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    let paths: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(paths, [raw.clone(), copy.clone()]);
+    app.open_path(&h.gpu(), copy);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.stack().exposure.params.ev, -1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }

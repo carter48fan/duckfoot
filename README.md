@@ -159,6 +159,7 @@ You can also **drag a RAW file onto the window**.
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
 | `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
 | `Ctrl+Shift+V` | choose what paste carries |
+| `Ctrl+'` | virtual copy: another edit of the same photo |
 | `Ctrl+Alt+V` | the same edits as the photo open before this one |
 | `Esc` with a mask chosen or healing | put the mask's handles away / stop healing |
 | `C` | crop tool on / off |
