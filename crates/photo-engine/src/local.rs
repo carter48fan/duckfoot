@@ -70,6 +70,9 @@ pub struct Adjust {
     pub clarity: f32,
     /// 0..=100.
     pub sharpness: f32,
+    /// Noise reduction, 0..=100: where the mask applies, at least this much (W-01).
+    #[serde(default)]
+    pub denoise: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,6 +226,7 @@ impl Mask {
             *v = f(*v, -100.0, 100.0, 0.0);
         }
         a.sharpness = f(a.sharpness, 0.0, 100.0, 0.0);
+        a.denoise = f(a.denoise, 0.0, 100.0, 0.0);
         self
     }
 }

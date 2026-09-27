@@ -1025,6 +1025,7 @@ impl PhotoApp {
                             ("sat", a.saturation),
                             ("clar", a.clarity),
                             ("sharp", a.sharpness),
+                            ("noise", a.denoise),
                         ] {
                             if v != 0.0 {
                                 parts.push(format!("{name} {v:+.0}"));
@@ -1079,6 +1080,7 @@ impl PhotoApp {
                         ("saturation", &mut a.saturation, -100.0),
                         ("clarity", &mut a.clarity, -100.0),
                         ("sharpness", &mut a.sharpness, 0.0),
+                        ("noise", &mut a.denoise, 0.0),
                     ] {
                         track!(widgets::param_slider(ui, label, value, lo..=100.0, 0, 0.0));
                     }

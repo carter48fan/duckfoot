@@ -310,6 +310,7 @@ fn brush_layers(stack: &PhotoStack) -> Vec<&[crate::local::Dab]> {
 struct Denoised {
     base: u32,
     params: Denoise,
+    local: LocalDenoise,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
@@ -861,6 +862,16 @@ impl Engine {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let denoise_pipeline = fullscreen_pipeline(
@@ -1264,6 +1275,7 @@ impl Engine {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         params: &Denoise,
+        local: &LocalDenoise,
         base: u32,
         reuse: Option<Denoised>,
     ) -> Result<Denoised> {
@@ -1297,16 +1309,21 @@ impl Engine {
                 (texture, view)
             }
         };
-        let u = denoise_uniforms(params, image.mip_levels);
+        let u = denoise_uniforms(
+            params,
+            image.mip_levels,
+            local,
+            (image.sensor_width, image.sensor_height),
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("denoise encoder"),
         });
         for k in 0..levels {
             let mut uniforms = u;
-            uniforms[0] = (base + k) as f32;
+            uniforms.a[0] = (base + k) as f32;
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("denoise params"),
-                contents: bytemuck::cast_slice(&uniforms),
+                contents: bytemuck::bytes_of(&uniforms),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1324,6 +1341,10 @@ impl Engine {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&image.brushes.view),
                     },
                 ],
             });
@@ -1344,6 +1365,7 @@ impl Engine {
         Ok(Denoised {
             base,
             params: *params,
+            local: local.clone(),
             texture,
             view,
         })
@@ -1353,21 +1375,22 @@ impl Engine {
     /// when Denoise turns on or changes, dropped when it turns off.
     fn sync_denoise(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
         let Some(image) = &mut self.image else { return };
-        let params = stack.denoise.params;
-        if !stack.denoise.enabled || params.is_neutral() {
+        let Some((params, local)) =
+            denoise_wanted(stack, (image.sensor_width, image.sensor_height))
+        else {
             image.denoised = None;
             return;
-        }
+        };
         let base = image.preview_level.min(image.mip_levels - 1);
         if image
             .denoised
             .as_ref()
-            .is_some_and(|(d, _)| d.base == base && d.params == params)
+            .is_some_and(|(d, _)| d.base == base && d.params == params && d.local == local)
         {
             return;
         }
         let reuse = image.denoised.take().map(|(d, _)| d);
-        match self.make_denoised(device, queue, &params, base, reuse) {
+        match self.make_denoised(device, queue, &params, &local, base, reuse) {
             Ok(d) => {
                 let Some(image) = &self.image else { return };
                 let bind = self.adjust_bind(
@@ -1814,10 +1837,11 @@ impl Engine {
             .output_size(image.sensor_width, image.sensor_height);
         check_size(device, out_w, out_h)?;
         // Noise reduction at full resolution, for this export only.
-        let denoised = if stack.denoise.enabled && !stack.denoise.params.is_neutral() {
-            Some(self.make_denoised(device, queue, &stack.denoise.params, 0, None)?)
-        } else {
-            None
+        let denoised = match denoise_wanted(stack, (image.sensor_width, image.sensor_height)) {
+            Some((params, local)) => {
+                Some(self.make_denoised(device, queue, &params, &local, 0, None)?)
+            }
+            None => None,
         };
         let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
@@ -1962,10 +1986,11 @@ impl Engine {
         stack: &PhotoStack,
         split_x: Option<f32>,
     ) {
-        self.sync_denoise(device, queue, stack);
+        // Brushes first: a brushed mask's noise reduction reads them.
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
+        self.sync_denoise(device, queue, stack);
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
@@ -2758,7 +2783,7 @@ fn mask_uniforms(
         }
         let a = &m.adjust;
         out[slot + 2] = [a.exposure, a.temperature, a.tint, a.contrast];
-        out[slot + 3] = [a.saturation, a.clarity, a.sharpness, 0.0];
+        out[slot + 3] = [a.saturation, a.clarity, a.sharpness, a.denoise];
         if shown == Some(i) {
             overlay = n + 1;
         }
@@ -2768,7 +2793,79 @@ fn mask_uniforms(
 }
 
 /// `denoise.wgsl`'s parameters for `params`, level left for the caller: see its `Params`.
-fn denoise_uniforms(params: &Denoise, mip_levels: u32) -> [f32; 8] {
+/// The masks that ask for noise reduction (W-01), packed for `denoise.wgsl`, and their
+/// brush strokes' lengths, so a stroke laid down is noticed as a change.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct LocalDenoise {
+    masks: [[f32; 4]; 32],
+    count: u32,
+    dabs: Vec<usize>,
+}
+
+impl LocalDenoise {
+    fn of(stack: &PhotoStack, sensor: (u32, u32)) -> Self {
+        let (all, n, _) = mask_uniforms(stack, sensor, None);
+        let mut out = Self::default();
+        for i in 0..n as usize {
+            if all[i * 4 + 3][3] > 0.0 {
+                let to = out.count as usize * 4;
+                out.masks[to..to + 4].copy_from_slice(&all[i * 4..i * 4 + 4]);
+                out.count += 1;
+            }
+        }
+        if out.count > 0 {
+            out.dabs = brush_layers(stack).iter().map(|d| d.len()).collect();
+        }
+        out
+    }
+}
+
+/// `denoise.wgsl`'s `Params`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DenoiseUniforms {
+    a: [f32; 4],
+    b: [f32; 4],
+    c: [f32; 4],
+    masks: [[f32; 4]; 32],
+}
+
+/// What noise reduction a stack asks for: the module's settings (or none at all when it
+/// is off), and the local masks'. `None` when nothing does.
+fn denoise_wanted(stack: &PhotoStack, sensor: (u32, u32)) -> Option<(Denoise, LocalDenoise)> {
+    let global = stack.denoise.enabled && !stack.denoise.params.is_neutral();
+    let local = LocalDenoise::of(stack, sensor);
+    if !global && local.count == 0 {
+        return None;
+    }
+    let params = if global {
+        stack.denoise.params
+    } else {
+        Denoise {
+            luminance: 0.0,
+            color: 0.0,
+            ..Denoise::default()
+        }
+    };
+    Some((params, local))
+}
+
+fn denoise_uniforms(
+    params: &Denoise,
+    mip_levels: u32,
+    local: &LocalDenoise,
+    sensor: (u32, u32),
+) -> DenoiseUniforms {
+    let [a0, a1, a2, a3, b0, b1, b2, b3] = denoise_params(params, mip_levels);
+    DenoiseUniforms {
+        a: [a0, a1, a2, a3],
+        b: [b0, b1, b2, b3],
+        c: [local.count as f32, sensor.0 as f32, sensor.1 as f32, 0.0],
+        masks: local.masks,
+    }
+}
+
+fn denoise_params(params: &Denoise, mip_levels: u32) -> [f32; 8] {
     let unit = |v: f32| {
         if v.is_finite() {
             (v / 100.0).clamp(0.0, 1.0)

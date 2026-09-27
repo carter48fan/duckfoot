@@ -2133,3 +2133,50 @@ fn auto_upright_levels_a_tilted_facade_from_the_sensor() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn a_mask_reduces_noise_only_where_it_applies() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let (w, h) = (128u32, 96u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load_raster(&gpu.device, &gpu.queue, noisy_step(w, h, 0.25))
+        .unwrap();
+    let clean = {
+        let mut e = Engine::new(&gpu.device);
+        e.load_raster(&gpu.device, &gpu.queue, noisy_step(w, h, 0.0))
+            .unwrap();
+        e.export(&gpu.device, &gpu.queue, &PhotoStack::default())
+            .unwrap()
+    };
+    let mut stack = PhotoStack::default();
+    assert!(!stack.denoise.enabled, "global noise reduction stays off");
+    let grainy = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    // A gradient: full on the left, nothing past the middle.
+    let mut mask = Mask::linear([0.1, 0.5], [0.45, 0.5]);
+    mask.adjust.denoise = 100.0;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    let masked = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let region = |img: &photo_engine::ExportedImage, x0: u32, x1: u32| {
+        let mut px = Vec::new();
+        for y in 8..h - 8 {
+            for x in x0..x1 {
+                let i = ((y * w + x) * 4) as usize;
+                px.extend_from_slice(&img.rgba[i..i + 3]);
+            }
+        }
+        px
+    };
+    let (l0, l1) = (4, 12);
+    let before = psnr(&region(&grainy, l0, l1), &region(&clean, l0, l1));
+    let after = psnr(&region(&masked, l0, l1), &region(&clean, l0, l1));
+    assert!(
+        after > before + 3.0,
+        "under the mask {before:.1} → {after:.1} dB"
+    );
+    // Past the mask's end, untouched.
+    let (r0, r1) = (w * 3 / 4, w - 4);
+    assert_eq!(region(&masked, r0, r1), region(&grainy, r0, r1));
+}
