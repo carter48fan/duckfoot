@@ -33,7 +33,9 @@ impl PhotoApp {
         let target = path.clone();
         let source = self.loaded_path.clone();
         std::thread::spawn(move || {
-            let info = source.as_deref().and_then(photo_engine::read_info);
+            let info = source
+                .as_deref()
+                .and_then(|p| photo_engine::read_info(&photo_engine::copies::source_file(p)));
             let outcome = exported
                 .save(&target, &settings, info.as_ref())
                 .map_err(|e| format!("{e:#}"));
@@ -360,11 +362,11 @@ impl PhotoApp {
                     .unwrap_or_else(|| PathBuf::from("DSC08450.ARW"));
 
                 // The preview uses the sample photo's own metadata, as the batch will.
-                let sample_info = photo_engine::read_info(&sample_path);
+                let sample_info = photo_engine::read_info(&photo_engine::copies::source_file(&sample_path));
                 let sample_date = sample_info
                     .as_ref()
                     .and_then(|i| i.capture_date_compact())
-                    .or_else(|| photo_engine::file_date_compact(&sample_path));
+                    .or_else(|| photo_engine::file_date_compact(&photo_engine::copies::source_file(&sample_path)));
                 let sample_ctx = batch::RenameContext {
                     source_path: &sample_path,
                     sequence_index: 0,
@@ -495,11 +497,13 @@ impl PhotoApp {
         let mut claimed = std::collections::HashSet::new();
 
         for (seq_idx, src_path) in selected_paths.iter().enumerate() {
-            let info = photo_engine::read_info(src_path);
+            let info = photo_engine::read_info(&photo_engine::copies::source_file(src_path));
             let date = info
                 .as_ref()
                 .and_then(|i| i.capture_date_compact())
-                .or_else(|| photo_engine::file_date_compact(src_path));
+                .or_else(|| {
+                    photo_engine::file_date_compact(&photo_engine::copies::source_file(src_path))
+                });
             let (stack, crop, rating) = if Some(src_path) == self.loaded_path.as_ref() {
                 let rating = self
                     .shelf
@@ -516,7 +520,9 @@ impl PhotoApp {
                 // Never opened, or only rated: exported as shot, which includes the way the
                 // camera was held.
                 let stack = stack.unwrap_or_else(|| PhotoStack {
-                    geometry: photo_engine::file_orientation(src_path),
+                    geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(
+                        src_path,
+                    )),
                     ..PhotoStack::default()
                 });
                 let crop = stack.geometry.crop;

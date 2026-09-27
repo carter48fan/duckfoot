@@ -174,6 +174,8 @@ impl Loader {
                             job = newer;
                         }
                         let (path, generation) = job;
+                        // A virtual copy's bytes are its photo's.
+                        let file = photo_engine::copies::source_file(&path).into_owned();
                         let _opening = gate.opening();
                         let started = Instant::now();
 
@@ -181,10 +183,11 @@ impl Loader {
                             // The stand-in, alongside the decode rather than ahead of it:
                             // it is only worth showing if it beats the real thing.
                             if !is_raster_path(&path) {
-                                let (path, done_tx, repaint) = (&path, &done_tx, &repaint);
+                                let (path, file, done_tx, repaint) =
+                                    (&path, &file, &done_tx, &repaint);
                                 scope.spawn(move || {
                                     let preview = guarded(path, || {
-                                        Ok(load_embedded_preview(path, STAGE_PREVIEW_SIDE))
+                                        Ok(load_embedded_preview(file, STAGE_PREVIEW_SIDE))
                                     });
                                     if let Ok(Some(preview)) = preview {
                                         let orientation = preview.orientation;
@@ -201,12 +204,12 @@ impl Loader {
 
                             let decoded = guarded(&path, || {
                                 if is_raster_path(&path) {
-                                    fs::read(&path)
+                                    fs::read(&file)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|bytes| decode_raster(&bytes))
                                         .map(Decoded::Raster)
                                 } else {
-                                    decode_raw(&path).map(|cfa| Decoded::Raw(Box::new(cfa)))
+                                    decode_raw(&file).map(|cfa| Decoded::Raw(Box::new(cfa)))
                                 }
                                 .map_err(|e| format!("{e:#}"))
                             });
@@ -224,7 +227,7 @@ impl Loader {
                                                 // its own lens: looked up here, off the UI
                                                 // thread, from the EXIF it was shot with.
                                                 let profile = if cfa.warp.is_none() {
-                                                    photo_engine::read_info(&path).and_then(
+                                                    photo_engine::read_info(&file).and_then(
                                                         |info| {
                                                             photo_engine::lensfun::for_photo(
                                                                 &info,
@@ -298,10 +301,11 @@ impl Loader {
                     let Ok(path) = job else { return };
                     // An open may have started while this worker sat waiting for a job.
                     gate.wait_until_idle();
-                    let image = guarded(&path, || Ok(generate_thumbnail(&path)))
+                    let file = photo_engine::copies::source_file(&path).into_owned();
+                    let image = guarded(&path, || Ok(generate_thumbnail(&file)))
                         .ok()
                         .flatten();
-                    let info = guarded(&path, || Ok(photo_engine::read_info(&path)))
+                    let info = guarded(&path, || Ok(photo_engine::read_info(&file)))
                         .ok()
                         .flatten();
                     let _ = done_tx.send(Done::Thumbnail { path, image, info });

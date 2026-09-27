@@ -528,6 +528,7 @@ impl PhotoApp {
                 sort_descending: self.filter.sort_descending,
                 ..Default::default()
             };
+        let mut make_copy = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
@@ -558,6 +559,14 @@ impl PhotoApp {
                     self.select_mode = !self.select_mode;
                 }
             }
+            if let Some(path) = self.loaded_path.clone() {
+                if widgets::chip(ui, false, "+ copy")
+                    .on_hover_text("A virtual copy: another edit of the same photo")
+                    .clicked()
+                {
+                    make_copy = Some(path);
+                }
+            }
             // Offered, not imposed (DESIGN.md: no onboarding): lit until it has been seen.
             if widgets::chip(ui, !self.settings.tour_done, "? tour")
                 .on_hover_text("How to get around on a phone")
@@ -566,6 +575,9 @@ impl PhotoApp {
                 self.start_tour();
             }
         });
+        if let Some(path) = make_copy {
+            self.make_virtual_copy(gpu, &path);
+        }
         if self.library_filters_open && !self.shelf.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;

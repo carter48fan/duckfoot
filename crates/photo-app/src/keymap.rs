@@ -80,6 +80,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     s(Editing, "`Ctrl+Shift+V`", "choose what paste carries"),
     s(
         Editing,
+        "`Ctrl+'`",
+        "virtual copy: another edit of the same photo",
+    ),
+    s(
+        Editing,
         "`Ctrl+Alt+V`",
         "the same edits as the photo open before this one",
     ),

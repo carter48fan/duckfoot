@@ -64,18 +64,27 @@ impl FolderTree {
         subfolders
     }
 
-    /// Scan directory for all supported photo files (RAW + Raster).
+    /// Scan directory for all supported photo files (RAW + Raster), and the virtual
+    /// copies their sidecars record, each copy after its photo.
     pub fn scan_supported_images(dir: &Path) -> Vec<PathBuf> {
         let mut images = Vec::new();
+        let mut files = Vec::new();
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() && is_supported_image(&path) {
                     images.push(path);
+                } else {
+                    files.push(path);
                 }
             }
         }
-        images.sort();
+        images.extend(
+            photo_engine::copies::copies_among(&files)
+                .into_iter()
+                .filter(|p| is_supported_image(p)),
+        );
+        photo_engine::copies::sort(&mut images);
         images
     }
 }
