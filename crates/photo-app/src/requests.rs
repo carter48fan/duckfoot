@@ -64,6 +64,18 @@ impl PhotoApp {
                     self.save_settings();
                     self.export_to(gpu, path);
                 }
+                platform::Response::ImportPreset(path) => self.import_preset(&path),
+                platform::Response::ExportPreset(path) => {
+                    if let Some(preset) = self.exporting_preset.take() {
+                        match photo_engine::fsio::atomic_write_bytes(
+                            &path,
+                            preset.to_json().as_bytes(),
+                        ) {
+                            Ok(()) => self.set_status(format!("Exported {}", file_name(&path))),
+                            Err(e) => self.error = Some(format!("{}: {e:#}", path.display())),
+                        }
+                    }
+                }
                 platform::Response::Status(msg) => self.set_status(msg),
             }
         }

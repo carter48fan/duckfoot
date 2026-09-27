@@ -23,6 +23,10 @@ pub enum Request {
     BatchOutputDir { from: Option<PathBuf> },
     /// Where the single-image export writes. `dir` and `name` are suggestions.
     ExportImage { dir: PathBuf, name: String },
+    /// A `.duckfoot-preset` file to add to the user's presets.
+    ImportPreset { from: Option<PathBuf> },
+    /// Where to write a preset for another machine. `name` is a suggestion.
+    ExportPreset { name: String },
 }
 
 /// The user's answer to a [`Request`]. A cancelled picker produces nothing.
@@ -33,6 +37,8 @@ pub enum Response {
     BrowseFolder(PathBuf),
     BatchOutputDir(PathBuf),
     ExportImage(PathBuf),
+    ImportPreset(PathBuf),
+    ExportPreset(PathBuf),
     /// Progress or a problem to show in the status bar.
     Status(String),
 }
@@ -126,6 +132,15 @@ impl Platform for DesktopPlatform {
                 .set_file_name(name)
                 .save_file()
                 .map(Response::ExportImage),
+            Request::ImportPreset { from } => start(from)
+                .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
+                .pick_file()
+                .map(Response::ImportPreset),
+            Request::ExportPreset { name } => rfd::FileDialog::new()
+                .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
+                .set_file_name(name)
+                .save_file()
+                .map(Response::ExportPreset),
         };
         self.answered.extend(answer);
     }

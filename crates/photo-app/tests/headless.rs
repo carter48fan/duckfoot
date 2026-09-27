@@ -1649,6 +1649,69 @@ fn paste_carries_only_the_chosen_modules_and_the_choice_is_remembered() {
 }
 
 #[test]
+fn a_saved_preset_applies_elsewhere_survives_a_restart_and_can_go() {
+    let dir = scratch_dir("userpresets");
+    let settings = dir.join("settings");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+        h.settle(&mut app, Duration::from_secs(30));
+        app.edit(|s| {
+            s.vibrance.enabled = true;
+            s.vibrance.params.vibrance = 0.3;
+            s.exposure.params.ev = 1.2;
+        });
+        app.paste_set
+            .set(photo_app::InspectorSectionId::Exposure, false);
+        app.save_user_preset("Soft colour");
+        assert_eq!(app.user_presets.len(), 1);
+        app.open_path(&h.gpu(), b.clone());
+        h.settle(&mut app, Duration::from_secs(30));
+        app.apply_user_preset(0);
+        assert!(app.stack().vibrance.enabled);
+        assert_eq!(
+            app.stack().exposure.params.ev,
+            0.0,
+            "exposure was not carried"
+        );
+        assert!(app.undo(), "one undo step");
+        assert!(!app.stack().vibrance.enabled);
+        app.shutdown();
+    }
+    let mut app =
+        PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+    h.frame(&mut app, Default::default());
+    assert_eq!(app.user_presets.len(), 1);
+    assert_eq!(app.user_presets[0].1.name, "Soft colour");
+    // A file from elsewhere comes in under its own name.
+    let file = dir.join("shared.duckfoot-preset");
+    std::fs::write(
+        &file,
+        photo_app::user_presets::UserPreset::new(
+            "Shared",
+            Default::default(),
+            &photo_engine::PhotoStack::default(),
+        )
+        .to_json(),
+    )
+    .unwrap();
+    app.import_preset(&file);
+    let names: Vec<String> = app
+        .user_presets
+        .iter()
+        .map(|(_, p)| p.name.clone())
+        .collect();
+    assert_eq!(names, ["Shared", "Soft colour"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
     use photo_app::crop_tool::Aspect;
     let dir = scratch_dir("cropaspect");
@@ -1876,6 +1939,11 @@ fn no_controls_overlap_on_any_screen() {
     for size in desktops {
         check(&mut app, "looks + info", size);
     }
+    app.preset_draft = Some("Evening".into());
+    for size in desktops {
+        check(&mut app, "looks + naming a preset", size);
+    }
+    app.preset_draft = None;
     app.looks_open = false;
     app.info_open = false;
     // Every card open at once, scrolled through by the detector's clip.
@@ -1904,6 +1972,13 @@ fn no_controls_overlap_on_any_screen() {
             check(&mut app, tab.label(), size);
         }
     }
+    // The Presets sheet naming a preset.
+    app.compact_tab = Some(Tab::Presets);
+    app.preset_draft = Some("Evening".into());
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "presets + naming", size);
+    }
+    app.preset_draft = None;
     // The Export sheet with the paste picker open.
     app.compact_tab = Some(Tab::Export);
     app.paste_picker_open = true;
