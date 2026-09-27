@@ -115,14 +115,15 @@ pub fn default_compact_sections() -> Vec<InspectorSectionConfig> {
 }
 
 /// `saved`, with any module it does not know about (one added since it was saved)
-/// appended in its default state, and any it names twice or that no longer exists
+/// placed in its default state after the module it follows by default, and any it names twice or that no longer exists
 /// dropped.
 pub fn merge_sections(saved: Vec<InspectorSectionConfig>) -> Vec<InspectorSectionConfig> {
     merge_sections_with(saved, default_compact_sections())
 }
 
 /// `saved`, with anything it does not know about — modules added since it was written —
-/// appended from `defaults`, and duplicates dropped.
+/// taken from `defaults` and put after the module it follows there (lens corrections
+/// belong beside crop, not under vignette), and duplicates dropped.
 pub fn merge_sections_with(
     saved: Vec<InspectorSectionConfig>,
     defaults: Vec<InspectorSectionConfig>,
@@ -133,10 +134,16 @@ pub fn merge_sections_with(
             out.push(s);
         }
     }
-    for d in defaults {
-        if !out.iter().any(|o| o.id == d.id) {
-            out.push(d);
+    for (i, d) in defaults.iter().enumerate() {
+        if out.iter().any(|o| o.id == d.id) {
+            continue;
         }
+        let at = defaults[..i]
+            .iter()
+            .rev()
+            .find_map(|before| out.iter().position(|o| o.id == before.id))
+            .map_or(0, |p| p + 1);
+        out.insert(at, d.clone());
     }
     out
 }
@@ -167,6 +174,15 @@ mod tests {
         assert_eq!(merged[1].id, saved[1].id);
         assert_eq!(merged.last().unwrap().id, InspectorSectionId::Vignette);
         assert_eq!(merged.len(), InspectorSectionId::all().len());
+        // A module new since the save lands where it belongs, not at the bottom.
+        let mut older = default_compact_sections();
+        older.retain(|s| s.id != InspectorSectionId::Lens);
+        let merged = merge_sections(older);
+        let lens = merged
+            .iter()
+            .position(|s| s.id == InspectorSectionId::Lens)
+            .unwrap();
+        assert_eq!(merged[lens - 1].id, InspectorSectionId::Geometry);
         assert!(!Settings::load(None).tour_done);
         let _ = std::fs::remove_dir_all(&dir);
     }

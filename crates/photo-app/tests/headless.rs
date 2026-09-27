@@ -1806,6 +1806,16 @@ fn no_controls_overlap_on_any_screen() {
     }
     app.looks_open = false;
     app.info_open = false;
+    // Every card open at once, scrolled through by the detector's clip.
+    let layout = app.inspector_sections.clone();
+    for s in &mut app.inspector_sections {
+        s.collapsed = false;
+        s.visible = true;
+    }
+    for size in desktops {
+        check(&mut app, "every card open", size);
+    }
+    app.inspector_sections = layout;
     app.begin_crop();
     for size in desktops {
         check(&mut app, "cropping", size);
@@ -1821,6 +1831,12 @@ fn no_controls_overlap_on_any_screen() {
         ] {
             check(&mut app, tab.label(), size);
         }
+    }
+    // Each module on its own, on the narrowest phone.
+    app.compact_tab = Some(Tab::Edit);
+    for &id in photo_app::InspectorSectionId::all() {
+        app.compact_module = id;
+        check(&mut app, id.title(), egui::vec2(360.0, 740.0));
     }
     app.compact_tab = None;
     check(&mut app, "phone, no sheet", egui::vec2(412.0, 892.0));

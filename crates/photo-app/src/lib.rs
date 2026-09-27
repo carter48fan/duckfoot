@@ -64,6 +64,7 @@ pub enum ColorEqTab {
 pub enum InspectorSectionId {
     Scope,
     Geometry,
+    Lens,
     WhiteBalance,
     Exposure,
     Tonal,
@@ -83,6 +84,7 @@ impl InspectorSectionId {
         &[
             Self::Scope,
             Self::Geometry,
+            Self::Lens,
             Self::WhiteBalance,
             Self::Exposure,
             Self::Tonal,
@@ -800,7 +802,7 @@ impl PhotoApp {
         let outcome = match sample {
             Sample::Pick(p) => self
                 .engine
-                .neutral_at(device, queue, &self.stack.geometry, (p.x, p.y))
+                .neutral_at(device, queue, &self.stack, (p.x, p.y))
                 .map(|wb| match wb {
                     Some(wb) => {
                         self.stack.white_balance.params = wb;

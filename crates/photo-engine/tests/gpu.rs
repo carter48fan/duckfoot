@@ -893,7 +893,7 @@ fn the_eyedropper_neutralises_a_grey_card_under_tungsten() {
     stack.geometry.rotate_right();
     stack.geometry.flip_h();
     let wb = engine
-        .neutral_at(&gpu.device, &gpu.queue, &stack.geometry, (0.5, 0.25))
+        .neutral_at(&gpu.device, &gpu.queue, &stack, (0.5, 0.25))
         .unwrap()
         .expect("a grey patch");
     stack.white_balance.params = wb;
@@ -907,7 +907,7 @@ fn the_eyedropper_neutralises_a_grey_card_under_tungsten() {
 
     // On the blue card it would have picked a very different balance.
     let blue = engine
-        .neutral_at(&gpu.device, &gpu.queue, &stack.geometry, (0.5, 0.75))
+        .neutral_at(&gpu.device, &gpu.queue, &stack, (0.5, 0.75))
         .unwrap()
         .unwrap();
     assert!(blue.tint_b < wb.tint_b * 0.5, "{blue:?} vs {wb:?}");
@@ -952,4 +952,119 @@ fn auto_white_balance_and_auto_tone_fix_a_cast_dark_frame() {
         (r - g).abs() < 6.0 && (b - g).abs() < 6.0,
         "cast left: {r:.1} {g:.1} {b:.1}"
     );
+}
+
+/// The red and green of one export row, as 0..255 values.
+fn row_channels(out: &photo_engine::ExportedImage, y: u32) -> (Vec<f32>, Vec<f32>) {
+    let at = |x: u32, c: u32| out.rgba[((y * out.width + x) * 4 + c) as usize] as f32;
+    (
+        (0..out.width).map(|x| at(x, 0)).collect(),
+        (0..out.width).map(|x| at(x, 1)).collect(),
+    )
+}
+
+/// Where a rising edge crosses half way, to a fraction of a pixel.
+fn edge_at(row: &[f32]) -> f32 {
+    let (lo, hi) = (row[0], row[row.len() - 1]);
+    let mid = (lo + hi) * 0.5;
+    let i = row
+        .windows(2)
+        .position(|w| w[0] < mid && w[1] >= mid)
+        .unwrap();
+    i as f32 + (mid - row[i]) / (row[i + 1] - row[i])
+}
+
+#[test]
+fn distortion_moves_the_frame_where_the_eyedropper_thinks_it_does() {
+    let gpu = gpu_or_skip!();
+    // A bright spot on the sensor where, with barrel removed, the output pixel near the
+    // corner should come from — as the CPU mirror of the mapping works it out.
+    let (w, h) = (256u32, 128u32);
+    let mut stack = PhotoStack::default();
+    stack.lens.enabled = true;
+    stack.lens.params.distortion = 80.0;
+    let target = (230.0, 110.0);
+    let (sx, sy) = photo_engine::sensor_point(&stack, (w, h), target);
+    // Pulled toward the middle, as removing barrel does.
+    assert!(sx < target.0 - 5.0 && sy < target.1 - 2.0, "({sx}, {sy})");
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let near = (x as f32 + 0.5 - sx).abs() < 3.0 && (y as f32 + 0.5 - sy).abs() < 3.0;
+        [if near { 0.8 } else { 0.02 }; 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let px = |out: &photo_engine::ExportedImage| {
+        out.rgba[((target.1 as u32 * out.width + target.0 as u32) * 4) as usize]
+    };
+    let corrected = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    stack.lens.enabled = false;
+    let plain = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(
+        px(&corrected) > 200,
+        "the spot is not there: {}",
+        px(&corrected)
+    );
+    assert!(
+        px(&plain) < 50,
+        "the spot was there all along: {}",
+        px(&plain)
+    );
+}
+
+#[test]
+fn fringe_correction_lines_red_up_with_green() {
+    let gpu = gpu_or_skip!();
+    // A lens that drew red 0.2% larger than green: at 900 px from the centre, the red
+    // edge sits 1.8 px further out than the green one.
+    let (w, h) = (2048u32, 16u32);
+    let (c, edge, m) = (w as f32 * 0.5, 1900.0, 1.002);
+    let red_edge = c + (edge - c) * m;
+    let raster = testkit::raster_from_fn(w, h, |x, _| {
+        let x = x as f32 + 0.5;
+        let r = if x > red_edge { 0.6 } else { 0.05 };
+        let g = if x > edge { 0.6 } else { 0.05 };
+        [r, g, g]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    let gap = |engine: &mut Engine, stack: &PhotoStack| {
+        let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        let (red, green) = row_channels(&out, h / 2);
+        edge_at(&red[1800..]) - edge_at(&green[1800..])
+    };
+    let before = gap(&mut engine, &stack);
+    assert!((before - 1.8).abs() < 0.3, "the test scene: {before}");
+    stack.lens.enabled = true;
+    stack.lens.params.ca_red = 100.0;
+    let after = gap(&mut engine, &stack);
+    assert!(after.abs() < 0.3, "still {after} px apart");
+}
+
+#[test]
+fn vignetting_correction_flattens_a_lens_falloff() {
+    let gpu = gpu_or_skip!();
+    // A flat field as a lens that loses 1.2 stops at the corner records it.
+    let (w, h) = (192u32, 128u32);
+    let half = (w as f32 * 0.5, h as f32 * 0.5);
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let (dx, dy) = (x as f32 + 0.5 - half.0, y as f32 + 0.5 - half.1);
+        let r2 = (dx * dx + dy * dy) / (half.0 * half.0 + half.1 * half.1);
+        [0.25 * (-1.2 * r2).exp2(); 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    let spread = |engine: &mut Engine, stack: &PhotoStack| {
+        let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        let at = |x: u32, y: u32| out.rgba[((y * out.width + x) * 4 + 1) as usize] as f32;
+        at(w / 2, h / 2) - at(1, 1)
+    };
+    let before = spread(&mut engine, &stack);
+    assert!(before > 40.0, "the test scene: {before}");
+    stack.lens.enabled = true;
+    // +100 is 1.5 stops at the corner; 1.2 is 80.
+    stack.lens.params.vignetting = 80.0;
+    let after = spread(&mut engine, &stack);
+    assert!(after.abs() < 4.0, "corner still {after} below the centre");
 }

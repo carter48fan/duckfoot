@@ -125,6 +125,17 @@ fn main() -> anyhow::Result<()> {
     app.looks_open = std::env::var_os("DUCKFOOT_SHOT_LOOKS").is_some();
     app.info_open = std::env::var_os("DUCKFOOT_SHOT_INFO").is_some();
     app.clip_overlay = std::env::var_os("DUCKFOOT_SHOT_CLIP").is_some();
+    // DUCKFOOT_SHOT_LENS=1: lens corrections on, their card open on the desktop.
+    if std::env::var_os("DUCKFOOT_SHOT_LENS").is_some() {
+        app.edit(|s| {
+            s.lens.enabled = true;
+            s.lens.params.distortion = 40.0;
+            s.lens.params.vignetting = 60.0;
+        });
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Lens;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

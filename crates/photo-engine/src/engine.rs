@@ -13,6 +13,7 @@ use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
+use crate::lens::LensModel;
 use crate::params::{Geometry, PhotoStack, WhiteBalance};
 use crate::temperature::WhiteScale;
 
@@ -105,6 +106,10 @@ struct AdjustUniforms {
     /// The crop, normalised to the oriented frame: x, y, width, height. Framing effects
     /// (the vignette) centre on what is exported, not on the uncropped sensor.
     frame: [f32; 4],
+    /// x = radial distortion k, y = fill zoom, z/w = red/blue CA scale.
+    lens: [f32; 4],
+    /// x = vignetting correction, stops at the corner.
+    lens_b: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -1453,6 +1458,7 @@ impl Engine {
         dither: bool,
     ) {
         let Some(image) = &self.image else { return };
+        let lens = LensModel::new(&stack.lens.params);
 
         if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
             let lut = build_lut(&stack.tone_curve.params);
@@ -1612,6 +1618,8 @@ impl Engine {
                     let c = stack.geometry.crop.sanitised();
                     [c.x, c.y, c.width, c.height]
                 },
+                lens: [lens.k, lens.zoom, lens.ca_red, lens.ca_blue],
+                lens_b: [lens.vignetting_stops, 0.0, 0.0, 0.0],
             }),
         );
     }
@@ -2091,7 +2099,8 @@ mod tests {
 
 /// Where full-resolution output pixel `out_px` (in the turned, uncropped frame) came from
 /// on the sensor: the shader's `sensor_coords`, on the CPU.
-pub fn sensor_point(g: &Geometry, sensor: (u32, u32), out_px: (f32, f32)) -> (f32, f32) {
+pub fn sensor_point(stack: &PhotoStack, sensor: (u32, u32), out_px: (f32, f32)) -> (f32, f32) {
+    let g = &stack.geometry;
     let (ow, oh) = g.output_size(sensor.0, sensor.1);
     let (mut x, mut y) = (out_px.0 - ow as f32 * 0.5, out_px.1 - oh as f32 * 0.5);
     let (s, c) = (-g.straighten_deg.to_radians()).sin_cos();
@@ -2104,6 +2113,9 @@ pub fn sensor_point(g: &Geometry, sensor: (u32, u32), out_px: (f32, f32)) -> (f3
     }
     for _ in 0..g.quarter_turns {
         (x, y) = (y, -x);
+    }
+    if stack.lens.enabled {
+        (x, y) = LensModel::new(&stack.lens.params).distorted((x, y), sensor);
     }
     (x + sensor.0 as f32 * 0.5, y + sensor.1 as f32 * 0.5)
 }
@@ -2172,15 +2184,16 @@ impl Engine {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        geometry: &Geometry,
+        stack: &PhotoStack,
         point: (f32, f32),
     ) -> Result<Option<WhiteBalance>> {
+        let geometry = &stack.geometry;
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
         let sensor = (image.sensor_width, image.sensor_height);
         let (ow, oh) = geometry.output_size(sensor.0, sensor.1);
-        let (sx, sy) = sensor_point(geometry, sensor, (point.0 * ow as f32, point.1 * oh as f32));
+        let (sx, sy) = sensor_point(stack, sensor, (point.0 * ow as f32, point.1 * oh as f32));
         if !(0.0..sensor.0 as f32).contains(&sx) || !(0.0..sensor.1 as f32).contains(&sy) {
             return Ok(None);
         }

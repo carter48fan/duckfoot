@@ -98,6 +98,7 @@ macro_rules! module_table {
 }
 
 module_table! {
+    Lens => lens, "lens corrections", "lens";
     WhiteBalance => white_balance, "white balance", "wb";
     Exposure => exposure, "exposure", "exposure";
     Tonal => tonal, "shadows & highlights", "tone";

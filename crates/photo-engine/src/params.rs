@@ -354,6 +354,21 @@ impl Default for Dehaze {
     }
 }
 
+/// Manual lens corrections, for a lens without a profile. Each slider is -100..=100 and
+/// 0 is none; see `lens::LensModel` for what they become.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Lens {
+    /// Positive straightens barrel distortion (lines bowing out), negative pincushion.
+    pub distortion: f32,
+    /// Positive shrinks a red image that the lens drew larger than green (red fringes on
+    /// the outer side of edges toward the corners), negative the reverse (cyan).
+    pub ca_red: f32,
+    /// The same for blue (blue outward) against yellow.
+    pub ca_blue: f32,
+    /// Positive brightens the corners a lens darkened; negative darkens them.
+    pub vignetting: f32,
+}
+
 /// Single color band adjustments for 8-band Color EQ.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorBand {
@@ -483,6 +498,8 @@ pub struct PhotoStack {
     pub dehaze: Module<Dehaze>,
     #[serde(default)]
     pub color_eq: Module<ColorEq>,
+    #[serde(default)]
+    pub lens: Module<Lens>,
 }
 
 impl Default for PhotoStack {
@@ -524,6 +541,7 @@ impl Default for PhotoStack {
             clarity: Module::new(false, Clarity::default()),
             dehaze: Module::new(false, Dehaze::default()),
             color_eq: Module::new(false, ColorEq::default()),
+            lens: Module::new(false, Lens::default()),
         }
     }
 }
@@ -541,6 +559,7 @@ pub(crate) mod flags {
     pub const CLARITY: u32 = 512;
     pub const DEHAZE: u32 = 1024;
     pub const COLOR_EQ: u32 = 2048;
+    pub const LENS: u32 = 4096;
 }
 
 impl PhotoStack {
@@ -581,6 +600,9 @@ impl PhotoStack {
         }
         if self.color_eq.enabled {
             m |= flags::COLOR_EQ;
+        }
+        if self.lens.enabled {
+            m |= flags::LENS;
         }
         m
     }

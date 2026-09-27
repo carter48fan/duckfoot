@@ -877,10 +877,17 @@ impl PhotoApp {
         // How much more the controls want than they were given this frame.
         let mut hidden = 0.0;
         if body_open {
+            // Under the cap with the strip and the gap before it, or at the cap the sheet
+            // would be that gap taller than its panel and run under the photo.
+            let gap = if loaded {
+                ui.spacing().item_spacing.y
+            } else {
+                0.0
+            };
             let body = egui::ScrollArea::vertical()
                 .id_salt("compact_edit")
                 .auto_shrink([false, true])
-                .max_height((cap - STRIP_H - 1.0).max(80.0))
+                .max_height((cap - STRIP_H - 1.0 - gap).max(80.0))
                 .scroll_source(ScrollSource {
                     drag: DragScroll::Always,
                     ..Default::default()

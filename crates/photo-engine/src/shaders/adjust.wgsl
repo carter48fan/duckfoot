@@ -44,6 +44,8 @@ struct Adjust {
     eq_purple:  vec4<f32>,
     eq_magenta: vec4<f32>,
     frame:      vec4<f32>,   // the crop in the oriented frame: x, y, width, height (0..1)
+    lens:       vec4<f32>,   // x = radial distortion k, y = fill zoom, z/w = red/blue CA scale
+    lens_b:     vec4<f32>,   // x = vignetting correction, stops at the corner
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -58,6 +60,7 @@ const FLAG_SHARPEN:  u32 = 256u;
 const FLAG_CLARITY:  u32 = 512u;
 const FLAG_DEHAZE:   u32 = 1024u;
 const FLAG_COLOR_EQ: u32 = 2048u;
+const FLAG_LENS:     u32 = 4096u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -240,8 +243,48 @@ fn sensor_coords(out_px: vec2<f32>) -> vec2<f32> {
         p = vec2<f32>(p.y, -p.x);
     }
 
+    // Undo the lens: `p` is now where the point belongs on an ideal sensor, and a lens
+    // with radial distortion put it further out or further in. About the sensor's centre,
+    // the optical axis for every lens without shift.
+    if (enabled(FLAG_LENS)) {
+        p = lens_distorted(p, sensor_size);
+    }
+
     return p + sensor_size * 0.5;
 }
+
+// The one-term radial model, r' = r·(1 + k·r²), with r a fraction of the half-diagonal.
+// `zoom` first, which for a pincushion correction (k > 0) scales the frame so the corners
+// land on the sensor's corners instead of past them: no pixel is invented.
+fn lens_distorted(p: vec2<f32>, sensor_size: vec2<f32>) -> vec2<f32> {
+    let q = p * u.lens.y;
+    let r = length(q) / length(sensor_size * 0.5);
+    return q * (1.0 + u.lens.x * r * r);
+}
+
+// What the vignetting correction gains a pixel by, from where it lies on the sensor.
+fn lens_gain_at(src: vec2<f32>) -> f32 {
+    let half = u.sizes.zw * 0.5;
+    let r = length(src - half) / length(half);
+    return exp2(u.lens_b.x * r * r);
+}
+
+// Lateral chromatic aberration: the lens images red and blue at slightly different sizes
+// from green. Each is sampled from where its own size put it, about the optical axis.
+fn lens_ca(s: vec4<f32>, src: vec2<f32>, lod: f32) -> vec4<f32> {
+    let half = u.sizes.zw * 0.5;
+    let uv_r = ((src - half) * u.lens.z + half) / u.sizes.zw;
+    let uv_b = ((src - half) * u.lens.w + half) / u.sizes.zw;
+    let red = textureSampleLevel(sensor, sensor_sampler, uv_r, lod).r;
+    let blue = textureSampleLevel(sensor, sensor_sampler, uv_b, lod).b;
+    return vec4<f32>(red, s.g, blue, s.a);
+}
+
+// The vignetting correction's gain at this pixel. Neighbourhood estimates (clarity,
+// dehaze) sample the sensor as it is and scale by this, so a corrected corner does not
+// read as local contrast. It varies over hundreds of pixels, so the pixel's gain stands
+// in for its neighbourhood's.
+var<private> lens_gain: f32 = 1.0;
 
 // A sensor sample as linear sRGB: white balance in camera space, then the primaries.
 fn scene(s: vec4<f32>, wb: vec3<f32>) -> vec3<f32> {
@@ -309,8 +352,8 @@ fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>) -> f32 {
     // and its luminance can land below zero: its log is NaN, which survives every clamp
     // after it and ends as a black speck. Luminance below zero is none at all.
     let y0 = max(luma(scene(s, wb)), 0.0) + floor_y;
-    let y_fine = max(luma(scene(blurred(uv, fine_level), wb)), 0.0) + floor_y;
-    let y_coarse = max(luma(scene(blurred(uv, coarse_level), wb)), 0.0) + floor_y;
+    let y_fine = max(luma(scene(blurred(uv, fine_level), wb)) * lens_gain, 0.0) + floor_y;
+    let y_coarse = max(luma(scene(blurred(uv, coarse_level), wb)) * lens_gain, 0.0) + floor_y;
 
     // Halos grow with the size of an edge; past two stops, more boost is only more halo.
     let d_texture = clamp(log2(y0 / y_fine), -2.0, 2.0);
@@ -360,7 +403,7 @@ fn dehaze(c: vec3<f32>, uv: vec2<f32>, wb: vec3<f32>) -> vec3<f32> {
         if (i == 2) { o = vec2<f32>(-t.x, 0.0); }
         if (i == 3) { o = vec2<f32>(0.0, t.y); }
         if (i == 4) { o = vec2<f32>(0.0, -t.y); }
-        let n = exposed(scene(textureSampleLevel(sensor, sensor_sampler, uv + o, level), wb));
+        let n = exposed(scene(textureSampleLevel(sensor, sensor_sampler, uv + o, level), wb) * lens_gain);
         dark = min(dark, min(n.r, min(n.g, n.b)));
     }
     let dark_p = pow(clamp(dark, 0.0, 1.0), gamma);
@@ -484,6 +527,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
     var s = textureSampleLevel(sensor, sensor_sampler, uv, lod);
+    if (enabled(FLAG_LENS) && (u.lens.z != 1.0 || u.lens.w != 1.0)) {
+        s = lens_ca(s, src, lod);
+    }
 
     let split_pos = u.split.x;
     let is_split = split_pos >= 0.0;
@@ -515,6 +561,13 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
+    }
+
+    // After sharpening, whose kernel is a pixel across and would otherwise see the gain as
+    // an edge; all four channels, since the neutral in `a` is this pixel's light too.
+    if (enabled(FLAG_LENS) && u.lens_b.x != 0.0) {
+        lens_gain = lens_gain_at(src);
+        s = s * lens_gain;
     }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.
