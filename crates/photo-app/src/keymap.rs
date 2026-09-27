@@ -127,6 +127,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(
         Library,
+        "`6` / `7` / `8` / `9`",
+        "red / yellow / green / blue label (again takes it off)",
+    ),
+    s(
+        Library,
         "`P` / `X` / `U`",
         "flag as pick / reject / clear the flag",
     ),

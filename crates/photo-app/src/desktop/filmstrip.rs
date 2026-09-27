@@ -222,7 +222,7 @@ impl PhotoApp {
                 // Two rows: what is shown, then how it is ordered and what to do with the
                 // selection. One row with a right-aligned half ran the halves into each other
                 // on a narrow stage.
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     self.rating_filter(ui);
                     ui.separator();
@@ -244,11 +244,24 @@ impl PhotoApp {
                     }
                 };
                 let mut clear = false;
+                // The label filter after the sort when it fits there, as last frame
+                // measured it, else on a row of its own.
+                let label_key = egui::Id::new("filmstrip_label_width");
+                let label_w = widgets::trailing_width(ui.ctx(), label_key);
+                let mut label_beside = false;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     self.search_field(ui, 140.0);
                     ui.separator();
                     self.sort_controls(ui, false);
+                    if label_w + 12.0 <= ui.available_width() {
+                        label_beside = true;
+                        ui.separator();
+                        ui.scope(|ui| {
+                            ui.horizontal(|ui| self.label_filter(ui));
+                            widgets::remember_trailing_width(ui, label_key);
+                        });
+                    }
                     if count > 0 && selected_w + 12.0 <= ui.available_width() {
                         selection_beside = true;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -259,6 +272,13 @@ impl PhotoApp {
                         });
                     }
                 });
+                if !label_beside {
+                    ui.add_space(4.0);
+                    ui.scope(|ui| {
+                        ui.horizontal(|ui| self.label_filter(ui));
+                        widgets::remember_trailing_width(ui, label_key);
+                    });
+                }
                 if count > 0 && !selection_beside {
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
@@ -407,6 +427,7 @@ impl PhotoApp {
         let mut action_flag = None;
         let mut action_export = false;
         let mut action_copy = None;
+        let mut action_label = None;
 
         egui::ScrollArea::horizontal()
             .auto_shrink([false, true])
@@ -551,6 +572,16 @@ impl PhotoApp {
                                 }
                             }
                         });
+                        ui.label(theme::dim("Label:"));
+                        ui.horizontal(|ui| {
+                            for (name, fill) in labels::LABELS {
+                                let on = item.metadata.color_label.as_deref() == Some(name);
+                                if labels::swatch(ui, name, fill, on).clicked() {
+                                    action_label = Some((item.path.clone(), name));
+                                    ui.close();
+                                }
+                            }
+                        });
                         if ui.button("Virtual copy (Ctrl+')").clicked() {
                             action_copy = Some(item.path.clone());
                             ui.close();
@@ -591,6 +622,13 @@ impl PhotoApp {
         }
         if action_export {
             self.batch_dialog_open = true;
+        }
+        if let Some((path, label)) = action_label {
+            if self.selection.is_selected(&path) {
+                self.set_label_for_selection(Some(label));
+            } else {
+                self.set_label_for_paths(&[path], Some(label));
+            }
         }
         if let Some(path) = action_copy {
             self.make_virtual_copy(gpu, &path);

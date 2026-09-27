@@ -107,7 +107,15 @@ impl PhotoApp {
         }
         egui::Frame::new()
             .inner_margin(Margin::symmetric(12, 8))
-            .show(ui, |ui| self.info_rows(ui, &path));
+            .show(ui, |ui| {
+                self.info_rows(ui, &path);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(theme::dim("label").size(11.5));
+                    self.label_picker(ui);
+                });
+                self.keywords_editor(ui);
+            });
     }
 
     /// Everything known about the photo at `path`, as label and value rows: the desktop

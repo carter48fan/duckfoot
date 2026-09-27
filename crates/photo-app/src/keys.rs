@@ -241,6 +241,22 @@ impl PhotoApp {
         if let Some(r) = rating_cmd {
             self.set_rating_for_selection(r);
         }
+        let label_cmd = ctx.input(|i| {
+            if i.modifiers.command {
+                return None;
+            }
+            [
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+                egui::Key::Num9,
+            ]
+            .iter()
+            .position(|k| i.key_pressed(*k))
+        });
+        if let Some(n) = label_cmd {
+            self.set_label_for_selection(Some(labels::LABELS[n].0));
+        }
 
         let (fit, actual, zoom_toggle) = ctx.input(|i| {
             (
