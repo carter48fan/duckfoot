@@ -155,6 +155,9 @@ impl PhotoApp {
         egui::Window::new("Batch Multi-Export & Recipes")
             .open(&mut open)
             .resizable(true)
+            // Inset past the corner resize grips (they reach 10 pt inside the frame), so
+            // the last row's buttons are never under one.
+            .frame(egui::Frame::window(&ui.ctx().global_style()).inner_margin(Margin::same(14)))
             // No bigger than the screen: on a phone it is most of it.
             .default_size(vec2(520.0, 480.0).min(ui.ctx().content_rect().size() - vec2(16.0, 16.0)))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))

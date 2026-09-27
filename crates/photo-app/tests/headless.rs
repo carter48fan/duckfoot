@@ -1671,3 +1671,184 @@ fn w_then_a_click_on_the_photo_takes_one_white_balance_pick() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every pair of widgets drawn over one another on the page: egui's own record of the
+/// last frame, each widget's hit area clipped to what is visible. Floating layers (windows,
+/// menus, tooltips, toasts) sit over the page by design and are left out, and a widget
+/// wholly inside another (a button in its panel) is containment, not overlap.
+fn overlapping_controls(h: &Headless, app: &mut PhotoApp, size: egui::Vec2) -> Vec<String> {
+    overlaps_in(h, app, size, false)
+}
+
+/// [`overlapping_controls`]; with `same_layer`, only widgets on one layer are compared, so
+/// an open dialog is checked against itself and not against the page it floats over.
+fn overlaps_in(
+    h: &Headless,
+    app: &mut PhotoApp,
+    size: egui::Vec2,
+    same_layer: bool,
+) -> Vec<String> {
+    h.ctx.enable_accesskit();
+    // Settled: the phone layout places its parts by where they were the frame before,
+    // and its sheet eases to its height.
+    for _ in 0..12 {
+        h.frame_sized(app, size, Default::default());
+    }
+    let output = h.frame_sized(app, size, Default::default());
+    // Names from the accessibility tree, for a readable report.
+    let names: std::collections::HashMap<u64, String> = output
+        .platform_output
+        .accesskit_update
+        .map(|u| {
+            u.nodes
+                .iter()
+                .filter_map(|(id, n)| n.label().map(|l| (id.0, l.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = |id: egui::Id| {
+        names
+            .get(&id.value())
+            .cloned()
+            .unwrap_or_else(|| format!("{id:?}"))
+    };
+    // What is drawn, not where a finger may land: `widgets::allocate_control` gives a
+    // touch control a hit area (its id `.with("hit")`) grown past what it paints, which
+    // may reach under a neighbour, as touch targets are meant to; egui gives the tap to
+    // the nearest. Those are left out and the painted rectangle compared instead.
+    let widgets: Vec<(egui::Id, egui::Rect, egui::LayerId)> = h.ctx.viewport(|v| {
+        let all: Vec<&egui::WidgetRect> = v
+            .prev_pass
+            .widgets
+            .layers()
+            .filter(|(layer, _)| {
+                matches!(layer.order, egui::Order::Background | egui::Order::Middle)
+            })
+            .flat_map(|(_, ws)| ws.iter())
+            .collect();
+        let hits: std::collections::HashSet<egui::Id> =
+            all.iter().map(|w| w.id.with("hit")).collect();
+        all.into_iter()
+            // Resize grips (the panels', the phone's side sheet's) are thin strips laid
+            // along an edge, over what they resize, on purpose.
+            .filter(|w| w.interact_rect.width().min(w.interact_rect.height()) > 12.0)
+            .filter(|w| w.interact_rect.is_positive() && !hits.contains(&w.id))
+            .map(|w| (w.id, w.interact_rect, w.layer_id))
+            .collect()
+    });
+    let mut out = Vec::new();
+    for (i, (ida, a, la)) in widgets.iter().enumerate() {
+        for (idb, b, lb) in &widgets[i + 1..] {
+            if same_layer && la != lb {
+                continue;
+            }
+            let o = a.intersect(*b);
+            // Within a point: a frame and the scroll area inside it can differ by the
+            // hairline between them.
+            let contains =
+                |outer: &egui::Rect, inner: &egui::Rect| outer.expand(1.5).contains_rect(*inner);
+            let contained = contains(a, b) || contains(b, a);
+            // A resizable window's corner grips: small squares centred on its corners.
+            let corner_grip = |grip: &egui::Rect, of: &egui::Rect| {
+                grip.width() <= 24.0
+                    && grip.height() <= 24.0
+                    && [
+                        of.left_top(),
+                        of.right_top(),
+                        of.left_bottom(),
+                        of.right_bottom(),
+                    ]
+                    .iter()
+                    .any(|c| (grip.center() - *c).length() < 2.0)
+            };
+            let contained = contained || corner_grip(a, b) || corner_grip(b, a);
+            if o.width() > 1.5 && o.height() > 1.5 && !contained {
+                out.push(format!(
+                    "{:?} {a:?} overlaps {:?} {b:?}",
+                    name(*ida),
+                    name(*idb)
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn no_controls_overlap_on_any_screen() {
+    let dir = scratch_dir("overlap");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    let mut found = Vec::new();
+    let mut check = |app: &mut PhotoApp, what: &str, size: egui::Vec2| {
+        for o in overlapping_controls(&h, app, size) {
+            found.push(format!("{what} {size:?}: {o}"));
+        }
+    };
+    let desktops = [
+        egui::vec2(1440.0, 900.0),
+        egui::vec2(1280.0, 720.0),
+        egui::vec2(1024.0, 768.0),
+    ];
+    for size in desktops {
+        check(&mut app, "desktop", size);
+    }
+    app.looks_open = true;
+    app.info_open = true;
+    for size in desktops {
+        check(&mut app, "looks + info", size);
+    }
+    app.looks_open = false;
+    app.info_open = false;
+    app.begin_crop();
+    for size in desktops {
+        check(&mut app, "cropping", size);
+    }
+    h.frame(&mut app, key(egui::Key::Escape));
+    // The phone, upright and on its side, with each sheet open.
+    for tab in Tab::ALL {
+        app.compact_tab = Some(tab);
+        for size in [
+            egui::vec2(412.0, 892.0),
+            egui::vec2(892.0, 412.0),
+            egui::vec2(360.0, 740.0),
+        ] {
+            check(&mut app, tab.label(), size);
+        }
+    }
+    app.compact_tab = None;
+    check(&mut app, "phone, no sheet", egui::vec2(412.0, 892.0));
+
+    // Dialogs, each against itself.
+    let mut in_dialog = |app: &mut PhotoApp, what: &str, size: egui::Vec2| {
+        for o in overlaps_in(&h, app, size, true) {
+            found.push(format!("{what} {size:?}: {o}"));
+        }
+    };
+    app.export_dialog_open = true;
+    for size in desktops {
+        in_dialog(&mut app, "export dialog", size);
+    }
+    app.export_dialog_open = false;
+    app.batch_dialog_open = true;
+    for size in desktops {
+        in_dialog(&mut app, "batch dialog", size);
+    }
+    app.batch_dialog_open = false;
+    app.shortcuts_open = true;
+    for size in desktops {
+        in_dialog(&mut app, "shortcuts", size);
+    }
+    app.shortcuts_open = false;
+    for f in &found {
+        eprintln!("{f}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(found.is_empty(), "{} overlaps", found.len());
+}

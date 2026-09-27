@@ -37,6 +37,9 @@ use crate::{file_name, summarise, theme, Export, InspectorSectionId, PhotoApp, V
 use photo_engine::PhotoStack;
 use std::path::PathBuf;
 
+/// The side sheet's resize grip, along its left edge; its content starts after it.
+const GRIP_W: f32 = 12.0;
+
 /// Which sheet is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -198,8 +201,12 @@ impl PhotoApp {
                     .exact_size(w)
                     .show(ui, |ui| {
                         self.compact_sheet_handle(ui, default_w, min_w, max_w);
-                        let cap = ui.available_height();
-                        self.compact_sheet(ui, gpu, tab, cap);
+                        // The content starts where the grip ends, not under it.
+                        let content = ui.max_rect().with_min_x(ui.max_rect().left() + GRIP_W);
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                            let cap = ui.available_height();
+                            self.compact_sheet(ui, gpu, tab, cap);
+                        });
                     })
                     .response
                     .rect;
@@ -253,7 +260,10 @@ impl PhotoApp {
         max_size: f32,
     ) {
         let panel = ui.max_rect();
-        let rect = Rect::from_min_max(panel.left_top(), pos2(panel.left() + 12.0, panel.bottom()));
+        let rect = Rect::from_min_max(
+            panel.left_top(),
+            pos2(panel.left() + GRIP_W, panel.bottom()),
+        );
         let response = ui.interact(rect, ui.id().with("sheet_grip"), Sense::click_and_drag());
         let hot = response.hovered() || response.dragged();
         let pill =
