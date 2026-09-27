@@ -38,6 +38,7 @@ left to the implementer's judgement, so the recommendations for DEC-3 onwards ar
 | **7** | Alpha feature floor (F-01 … F-10) | done | Feature checklist in [§9](#9-alpha-release-gate) |
 | — | **Alpha release** | | [§9](#9-alpha-release-gate) all green |
 | **8** | Worth considering (W-01 … W-14) | after alpha | Post-alpha roadmap |
+| **9** | Gesture-first traversal and aligned bars (G-01 … G-05) | after every feature | Owner's direction, 27 Sep: Snapseed-like, swipe anywhere; every bar on one line; a tutorial that teaches it |
 
 **Critical path:** 0 → 1 → 2 → 3 → 7.
 
@@ -946,6 +947,30 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 | **W-12** | Android share sheet | After export, `ACTION_SEND` via a `FileProvider` URI. | 1 d |
 | **W-13** | Localisation scaffolding | `fluent` bundles with the strings extracted; English only at first. Doing it early is cheap; late is expensive. | 2 d |
 | **W-14** | Display colour management | Desktop monitor ICC (colord / Windows / macOS APIs) applied as a final preview-only transform. It closes the README's "display profiles are ignored". | 3 d |
+
+### Phase 9 — Gesture-first traversal and aligned bars (after every feature)
+
+**Owner's direction (27 Sep 2026):**
+- Align the top and bottom menu content; every button and control on the top two bars is misaligned.
+- Swipes are not exact enough. Swiping left or right anywhere should traverse, even on the image.
+- Everything is too small to move through quickly without tapping, especially the tight sliders in big panels.
+- Traversal should be simple and gesture-based, like Snapseed, and there must still be a good tutorial.
+
+This phase comes after all features, so it works on the finished set of controls and does not have to be done twice.
+
+**What is wrong today** (screenshots at 1280×800 and 412×892):
+- **Desktop top bar:** the controls have four heights (the Photo/Audio/Video switch, the camera box, the layout group, the buttons). The right-hand groups sit on different centre lines. `?` is a bare glyph beside boxed buttons.
+- **Desktop stage toolbar:** CROP, A/B and CLIP are bare text sitting a few pixels above the boxed zoom group (− 19% +), FIT and 1:1. The panel headers (SHELF BIN, SCOPE and its HIST/RIBBON/SURFACE chips) each keep their own baseline.
+- **Phone top bar:** text items (13%, CLIP, FINE) and icons (reset, compare, undo, redo) have different sizes and uneven gaps, and only the compare icon is boxed.
+- **Phone bottom bars:** the module strip marks the chosen module with a line under its label, while the navigation bar marks the chosen tab with a line above its icon. The strip's undo/redo glyphs sit off its text baseline.
+
+| ID | Item | Shape |
+|---|---|---|
+| **G-01** | One line per bar | Every bar item goes through one `bar_item` widget: one height per bar (32 px desktop, 44 px touch), centred on the bar's midline, with a fixed gap and group padding. Glyphs get a fixed square, so an icon and a word are the same size. Within a group, items are either all boxed or all bare; `?` becomes a boxed icon like its neighbours. The selected state is marked the same way on every bar: one underline at the same distance below. The zoom group's numbers are centred between its ± buttons. **Test:** an *alignment detector* beside the overlap test reads egui's widget rects per bar. It fails if an item's vertical centre is more than 1 px off the bar's midline, if heights in a group differ, or if gaps are uneven. It runs on every desktop and phone size the overlap test covers. |
+| **G-02** | Swipe anywhere, exactly | One gesture recogniser for the whole app. It locks the direction after 10 px, so a swipe is never misread as a scroll or a slider drag. A flick is decided by velocity as well as distance, so a short fast swipe counts. There is a dead zone at the screen edges for the system back gesture. A **horizontal swipe anywhere** traverses: on the photo, on the sheet, even across a slider row (a drag that starts on a slider's thumb still moves that slider). In the Library and with no sheet open, a swipe moves between photos. In Edit it moves between tools (G-03). While zoomed in, one finger pans and a two-finger swipe traverses. |
+| **G-03** | Snapseed-style editing on the photo | In Edit, the photo itself is the control. **Swipe up or down** to choose a parameter of the current tool: a large, readable list floats over the photo and follows the finger. **Swipe left or right** to change its value, with a large readout ("Exposure +0.35") over the photo, like a toast. Slow drags are finer and flicks coarser; a light tick marks each step, zero and each end. A **double-tap** puts the parameter back. **Hold** shows the original (the before view without the split). **Pinch** zooms, and two fingers pan. The module strip remains for jumping straight to a tool, and a sideways flick on it moves one tool at a time. The sheet's sliders stay, as big rows: a drag anywhere on a row adjusts it relative to where it was, instead of needing to hit a thin rail. On desktop the same engine runs from a right-button or Alt drag on the photo, and ↑/↓ choose and ←/→ adjust for the keyboard and screen readers. |
+| **G-04** | A tutorial that teaches the gestures | The tour is rewritten as interactive coach marks on the real photo. Each step waits for the user to do the gesture before moving on: swipe up or down to choose, left or right to adjust, double-tap to reset, hold to compare, swipe the strip to change tool, and swipe in the Library to change photo. It can be skipped at any step, replayed from `?` and the phone's menu, and shown again on the next launch after a skip if the user asks. Each step's text stays short enough to sit clear of the controls it points at, and the overlap test covers every step. Headless tests drive each step with synthetic touches and check that it advances. |
+| **G-05** | Proof on a phone | Everything above, checked on real Android hardware in both orientations. Swipe accuracy is measured with a checklist of 20 swipes: none misread, none missed. The APK must still build on every commit. |
 
 ---
 
