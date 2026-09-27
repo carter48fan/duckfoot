@@ -2077,3 +2077,59 @@ fn a_wide_screen_shows_the_file_and_a_proof_marks_what_srgb_loses() {
         "the proof shows the green as sRGB brings it in: {g:?}"
     );
 }
+
+#[test]
+fn auto_upright_levels_a_tilted_facade_from_the_sensor() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (480u32, 360u32);
+    let tilt = 3.0f32.to_radians();
+    // Pillars and sills, the camera turned 3°.
+    let scene = move |x: u32, y: u32| {
+        let (dx, dy) = (x as f32 - w as f32 / 2.0, y as f32 - h as f32 / 2.0);
+        let (s, c) = tilt.sin_cos();
+        let (fx, fy) = (dx * c + dy * s, -dx * s + dy * c);
+        let pillar = [-0.3f32, -0.1, 0.1, 0.3]
+            .iter()
+            .any(|p| (fx - p * w as f32).abs() < 4.0);
+        let sill = [-0.2f32, 0.2]
+            .iter()
+            .any(|p| (fy - p * h as f32).abs() < 4.0);
+        [if pillar || sill { 0.7 } else { 0.08 }; 3]
+    };
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::cfa_from_fn(w, h, scene))
+        .unwrap();
+    let g = engine
+        .auto_upright(
+            &gpu.device,
+            &gpu.queue,
+            &PhotoStack::default(),
+            photo_engine::keystone::Upright::Level,
+        )
+        .unwrap()
+        .expect("lines to level by");
+    assert!(
+        (g.straighten_deg.abs() - 3.0).abs() < 0.5,
+        "straighten {} for a 3° tilt",
+        g.straighten_deg
+    );
+    // A blank frame has nothing to go by.
+    let mut blank = Engine::new(&gpu.device);
+    blank
+        .load(
+            &gpu.device,
+            &gpu.queue,
+            testkit::cfa_from_fn(w, h, |_, _| [0.3; 3]),
+        )
+        .unwrap();
+    assert!(blank
+        .auto_upright(
+            &gpu.device,
+            &gpu.queue,
+            &PhotoStack::default(),
+            photo_engine::keystone::Upright::Vertical
+        )
+        .unwrap()
+        .is_none());
+}

@@ -1051,10 +1051,13 @@ impl PhotoApp {
             } else {
                 0.0
             };
+            // The panel can be shorter than the cap on a small screen.
+            let room = cap.min(ui.available_height());
+            let body_h = (room - STRIP_H - 1.0 - gap).max(80.0);
             let body = egui::ScrollArea::vertical()
                 .id_salt("compact_edit")
                 .auto_shrink([false, true])
-                .max_height((cap - STRIP_H - 1.0 - gap).max(80.0))
+                .max_height(body_h)
                 .scroll_source(ScrollSource {
                     drag: DragScroll::Always,
                     ..Default::default()
@@ -1062,7 +1065,10 @@ impl PhotoApp {
                 .show(ui, |ui| {
                     // A sideways flick on anything that is not a control moves module.
                     if loaded && !self.customize_open {
-                        let area = ui.clip_rect();
+                        // No lower than the body is given: the clip rect can reach past
+                        // it, over the strip below, once the controls scroll.
+                        let mut area = ui.clip_rect();
+                        area.max.y = area.max.y.min(area.min.y + body_h);
                         if let Some(step) = swipe(ui, area, ui.id().with("module_swipe"), false) {
                             self.step_module(step);
                         }

@@ -3359,6 +3359,48 @@ impl Engine {
     /// Exposure and tone for the photo as `stack` white-balances it: the median at mid
     /// grey, highlights pulled in when the brightest tones would clip, shadows lifted when
     /// the darkest would crush.
+    /// Auto upright (W-07): the straighten and keystone that stand the photo's lines up,
+    /// as far as `mode` corrects, found on an overview of the sensor. `None` when the
+    /// photo has too few straight lines to go by.
+    pub fn auto_upright(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        mode: crate::keystone::Upright,
+    ) -> Result<Option<Geometry>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let (texels, (w, h)) = self.sensor_overview_sized(device, queue, 512)?;
+        let wb = image.wb;
+        let lum: Vec<f32> = texels
+            .iter()
+            .map(|t| (t[0] * wb[0] + t[1] * wb[1] + t[2] * wb[2]) / 3.0 + t[3])
+            .collect();
+        let (vertical, horizontal) = crate::keystone::find_lines(&lum, w as usize, h as usize);
+        // From the overview's pixels to the sensor's.
+        let (sx, sy) = (
+            image.sensor_width as f32 / w as f32,
+            image.sensor_height as f32 / h as f32,
+        );
+        let scale = |segs: Vec<crate::keystone::Segment>| -> Vec<crate::keystone::Segment> {
+            segs.into_iter()
+                .map(|s| crate::keystone::Segment {
+                    a: ((s.a.0 + 0.5) * sx, (s.a.1 + 0.5) * sy),
+                    b: ((s.b.0 + 0.5) * sx, (s.b.1 + 0.5) * sy),
+                })
+                .collect()
+        };
+        Ok(crate::keystone::solve(
+            &stack.geometry,
+            (image.sensor_width, image.sensor_height),
+            &scale(vertical),
+            &scale(horizontal),
+            mode,
+        ))
+    }
+
     pub fn auto_tone(
         &self,
         device: &wgpu::Device,
