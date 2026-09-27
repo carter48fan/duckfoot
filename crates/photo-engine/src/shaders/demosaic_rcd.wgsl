@@ -35,6 +35,9 @@ struct Demosaic {
 @group(0) @binding(3) var green_plane: texture_2d<f32>;
 // Pass 3's output: blue at red sites, red at blue ones.
 @group(0) @binding(4) var opposite: texture_2d<f32>;
+// The trusted colour ratios, with their mips (see `fs_ratios`).
+@group(0) @binding(5) var ratios: texture_2d<f32>;
+@group(0) @binding(6) var ratio_sampler: sampler;
 
 const EPS: f32 = 1e-5;
 const EPSSQ: f32 = 1e-10;
@@ -222,23 +225,6 @@ fn fs_opposite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 const CLIP_LO: f32 = 0.93;
 const CLIP_HI: f32 = 1.0;
 
-/// The brightest photosite in the 3x3 block around a pixel, every colour.
-///
-/// A pixel next to a clipped site is built partly from it — green is interpolated across
-/// it, red and blue take colour differences through it — so its channels are wrong by
-/// unequal amounts even though its own photosite measured correctly. Judged only on its own
-/// demosaiced value it can sit well under the ramp, and it is the one-pixel magenta rim
-/// round every blown specular.
-fn raw_peak(x: i32, y: i32) -> f32 {
-    var peak = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            peak = max(peak, cfa(x + dx, y + dy));
-        }
-    }
-    return peak;
-}
-
 // Highlight reconstruction.
 //
 // A photosite saturates at 1.0 after black/white normalisation, so a blown specular reads
@@ -265,12 +251,115 @@ fn raw_peak(x: i32, y: i32) -> f32 {
 // the neutral alone. Green's balance gain is always 1.0, so the neutral needs no balance
 // of its own and stays neutral under any white balance the user picks.
 //
-// This reconstructs colour, not detail. Texture inside a blown highlight is gone at capture
-// and no amount of arithmetic here brings it back.
+// That neutral is now only for what cannot be rebuilt: where some channels survived, the
+// clipped ones are rebuilt from them first (Highlight detail, below), and only where every
+// channel clipped, or nothing unclipped is near, is the colour truly gone at capture.
+// Highlight detail.
+//
+// Where only some of a pixel's channels clipped (a sunset's red, foliage's green), the
+// ones that did not still hold its texture, and the clipped ones can be rebuilt from them
+// by the colour ratio of what is nearby and unclipped: a sky is much the same colour just
+// below where it blew. The ratios come from the mosaic itself, one full sample per 2×2
+// Bayer quad (so they need no demosaic, and cost a sixteenth of the sensor's memory),
+// weighted to well-exposed quads with nothing clipped, then box-averaged down a mip chain
+// so that a pixel deep in a large blown area still finds some.
+
+// Beyond this a ratio is noise in a dark channel, not a colour.
+const RATIO_MAX: f32 = 16.0;
+
+/// One quad's ratios red / green and blue / green, times how far they are to be trusted,
+/// and that trust.
+@fragment
+fn fs_ratios(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let x = i32(pos.x) * 2;
+    let y = i32(pos.y) * 2;
+    var rgb = vec3<f32>(0.0);
+    var peak = 0.0;
+    for (var dy = 0; dy < 2; dy = dy + 1) {
+        for (var dx = 0; dx < 2; dx = dx + 1) {
+            let v = cfa(x + dx, y + dy);
+            let c = colour_at(x + dx, y + dy);
+            // Two greens to a quad: each is half of it.
+            rgb[c] = rgb[c] + select(v, 0.5 * v, c == 1u);
+            peak = max(peak, v);
+        }
+    }
+    let trust = smoothstep(0.02, 0.25, rgb.g) * (1.0 - smoothstep(0.8, CLIP_LO, peak));
+    if (trust <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let ratio = min(rgb.rb / rgb.g, vec2<f32>(RATIO_MAX));
+    return vec4<f32>(ratio * trust, trust, 0.0);
+}
+
+/// The trusted ratios (red / green, blue / green) around `(x, y)`, and how much of them
+/// was found (0 when nothing nearby is unclipped). The finest level with enough trusted
+/// quads is used, blended into coarser ones where it has too few, so the ratio field is
+/// smooth where the levels hand over.
+fn trusted_ratio(x: i32, y: i32) -> vec3<f32> {
+    let uv = (vec2<f32>(f32(x), f32(y)) + 0.5) / vec2<f32>(u.size.xy);
+    var remaining = 1.0;
+    var acc = vec2<f32>(0.0);
+    let levels = i32(textureNumLevels(ratios));
+    for (var level = 0; level < levels; level = level + 1) {
+        let s = textureSampleLevel(ratios, ratio_sampler, uv, f32(level));
+        if (s.z > 1e-4) {
+            let share = remaining * min(s.z / 0.25, 1.0);
+            acc = acc + share * s.xy / s.z;
+            remaining = remaining - share;
+            if (remaining < 0.01) {
+                break;
+            }
+        }
+    }
+    let found = 1.0 - remaining;
+    return vec3<f32>(acc / max(found, 1e-6), found);
+}
+
+/// The brightest photosite of each colour in the 3×3 block around a pixel.
+///
+/// A pixel next to a clipped site is built partly from it (green interpolated across it,
+/// red and blue taken through it), so a channel is only as good as the sites of its colour
+/// around it: judged on its own demosaiced value it can sit well under the ramp, and that
+/// is the one-pixel magenta rim round every blown specular.
+fn raw_peaks(x: i32, y: i32) -> vec3<f32> {
+    var peak = vec3<f32>(0.0);
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let c = colour_at(x + dx, y + dy);
+            peak[c] = max(peak[c], cfa(x + dx, y + dy));
+        }
+    }
+    return peak;
+}
+
+/// A pixel's camera colour, the channels that clipped rebuilt from the least clipped one
+/// by the nearby ratios, then split as `rgb` still trusted and `a` neutral for what could
+/// not be rebuilt: every channel clipped, or no unclipped colour anywhere near.
 fn reconstruct(cam: vec3<f32>, x: i32, y: i32) -> vec4<f32> {
-    let peak = max(max(cam.r, max(cam.g, cam.b)), raw_peak(x, y));
-    let t = smoothstep(CLIP_LO, CLIP_HI, peak);
-    return vec4<f32>(cam * (1.0 - t), cam.g * t);
+    let clip = smoothstep(vec3<f32>(CLIP_LO), vec3<f32>(CLIP_HI), max(cam, raw_peaks(x, y)));
+    let worst = max(clip.r, max(clip.g, clip.b));
+    if (worst <= 0.0) {
+        return vec4<f32>(cam, 0.0);
+    }
+    // The least clipped channel, green on a tie: it is the densest.
+    var k = 1u;
+    if (clip.r < clip[k]) {
+        k = 0u;
+    }
+    if (clip.b < clip[k]) {
+        k = 2u;
+    }
+    let found = trusted_ratio(x, y);
+    let ratio = vec3<f32>(found.x, 1.0, found.y);
+    // What each channel would read at that colour, given the reference channel's reading.
+    // A channel at the clip truly read at least what it did; one only beside clipped sites
+    // is raised by them (the demosaic reached across), and its own reading is no floor.
+    let estimate = ratio * (cam[k] / max(ratio[k], 1e-4));
+    let floor = cam * step(vec3<f32>(CLIP_LO), cam);
+    let rebuilt = mix(cam, max(estimate, floor), clip * found.z);
+    let t = worst * max(clip[k], 1.0 - found.z);
+    return vec4<f32>(rebuilt * (1.0 - t), cam.g * t);
 }
 
 @fragment

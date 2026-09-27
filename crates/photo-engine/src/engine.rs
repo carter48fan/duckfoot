@@ -377,10 +377,11 @@ fn output_texture_as(
 const NAN_PAINT: u32 = 0x8000_0000;
 
 pub struct Engine {
-    /// Bayer demosaic, RCD's four passes (`shaders/demosaic_rcd.wgsl`): directions,
-    /// green, the opposite colour at red and blue sites, and the rest.
-    rcd_pipelines: [wgpu::RenderPipeline; 4],
+    /// Bayer demosaic, RCD's passes (`shaders/demosaic_rcd.wgsl`): the highlight
+    /// ratios, directions, green, the opposite colour at red and blue sites, and the rest.
+    rcd_pipelines: [wgpu::RenderPipeline; 5],
     rcd_bgl: wgpu::BindGroupLayout,
+    rcd_sampler: wgpu::Sampler,
     green_bgl: wgpu::BindGroupLayout,
     /// Green then red and blue for Fuji's X-Trans (`shaders/demosaic_xtrans.wgsl`).
     xtrans_green_pipeline: wgpu::RenderPipeline,
@@ -868,9 +869,33 @@ impl Engine {
                 plane_entry(2),
                 plane_entry(3),
                 plane_entry(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
+        let rcd_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("rcd ratio sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         let rcd_pipelines = [
+            ("fs_ratios", SENSOR_FORMAT),
             ("fs_dirs", RCD_DIRS_FORMAT),
             ("fs_green", GREEN_FORMAT),
             ("fs_opposite", RCD_OPPOSITE_FORMAT),
@@ -1022,6 +1047,7 @@ impl Engine {
             hist_owed: None,
             rcd_pipelines,
             rcd_bgl,
+            rcd_sampler,
             green_bgl,
             xtrans_green_pipeline,
             xtrans_rb_pipeline,
@@ -2701,21 +2727,21 @@ impl Engine {
         target: &wgpu::TextureView,
         extent: wgpu::Extent3d,
     ) {
-        let plane = |label, size, format| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                })
-                .create_view(&Default::default())
+        let texture = |label, size, format, mips| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: mips,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
         };
+        let plane =
+            |label, size, format| texture(label, size, format, 1).create_view(&Default::default());
         let dirs = plane("rcd directions", extent, RCD_DIRS_FORMAT);
         let opposite = plane("rcd opposite colour", extent, RCD_OPPOSITE_FORMAT);
         // What a pass does not read yet, since a pass may not read what it writes.
@@ -2728,14 +2754,24 @@ impl Engine {
             },
             RCD_OPPOSITE_FORMAT,
         );
-        let passes: [(&str, [&wgpu::TextureView; 3], &wgpu::TextureView); 4] = [
-            ("rcd directions pass", [&unused, &unused, &unused], &dirs),
-            ("rcd green pass", [&dirs, &unused, &unused], green),
-            ("rcd opposite pass", [&dirs, green, &unused], &opposite),
-            ("rcd final pass", [&dirs, green, &opposite], target),
-        ];
-        for (i, (label, reads, writes)) in passes.into_iter().enumerate() {
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // The highlight ratios: one texel a Bayer quad, and every level down to one texel.
+        let quads = wgpu::Extent3d {
+            width: (extent.width / 2).max(1),
+            height: (extent.height / 2).max(1),
+            depth_or_array_layers: 1,
+        };
+        let ratio_levels = 32 - quads.width.max(quads.height).leading_zeros();
+        let ratios = texture("rcd highlight ratios", quads, SENSOR_FORMAT, ratio_levels);
+        let ratio_level = |level: u32| {
+            ratios.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let all_ratios = ratios.create_view(&Default::default());
+        let bind = |label, reads: [&wgpu::TextureView; 4]| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout: &self.rcd_bgl,
                 entries: &[
@@ -2759,9 +2795,67 @@ impl Engine {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(reads[2]),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(reads[3]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.rcd_sampler),
+                    },
                 ],
+            })
+        };
+
+        let base = ratio_level(0);
+        let ratio_bind = bind("rcd ratios pass", [&unused; 4]);
+        draw_fullscreen(
+            encoder,
+            "rcd ratios pass",
+            &self.rcd_pipelines[0],
+            &ratio_bind,
+            &base,
+        );
+        for level in 1..ratio_levels {
+            let parent = ratio_level(level - 1);
+            let mip = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rcd ratio downsample"),
+                layout: &self.mip_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&parent),
+                }],
             });
-            draw_fullscreen(encoder, label, &self.rcd_pipelines[i], &bind, writes);
+            draw_fullscreen(
+                encoder,
+                "rcd ratio downsample",
+                &self.mip_pipeline,
+                &mip,
+                &ratio_level(level),
+            );
+        }
+
+        let passes: [(&str, [&wgpu::TextureView; 4], &wgpu::TextureView); 4] = [
+            (
+                "rcd directions pass",
+                [&unused, &unused, &unused, &unused],
+                &dirs,
+            ),
+            ("rcd green pass", [&dirs, &unused, &unused, &unused], green),
+            (
+                "rcd opposite pass",
+                [&dirs, green, &unused, &unused],
+                &opposite,
+            ),
+            (
+                "rcd final pass",
+                [&dirs, green, &opposite, &all_ratios],
+                target,
+            ),
+        ];
+        for (i, (label, reads, writes)) in passes.into_iter().enumerate() {
+            let bind = bind(label, reads);
+            draw_fullscreen(encoder, label, &self.rcd_pipelines[i + 1], &bind, writes);
         }
     }
 }
@@ -2992,6 +3086,13 @@ impl Engine {
         side: u32,
     ) -> Result<Vec<[f32; 4]>> {
         Ok(self.sensor_overview_sized(device, queue, side)?.0)
+    }
+
+    /// The sensor texture's finest level as it is stored (camera RGB, and the highlight
+    /// neutral in alpha), for tests that check the demosaic itself.
+    #[doc(hidden)]
+    pub fn sensor_level0(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Overview> {
+        self.sensor_overview_sized(device, queue, u32::MAX)
     }
 
     /// [`Self::sensor_overview`], and its size.

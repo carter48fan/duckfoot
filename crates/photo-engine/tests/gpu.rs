@@ -1844,3 +1844,90 @@ fn the_demosaic_keeps_fine_detail_grey_and_where_it_was() {
     assert!(false_col < 3.3, "false colour {false_col:.3}");
     assert!(fidelity > 36.3, "PSNR {fidelity:.2} dB");
 }
+
+/// The sensor texture as the adjust pass sees it at white balance 1: `rgb + a`.
+fn sensor_rgb(gpu: &Gpu, engine: &Engine) -> (Vec<[f32; 3]>, u32) {
+    let (texels, (w, _)) = engine.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    let rgb = texels
+        .iter()
+        .map(|t| [t[0] + t[3], t[1] + t[3], t[2] + t[3]])
+        .collect();
+    (rgb, w)
+}
+
+#[test]
+fn a_clipped_channel_is_rebuilt_from_the_ones_that_were_not() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (160u32, 120u32);
+    // An orange sky brightening to the right, striped: red clips over most of it, green
+    // and blue never do, and all three carry the stripes.
+    let sky = move |x: u32, y: u32| {
+        let base = 0.3 + 0.6 * x as f32 / w as f32;
+        let stripes = 1.0 + 0.2 * (y as f32 * 0.8).sin();
+        [1.8 * base * stripes, 0.7 * base * stripes, 0.4 * base * stripes]
+    };
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::cfa_from_fn(w, h, sky))
+        .unwrap();
+    let (rgb, stride) = sensor_rgb(gpu, &engine);
+    let x = 140;
+    let (mut reds, mut greens) = (Vec::new(), Vec::new());
+    for y in 8..h - 8 {
+        let [r, g, _] = rgb[(y * stride + x) as usize];
+        reds.push(r);
+        greens.push(g);
+    }
+    assert!(
+        sky(x, 60)[0] > 1.2,
+        "red must be clipped here for the test to mean anything"
+    );
+    let ratio = reds.iter().sum::<f32>() / greens.iter().sum::<f32>();
+    assert!(
+        (ratio - 1.8 / 0.7).abs() < 0.25,
+        "red / green in the blown sky is {ratio:.2}, not the sky's 2.57"
+    );
+    // And red follows the stripes that green shows.
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    let (mr, mg) = (mean(&reds), mean(&greens));
+    let cov: f32 = reds.iter().zip(&greens).map(|(r, g)| (r - mr) * (g - mg)).sum();
+    let var_r: f32 = reds.iter().map(|r| (r - mr).powi(2)).sum();
+    let var_g: f32 = greens.iter().map(|g| (g - mg).powi(2)).sum();
+    let correlation = cov / (var_r * var_g).sqrt().max(1e-9);
+    assert!(
+        correlation > 0.9,
+        "red in the blown sky does not follow its stripes: {correlation:.2}"
+    );
+}
+
+#[test]
+fn a_blown_white_specular_stays_white_to_its_rim() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (96u32, 96u32);
+    let gains = [2.0f32, 1.0, 1.8];
+    // A grey card under light the white balance corrects, with a light far past clipping.
+    let scene = move |x: u32, y: u32| {
+        let (dx, dy) = (x as f32 - 48.0, y as f32 - 48.0);
+        if dx * dx + dy * dy < 14.0 * 14.0 {
+            [3.0; 3]
+        } else {
+            [0.3 / gains[0], 0.3 / gains[1], 0.3 / gains[2]]
+        }
+    };
+    let mut cfa = testkit::cfa_from_fn(w, h, scene);
+    cfa.wb = gains;
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let out = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    let mut worst = 0u8;
+    for y in 30..66u32 {
+        for x in 30..66u32 {
+            let i = ((y * w + x) * 4) as usize;
+            let px = &out.rgba[i..i + 3];
+            worst = worst.max(px.iter().max().unwrap() - px.iter().min().unwrap());
+        }
+    }
+    assert!(worst <= 12, "a tint of {worst} in or around the blown light");
+}
