@@ -177,6 +177,15 @@ pub(crate) fn summarise(
             let p = &s.sharpen.params;
             (format!("amount {:.2}", p.amount), *p != d.sharpen.params)
         }
+        S::Denoise => {
+            let p = &s.denoise.params;
+            let text = if p.is_neutral() {
+                "none".to_string()
+            } else {
+                format!("lum {:.0} · col {:.0}", p.luminance, p.color)
+            };
+            (text, *p != d.denoise.params)
+        }
         S::Lens => {
             let p = &s.lens.params;
             let parts: Vec<String> = [

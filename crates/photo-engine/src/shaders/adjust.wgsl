@@ -33,7 +33,8 @@ struct Adjust {
     vibrance:   vec4<f32>,   // x = vibrance, y = saturation
     vignette:   vec4<f32>,   // x = amount, y = radius
     sharpen:    vec4<f32>,   // x = amount
-    dest:       vec4<f32>,   // xy = render target size, z = sensor mip level to sample
+    dest:       vec4<f32>,   // xy = render target size, z = sensor mip level to sample,
+                             // w = the sensor level `sensor`'s own level 0 is (denoise)
     detail:     vec4<f32>,   // x = clarity, y = texture, z = dehaze
     eq_red:     vec4<f32>,   // x = hue (-30..30 deg), y = sat (-100..100), z = lum (-100..100)
     eq_orange:  vec4<f32>,
@@ -70,6 +71,16 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 @group(0) @binding(1) var<uniform> u: Adjust;
 @group(0) @binding(2) var curve_lut: texture_2d<f32>;
 @group(0) @binding(3) var sensor_sampler: sampler;
+// The sensor as decoded, every level. `sensor` is this too, unless Denoise is on, when it is
+// the denoised copy — which may start at a coarser level; see `tap`. The before half of a
+// split reads this, since it shows the file as shot.
+@group(0) @binding(4) var original: texture_2d<f32>;
+
+// `sensor` at absolute sensor level `level`. The denoised copy the preview reads is made
+// only from the preview's level down, and is bound with that level as its level 0.
+fn tap(uv: vec2<f32>, level: f32) -> vec4<f32> {
+    return textureSampleLevel(sensor, sensor_sampler, uv, max(level - u.dest.w, 0.0));
+}
 
 const LUT_MAX: i32 = 1023;
 
@@ -275,8 +286,8 @@ fn lens_ca(s: vec4<f32>, src: vec2<f32>, lod: f32) -> vec4<f32> {
     let half = u.sizes.zw * 0.5;
     let uv_r = ((src - half) * u.lens.z + half) / u.sizes.zw;
     let uv_b = ((src - half) * u.lens.w + half) / u.sizes.zw;
-    let red = textureSampleLevel(sensor, sensor_sampler, uv_r, lod).r;
-    let blue = textureSampleLevel(sensor, sensor_sampler, uv_b, lod).b;
+    let red = tap(uv_r, lod).r;
+    let blue = tap(uv_b, lod).b;
     return vec4<f32>(red, s.g, blue, s.a);
 }
 
@@ -313,15 +324,15 @@ fn luma(c: vec3<f32>) -> f32 {
 // neighbourhoods are the same size in the preview as in the export.
 fn blurred(uv: vec2<f32>, level: f32) -> vec4<f32> {
     let t = exp2(level) / u.sizes.zw;
-    var sum = textureSampleLevel(sensor, sensor_sampler, uv, level) * 4.0;
-    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(t.x, 0.0), level) * 2.0;
-    sum += textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(t.x, 0.0), level) * 2.0;
-    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, t.y), level) * 2.0;
-    sum += textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, t.y), level) * 2.0;
-    sum += textureSampleLevel(sensor, sensor_sampler, uv + t, level);
-    sum += textureSampleLevel(sensor, sensor_sampler, uv - t, level);
-    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(t.x, -t.y), level);
-    sum += textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(-t.x, t.y), level);
+    var sum = tap(uv, level) * 4.0;
+    sum += tap(uv + vec2<f32>(t.x, 0.0), level) * 2.0;
+    sum += tap(uv - vec2<f32>(t.x, 0.0), level) * 2.0;
+    sum += tap(uv + vec2<f32>(0.0, t.y), level) * 2.0;
+    sum += tap(uv - vec2<f32>(0.0, t.y), level) * 2.0;
+    sum += tap(uv + t, level);
+    sum += tap(uv - t, level);
+    sum += tap(uv + vec2<f32>(t.x, -t.y), level);
+    sum += tap(uv + vec2<f32>(-t.x, t.y), level);
     return sum / 16.0;
 }
 
@@ -403,7 +414,7 @@ fn dehaze(c: vec3<f32>, uv: vec2<f32>, wb: vec3<f32>) -> vec3<f32> {
         if (i == 2) { o = vec2<f32>(-t.x, 0.0); }
         if (i == 3) { o = vec2<f32>(0.0, t.y); }
         if (i == 4) { o = vec2<f32>(0.0, -t.y); }
-        let n = exposed(scene(textureSampleLevel(sensor, sensor_sampler, uv + o, level), wb) * lens_gain);
+        let n = exposed(scene(tap(uv + o, level), wb) * lens_gain);
         dark = min(dark, min(n.r, min(n.g, n.b)));
     }
     let dark_p = pow(clamp(dark, 0.0, 1.0), gamma);
@@ -526,7 +537,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Sampled rather than loaded, because straightening lands between texels. With no
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
-    var s = textureSampleLevel(sensor, sensor_sampler, uv, lod);
+    var s = tap(uv, lod);
     if (enabled(FLAG_LENS) && (u.lens.z != 1.0 || u.lens.w != 1.0)) {
         s = lens_ca(s, src, lod);
     }
@@ -538,9 +549,12 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         // line wide at every zoom instead of scaling with the image.
         let norm_x = out_px.x / u.sizes.x;
         // "Before" on the left of the split: the file as shot — as-shot WB, highlight
-        // recovery, camera matrix — from the sensor as it is, so before any sharpening.
+        // recovery, camera matrix — from the sensor as it is, so before any sharpening,
+        // noise reduction or fringe correction. Framed like the after half, so the two
+        // meet at the divider.
         if (norm_x < split_pos) {
-            var bc = balanced(s, u.as_shot_wb.rgb);
+            let raw = textureSampleLevel(original, sensor_sampler, uv, lod);
+            var bc = balanced(raw, u.as_shot_wb.rgb);
             bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
             return finish(bc, out_px);
         }
@@ -555,10 +569,10 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         // at fit, where sharpening is correctly all but invisible.
         // All four channels: the neutral in `a` is part of the pixel's light too.
         let step = exp2(lod) / u.sizes.zw;
-        let s_up = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(0.0, step.y), lod);
-        let s_dn = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(0.0, step.y), lod);
-        let s_lf = textureSampleLevel(sensor, sensor_sampler, uv - vec2<f32>(step.x, 0.0), lod);
-        let s_rt = textureSampleLevel(sensor, sensor_sampler, uv + vec2<f32>(step.x, 0.0), lod);
+        let s_up = tap(uv - vec2<f32>(0.0, step.y), lod);
+        let s_dn = tap(uv + vec2<f32>(0.0, step.y), lod);
+        let s_lf = tap(uv - vec2<f32>(step.x, 0.0), lod);
+        let s_rt = tap(uv + vec2<f32>(step.x, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
     }

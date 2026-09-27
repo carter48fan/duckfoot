@@ -14,7 +14,7 @@ use crate::decode::{CfaImage, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::lens::LensModel;
-use crate::params::{Geometry, PhotoStack, WhiteBalance};
+use crate::params::{Denoise, Geometry, PhotoStack, WhiteBalance};
 use crate::temperature::WhiteScale;
 
 /// The adjusted image is written here, and egui samples it directly.
@@ -143,6 +143,19 @@ pub struct LoadedImage {
     /// The clipping overlay's texture and the bind group that reads the preview into it,
     /// while the overlay is on. Preview-sized; replaced with the preview.
     overlay: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
+    /// The denoised copy the preview reads while Denoise is on, and the adjust bind group
+    /// that reads it. Made from the preview's level down, so it costs 1/4^level of a
+    /// full-resolution copy.
+    denoised: Option<(Denoised, wgpu::BindGroup)>,
+}
+
+/// A denoised copy of the sensor from level `base` down (see `shaders/denoise.wgsl`): its
+/// level 0 is the sensor's level `base`.
+struct Denoised {
+    base: u32,
+    params: Denoise,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 impl LoadedImage {
@@ -226,6 +239,8 @@ pub struct Engine {
     /// See [`Engine::set_clip_overlay`].
     clip_overlay: bool,
     mip_bgl: wgpu::BindGroupLayout,
+    denoise_pipeline: wgpu::RenderPipeline,
+    denoise_bgl: wgpu::BindGroupLayout,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
     sensor_sampler: wgpu::Sampler,
@@ -599,8 +614,52 @@ impl Engine {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The sensor as decoded, for the before half of a split.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+        let denoise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("denoise"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/denoise.wgsl").into()),
+        });
+        let denoise_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("denoise bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                uniform_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let denoise_pipeline = fullscreen_pipeline(
+            device,
+            "denoise",
+            &denoise_shader,
+            &denoise_bgl,
+            SENSOR_FORMAT,
+        );
 
         let sensor_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sensor sampler"),
@@ -754,6 +813,8 @@ impl Engine {
             adjust_buffer,
             mip_pipeline,
             mip_bgl,
+            denoise_pipeline,
+            denoise_bgl,
             lut_texture,
             lut_view,
             sensor_sampler,
@@ -848,11 +909,13 @@ impl Engine {
         self.export_band_bytes = bytes;
     }
 
-    /// The adjust pass's inputs: the sensor, one of the two uniform buffers, the curve LUT.
+    /// The adjust pass's inputs: what it samples as the sensor (the sensor, or its denoised
+    /// copy), one of the two uniform buffers, the curve LUT, and the sensor as decoded.
     fn adjust_bind(
         &self,
         device: &wgpu::Device,
         sensor_view: &wgpu::TextureView,
+        original_view: &wgpu::TextureView,
         uniforms: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -875,8 +938,136 @@ impl Engine {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(original_view),
+                },
             ],
         })
+    }
+
+    /// `params` applied to the sensor from level `base` down, into `reuse`'s texture when
+    /// it has the same shape (a slider drag re-renders; it does not reallocate).
+    fn make_denoised(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &Denoise,
+        base: u32,
+        reuse: Option<Denoised>,
+    ) -> Result<Denoised> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let base = base.min(image.mip_levels - 1);
+        let levels = image.mip_levels - base;
+        let (texture, view) = match reuse {
+            Some(d) if d.base == base => (d.texture, d.view),
+            _ => {
+                let texture = scoped(device, "the denoised copy", || {
+                    device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("denoised sensor"),
+                        // The sensor's own level `base`: mip sizes round down.
+                        size: wgpu::Extent3d {
+                            width: (image.sensor_width >> base).max(1),
+                            height: (image.sensor_height >> base).max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: levels,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: SENSOR_FORMAT,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                })?;
+                let view = texture.create_view(&Default::default());
+                (texture, view)
+            }
+        };
+        let u = denoise_uniforms(params, image.mip_levels);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("denoise encoder"),
+        });
+        for k in 0..levels {
+            let mut uniforms = u;
+            uniforms[0] = (base + k) as f32;
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("denoise params"),
+                contents: bytemuck::cast_slice(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("denoise bind"),
+                layout: &self.denoise_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&image.sensor_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                    },
+                ],
+            });
+            let target = texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: k,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            draw_fullscreen(
+                &mut encoder,
+                "denoise pass",
+                &self.denoise_pipeline,
+                &bind,
+                &target,
+            );
+        }
+        queue.submit([encoder.finish()]);
+        Ok(Denoised {
+            base,
+            params: *params,
+            texture,
+            view,
+        })
+    }
+
+    /// Bring the preview's denoised copy in line with `stack` and the preview level: made
+    /// when Denoise turns on or changes, dropped when it turns off.
+    fn sync_denoise(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
+        let Some(image) = &mut self.image else { return };
+        let params = stack.denoise.params;
+        if !stack.denoise.enabled || params.is_neutral() {
+            image.denoised = None;
+            return;
+        }
+        let base = image.preview_level.min(image.mip_levels - 1);
+        if image
+            .denoised
+            .as_ref()
+            .is_some_and(|(d, _)| d.base == base && d.params == params)
+        {
+            return;
+        }
+        let reuse = image.denoised.take().map(|(d, _)| d);
+        match self.make_denoised(device, queue, &params, base, reuse) {
+            Ok(d) => {
+                let Some(image) = &self.image else { return };
+                let bind =
+                    self.adjust_bind(device, &d.view, &image.sensor_view, &self.adjust_buffer);
+                if let Some(image) = &mut self.image {
+                    image.denoised = Some((d, bind));
+                }
+            }
+            // The preview shows the photo without noise reduction rather than nothing.
+            Err(e) => log::error!("{e:#}; previewing without noise reduction"),
+        }
     }
 
     fn export_band_bytes(&self, device: &wgpu::Device) -> u64 {
@@ -1123,7 +1314,7 @@ impl Engine {
         let output_texture = output_texture(device, preview_w, preview_h);
         let output_view = output_texture.create_view(&Default::default());
 
-        let adjust_bind = self.adjust_bind(device, &sensor_view, &self.adjust_buffer);
+        let adjust_bind = self.adjust_bind(device, &sensor_view, &sensor_view, &self.adjust_buffer);
         scopes.pop("loading the image onto the GPU")?;
 
         // Any histogram in flight describes the previous image.
@@ -1150,6 +1341,7 @@ impl Engine {
             output_texture,
             adjust_bind,
             overlay: None,
+            denoised: None,
         });
         self.sync_overlay(device);
         Ok(())
@@ -1243,7 +1435,13 @@ impl Engine {
             .geometry
             .output_size(image.sensor_width, image.sensor_height);
         check_size(device, out_w, out_h)?;
-        let sizes = ((out_w, out_h), (out_w, out_h), 0);
+        // Noise reduction at full resolution, for this export only.
+        let denoised = if stack.denoise.enabled && !stack.denoise.params.is_neutral() {
+            Some(self.make_denoised(device, queue, &stack.denoise.params, 0, None)?)
+        } else {
+            None
+        };
+        let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
         self.write_uniforms(queue, stack, None, sizes, true, !deep);
 
@@ -1259,7 +1457,8 @@ impl Engine {
         // sharpen), so it cannot be split into bands without seams. Only the copy is.
         let full = scoped(device, "export render", || {
             let full = output_texture_as(device, out_w, out_h, format);
-            let bind = self.adjust_bind(device, &image.sensor_view, &self.export_buffer);
+            let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
+            let bind = self.adjust_bind(device, sensor, &image.sensor_view, &self.export_buffer);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("export encoder"),
             });
@@ -1375,15 +1574,17 @@ impl Engine {
         stack: &PhotoStack,
         split_x: Option<f32>,
     ) {
+        self.sync_denoise(device, queue, stack);
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
         let out_size = (image.width, image.height);
+        let base = image.denoised.as_ref().map_or(0, |(d, _)| d.base);
         self.write_uniforms(
             queue,
             stack,
             split_x,
-            (out_size, target, level),
+            (out_size, target, level, base),
             false,
             true,
         );
@@ -1396,7 +1597,10 @@ impl Engine {
             &mut encoder,
             "adjust pass",
             &self.adjust_pipeline,
-            &image.adjust_bind,
+            image
+                .denoised
+                .as_ref()
+                .map_or(&image.adjust_bind, |(_, bind)| bind),
             &image.output_view,
         );
 
@@ -1453,7 +1657,7 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
         split_x: Option<f32>,
-        (out_size, target, level): ((u32, u32), (u32, u32), u32),
+        (out_size, target, level, base): ((u32, u32), (u32, u32), u32, u32),
         for_export: bool,
         dither: bool,
     ) {
@@ -1559,7 +1763,7 @@ impl Engine {
                     0.0,
                 ],
                 sharpen: [stack.sharpen.params.amount, 0.0, 0.0, 0.0],
-                dest: [target.0 as f32, target.1 as f32, level as f32, 0.0],
+                dest: [target.0 as f32, target.1 as f32, level as f32, base as f32],
                 detail: [
                     stack.clarity.params.clarity,
                     stack.clarity.params.texture,
@@ -1954,6 +2158,30 @@ pub(crate) fn read_back_level(
         y += rows;
     }
     Ok(out)
+}
+
+/// `denoise.wgsl`'s parameters for `params`, level left for the caller: see its `Params`.
+fn denoise_uniforms(params: &Denoise, mip_levels: u32) -> [f32; 8] {
+    let unit = |v: f32| {
+        if v.is_finite() {
+            (v / 100.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    [
+        0.0,
+        // At 100, noise of 6% of white at full scale, as a high-ISO file has at mid grey.
+        unit(params.luminance) * 0.06,
+        // Detail 0 averages steps up to three noise sigmas; 100 only up to one.
+        3.0 - 2.0 * unit(params.detail),
+        unit(params.color),
+        // One to three levels coarser: 2x2 to 8x8 photosites per colour tap.
+        (1.0 + 2.0 * unit(params.smoothness)).round(),
+        mip_levels.saturating_sub(1) as f32,
+        0.0,
+        0.0,
+    ]
 }
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

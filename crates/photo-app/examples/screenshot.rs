@@ -136,6 +136,16 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Lens;
         }
     }
+    // DUCKFOOT_SHOT_DENOISE=1: noise reduction on, its card open on the desktop.
+    if std::env::var_os("DUCKFOOT_SHOT_DENOISE").is_some() {
+        app.edit(|s| {
+            s.denoise.enabled = true;
+            s.denoise.params.luminance = 40.0;
+        });
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Denoise;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

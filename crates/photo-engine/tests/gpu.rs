@@ -1068,3 +1068,177 @@ fn vignetting_correction_flattens_a_lens_falloff() {
     let after = spread(&mut engine, &stack);
     assert!(after.abs() < 4.0, "corner still {after} below the centre");
 }
+
+/// A fixed pseudo-random value in -1..1 for each (x, y, channel): noise a test can repeat.
+fn noise(x: u32, y: u32, c: u32) -> f32 {
+    let mut h =
+        x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77) ^ c.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    (h as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+/// A step from dark to light grey down the middle, clean and with high-ISO grain: shot
+/// noise in each channel on its own, so both grain and colour noise.
+fn noisy_step(w: u32, h: u32, grain: f32) -> photo_engine::RasterImage {
+    testkit::raster_from_fn(w, h, move |x, y| {
+        let v: f32 = if x < w / 2 { 0.12 } else { 0.4 };
+        let spread = grain * v.sqrt();
+        [0, 1, 2].map(|c| (v + spread * 1.7 * noise(x, y, c)).max(0.0))
+    })
+}
+
+fn psnr(a: &[u8], b: &[u8]) -> f32 {
+    let mse = a
+        .chunks(4)
+        .zip(b.chunks(4))
+        .map(|(p, q)| {
+            (0..3)
+                .map(|c| (p[c] as f32 - q[c] as f32).powi(2))
+                .sum::<f32>()
+        })
+        .sum::<f32>()
+        / (a.len() / 4 * 3) as f32;
+    10.0 * (255.0f32 * 255.0 / mse.max(1e-6)).log10()
+}
+
+fn denoising() -> PhotoStack {
+    let mut stack = PhotoStack::default();
+    stack.denoise.enabled = true;
+    stack.denoise.params.luminance = 60.0;
+    stack.denoise.params.color = 60.0;
+    stack
+}
+
+#[test]
+fn denoise_removes_grain_and_keeps_the_edge() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 128u32);
+    let export = |raster, stack: &PhotoStack| {
+        let mut engine = Engine::new(&gpu.device);
+        engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+        engine.export(&gpu.device, &gpu.queue, stack).unwrap()
+    };
+    let clean = export(noisy_step(w, h, 0.0), &PhotoStack::default());
+    let noisy = export(noisy_step(w, h, 0.03), &PhotoStack::default());
+    let denoised = export(noisy_step(w, h, 0.03), &denoising());
+    let (before, after) = (
+        psnr(&noisy.rgba, &clean.rgba),
+        psnr(&denoised.rgba, &clean.rgba),
+    );
+    assert!(
+        after >= before + 6.0,
+        "PSNR {before:.1} dB -> {after:.1} dB"
+    );
+
+    // The step is still a step: the mean profile across it rises within the same couple
+    // of pixels as the clean one.
+    let profile = |out: &photo_engine::ExportedImage| -> Vec<f32> {
+        (0..w)
+            .map(|x| {
+                (0..h)
+                    .map(|y| out.rgba[((y * w + x) * 4 + 1) as usize] as f32)
+                    .sum::<f32>()
+                    / h as f32
+            })
+            .collect()
+    };
+    let rise = |p: &[f32]| {
+        let (lo, hi) = (p[w as usize / 4], p[w as usize * 3 / 4]);
+        let at = |f: f32| p.iter().position(|v| *v >= lo + (hi - lo) * f).unwrap();
+        at(0.9) - at(0.1)
+    };
+    let (sharp, kept) = (rise(&profile(&clean)), rise(&profile(&denoised)));
+    assert!(
+        kept <= sharp + 1,
+        "the edge spread from {sharp} to {kept} px"
+    );
+}
+
+#[test]
+fn colour_noise_reduction_takes_out_false_colour() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (128u32, 96u32);
+    let chroma_spread = |stack: &PhotoStack| {
+        let mut engine = Engine::new(&gpu.device);
+        engine
+            .load_raster(&gpu.device, &gpu.queue, noisy_step(w, h, 0.03))
+            .unwrap();
+        let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        // Red against green, across the flat light half away from the step.
+        let d: Vec<f32> = (8..h - 8)
+            .flat_map(|y| (w * 5 / 8..w - 8).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let i = ((y * w + x) * 4) as usize;
+                out.rgba[i] as f32 - out.rgba[i + 1] as f32
+            })
+            .collect();
+        let mean = d.iter().sum::<f32>() / d.len() as f32;
+        (d.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / d.len() as f32).sqrt()
+    };
+    let mut colour_only = PhotoStack::default();
+    colour_only.denoise.enabled = true;
+    colour_only.denoise.params.luminance = 0.0;
+    colour_only.denoise.params.color = 100.0;
+    let (before, after) = (
+        chroma_spread(&PhotoStack::default()),
+        chroma_spread(&colour_only),
+    );
+    assert!(
+        after < before * 0.5,
+        "false colour {before:.2} -> {after:.2}"
+    );
+}
+
+#[test]
+fn a_denoised_preview_shows_what_the_denoised_export_will() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (256u32, 192u32);
+    let level = 2;
+    let gap = |stack: &PhotoStack| {
+        let mut engine = Engine::new(&gpu.device);
+        engine
+            .load_raster(&gpu.device, &gpu.queue, noisy_step(w, h, 0.03))
+            .unwrap();
+        let exported = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        let (_, _, shown) = preview(gpu, &mut engine, stack, level);
+        let f = 1 << level;
+        let small = downscale(&exported.rgba, exported.width, exported.height, f);
+        let mut sum = 0.0;
+        for (i, e) in small.iter().enumerate() {
+            for c in 0..3 {
+                sum += (testkit::srgb_to_linear(shown[i * 4 + c]) - e[c]).abs();
+            }
+        }
+        sum / (small.len() * 3) as f32 * 255.0
+    };
+    let (plain, denoised) = (gap(&PhotoStack::default()), gap(&denoising()));
+    assert!(
+        denoised <= plain + 1.0,
+        "preview vs export: {denoised:.2} denoised, {plain:.2} without"
+    );
+}
+
+#[test]
+fn the_before_half_is_not_denoised() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (96u32, 64u32);
+    let render = |stack: &PhotoStack| {
+        let mut engine = Engine::new(&gpu.device);
+        engine
+            .load_raster(&gpu.device, &gpu.queue, noisy_step(w, h, 0.03))
+            .unwrap();
+        engine.set_preview_level(&gpu.device, 0);
+        engine.render(&gpu.device, &gpu.queue, stack, Some(1.0));
+        read_texture(
+            &gpu.device,
+            &gpu.queue,
+            engine.image().unwrap().output_texture(),
+        )
+        .unwrap()
+    };
+    assert!(render(&denoising()) == render(&PhotoStack::default()));
+}

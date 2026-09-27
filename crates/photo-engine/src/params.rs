@@ -354,6 +354,49 @@ impl Default for Dehaze {
     }
 }
 
+/// Noise reduction, as a pre-pass over the sensor (see `shaders/denoise.wgsl`). Sliders
+/// are 0..=100; 0 luminance and 0 colour is none.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Denoise {
+    /// How much grain is averaged out of brightness.
+    pub luminance: f32,
+    /// How much fine texture the luminance smoothing keeps; higher keeps more.
+    pub detail: f32,
+    /// How much colour noise (blotches of false colour) is averaged out.
+    pub color: f32,
+    /// How wide an area colour is averaged over; higher removes coarser blotches.
+    pub smoothness: f32,
+}
+
+impl Default for Denoise {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            detail: 50.0,
+            color: 25.0,
+            smoothness: 50.0,
+        }
+    }
+}
+
+impl Denoise {
+    /// A starting point for a photo shot at `iso`: nothing but a little colour at base
+    /// ISO, and about a tenth more luminance smoothing per stop from there.
+    pub fn for_iso(iso: u32) -> Self {
+        let stops = (iso.max(1) as f32 / 200.0).log2().max(0.0);
+        Self {
+            luminance: (stops * 12.0).clamp(0.0, 70.0).round(),
+            color: (25.0 + stops * 8.0).clamp(25.0, 60.0).round(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether it would change a pixel at all.
+    pub fn is_neutral(&self) -> bool {
+        !(self.luminance > 0.0 || self.color > 0.0)
+    }
+}
+
 /// Manual lens corrections, for a lens without a profile. Each slider is -100..=100 and
 /// 0 is none; see `lens::LensModel` for what they become.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -500,6 +543,8 @@ pub struct PhotoStack {
     pub color_eq: Module<ColorEq>,
     #[serde(default)]
     pub lens: Module<Lens>,
+    #[serde(default)]
+    pub denoise: Module<Denoise>,
 }
 
 impl Default for PhotoStack {
@@ -542,6 +587,7 @@ impl Default for PhotoStack {
             dehaze: Module::new(false, Dehaze::default()),
             color_eq: Module::new(false, ColorEq::default()),
             lens: Module::new(false, Lens::default()),
+            denoise: Module::new(false, Denoise::default()),
         }
     }
 }
@@ -560,6 +606,9 @@ pub(crate) mod flags {
     pub const DEHAZE: u32 = 1024;
     pub const COLOR_EQ: u32 = 2048;
     pub const LENS: u32 = 4096;
+    /// Not read by the adjust shader: noise reduction is a pre-pass. Here so the bitmask
+    /// says everything that is on.
+    pub const DENOISE: u32 = 8192;
 }
 
 impl PhotoStack {
@@ -603,6 +652,9 @@ impl PhotoStack {
         }
         if self.lens.enabled {
             m |= flags::LENS;
+        }
+        if self.denoise.enabled {
+            m |= flags::DENOISE;
         }
         m
     }
@@ -651,6 +703,16 @@ fn finite_or(v: f32, fallback: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denoise_for_iso_grows_with_the_iso() {
+        let base = Denoise::for_iso(100);
+        assert_eq!((base.luminance, base.color), (0.0, 25.0));
+        let high = Denoise::for_iso(3200);
+        assert_eq!((high.luminance, high.color), (48.0, 57.0));
+        assert!(Denoise::for_iso(204_800).luminance <= 70.0);
+        assert_eq!(Denoise::for_iso(0), Denoise::for_iso(1));
+    }
 
     #[test]
     fn quarter_turns_swap_the_output_axes() {
