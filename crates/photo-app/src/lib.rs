@@ -471,6 +471,10 @@ pub struct PhotoApp {
     pub paste_picker_open: bool,
     /// What is typed in a keywords field, not yet added.
     keyword_draft: String,
+    /// Filters kept under a name, and the name being typed for a new one.
+    pub saved_filters: Vec<dam::SavedFilter>,
+    saved_filter_draft: Option<String>,
+    folder_watch: dam::watch::FolderWatch,
     /// The local mask being placed and adjusted (W-01): its handles are on the stage.
     pub selected_mask: Option<usize>,
     /// Show the selected mask as a red wash on the preview.
@@ -703,6 +707,9 @@ impl PhotoApp {
             paste_set: paste::PasteSet::default(),
             paste_picker_open: false,
             keyword_draft: String::new(),
+            saved_filters: Vec::new(),
+            saved_filter_draft: None,
+            folder_watch: Default::default(),
             selected_mask: None,
             mask_overlay: false,
             mask_drag: None,
@@ -834,6 +841,11 @@ impl PhotoApp {
         if let Some(set) = s.paste {
             self.paste_set = set;
         }
+        self.saved_filters = s.saved_filters;
+        for dir in s.watched_folders.into_iter().filter(|d| d.is_dir()) {
+            let listing = dam::FolderTree::scan_supported_images(&dir);
+            self.folder_watch.watch(dir, &listing);
+        }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
         // Missing photos are shelved too, and shown as missing.
         let shelf = s.shelf;
@@ -866,6 +878,8 @@ impl PhotoApp {
         s.filter = Some(self.filter.clone());
         s.export = Some(self.export_settings);
         s.paste = Some(self.paste_set.clone());
+        s.saved_filters = self.saved_filters.clone();
+        s.watched_folders = self.folder_watch.folders();
         s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
         s.last_open = self.loaded_path.clone();
         self.save_settings();
@@ -1270,6 +1284,7 @@ impl PhotoApp {
         self.poll_platform(gpu);
         self.take_drops(gpu);
         self.poll_loader(&ctx, gpu);
+        self.poll_folders(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);
         self.poll_batch_export(&ctx);

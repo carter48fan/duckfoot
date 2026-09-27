@@ -40,6 +40,10 @@ pub struct Settings {
     pub constrain_crop: bool,
     /// What paste carries (W-03).
     pub paste: Option<crate::paste::PasteSet>,
+    /// Filters kept under a name.
+    pub saved_filters: Vec<crate::dam::SavedFilter>,
+    /// The folders opened whole, watched for photos that arrive.
+    pub watched_folders: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -63,6 +67,8 @@ impl Default for Settings {
             filter: None,
             constrain_crop: true,
             paste: None,
+            saved_filters: Vec::new(),
+            watched_folders: Vec::new(),
         }
     }
 }

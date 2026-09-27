@@ -232,6 +232,15 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Geometry;
         }
     }
+    // DUCKFOOT_SHOT_FILTERS=1: a filter showing, one kept under a name, the phone's filter
+    // rows open.
+    if std::env::var_os("DUCKFOOT_SHOT_FILTERS").is_some() {
+        app.filter.color_label = Some("green".into());
+        app.saved_filters
+            .push(photo_app::dam::SavedFilter::new("keepers", &app.filter));
+        app.filter.rating = photo_app::dam::RatingFilter::MinStars(3);
+        app.library_filters_open = true;
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

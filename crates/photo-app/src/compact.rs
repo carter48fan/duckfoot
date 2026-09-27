@@ -522,12 +522,7 @@ impl PhotoApp {
         }
 
         // Sorting is not filtering: only something that hides photos lights the chip.
-        let filtering = self.filter
-            != crate::dam::FilterState {
-                sort_by: self.filter.sort_by,
-                sort_descending: self.filter.sort_descending,
-                ..Default::default()
-            };
+        let filtering = self.filtering();
         let mut make_copy = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -591,6 +586,14 @@ impl PhotoApp {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 self.search_field(ui, 120.0);
                 self.sort_controls(ui, false);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.label_filter(ui);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.saved_filters_row(ui);
             });
         }
         if self.select_mode {

@@ -172,6 +172,7 @@ impl PhotoApp {
     pub fn open_session_folder(&mut self, gpu: &Gpu, folder: PathBuf) {
         let images = dam::FolderTree::scan_supported_images(&folder);
         if !images.is_empty() {
+            self.folder_watch.watch(folder.clone(), &images);
             self.folder_tree.current_folder = Some(folder);
             self.add_to_shelf(gpu, images);
             self.folder_browser_open = false;
@@ -420,6 +421,55 @@ impl PhotoApp {
         self.shelf.insert(at, ShelfItem::new(copy.clone()));
         self.open_path(gpu, copy.clone());
         self.set_status(format!("Virtual copy: {}", file_name(&copy)));
+    }
+
+    /// Take in what the last read of the watched folders found, and start the next.
+    pub(crate) fn poll_folders(&mut self, ctx: &egui::Context, gpu: &Gpu) {
+        if self.folder_watch.folders().is_empty() {
+            return;
+        }
+        if let Some(scan) = self.folder_watch.poll(std::time::Instant::now()) {
+            self.take_scan(gpu, scan);
+        }
+        ctx.request_repaint_after(dam::watch::INTERVAL);
+    }
+
+    /// Read the watched folders now and take in what they hold.
+    pub fn rescan_folders_now(&mut self, gpu: &Gpu) {
+        let scan = self.folder_watch.scan_now();
+        self.take_scan(gpu, scan);
+    }
+
+    fn take_scan(&mut self, gpu: &Gpu, scan: dam::watch::Scan) {
+        let mut returned = Vec::new();
+        for item in &mut self.shelf {
+            let file = photo_engine::copies::source_file(&item.path).into_owned();
+            let watched = file
+                .parent()
+                .is_some_and(|d| scan.folders.iter().any(|f| f == d));
+            if !watched {
+                continue;
+            }
+            let missing = !scan.present.contains(&file);
+            if item.missing && !missing {
+                returned.push(item.path.clone());
+            }
+            item.missing = missing;
+        }
+        for path in returned {
+            self.thumbs_requested.remove(&path);
+            self.request_thumbnail(&path);
+        }
+        let new: Vec<PathBuf> = scan
+            .new
+            .into_iter()
+            .filter(|p| !self.shelf.iter().any(|it| it.path == *p))
+            .collect();
+        if !new.is_empty() {
+            let n = new.len();
+            self.add_to_shelf(gpu, new);
+            self.set_status(format!("{n} new photo(s) arrived in a watched folder"));
+        }
     }
 
     pub(crate) fn request_thumbnail(&mut self, path: &std::path::Path) {

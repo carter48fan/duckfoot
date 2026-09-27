@@ -2346,3 +2346,54 @@ fn a_virtual_copy_is_edited_apart_and_found_again_with_its_folder() {
     assert_eq!(app.stack().exposure.params.ev, -1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_watched_folder_brings_in_new_photos_and_marks_gone_ones() {
+    let dir = scratch_dir("watch");
+    let settings = dir.join("settings");
+    let roll = dir.join("roll");
+    std::fs::create_dir_all(&roll).unwrap();
+    let (a, b) = (roll.join("a.dng"), roll.join("b.dng"));
+    write_dng(&a, 320, 214);
+    let h = Headless::new();
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.open_session_folder(&h.gpu(), roll.clone());
+        h.settle(&mut app, Duration::from_secs(30));
+        write_dng(&b, 320, 214);
+        app.rescan_folders_now(&h.gpu());
+        let paths: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [a.clone(), b.clone()],
+            "the new photo joined the shelf"
+        );
+        // Taken off the shelf, it stays off: it is not new any more.
+        app.remove_from_shelf(std::slice::from_ref(&b));
+        app.rescan_folders_now(&h.gpu());
+        assert_eq!(app.shelf.len(), 1);
+        std::fs::remove_file(&a).unwrap();
+        app.rescan_folders_now(&h.gpu());
+        assert!(app.shelf[0].missing, "a photo whose file went is missing");
+        write_dng(&a, 320, 214);
+        app.rescan_folders_now(&h.gpu());
+        assert!(!app.shelf[0].missing, "and back when it is");
+        // A filter kept under a name.
+        app.filter.rating = photo_app::dam::RatingFilter::MinStars(3);
+        app.saved_filters
+            .push(photo_app::dam::SavedFilter::new("keepers", &app.filter));
+        app.shutdown();
+    }
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    h.frame(&mut app, Default::default());
+    assert_eq!(app.saved_filters.len(), 1);
+    assert_eq!(app.saved_filters[0].name, "keepers");
+    // The folder is still watched after a restart.
+    let c = roll.join("c.dng");
+    write_dng(&c, 320, 214);
+    app.rescan_folders_now(&h.gpu());
+    assert!(app.shelf.iter().any(|it| it.path == c));
+    let _ = std::fs::remove_dir_all(&dir);
+}
