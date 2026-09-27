@@ -13,7 +13,7 @@ const CHANNELS: usize = 4;
 pub const BUFFER_BYTES: u64 = (BINS * CHANNELS * std::mem::size_of::<u32>()) as u64;
 
 /// Counts per level, 0..=255.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Histogram {
     pub red: Vec<u32>,
     pub green: Vec<u32>,

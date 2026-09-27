@@ -797,6 +797,12 @@ impl PhotoApp {
                         );
                         add = Some(Mask::linear(a, b));
                     }
+                    if widgets::chip_enabled(ui, room, false, "+ brush")
+                        .on_hover_text("Paint where it applies")
+                        .clicked()
+                    {
+                        add = Some(Mask::brush());
+                    }
                     if n > 0
                         && widgets::chip(ui, self.mask_overlay, "show mask")
                             .on_hover_text(
@@ -815,7 +821,7 @@ impl PhotoApp {
                 }
                 let mut remove = None;
                 for i in 0..self.stack.local.params.masks.len() {
-                    let m = self.stack.local.params.masks[i];
+                    let m = self.stack.local.params.masks[i].clone();
                     let chosen = self.selected_mask == Some(i);
                     ui.horizontal(|ui| {
                         if widgets::chip(ui, chosen, &format!("{} {}", m.kind(), i + 1))
@@ -897,6 +903,49 @@ impl PhotoApp {
                     ] {
                         track!(widgets::param_slider(ui, label, value, lo..=100.0, 0, 0.0));
                     }
+                    if let Shape::Brush { dabs } = &m.shape {
+                        let painted = dabs.len();
+                        let brush = &mut self.brush;
+                        widgets::param_slider(
+                            ui,
+                            "brush size",
+                            &mut brush.size,
+                            1.0..=30.0,
+                            0,
+                            6.0,
+                        );
+                        widgets::param_slider(
+                            ui,
+                            "brush feather",
+                            &mut brush.feather,
+                            0.0..=100.0,
+                            0,
+                            60.0,
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if widgets::chip(ui, self.brush.erase, "erase")
+                                .on_hover_text("Paint the mask away (Alt or right-drag too)")
+                                .clicked()
+                            {
+                                self.brush.erase = !self.brush.erase;
+                            }
+                            if widgets::chip_enabled(ui, painted > 0, false, "clear")
+                                .on_hover_text("Take all the painting away")
+                                .clicked()
+                            {
+                                if let Shape::Brush { dabs } =
+                                    &mut self.stack.local.params.masks[i].shape
+                                {
+                                    dabs.clear();
+                                }
+                                discrete!();
+                            }
+                            if painted == 0 {
+                                ui.label(theme::dim("Paint on the photo.").size(11.5));
+                            }
+                        });
+                    }
+                    let m = &mut self.stack.local.params.masks[i];
                     if let Shape::Radial { feather, .. } = &mut m.shape {
                         let mut pct = *feather * 100.0;
                         let r =

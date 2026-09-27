@@ -56,7 +56,8 @@ struct Adjust {
     // Local adjustments (W-01): per mask, geometry (two vec4) then its adjustments (two):
     //   linear: xy = full-effect end, zw = no-effect end (sensor px)
     //   radial: xy = centre, zw = radii (px); then cos/sin of its turn, feather
-    //   the second's w = kind (0 linear, 1 radial) + 2 if inverted
+    //   brush: x = its layer in `brushes`
+    //   the second's w = kind (0 linear, 1 radial, 2 brush) + 4 if inverted
     //   exposure (EV), temperature, tint, contrast; saturation, clarity, sharpness, 0
     masks:      array<vec4<f32>, 32>,
     mask_info:  vec4<u32>,   // x = masks in use, y = 1 + the mask shown as an overlay, or 0
@@ -89,6 +90,8 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 // the denoised copy — which may start at a coarser level; see `tap`. The before half of a
 // split reads this, since it shows the file as shot.
 @group(0) @binding(4) var original: texture_2d<f32>;
+// Brush masks' coverage, one layer each, in sensor space.
+@group(0) @binding(5) var brushes: texture_2d_array<f32>;
 
 // `sensor` at absolute sensor level `level`. The denoised copy the preview reads is made
 // only from the preview's level down, and is bound with that level as its level 0.
@@ -445,8 +448,11 @@ fn mask_weight(i: u32, p: vec2<f32>) -> f32 {
     let g0 = u.masks[i * 4u];
     let g1 = u.masks[i * 4u + 1u];
     let code = u32(g1.w + 0.5);
+    let kind = code & 3u;
     var inside: f32;
-    if ((code & 1u) == 0u) {
+    if (kind == 2u) {
+        inside = textureSampleLevel(brushes, sensor_sampler, p / u.sizes.zw, i32(g0.x + 0.5), 0.0).r;
+    } else if (kind == 0u) {
         let d = g0.zw - g0.xy;
         let t = clamp(dot(p - g0.xy, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
         inside = 1.0 - smoothstep(0.0, 1.0, t);
@@ -457,7 +463,7 @@ fn mask_weight(i: u32, p: vec2<f32>) -> f32 {
         let d = length(vec2<f32>(x / g0.z, y / g0.w));
         inside = 1.0 - smoothstep(1.0 - g1.z, 1.0, d);
     }
-    if ((code & 2u) != 0u) {
+    if ((code & 4u) != 0u) {
         inside = 1.0 - inside;
     }
     return inside;

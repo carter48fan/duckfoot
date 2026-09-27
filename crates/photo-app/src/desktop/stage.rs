@@ -104,18 +104,65 @@ impl PhotoApp {
                         frame: frame_now,
                     };
                     let tolerance = if widgets::is_touch(ui.ctx()) { 24.0 } else { 9.0 };
-                    if let Some(mask) = self.stack.local.params.masks.get(i).copied() {
+                    let painting_brush = self
+                        .stack
+                        .local
+                        .params
+                        .masks
+                        .get(i)
+                        .is_some_and(|m| matches!(m.shape, photo_engine::local::Shape::Brush { .. }));
+                    // A pin under a click chooses that mask, even while a brush is out.
+                    let on_pin = response.clicked()
+                        && response.interact_pointer_pos().is_some_and(|p| {
+                            self.stack
+                                .local
+                                .params
+                                .masks
+                                .iter()
+                                .enumerate()
+                                .any(|(j, m)| j != i && mapping.pin(m).distance(p) <= tolerance)
+                        });
+                    if painting_brush && !on_pin {
+                        // A brush mask is painted: a drag lays a stroke (one undo step), a
+                        // tap one dab. Alt or the right button erases.
+                        let erase = self.brush.erase
+                            || ui.input(|i| i.modifiers.alt)
+                            || response.dragged_by(egui::PointerButton::Secondary);
+                        if response.drag_started() {
+                            let origin = ui.input(|i| i.pointer.press_origin());
+                            if let Some(at) = origin.or(response.interact_pointer_pos()) {
+                                self.history.checkpoint(&self.stack);
+                                let s = mapping.to_sensor(at);
+                                self.painting = Some(self.paint(i, s, s, true, erase));
+                            }
+                        } else if response.clicked() {
+                            if let Some(at) = response.interact_pointer_pos() {
+                                self.history.checkpoint(&self.stack);
+                                let s = mapping.to_sensor(at);
+                                self.paint(i, s, s, true, erase);
+                            }
+                        }
+                        if let (Some(last), Some(p), true) =
+                            (self.painting, response.interact_pointer_pos(), response.dragged())
+                        {
+                            let to = mapping.to_sensor(p);
+                            self.painting = Some(self.paint(i, last, to, false, erase));
+                        }
+                        if response.hover_pos().is_some() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                        }
+                    } else if let Some(mask) = self.stack.local.params.masks.get(i).cloned() {
                         if response.drag_started() {
                             let origin = ui.input(|i| i.pointer.press_origin());
                             if let Some(at) = origin.or(response.interact_pointer_pos()) {
                                 if let Some(handle) = mapping.hit(&mask, at, tolerance) {
                                     self.history.checkpoint(&self.stack);
-                                    self.mask_drag = Some((handle, at, mask));
+                                    self.mask_drag = Some((handle, at, mask.clone()));
                                 }
                             }
                         }
                         if let (Some((handle, from, start)), Some(p)) =
-                            (self.mask_drag, response.interact_pointer_pos())
+                            (self.mask_drag.clone(), response.interact_pointer_pos())
                         {
                             let moved = mapping.dragged(&start, handle, from, p);
                             if self.stack.local.params.masks[i] != moved {
@@ -124,7 +171,7 @@ impl PhotoApp {
                             }
                         }
                         if let Some(p) = response.hover_pos() {
-                            let cursor = match self.mask_drag.map(|d| d.0).or(mapping.hit(&mask, p, tolerance)) {
+                            let cursor = match self.mask_drag.as_ref().map(|d| d.0).or(mapping.hit(&mask, p, tolerance)) {
                                 Some(crate::mask_tool::Handle::Move) => Some(egui::CursorIcon::Grab),
                                 Some(_) => Some(egui::CursorIcon::Crosshair),
                                 None => None,
@@ -150,8 +197,9 @@ impl PhotoApp {
                 }
                 if response.drag_stopped() {
                     self.mask_drag = None;
+                    self.painting = None;
                 }
-                let mask_dragging = self.mask_drag.is_some();
+                let mask_dragging = self.mask_drag.is_some() || self.painting.is_some();
 
                 // With nothing to pan at fit, a drag anywhere on the image moves the divider.
                 if self.split_active
@@ -529,6 +577,22 @@ impl PhotoApp {
                             painter.add(egui::Shape::line(line.clone(), dark));
                             painter.add(egui::Shape::line(line, stroke));
                         }
+                        // The brush, where it would paint.
+                        if let (photo_engine::local::Shape::Brush { .. }, Some(p)) =
+                            (&mask.shape, response.hover_pos())
+                        {
+                            let (ow, _) = self.stack.geometry.output_size(sensor.0, sensor.1);
+                            let per_px = frame.width() / ow as f32;
+                            let long = sensor.0.max(sensor.1) as f32;
+                            let r = self.brush.size / 100.0 * long * per_px;
+                            let colour = if self.brush.erase { theme::DANGER } else { theme::TEXT_HI };
+                            painter.circle_stroke(p, r, dark);
+                            painter.circle_stroke(p, r, Stroke::new(1.5, colour));
+                            let inner = r * (1.0 - self.brush.feather / 100.0).clamp(0.0, 1.0);
+                            if inner > 2.0 {
+                                painter.circle_stroke(p, inner, Stroke::new(1.0, colour.linear_multiply(0.5)));
+                            }
+                        }
                         for (handle, at) in mapping.handles(mask) {
                             let r = if handle == crate::mask_tool::Handle::Move { 6.0 } else { 5.0 };
                             painter.circle(at, r, theme::ACCENT, Stroke::new(1.5, Color32::BLACK));
@@ -538,7 +602,14 @@ impl PhotoApp {
                         &painter,
                         pos2(framed_view.center().x, framed_view.top() + 12.0),
                         Align2::CENTER_TOP,
-                        "MASK · drag the handles · Esc puts them away",
+                        if matches!(
+                            self.stack.local.params.masks.get(i).map(|m| &m.shape),
+                            Some(photo_engine::local::Shape::Brush { .. })
+                        ) {
+                            "BRUSH · paint to add · Alt or right-drag erases · Esc puts it away"
+                        } else {
+                            "MASK · drag the handles · Esc puts them away"
+                        },
                         theme::ACCENT,
                         theme::ACCENT,
                     );

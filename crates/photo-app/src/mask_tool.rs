@@ -56,6 +56,8 @@ impl Mapping {
     /// A mask's handles, on screen.
     pub fn handles(&self, mask: &Mask) -> Vec<(Handle, Pos2)> {
         match mask.shape {
+            // A brush is painted, not dragged.
+            Shape::Brush { .. } => Vec::new(),
             Shape::Linear { from, to } => {
                 let mid = [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5];
                 vec![
@@ -86,11 +88,20 @@ impl Mapping {
 
     /// Where a mask's pin is drawn, to choose it from the photo: its middle.
     pub fn pin(&self, mask: &Mask) -> Pos2 {
-        match mask.shape {
-            Shape::Linear { from, to } => {
+        match &mask.shape {
+            &Shape::Linear { from, to } => {
                 self.to_screen([(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5])
             }
-            Shape::Radial { centre, .. } => self.to_screen(centre),
+            &Shape::Radial { centre, .. } => self.to_screen(centre),
+            // The middle of what was painted, or of the frame before anything is.
+            Shape::Brush { dabs } if !dabs.is_empty() => {
+                let n = dabs.len() as f32;
+                let (x, y) = dabs
+                    .iter()
+                    .fold((0.0, 0.0), |(x, y), d| (x + d.at[0], y + d.at[1]));
+                self.to_screen([x / n, y / n])
+            }
+            Shape::Brush { .. } => self.frame.center(),
         }
     }
 
@@ -99,6 +110,7 @@ impl Mapping {
     pub fn outline(&self, mask: &Mask) -> Vec<Vec<Pos2>> {
         let (sw, sh) = (self.sensor.0 as f32, self.sensor.1 as f32);
         match mask.shape {
+            Shape::Brush { .. } => Vec::new(),
             Shape::Radial {
                 centre,
                 radius,
@@ -162,8 +174,9 @@ impl Mapping {
         }
         let s = self.to_sensor(p);
         match mask.shape {
+            Shape::Brush { .. } => None,
             Shape::Radial { .. } => {
-                let mut solid = *mask;
+                let mut solid = mask.clone();
                 solid.invert = false;
                 (solid.weight(s, self.sensor) > 0.0).then_some(Handle::Move)
             }
@@ -178,7 +191,7 @@ impl Mapping {
     pub fn dragged(&self, start: &Mask, handle: Handle, from: Pos2, to: Pos2) -> Mask {
         let (a, b) = (self.to_sensor(from), self.to_sensor(to));
         let d = [b[0] - a[0], b[1] - a[1]];
-        let mut out = *start;
+        let mut out = start.clone();
         let (sw, sh) = (self.sensor.0 as f32, self.sensor.1 as f32);
         match (&mut out.shape, handle) {
             (Shape::Linear { from, to }, Handle::Move) => {

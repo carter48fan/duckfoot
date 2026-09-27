@@ -62,6 +62,27 @@ pub enum ColorEqTab {
     Luminance,
 }
 
+/// The brush for painting a brush mask.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushTool {
+    /// Radius, percent of the photo's long side.
+    pub size: f32,
+    /// How much of the radius fades, percent.
+    pub feather: f32,
+    /// Take the mask away instead of adding to it.
+    pub erase: bool,
+}
+
+impl Default for BrushTool {
+    fn default() -> Self {
+        Self {
+            size: 6.0,
+            feather: 60.0,
+            erase: false,
+        }
+    }
+}
+
 /// Sections available in the Inspector sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum InspectorSectionId {
@@ -442,6 +463,10 @@ pub struct PhotoApp {
     mask_drag: Option<(mask_tool::Handle, egui::Pos2, photo_engine::local::Mask)>,
     /// The mask the engine is washing red, to notice a change.
     shown_mask: Option<usize>,
+    /// How a brush mask is painted.
+    pub brush: BrushTool,
+    /// A brush stroke in progress: where its last dab went (sensor, 0..1).
+    painting: Option<[f32; 2]>,
     /// The user's own presets, as their files say (W-04).
     pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
     /// The name being typed for a preset about to be saved.
@@ -651,6 +676,8 @@ impl PhotoApp {
             mask_overlay: false,
             mask_drag: None,
             shown_mask: None,
+            brush: BrushTool::default(),
+            painting: None,
             user_presets: Vec::new(),
             preset_draft: None,
             exporting_preset: None,
