@@ -97,6 +97,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Esc` while dragging",
         "put the control back where the drag started",
     ),
+    s(
+        Editing,
+        "`W`, then click",
+        "white balance from something that should be grey",
+    ),
     s(View, "`\\`", "before / after split"),
     s(
         View,

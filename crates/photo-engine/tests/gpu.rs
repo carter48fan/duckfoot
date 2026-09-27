@@ -854,3 +854,102 @@ fn the_clipping_overlay_paints_the_preview_and_never_the_export() {
         engine.image().unwrap().output_texture()
     ));
 }
+
+/// Mean of each channel over a centred box of an export.
+fn centre_mean(out: &photo_engine::ExportedImage, side: u32) -> [f32; 3] {
+    let (cx, cy) = (out.width / 2, out.height / 2);
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0;
+    for y in cy - side / 2..cy + side / 2 {
+        for x in cx - side / 2..cx + side / 2 {
+            let i = ((y * out.width + x) * 4) as usize;
+            for (c, s) in sum.iter_mut().enumerate() {
+                *s += out.rgba[i + c] as f32;
+            }
+            n += 1.0;
+        }
+    }
+    sum.map(|s| s / n)
+}
+
+#[test]
+fn the_eyedropper_neutralises_a_grey_card_under_tungsten() {
+    let gpu = gpu_or_skip!();
+    // Grey under warm light, as the camera records it: red strong, blue weak. The right
+    // half is a blue card, which must not be what the dropper reads.
+    let (w, h) = (96u32, 64u32);
+    let cfa = testkit::cfa_from_fn(w, h, |x, _| {
+        if x < w / 2 {
+            [0.30 * 1.7, 0.30, 0.30 * 0.55]
+        } else {
+            [0.05, 0.10, 0.40]
+        }
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let mut stack = PhotoStack::default();
+    // Turned and mirrored, so the tap has to be mapped back to the sensor to land on grey:
+    // one clockwise turn puts the sensor's left half at the top.
+    stack.geometry.rotate_right();
+    stack.geometry.flip_h();
+    let wb = engine
+        .neutral_at(&gpu.device, &gpu.queue, &stack.geometry, (0.5, 0.25))
+        .unwrap()
+        .expect("a grey patch");
+    stack.white_balance.params = wb;
+    stack.white_balance.enabled = true;
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    // The grey is now the top half of the turned frame.
+    let i = (((out.height / 4) * out.width + out.width / 2) * 4) as usize;
+    let px = [out.rgba[i], out.rgba[i + 1], out.rgba[i + 2]].map(|v| v as i32);
+    let spread = px.iter().max().unwrap() - px.iter().min().unwrap();
+    assert!(spread <= 3, "not neutral: {px:?}");
+
+    // On the blue card it would have picked a very different balance.
+    let blue = engine
+        .neutral_at(&gpu.device, &gpu.queue, &stack.geometry, (0.5, 0.75))
+        .unwrap()
+        .unwrap();
+    assert!(blue.tint_b < wb.tint_b * 0.5, "{blue:?} vs {wb:?}");
+}
+
+#[test]
+fn auto_white_balance_and_auto_tone_fix_a_cast_dark_frame() {
+    let gpu = gpu_or_skip!();
+    // A dim, warm-cast scene with some texture.
+    let scene = testkit::smooth_scene(128, 96);
+    let cfa = testkit::cfa_from_fn(128, 96, |x, y| {
+        let [r, g, b] = scene(x, y);
+        let v = (r + g + b) / 3.0 * 0.12 + 0.01;
+        [v * 1.6, v, v * 0.6]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let mut stack = PhotoStack::default();
+    stack.white_balance.params = engine
+        .auto_white_balance(&gpu.device, &gpu.queue)
+        .unwrap()
+        .expect("an estimate");
+    stack.white_balance.enabled = true;
+    let tone = engine
+        .auto_tone(&gpu.device, &gpu.queue, &stack)
+        .unwrap()
+        .expect("an estimate");
+    assert!(tone.ev > 1.0, "a dark frame is brightened: {tone:?}");
+    stack.exposure.params.ev = tone.ev;
+    stack.tonal.params = tone.tonal;
+    stack.tonal.enabled = true;
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let mut all: Vec<u8> = out.rgba.chunks_exact(4).map(|p| p[1]).collect();
+    all.sort_unstable();
+    let median = all[all.len() / 2] as i32;
+    assert!(
+        (100..=140).contains(&median),
+        "median {median}, want mid grey (~118)"
+    );
+    let [r, g, b] = centre_mean(&out, 16);
+    assert!(
+        (r - g).abs() < 6.0 && (b - g).abs() < 6.0,
+        "cast left: {r:.1} {g:.1} {b:.1}"
+    );
+}

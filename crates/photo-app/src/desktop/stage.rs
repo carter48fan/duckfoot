@@ -106,6 +106,21 @@ impl PhotoApp {
                     }
                 }
 
+                // The eyedropper: the next click on the photo picks white balance there.
+                if self.picking_wb && !self.cropping {
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
+                    if response.clicked() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            if frame_now.contains(p) {
+                                let n = (p - frame_now.min) / frame_now.size();
+                                self.pending_sample = Some(crate::Sample::Pick(pos2(n.x, n.y)));
+                                self.picking_wb = false;
+                            }
+                        }
+                    }
+                }
                 if self.cropping {
                     // In crop mode a drag frames the picture instead of moving it: on a
                     // handle it moves that edge or corner, inside the crop it slides it,
@@ -408,6 +423,17 @@ impl PhotoApp {
                         pos2(framed_view.center().x, framed_view.top() + 12.0),
                         Align2::CENTER_TOP,
                         "CROP · handles resize · inside moves · outside turns · X swaps · O guides · Enter / Esc",
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+
+                if self.picking_wb {
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "WHITE BALANCE · click something that should be grey · Esc cancels",
                         theme::ACCENT,
                         theme::ACCENT,
                     );

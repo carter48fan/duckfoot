@@ -212,6 +212,18 @@ impl PhotoApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
                     let as_shot = (p.tint_r - 1.0).abs() < 1e-4 && (p.tint_b - 1.0).abs() < 1e-4;
+                    if widgets::chip(ui, self.picking_wb, "pick")
+                        .on_hover_text("Click something that should be grey (W)")
+                        .clicked()
+                    {
+                        self.picking_wb = !self.picking_wb;
+                    }
+                    if widgets::chip(ui, false, "auto")
+                        .on_hover_text("Balance the whole photo")
+                        .clicked()
+                    {
+                        self.pending_sample = Some(crate::Sample::AutoWb);
+                    }
                     if widgets::chip(ui, as_shot, "as shot")
                         .on_hover_text(format!("What the camera metered: {home_k:.0} K"))
                         .clicked()
@@ -241,6 +253,16 @@ impl PhotoApp {
                 }
             }
             InspectorSectionId::Exposure => {
+                if self.ready_image().is_some()
+                    && widgets::chip(ui, false, "auto tone")
+                        .on_hover_text(
+                            "Exposure to put the middle tones at mid grey, and highlights and \
+                             shadows eased back from clipping",
+                        )
+                        .clicked()
+                {
+                    self.pending_sample = Some(crate::Sample::AutoTone);
+                }
                 let p = &mut self.stack.exposure.params;
                 let dp = d.exposure.params;
 

@@ -166,6 +166,7 @@ You can also **drag a RAW file onto the window**.
 | `[` / `]` | rotate 90° left / right |
 | `H` / `V` | mirror / flip |
 | `Esc` while dragging | put the control back where the drag started |
+| `W`, then click | white balance from something that should be grey |
 | **View** | |
 | `\` | before / after split |
 | `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
