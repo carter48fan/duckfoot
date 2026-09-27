@@ -1610,7 +1610,7 @@ mod tests {
         );
         assert!(((b - black) - 2.0 * (a - black)).abs() <= 1.0, "{a} -> {b}");
         let warp = fixed.warp.expect("the warp was not kept");
-        assert_eq!(warp.planes[1], [1.0, -0.08, 0.0, 0.0]);
+        assert_eq!(warp.planes[1], [1.0, 0.0, -0.08, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert!(
             (warp.centre[0] - w as f32 * 0.5).abs() < 1.0,
             "{:?}",

@@ -1403,10 +1403,12 @@ fn a_files_own_warp_moves_each_plane_where_it_says() {
         centre: [w as f32 * 0.5, h as f32 * 0.5],
         m: (w as f32 * 0.5).hypot(h as f32 * 0.5),
         planes: [
-            [1.0, -0.3, 0.0, 0.0],
-            [1.0, -0.2, 0.0, 0.0],
-            [1.0, -0.2, 0.0, 0.0],
+            [1.0, 0.0, -0.3, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
         ],
+        tca: None,
+        vignetting: None,
     };
     let target = (230.0, 110.0);
     let stack = PhotoStack::default();
@@ -1437,4 +1439,49 @@ fn a_files_own_warp_moves_each_plane_where_it_says() {
         px[0] > 150 && px[1] > 150,
         "the planes did not meet: {px:?}"
     );
+}
+
+#[test]
+fn a_lens_profile_applies_only_while_lens_asks_for_it() {
+    let gpu = gpu_or_skip!();
+    // A flat field as a lens that loses half its light at the corner records it.
+    let (w, h) = (192u32, 128u32);
+    let half_diag = (w as f32).hypot(h as f32) * 0.5;
+    let cfa = testkit::cfa_from_fn(w, h, |x, y| {
+        let (dx, dy) = (
+            x as f32 + 0.5 - w as f32 * 0.5,
+            y as f32 + 0.5 - h as f32 * 0.5,
+        );
+        let r2 = (dx * dx + dy * dy) / (half_diag * half_diag);
+        [0.25 * (1.0 - 0.5 * r2); 3]
+    });
+    let profile = photo_engine::FileWarp {
+        centre: [w as f32 * 0.5, h as f32 * 0.5],
+        m: h as f32 * 0.5,
+        planes: [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 3],
+        tca: None,
+        vignetting: Some(([-0.5, 0.0, 0.0], half_diag)),
+    };
+    let pool = photo_engine::UploadPool::default();
+    let mut up = photo_engine::upload_cfa(&gpu.device, &gpu.queue, &pool, cfa).unwrap();
+    up.lens_profile = Some(("Acme 35mm f/2".into(), profile));
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_uploaded(&gpu.device, &gpu.queue, up).unwrap();
+    assert_eq!(
+        engine.image().unwrap().lens_profile_name(),
+        Some("Acme 35mm f/2")
+    );
+    let spread = |engine: &mut Engine, stack: &PhotoStack| {
+        let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        let at = |x: u32, y: u32| out.rgba[((y * out.width + x) * 4 + 1) as usize] as f32;
+        at(w / 2, h / 2) - at(2, 2)
+    };
+    let mut stack = PhotoStack::default();
+    let off = spread(&mut engine, &stack);
+    assert!(off > 25.0, "the test scene: {off}");
+    stack.lens.enabled = true;
+    let on = spread(&mut engine, &stack);
+    assert!(on.abs() < 4.0, "corner still {on} below the centre");
+    stack.lens.params.profile = false;
+    assert!((spread(&mut engine, &stack) - off).abs() < 1.0);
 }

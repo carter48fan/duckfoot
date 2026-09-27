@@ -839,11 +839,14 @@ most 1 s of work; Android LMK kills lose nothing that settled.
   6 dB; the edge MTF50 drop is at most 10% at defaults; preview matches export (WP2.1).
 
 **F-04 Lens correction** (DEC-8)
-- **Status:** done except the lensfun profiles, all under tests.
+- **Status:** done, all under tests.
   - **Constrained crop.**
   - **Manual corrections:** distortion (a pincushion correction zooms to fill), red and blue fringes, vignetting.
   - **DNG opcodes:** `GainMap` (OpcodeList2) and `FixVignetteRadial` are applied to the mosaic at decode. `WarpRectilinear` is folded into the shader's inverse mapping, one polynomial per plane, and the eyedropper's CPU mirror follows it. Its tangential terms are not applied.
-  - **Next:** the lensfun profiles.
+  - **Profiles:** the lensfun database (CC BY-SA 3.0, `data/LENSFUN-NOTICE.md`) is distilled by `tools/lensfun_extract.py` into a 280 KB table: 1,000+ cameras and the rectilinear lenses.
+    - The lens is matched by the file's LensModel. The numbers must be exact (focal range, aperture) and most of the words must match; the mount and the calibration's sensor size break ties.
+    - Distortion (ptlens/poly3/poly5), TCA (linear/poly3) and vignetting ("pa", interpolated in stops) are taken at the shot's focal length and aperture, carried over between sensor sizes in millimetres, and applied by the shader as the DNG warp is.
+    - They are on while Lens is on, with a "profile" switch. A file that corrects itself skips them.
 - **Module "Lens":**
   - **Profile:** automatic from EXIF `LensModel` against the bundled lensfun XML (parsed
     with `quick-xml`). It gives distortion (ptlens/poly3), TCA and vignetting. A manual

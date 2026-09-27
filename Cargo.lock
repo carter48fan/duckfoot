@@ -2817,6 +2817,7 @@ dependencies = [
  "log",
  "memchr",
  "memmap2",
+ "miniz_oxide 0.8.9",
  "pollster 1.0.1",
  "rawler",
  "rawloader",

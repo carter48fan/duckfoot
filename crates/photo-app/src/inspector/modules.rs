@@ -730,6 +730,32 @@ impl PhotoApp {
                 }
             }
             InspectorSectionId::Lens => {
+                // What the photo's lens is corrected from before the sliders, if anything.
+                let own = self
+                    .ready_image()
+                    .is_some_and(|i| i.corrects_its_own_lens());
+                let found = self
+                    .ready_image()
+                    .and_then(|i| i.lens_profile_name())
+                    .map(String::from);
+                let lens_name = self.open_info().and_then(|i| i.lens.clone());
+                ui.horizontal_wrapped(|ui| {
+                    if own {
+                        ui.label(theme::dim("The file corrects its own lens.").size(12.0));
+                    } else if let Some(name) = &found {
+                        let on = self.stack.lens.params.profile;
+                        if widgets::chip(ui, on, "profile")
+                            .on_hover_text("Correct distortion, fringes and fall-off from the lens's profile (lensfun)")
+                            .clicked()
+                        {
+                            self.stack.lens.params.profile = !on;
+                            discrete!();
+                        }
+                        ui.label(theme::dim(name).size(12.0));
+                    } else if let Some(lens) = &lens_name {
+                        ui.label(theme::dim(format!("No profile for {lens}.")).size(12.0));
+                    }
+                });
                 let p = &mut self.stack.lens.params;
                 let dp = d.lens.params;
                 for (label, value, default) in [

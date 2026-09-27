@@ -66,7 +66,8 @@ pub enum Done {
 }
 
 enum Decoded {
-    Raw(CfaImage),
+    /// Boxed: a mosaic's header (pattern, levels, matrix, lens warp) outweighs a raster's.
+    Raw(Box<CfaImage>),
     Raster(RasterImage),
 }
 
@@ -150,6 +151,14 @@ impl Loader {
         let repaint: Arc<Mutex<Option<egui::Context>>> = Arc::default();
         let gate = Arc::new(Gate::default());
 
+        // The lens database is inflated on first use; do that now, while nothing is open,
+        // rather than in the first photo's decode.
+        let _ = std::thread::Builder::new()
+            .name("duckfoot-lensfun".into())
+            .spawn(|| {
+                photo_engine::lensfun::database();
+            });
+
         let (open_tx, open_rx) = mpsc::channel::<(PathBuf, u64)>();
         {
             let done_tx = done_tx.clone();
@@ -197,7 +206,7 @@ impl Loader {
                                         .and_then(|bytes| decode_raster(&bytes))
                                         .map(Decoded::Raster)
                                 } else {
-                                    decode_raw(&path).map(Decoded::Raw)
+                                    decode_raw(&path).map(|cfa| Decoded::Raw(Box::new(cfa)))
                                 }
                                 .map_err(|e| format!("{e:#}"))
                             });
@@ -211,7 +220,27 @@ impl Loader {
                                     guarded(&path, || {
                                         match decoded {
                                             Decoded::Raw(cfa) => {
-                                                upload_cfa(&device, &queue, &pool, cfa)
+                                                // A lens profile, unless the file corrects
+                                                // its own lens: looked up here, off the UI
+                                                // thread, from the EXIF it was shot with.
+                                                let profile = if cfa.warp.is_none() {
+                                                    photo_engine::read_info(&path).and_then(
+                                                        |info| {
+                                                            photo_engine::lensfun::for_photo(
+                                                                &info,
+                                                                (cfa.width, cfa.height),
+                                                            )
+                                                        },
+                                                    )
+                                                } else {
+                                                    None
+                                                };
+                                                upload_cfa(&device, &queue, &pool, *cfa).map(
+                                                    |mut up| {
+                                                        up.lens_profile = profile;
+                                                        up
+                                                    },
+                                                )
                                             }
                                             Decoded::Raster(raster) => {
                                                 upload_raster(&device, &queue, raster)
