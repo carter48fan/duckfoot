@@ -247,7 +247,16 @@ jobs:
         with:
           key: tests-${{ matrix.os }}
 
-      - run: cargo test --workspace --locked
+      # On Windows wgpu finds WARP, the software adapter, and compiles every pipeline of
+      # every test's engine through FXC, which took the step past half an hour; the pixel
+      # tests run on lavapipe in ci.yml, so here they skip. The timeout ends a hung step
+      # with its log, which names a test running for over 60 seconds.
+      - name: cargo test --workspace --locked
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export WGPU_BACKEND=noop; fi
+          cargo test --workspace --locked
 
       - name: macOS app
         if: runner.os == 'macOS'
