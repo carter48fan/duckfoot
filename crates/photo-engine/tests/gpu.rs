@@ -1242,3 +1242,153 @@ fn the_before_half_is_not_denoised() {
     };
     assert!(render(&denoising()) == render(&PhotoStack::default()));
 }
+
+/// Mean spread between the brightest and darkest channel, away from the frame's edge:
+/// on a grey scene, all of it is false colour.
+fn false_colour(out: &photo_engine::ExportedImage) -> f32 {
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in 4..out.height - 4 {
+        for x in 4..out.width - 4 {
+            let i = ((y * out.width + x) * 4) as usize;
+            let px = &out.rgba[i..i + 3];
+            sum += (*px.iter().max().unwrap() - *px.iter().min().unwrap()) as f32;
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+#[test]
+fn x_trans_demosaics_a_grey_scene_about_as_cleanly_as_bayer() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 144u32);
+    let smooth = testkit::smooth_scene(w, h);
+    // Grey, with detail at several scales and a hard diagonal edge.
+    let scene = move |x: u32, y: u32| {
+        let v = smooth(x, y)[1] * if x + y / 2 > 120 { 1.6 } else { 0.7 };
+        [v; 3]
+    };
+    let export = |cfa| {
+        let mut engine = Engine::new(&gpu.device);
+        engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+        engine
+            .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+            .unwrap()
+    };
+    let bayer = false_colour(&export(testkit::cfa_from_fn(w, h, &scene)));
+    let pattern = photo_engine::CfaPattern::xtrans(testkit::XTRANS).unwrap();
+    let xtrans = false_colour(&export(testkit::mosaic_from_fn(pattern, w, h, &scene)));
+    assert!(
+        xtrans <= bayer + 1.0,
+        "X-Trans {xtrans:.2} vs Bayer {bayer:.2}"
+    );
+}
+
+#[test]
+fn x_trans_keeps_each_patch_its_own_colour() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (96u32, 96u32);
+    let patches = [
+        [0.5, 0.1, 0.1],
+        [0.1, 0.4, 0.1],
+        [0.1, 0.15, 0.5],
+        [0.3, 0.3, 0.3],
+    ];
+    let scene = move |x: u32, y: u32| patches[((y / 48) * 2 + x / 48) as usize];
+    let pattern = photo_engine::CfaPattern::xtrans(testkit::XTRANS).unwrap();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(
+            &gpu.device,
+            &gpu.queue,
+            testkit::mosaic_from_fn(pattern, w, h, scene),
+        )
+        .unwrap();
+    let out = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    for (i, want) in patches.iter().enumerate() {
+        let (cx, cy) = ((i as u32 % 2) * 48 + 24, (i as u32 / 2) * 48 + 24);
+        let at = ((cy * w + cx) * 4) as usize;
+        let got: Vec<f32> = (0..3)
+            .map(|c| testkit::srgb_to_linear(out.rgba[at + c]))
+            .collect();
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() < 0.02,
+                "patch {i}: {got:?} for {want:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_display_p3_jpeg_renders_in_its_own_colours() {
+    use image::ImageEncoder;
+    let gpu = gpu_or_skip!();
+    // Flat patches, as a phone that shoots P3 would write them, with its profile.
+    let (w, h) = (64u32, 32u32);
+    let patches: [[u8; 3]; 4] = [
+        [200, 120, 60],
+        [60, 160, 90],
+        [90, 100, 200],
+        [128, 128, 128],
+    ];
+    let mut px = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            px.extend_from_slice(&patches[((y / 16) * 2 + x / 32) as usize]);
+        }
+    }
+    let mut jpeg = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100);
+    enc.set_icc_profile(photo_engine::icc::display_p3_profile().to_vec())
+        .unwrap();
+    enc.write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+
+    let raster = photo_engine::decode_raster(&jpeg).unwrap();
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let out = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+
+    // The published linear Display P3 → sRGB matrix, not this crate's own derivation.
+    const P3_TO_SRGB: [[f32; 3]; 3] = [
+        [1.2249, -0.2247, 0.0],
+        [-0.0420, 1.0419, 0.0],
+        [-0.0197, -0.0786, 1.0979],
+    ];
+    let lin = |v: u8| testkit::srgb_to_linear(v);
+    let encode = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        let e = if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        e * 255.0
+    };
+    for (i, p) in patches.iter().enumerate() {
+        let (cx, cy) = ((i as u32 % 2) * 32 + 16, (i as u32 / 2) * 16 + 8);
+        let at = ((cy * w + cx) * 4) as usize;
+        let l = p.map(lin);
+        for (c, row) in P3_TO_SRGB.iter().enumerate() {
+            let want = encode(row.iter().zip(l).map(|(m, v)| m * v).sum());
+            let got = out.rgba[at + c] as f32;
+            assert!(
+                (got - want).abs() <= 2.5,
+                "patch {i} channel {c}: {got} for {want:.1}"
+            );
+        }
+    }
+    // Not what reading it as sRGB would give: the orange is visibly more saturated.
+    let at = ((8 * w + 16) * 4) as usize;
+    assert!(
+        out.rgba[at] as i32 - 200 >= 8,
+        "P3 orange came out {:?}",
+        &out.rgba[at..at + 3]
+    );
+}

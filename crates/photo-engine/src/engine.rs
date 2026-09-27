@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use wgpu::util::DeviceExt;
 
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
-use crate::decode::{CfaImage, RasterImage};
+use crate::decode::{CfaImage, CfaPattern, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
 use crate::lens::LensModel;
@@ -62,8 +62,9 @@ pub const MAX_PREVIEW_LEVEL: u32 = 5;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DemosaicUniforms {
+    /// Width, height, and the pattern's width and height.
     size: [u32; 4],
-    cfa: [u32; 4],
+    cfa: [u32; 36],
     black: [f32; 4],
     white: [f32; 4],
 }
@@ -227,6 +228,9 @@ pub struct Engine {
     green_pipeline: wgpu::RenderPipeline,
     green_bgl: wgpu::BindGroupLayout,
     rb_pipeline: wgpu::RenderPipeline,
+    /// The same two passes for Fuji's X-Trans (`shaders/demosaic_xtrans.wgsl`).
+    xtrans_green_pipeline: wgpu::RenderPipeline,
+    xtrans_rb_pipeline: wgpu::RenderPipeline,
     rb_bgl: wgpu::BindGroupLayout,
     adjust_pipeline: wgpu::RenderPipeline,
     /// The same shader into [`DEEP_OUTPUT_FORMAT`], for 16-bit export.
@@ -322,7 +326,7 @@ enum UploadedPixels {
     /// The sensor mosaic, still to be demosaiced.
     Mosaic {
         texture: wgpu::Texture,
-        cfa: [u32; 4],
+        cfa: CfaPattern,
         black: [f32; 4],
         white: [f32; 4],
     },
@@ -413,7 +417,7 @@ pub fn upload_cfa(
     Ok(UploadedImage {
         pixels: UploadedPixels::Mosaic {
             texture,
-            cfa: cfa.cfa2x2,
+            cfa: cfa.cfa,
             black: cfa.black,
             white: cfa.white,
         },
@@ -475,7 +479,7 @@ pub fn upload_raster(
         geometry: raster.orientation,
         orientation: raster.orientation,
         wb: [1.0, 1.0, 1.0],
-        cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        cam_to_srgb: raster.cam_to_srgb,
         white_scale: WhiteScale::srgb(),
         make: raster.make,
         model: raster.model,
@@ -680,6 +684,26 @@ impl Engine {
             &green_bgl,
             GREEN_FORMAT,
         );
+        let xtrans_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("demosaic x-trans"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_xtrans.wgsl").into()),
+        });
+        let xtrans_green_pipeline = fullscreen_pipeline_at(
+            device,
+            "demosaic x-trans green",
+            &xtrans_shader,
+            "fs_green",
+            &green_bgl,
+            GREEN_FORMAT,
+        );
+        let xtrans_rb_pipeline = fullscreen_pipeline_at(
+            device,
+            "demosaic x-trans rb",
+            &xtrans_shader,
+            "fs_rb",
+            &rb_bgl,
+            SENSOR_FORMAT,
+        );
         let rb_pipeline =
             fullscreen_pipeline(device, "demosaic rb", &rb_shader, &rb_bgl, SENSOR_FORMAT);
         let adjust_pipeline =
@@ -806,6 +830,8 @@ impl Engine {
             green_pipeline,
             green_bgl,
             rb_pipeline,
+            xtrans_green_pipeline,
+            xtrans_rb_pipeline,
             rb_bgl,
             adjust_pipeline,
             deep_adjust_pipeline,
@@ -1212,8 +1238,8 @@ impl Engine {
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("demosaic uniforms"),
                         contents: bytemuck::bytes_of(&DemosaicUniforms {
-                            size: [width, height, 0, 0],
-                            cfa,
+                            size: [width, height, cfa.width, cfa.height],
+                            cfa: cfa.colours.map(u32::from),
                             black,
                             white,
                         }),
@@ -1254,18 +1280,23 @@ impl Engine {
                     ],
                 });
 
+                let (green_pipeline, rb_pipeline) = if cfa.is_bayer() {
+                    (&self.green_pipeline, &self.rb_pipeline)
+                } else {
+                    (&self.xtrans_green_pipeline, &self.xtrans_rb_pipeline)
+                };
                 // Green first and alone: red and blue are reconstructed relative to it.
                 draw_fullscreen(
                     &mut encoder,
                     "demosaic green pass",
-                    &self.green_pipeline,
+                    green_pipeline,
                     &green_bind,
                     &green_view,
                 );
                 draw_fullscreen(
                     &mut encoder,
                     "demosaic rb pass",
-                    &self.rb_pipeline,
+                    rb_pipeline,
                     &rb_bind,
                     &level_view(0),
                 );
@@ -2204,6 +2235,18 @@ fn fullscreen_pipeline(
     bgl: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    fullscreen_pipeline_at(device, label, shader, "fs", bgl, format)
+}
+
+/// `fullscreen_pipeline` with a fragment entry point other than `fs`.
+fn fullscreen_pipeline_at(
+    device: &wgpu::Device,
+    label: &str,
+    shader: &wgpu::ShaderModule,
+    entry: &str,
+    bgl: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &[Some(bgl)],
@@ -2220,7 +2263,7 @@ fn fullscreen_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs"),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
             targets: &[Some(format.into())],
         }),

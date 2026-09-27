@@ -893,6 +893,10 @@ most 1 s of work; Android LMK kills lose nothing that settled.
   constrained region (F-04).
 
 **F-08 X-Trans and raster fidelity**
+- **Status:** done, under GPU tests.
+  - **X-Trans** demosaics through the whole 6×6 pattern. Green is a directional blend in four directions and red/blue come from colour differences over the 5×5, with the Bayer path's highlight reconstruction. On the grey test scene its false colour is 1.1 levels against Bayer's 0.6.
+  - **Rasters:** 16-bit PNG/TIFF keeps 16 bits and float TIFF is read as linear. An embedded matrix/TRC profile (Display P3, Adobe RGB, ProPhoto, grey) is read by a small parser here instead of qcms, and the pixels stay in the file's primaries, converted in the shader as for RAW. A P3 JPEG's patches land within 2.5 levels of the published P3→sRGB matrix.
+  - **Left out:** a LUT-based (CMYK/printer) profile is read as sRGB.
 - **X-Trans:** a Markesteijn one-pass demosaic in WGSL, with the 6×6 CFA passed as a
   uniform array. It replaces WP0.3's refusal. Highlight reconstruction is reused.
 - **Raster (M-16):**

@@ -29,8 +29,10 @@ fn main() -> anyhow::Result<()> {
                     img.megapixels()
                 );
                 println!(
-                    "   cfa 2x2    [{} {} / {} {}]   (0=R 1=G 2=B)",
-                    img.cfa2x2[0], img.cfa2x2[1], img.cfa2x2[2], img.cfa2x2[3]
+                    "   cfa        {}×{} {:?}   (0=R 1=G 2=B)",
+                    img.cfa.width,
+                    img.cfa.height,
+                    &img.cfa.colours[..(img.cfa.width * img.cfa.height) as usize]
                 );
                 println!(
                     "   black      {:?}\n   white      {:?}",
