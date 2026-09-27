@@ -157,6 +157,7 @@ You can also **drag a RAW file onto the window**.
 | `Ctrl+E` | export this photo: size, format, metadata, then where |
 | `Ctrl+Shift+E` | batch export the selection |
 | **Editing** | |
+| `Alt+↑` / `Alt+↓`, `Alt+←` / `Alt+→` | choose a value of the card last worked on, then turn it (as a right-drag on the photo does) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
 | `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
 | `Ctrl+Shift+V` | choose what paste carries |

@@ -5,9 +5,12 @@
 pub mod batch;
 pub mod compact;
 pub mod dam;
+pub mod gesture;
 pub mod gpu_errors;
 pub mod inspector_map_3d;
+pub mod knobs;
 mod loader;
+mod on_photo;
 pub mod platform;
 pub mod presets;
 pub mod settings;
@@ -734,7 +737,6 @@ pub struct PhotoApp {
     /// User-adjusted width for the landscape side sheet.
     pub compact_sheet_width: Option<f32>,
     /// Where a swipe across the stage began, to step photos when it ends.
-    swipe_from: Option<egui::Pos2>,
     /// A photo step asked for where there was no `Gpu` to do it with.
     pending_step: Option<isize>,
     /// Which arrangement this frame is laid out in; decided by the screen's size.
@@ -751,6 +753,8 @@ pub struct PhotoApp {
     tour_step: Option<usize>,
     /// Where the phone layout's parts were last frame, for the tour to point at.
     compact_rects: compact::Rects,
+    /// A touch on the photo, and what it is doing to it (G-02, G-03).
+    pub(crate) photo_touch: on_photo::PhotoTouch,
     /// The gesture exclusions last given the platform, in physical pixels.
     gestures_excluded: Vec<[i32; 4]>,
 }
@@ -920,7 +924,6 @@ impl PhotoApp {
             compact_controls_open: true,
             compact_sheet_width: None,
             compact_sheet_fit: None,
-            swipe_from: None,
             pending_step: None,
             layout: compact::Layout::Desktop,
             settings_dir,
@@ -929,6 +932,7 @@ impl PhotoApp {
             preset: None,
             tour_step: None,
             compact_rects: compact::Rects::default(),
+            photo_touch: Default::default(),
             gestures_excluded: Vec::new(),
         };
         if unclean {
@@ -1391,8 +1395,17 @@ impl PhotoApp {
         } else {
             None
         };
-        self.engine
-            .render(gpu.device, gpu.queue, &self.stack, split_x);
+        // Held on a phone: the original, in the frame it is edited in.
+        if self.photo_touch.holding {
+            let original = PhotoStack {
+                geometry: self.stack.geometry,
+                ..self.baseline.clone()
+            };
+            self.engine.render(gpu.device, gpu.queue, &original, None);
+        } else {
+            self.engine
+                .render(gpu.device, gpu.queue, &self.stack, split_x);
+        }
         self.render_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.needs_render = false;
 
@@ -1587,8 +1600,8 @@ fn file_name(path: &std::path::Path) -> String {
 }
 
 /// The white balance temperature slider's span, as Lightroom's.
-const WB_KELVIN_MIN: f32 = 2000.0;
-const WB_KELVIN_MAX: f32 = 50000.0;
+pub(crate) const WB_KELVIN_MIN: f32 = 2000.0;
+pub(crate) const WB_KELVIN_MAX: f32 = 50000.0;
 
 #[cfg(test)]
 mod tests {

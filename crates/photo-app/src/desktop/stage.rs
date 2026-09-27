@@ -462,33 +462,16 @@ impl PhotoApp {
                 } else if response.dragged() && !at_fit && !self.split_dragging && !mask_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
                 }
-                // On touch, a sideways swipe at fit — where a drag has nothing to pan — steps
-                // to the next or previous photo, as ← and → do.
-                if widgets::is_touch(ui.ctx())
-                    && at_fit
-                    && !self.cropping
-                    && !self.split_active
+                // On touch, one recogniser reads the photo's touches: it is the Edit
+                // sheet's control, or a sideways flick steps to the next photo (G-02).
+                let free = !self.cropping
                     && !mask_dragging
+                    && !self.split_dragging
                     && self.selected_mask.is_none()
-                    && !self.healing
-                {
-                    if response.drag_started() {
-                        self.swipe_from = response.interact_pointer_pos();
-                    }
-                    // A second finger makes it a pinch, never a swipe: pinching in at fit
-                    // stays at fit, and its first finger's travel must not change photo.
-                    if ui.ctx().multi_touch().is_some() {
-                        self.swipe_from = None;
-                    }
-                    if response.drag_stopped() {
-                        let end = response.interact_pointer_pos();
-                        if let (Some(from), Some(to)) = (self.swipe_from.take(), end) {
-                            let d = to - from;
-                            if d.x.abs() > 60.0 && d.x.abs() > 2.0 * d.y.abs() {
-                                self.pending_step = Some(if d.x < 0.0 { 1 } else { -1 });
-                            }
-                        }
-                    }
+                    && !self.healing;
+                self.stage_gestures(ui.ctx(), rect, at_fit, free);
+                if !widgets::is_touch(ui.ctx()) {
+                    self.desktop_photo_drag(ui.ctx(), &response);
                 }
 
                 if let Some(pointer) = response.hover_pos() {
@@ -844,6 +827,8 @@ impl PhotoApp {
                         theme::RAIL,
                     );
                 }
+
+                self.paint_photo_overlay(ui, rect);
 
                 if self.cropping {
                     if ui.ctx().output(|o| o.cursor_icon) != egui::CursorIcon::Move {
