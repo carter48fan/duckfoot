@@ -760,10 +760,9 @@ impl PhotoApp {
             .position(|(p, _)| p == path)
             .map(|i| self.parked_histories.remove(i).1)
             // Else what the sidecar kept, so undo reaches back past a relaunch.
-            .unwrap_or_else(|| History {
-                truncated: saved_history.len() >= photo_engine::sidecar::HISTORY_STEPS,
-                past: saved_history,
-                future: Vec::new(),
+            .unwrap_or_else(|| {
+                let truncated = saved_history.len() >= photo_engine::sidecar::HISTORY_STEPS;
+                History::from_past(saved_history, truncated)
             });
         let left = std::mem::replace(&mut self.history, history);
         if let Some(previous) = self.loaded_path.take() {
