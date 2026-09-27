@@ -19,6 +19,9 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Duckfoot"
         android:hasCode="true"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="false">
 
         <!-- screenOrientation fullUser: any way up, unless the user has locked rotation; the

@@ -210,6 +210,18 @@ public class DuckfootActivity extends NativeActivity {
         runOnUiThread(() -> startPicker(kind));
     }
 
+    /**
+     * The Rust side has stopped for good (its edits are flushed): end the task and the
+     * process, so the next launch starts cold rather than in a process whose native half
+     * has already run once.
+     */
+    public void die() {
+        runOnUiThread(() -> {
+            finishAndRemoveTask();
+            android.os.Process.killProcess(android.os.Process.myPid());
+        });
+    }
+
     /** Back with nothing left to close: background the app, keeping its state. */
     public void leave() {
         runOnUiThread(() -> moveTaskToBack(true));
@@ -428,7 +440,13 @@ public class DuckfootActivity extends NativeActivity {
      * so picking a photo again brings back its sidecar. A different photo with the same
      * name gets "name (2).ext".
      */
+    /** What a copy must leave free, beyond itself, so the phone is not filled to the brim. */
+    private static final long SPARE_BYTES = 500L << 20;
+
     private File copyInto(File dir, Doc doc, Uri uri) throws IOException {
+        if (doc.size >= 0 && dir.getUsableSpace() < doc.size + SPARE_BYTES) {
+            throw new IOException("not enough free space to copy it in");
+        }
         File dest = new File(dir, doc.name);
         if (dest.isFile()) {
             if (doc.size >= 0 && dest.length() == doc.size && sameHead(uri, dest)) {
