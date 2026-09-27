@@ -41,7 +41,7 @@ jobs:
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
           DUCKFOOT_REQUIRE_GPU: "1"
-        run: cargo test --release --locked -p photo-engine --test gpu
+        run: cargo test --release --locked -p photo-engine --test gpu --test drag
 
       # Catches WGSL errors, which are otherwise only found at device creation.
       - run: cargo build --workspace --all-targets

@@ -381,7 +381,7 @@ fn draw_3d_grid(painter: &egui::Painter, center: Pos2, scale: f32, state: &Inspe
 }
 
 struct DepthPoly {
-    points: Vec<Pos2>,
+    points: [Pos2; 4],
     depth: f32,
     fill_col: Color32,
     stroke_col: Color32,
@@ -425,15 +425,18 @@ fn render_3d_channels(
         ),
     ];
 
-    let mut depth_items: Vec<DepthPoly> = Vec::new();
+    let mut depth_items: Vec<DepthPoly> = Vec::with_capacity(channel_defs.len() * SAMPLES);
     let mut channel_labels: Vec<(Pos2, &str, Color32)> = Vec::new();
+    // One pair of rows for every channel in turn, not a pair each (WP5.4).
+    let mut top_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
+    let mut bot_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
 
     for (data, y_coord, base_color, label) in channel_defs {
         let fill_col = base_color.linear_multiply(0.24);
         let stroke_col = base_color;
 
-        let mut top_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
-        let mut bot_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
+        top_pts.clear();
+        bot_pts.clear();
 
         for i in 0..SAMPLES {
             let bin_idx = ((i as f32 * step_bin).round() as usize).min(255);
@@ -488,7 +491,7 @@ fn render_3d_channels(
 
                 let avg_depth = (p_t0.1 + p_t1.1 + p_b0.1 + p_b1.1) * 0.25;
                 depth_items.push(DepthPoly {
-                    points: vec![p_b0.0, p_t0.0, p_t1.0, p_b1.0],
+                    points: [p_b0.0, p_t0.0, p_t1.0, p_b1.0],
                     depth: avg_depth,
                     fill_col,
                     stroke_col,
@@ -507,7 +510,7 @@ fn render_3d_channels(
 
     for item in depth_items {
         painter.add(egui::Shape::convex_polygon(
-            item.points.clone(),
+            item.points.to_vec(),
             item.fill_col,
             Stroke::NONE,
         ));

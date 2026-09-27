@@ -132,6 +132,7 @@ impl PhotoApp {
     pub(crate) fn displayed_indices(&self) -> Vec<usize> {
         let is_stack_edited = self.is_stack_edited();
         let loaded_path = self.loaded_path.clone();
+        let query = self.filter.search_query.to_lowercase();
 
         let mut displayed: Vec<usize> = self
             .shelf
@@ -143,8 +144,13 @@ impl PhotoApp {
                 } else {
                     it.is_edited
                 };
-                self.filter
-                    .matches(&it.path, &it.metadata, is_edited, it.has_sidecar)
+                self.filter.matches_lowered(
+                    &query,
+                    &it.search_name,
+                    &it.metadata,
+                    is_edited,
+                    it.has_sidecar,
+                )
             })
             .map(|(i, _)| i)
             .collect();

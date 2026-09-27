@@ -2578,13 +2578,25 @@ fn the_phone_keeps_its_swipe_strips_from_the_system_back_gesture() {
     for _ in 0..6 {
         h.frame_sized(&mut app, phone, Default::default());
     }
-    let last = platform.0.lock().unwrap().last().cloned().expect("asked once");
+    let last = platform
+        .0
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("asked once");
     let ppp = h.ctx.pixels_per_point();
     let height = (phone.y * ppp).round() as i32;
     // The tab bar along the bottom, full width, and the module strip above it.
     assert_eq!(last.len(), 2, "{last:?}");
-    assert!(last.iter().any(|r| r[3] >= height - 1 && r[0] <= 0), "{last:?}");
-    assert!(last.iter().all(|r| (r[3] - r[1]) as f32 <= 200.0 * ppp), "{last:?}");
+    assert!(
+        last.iter().any(|r| r[3] >= height - 1 && r[0] <= 0),
+        "{last:?}"
+    );
+    assert!(
+        last.iter().all(|r| (r[3] - r[1]) as f32 <= 200.0 * ppp),
+        "{last:?}"
+    );
     // Asked only when they change.
     let asks = platform.0.lock().unwrap().len();
     h.frame_sized(&mut app, phone, Default::default());

@@ -87,6 +87,30 @@ impl FilterState {
         is_edited: bool,
         has_sidecar: bool,
     ) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        self.matches_lowered(
+            &self.search_query.to_lowercase(),
+            &name,
+            metadata,
+            is_edited,
+            has_sidecar,
+        )
+    }
+
+    /// [`FilterState::matches`] for a whole shelf, every frame (WP5.4): the query
+    /// lowercased once by the caller, and each name when it was shelved.
+    pub fn matches_lowered(
+        &self,
+        query: &str,
+        name: &str,
+        metadata: &AssetMetadata,
+        is_edited: bool,
+        has_sidecar: bool,
+    ) -> bool {
         // 1. Rating filter
         if let RatingFilter::MinStars(min) = self.rating {
             if metadata.rating < min {
@@ -137,20 +161,14 @@ impl FilterState {
         }
 
         // 5. Text search query
-        if !self.search_query.is_empty() {
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let query = self.search_query.to_lowercase();
+        if !query.is_empty() {
             let keyword = || {
                 metadata
                     .keywords
                     .iter()
-                    .any(|k| k.to_lowercase().contains(&query))
+                    .any(|k| k.to_lowercase().contains(query))
             };
-            if !file_name.contains(&query) && !keyword() {
+            if !name.contains(query) && !keyword() {
                 return false;
             }
         }

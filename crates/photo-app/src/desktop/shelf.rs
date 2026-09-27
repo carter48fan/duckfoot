@@ -334,6 +334,7 @@ impl PhotoApp {
                     return;
                 }
                 let mut any_visible = false;
+                let query = self.filter.search_query.to_lowercase();
                 for (i, item) in self.shelf.iter().enumerate() {
                     let active = self.loaded_path.as_ref() == Some(&item.path);
                     let is_edited = if active {
@@ -341,10 +342,13 @@ impl PhotoApp {
                     } else {
                         item.is_edited
                     };
-                    if !self
-                        .filter
-                        .matches(&item.path, &item.metadata, is_edited, item.has_sidecar)
-                    {
+                    if !self.filter.matches_lowered(
+                        &query,
+                        &item.search_name,
+                        &item.metadata,
+                        is_edited,
+                        item.has_sidecar,
+                    ) {
                         continue;
                     }
                     any_visible = true;
