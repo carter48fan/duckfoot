@@ -562,6 +562,22 @@ impl PhotoApp {
                 let total = displayed.len();
                 ui.set_min_size(vec2(total as f32 * FILM_STRIDE - FILM_GAP, FILM_TILE.y));
                 let visible = visible_tiles(viewport.x_range(), total);
+                // Thumbnails for what is in view and a stretch either side, as they are
+                // needed rather than a whole roll's at once (WP5.2).
+                const PREFETCH: usize = 24;
+                let wanted: Vec<PathBuf> = displayed
+                    [visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(total)]
+                    .iter()
+                    .map(|&i| self.shelf[i].path.clone())
+                    .collect();
+                for (k, path) in wanted.iter().enumerate() {
+                    self.request_thumbnail(path);
+                    let in_view = (visible.start.saturating_sub(PREFETCH) + k) >= visible.start
+                        && (visible.start.saturating_sub(PREFETCH) + k) < visible.end;
+                    if in_view {
+                        self.thumb_used.insert(path.clone(), self.frame_no);
+                    }
+                }
 
                 let loading = self.loading.as_ref().map(|(p, _)| p);
                 for (slot, &index) in displayed

@@ -373,7 +373,7 @@ impl PhotoApp {
                 if open_first && to_open.is_none() {
                     to_open = Some(path.clone());
                 }
-                self.request_thumbnail(&path);
+                // Its thumbnail is asked for when its tile is first in view (WP5.2).
                 self.shelf.push(ShelfItem::new(path));
             }
         }
@@ -480,8 +480,48 @@ impl PhotoApp {
             return;
         }
         if self.thumbs_requested.insert(path.to_path_buf()) {
+            self.thumbs_pending.insert(path.to_path_buf());
             self.loader.thumbnail(path.to_path_buf());
         }
+    }
+
+    /// The most thumbnails kept: a phone has far less memory to spare.
+    fn thumb_cap(&self) -> usize {
+        if self.layout.is_compact() {
+            400
+        } else {
+            1500
+        }
+    }
+
+    /// Drop the least recently drawn thumbnails until `keep` are left; they are asked for
+    /// again when their tiles come back into view.
+    pub(crate) fn evict_thumbs(&mut self, keep: usize) {
+        if self.thumbs.len() <= keep {
+            return;
+        }
+        let mut by_age: Vec<(u64, PathBuf)> = self
+            .thumbs
+            .keys()
+            .map(|p| (self.thumb_used.get(p).copied().unwrap_or(0), p.clone()))
+            .collect();
+        by_age.sort();
+        let open = self.loaded_path.clone();
+        for (_, path) in by_age.into_iter().take(self.thumbs.len() - keep) {
+            if Some(&path) == open.as_ref() {
+                continue;
+            }
+            self.thumbs.remove(&path);
+            self.thumbs_requested.remove(&path);
+            self.thumb_used.remove(&path);
+        }
+    }
+
+    /// Give memory back when the system asks (Android's onTrimMemory): the engine's spare
+    /// textures, and all but a quarter of the thumbnails.
+    pub fn release_memory(&mut self) {
+        self.engine.release_spares();
+        self.evict_thumbs(self.thumb_cap() / 4);
     }
 
     /// Step to the previous (-1) or next (+1) photo as the shelf shows them: through the
@@ -530,6 +570,9 @@ impl PhotoApp {
             ));
             return;
         }
+        // Its metadata comes with its thumbnail, and the Info card wants it whether or
+        // not its tile is in view.
+        self.request_thumbnail(&path);
         if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
             item.missing = false;
         }
@@ -743,14 +786,17 @@ impl PhotoApp {
                     }
                 }
                 loader::Done::Thumbnail { path, image, info } => {
-                    self.thumbs_answered += 1;
+                    self.thumbs_pending.remove(&path);
                     if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                         item.info = info;
                     }
                     if let Some(image) = image {
                         let name = format!("thumb:{}", path.display());
                         let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                        self.thumb_used.insert(path.clone(), self.frame_no);
                         self.thumbs.insert(path, texture);
+                        let cap = self.thumb_cap();
+                        self.evict_thumbs(cap);
                     }
                 }
             }
@@ -959,6 +1005,8 @@ impl PhotoApp {
             // The texture goes with its handle.
             self.thumbs.remove(&item.path);
             self.thumbs_requested.remove(&item.path);
+            self.thumbs_pending.remove(&item.path);
+            self.thumb_used.remove(&item.path);
         }
         let n = removed.len();
         self.removed_from_shelf = removed;
@@ -976,9 +1024,7 @@ impl PhotoApp {
         let removed = std::mem::take(&mut self.removed_from_shelf);
         let n = removed.len();
         for (index, item) in removed {
-            let path = item.path.clone();
             self.shelf.insert(index.min(self.shelf.len()), item);
-            self.request_thumbnail(&path);
         }
         self.set_status(format!("Put {n} back on the shelf"));
     }

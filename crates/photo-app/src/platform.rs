@@ -45,6 +45,8 @@ pub enum Response {
     ImportPreset(PathBuf),
     ExportPreset(PathBuf),
     DisplayProfile(PathBuf),
+    /// The system is short of memory: give back what can be made again.
+    LowMemory,
     /// Progress or a problem to show in the status bar.
     Status(String),
 }

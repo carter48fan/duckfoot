@@ -370,7 +370,11 @@ fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
     if let Some(preview) = load_embedded_preview(path, THUMB_SIDE as u32) {
         return Some(preview_image(preview, Some(THUMB_SIDE)));
     }
-    // No preview this can read: build one from the mosaic.
+    // No preview this can read: build one from the mosaic. A whole-sensor decode each, so
+    // one at a time however many workers there are, or a roll of such files would hold
+    // several full mosaics in memory at once (WP5.2).
+    static ONE_MOSAIC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_MOSAIC.lock().unwrap_or_else(|e| e.into_inner());
     decode_raw(path).ok().map(|cfa| thumbnail(&cfa))
 }
 

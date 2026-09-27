@@ -302,6 +302,7 @@ impl Platform for AndroidPlatform {
                 "add" if !args.is_empty() => out.push(Response::AddImages(paths.collect())),
                 "folder" => out.extend(paths.next().map(Response::BrowseFolder)),
                 "preset" => out.extend(paths.next().map(Response::ImportPreset)),
+                "trim" => out.push(Response::LowMemory),
                 // Progress and problems alike go to the status bar.
                 "status" => out.extend(args.into_iter().next().map(Response::Status)),
                 other => log::warn!("unknown event from the activity: {other}"),

@@ -555,6 +555,12 @@ impl UploadPool {
             *slot = Some(texture);
         }
     }
+
+    fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
 }
 
 fn check_size(device: &wgpu::Device, width: u32, height: u32) -> Result<()> {
@@ -1416,6 +1422,15 @@ impl Engine {
 
     pub fn image(&self) -> Option<&LoadedImage> {
         self.image.as_ref()
+    }
+
+    /// Let go of the textures kept only to be reused (the green plane, the pooled mosaic,
+    /// the last sensor), when the system is short of memory. The next open allocates them
+    /// again.
+    pub fn release_spares(&mut self) {
+        self.scratch = None;
+        self.retired_sensor = None;
+        self.upload_pool.clear();
     }
 
     pub fn unload(&mut self) {
