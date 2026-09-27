@@ -13,8 +13,6 @@ run-name: >-
 # - Android APK (arm64)
 # - Linux AppImage & tarball (x86_64)
 # - Windows portable zip (x86_64)
-# - an unsigned macOS .dmg, and the test suite on Windows and macOS (experimental: see
-#   the desktop-experimental job)
 # and attaches them to the workflow run. On top of that (see the `release` job):
 #
 # - every push to main updates the rolling **nightly** release with all target builds;
@@ -231,7 +229,11 @@ jobs:
   # themselves where there is no GPU), and an unsigned macOS app. Labelled experimental
   # (DEC-9): a failure here is reported but does not fail the run, and nothing waits on
   # it, so the phone's test build is never held back by it.
+  # Run by hand (Actions → Build → Run workflow) and for tags, not on every push: macOS
+  # minutes cost ten times Linux's and Windows' twice, and the phone's test build is what
+  # every push has to deliver.
   desktop-experimental:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:

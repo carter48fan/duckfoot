@@ -401,9 +401,10 @@ How it differs from the desktop, for now:
 ### Windows, macOS — experimental
 
 **Built and tested in CI, not yet smoke-tested by hand; no claim is made that they work.**
-Every push runs the workspace tests on `windows-latest` and `macos-latest` (the GPU tests
-skip themselves where the runner has no GPU), builds a Windows zip and an unsigned macOS
-`.dmg`, and attaches them to the run. The shell in `crates/duckfoot/src/lib.rs` holds no
+Every push builds a Windows zip. A manual run of the Build workflow, and every tag, also
+runs the workspace tests on `windows-latest` and `macos-latest` (the GPU tests skip
+themselves where the runner has no GPU) and builds an unsigned macOS `.dmg`, attached to
+the run; macOS runner minutes cost ten times Linux's, so not every push pays for them. The shell in `crates/duckfoot/src/lib.rs` holds no
 Linux-specific code.
 
 ```bash
