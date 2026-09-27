@@ -2400,3 +2400,51 @@ fn a_watched_folder_brings_in_new_photos_and_marks_gone_ones() {
     assert!(app.shelf.iter().any(|it| it.path == c));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
+    let dir = scratch_dir("recursive");
+    let settings = dir.join("settings");
+    let roll = dir.join("roll");
+    let (day1, day2, hidden) = (roll.join("day1"), roll.join("day1/evening"), roll.join(".cache"));
+    for d in [&day1, &day2, &hidden] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (a, b, c, h) = (
+        roll.join("a.dng"),
+        day1.join("b.dng"),
+        day2.join("c.dng"),
+        hidden.join("h.dng"),
+    );
+    for p in [&a, &b, &c, &h] {
+        write_dng(p, 160, 107);
+    }
+    // b was labelled and rated before; its sidecar says so.
+    photo_engine::update_sidecar(&b, |d| {
+        d.metadata.rating = 3;
+        d.metadata.color_label = Some("green".into());
+    })
+    .unwrap();
+    let h_ = Headless::new();
+    let mut app = PhotoApp::with_platform(&h_.gpu(), Box::new(RememberingPlatform(settings)));
+    h_.frame(&mut app, Default::default());
+    app.open_session_folder(&h_.gpu(), roll.clone());
+    assert!(app.shelf.is_empty(), "the folder is read off the UI thread");
+    h_.settle(&mut app, Duration::from_secs(30));
+    let paths: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(paths, [a.clone(), b.clone(), c.clone()], "hidden folders are skipped");
+    let item = app.shelf.iter().find(|it| it.path == b).unwrap();
+    assert!(!item.pending);
+    assert_eq!(item.metadata.rating, 3, "its marks were read in the background");
+
+    // Shelved and marked at once, before its facts arrive: the label it had is kept.
+    app.remove_from_shelf(std::slice::from_ref(&b));
+    app.add_to_shelf(&h_.gpu(), vec![b.clone()]);
+    assert!(app.shelf.iter().find(|it| it.path == b).unwrap().pending);
+    app.selection.select_single(b.clone());
+    app.set_rating_for_selection(5);
+    let data = photo_engine::load_sidecar_full(&b).unwrap().unwrap();
+    assert_eq!(data.metadata.rating, 5);
+    assert_eq!(data.metadata.color_label.as_deref(), Some("green"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

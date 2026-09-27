@@ -678,7 +678,7 @@ test.
 - **Done when:** a 2,000-photo roll on a 4 GB phone stays below a measured ceiling
   (target: 1.2 GB PSS). This is part of the device test in §8.
 
-**WP5.3 I/O off the UI thread** — M-31
+**WP5.3 I/O off the UI thread** — M-31 — ✅ done: shelving is a name only, its sidecar and size read on the loader's file thread (a mark set before they arrive reads them first, so it never writes over what the sidecar held); folder opens, drops and restored watches read on that thread; the folder browser's subfolders come from a listing refreshed off-thread every few seconds. Tested by a folder that opens with the shelf still empty and fills in with its marks.
 - **Implementation:** `ShelfItem::new`'s sidecar parse and stat, `scan_supported_images`,
   and `FolderTree::list_subfolders` (read every frame at `lib.rs:2243`) all move to the
   loader, with cached results and a refresh on a timer or on navigation.
@@ -743,7 +743,7 @@ test.
 - **Manual smoke test:** open, edit, export, then close with the edits kept.
 - **README:** "experimental" labels until the smoke tests pass.
 
-**WP5.8 Recursive import** — L-24
+**WP5.8 Recursive import** — L-24 — ✅ done: folders opened or dropped are read four levels deep on the file thread, hidden and system folders skipped, at most 256 folders; each folder that held photos is watched. (Cancelling a long read is still to come.)
 - **Implementation:** a folder import on Android and desktop recurses with a depth limit
   (default 4), skipping hidden and system folders. It is cancellable and shows progress,
   and runs on the loader thread (WP5.3).

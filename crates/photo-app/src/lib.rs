@@ -183,18 +183,51 @@ pub struct ShelfItem {
     /// photo itself).
     pub sort_name: String,
     pub copy: u32,
+    /// Its sidecar and file not read yet (WP5.3): shelved at once, filled in when the
+    /// loader has read them.
+    pub pending: bool,
 }
 
-impl ShelfItem {
-    fn new(path: PathBuf) -> Self {
-        let (metadata, has_sidecar) = match photo_engine::load_sidecar_full(&path) {
+/// What a shelved photo's sidecar and file say: read on the loader's thread.
+#[derive(Debug, Clone)]
+pub struct ShelfFacts {
+    pub path: PathBuf,
+    pub metadata: photo_engine::AssetMetadata,
+    pub has_sidecar: bool,
+    pub bytes: u64,
+    pub missing: bool,
+}
+
+impl ShelfFacts {
+    pub fn read(path: &std::path::Path) -> Self {
+        let (metadata, has_sidecar) = match photo_engine::load_sidecar_full(path) {
             Ok(Some(sc)) => (sc.metadata, true),
             _ => (
                 photo_engine::AssetMetadata::default(),
-                find_sidecar(&path).is_some(),
+                find_sidecar(path).is_some(),
             ),
         };
-        let file = photo_engine::copies::source_file(&path).into_owned();
+        let file = photo_engine::copies::source_file(path).into_owned();
+        Self {
+            path: path.to_path_buf(),
+            metadata,
+            has_sidecar,
+            bytes: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+            missing: !file.exists(),
+        }
+    }
+}
+
+impl ShelfItem {
+    /// Shelved with its facts read now, on this thread: for one photo at a time.
+    fn new(path: PathBuf) -> Self {
+        let mut item = Self::waiting(path);
+        item.take(ShelfFacts::read(&item.path));
+        item
+    }
+
+    /// Shelved with only its name, its facts to follow.
+    fn waiting(path: PathBuf) -> Self {
         let (sort_name, copy) = match photo_engine::copies::parse(&path) {
             Some((source, n)) => (file_name(&source), n),
             None => (file_name(&path), 1),
@@ -204,13 +237,22 @@ impl ShelfItem {
             sort_name,
             copy,
             is_edited: false,
-            has_sidecar,
-            metadata,
-            bytes: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
-            missing: !file.exists(),
+            has_sidecar: false,
+            metadata: photo_engine::AssetMetadata::default(),
+            bytes: 0,
+            missing: false,
             info: None,
             path,
+            pending: true,
         }
+    }
+
+    fn take(&mut self, facts: ShelfFacts) {
+        self.metadata = facts.metadata;
+        self.has_sidecar = facts.has_sidecar;
+        self.bytes = facts.bytes;
+        self.missing = facts.missing;
+        self.pending = false;
     }
 }
 
@@ -576,6 +618,11 @@ pub struct PhotoApp {
     thumbs_requested: HashSet<PathBuf>,
     /// Thumbnail requests the workers have not answered yet.
     thumbs_pending: HashSet<PathBuf>,
+    /// Shelved photos whose facts the loader has not sent yet, and folder reads out.
+    shelf_pending: HashSet<PathBuf>,
+    scans_pending: usize,
+    /// The folder browser's last listing, and when it was asked for.
+    subfolders: Option<(PathBuf, Vec<PathBuf>, Instant)>,
     /// When each thumbnail was last drawn (a frame count), to evict the stalest (WP5.2).
     thumb_used: HashMap<PathBuf, u64>,
     frame_no: u64,
@@ -783,6 +830,9 @@ impl PhotoApp {
             thumbs: HashMap::new(),
             thumbs_requested: HashSet::new(),
             thumbs_pending: HashSet::new(),
+            shelf_pending: HashSet::new(),
+            scans_pending: 0,
+            subfolders: None,
             thumb_used: HashMap::new(),
             frame_no: 0,
             stage_preview: None,
@@ -879,9 +929,14 @@ impl PhotoApp {
         self.saved_filters = s.saved_filters;
         // Settings already hold the screen; the matrix is worked out from them once.
         self.refresh_screen();
-        for dir in s.watched_folders.into_iter().filter(|d| d.is_dir()) {
-            let listing = dam::FolderTree::scan_supported_images(&dir);
-            self.folder_watch.watch(dir, &listing);
+        // Read on the loader's thread; each is watched once its listing is back.
+        for dir in s.watched_folders {
+            self.scans_pending += 1;
+            self.loader.file_job(loader::FileJob::Scan {
+                folder: dir,
+                purpose: loader::ScanFor::Watch,
+                depth: 0,
+            });
         }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
         // Missing photos are shelved too, and shown as missing.
@@ -1124,7 +1179,10 @@ impl PhotoApp {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.loading.is_some() || !self.thumbs_pending.is_empty()
+        self.loading.is_some()
+            || !self.thumbs_pending.is_empty()
+            || !self.shelf_pending.is_empty()
+            || self.scans_pending > 0
     }
 
     fn sidecar_state(&self) -> SidecarState {

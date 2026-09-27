@@ -55,6 +55,16 @@ pub enum Done {
         /// How the camera meant the photo to be viewed, known long before the decode.
         orientation: Geometry,
     },
+    /// What a shelved photo's sidecar and file say, read off the UI thread (WP5.3).
+    Shelf(crate::ShelfFacts),
+    /// The photos a folder (and its folders, to `depth`) holds, for `purpose`.
+    Scanned {
+        folder: PathBuf,
+        purpose: ScanFor,
+        found: Vec<(PathBuf, Vec<PathBuf>)>,
+    },
+    /// A folder's folders, for the folder browser.
+    Subfolders { dir: PathBuf, subs: Vec<PathBuf> },
     Thumbnail {
         path: PathBuf,
         /// `None` if nothing could be built; the request is still answered, so the UI
@@ -71,9 +81,33 @@ enum Decoded {
     Raster(RasterImage),
 }
 
+/// Why a folder is being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanFor {
+    /// Opened whole: shelved, watched, the first photo opened.
+    Open,
+    /// Dropped on the window: shelved, the first photo opened.
+    Drop,
+    /// Watched since the last launch: only its listing is wanted.
+    Watch,
+}
+
+/// Disk work that is small but can be slow (a network share, a card): never on the UI
+/// thread.
+pub enum FileJob {
+    Shelf(PathBuf),
+    Scan {
+        folder: PathBuf,
+        purpose: ScanFor,
+        depth: u32,
+    },
+    Subfolders(PathBuf),
+}
+
 pub struct Loader {
     open_tx: Sender<(PathBuf, u64)>,
     thumb_tx: Sender<PathBuf>,
+    file_tx: Sender<FileJob>,
     pub done: Receiver<Done>,
     /// Set on the first frame; lets a worker wake the UI when its result lands, since
     /// the event loop otherwise sleeps until the next input event.
@@ -150,6 +184,37 @@ impl Loader {
         let (done_tx, done) = mpsc::channel();
         let repaint: Arc<Mutex<Option<egui::Context>>> = Arc::default();
         let gate = Arc::new(Gate::default());
+
+        // One thread for the small disk reads: sidecars and sizes as photos are shelved,
+        // folders as they are opened or browsed.
+        let (file_tx, file_rx) = mpsc::channel::<FileJob>();
+        {
+            let (done_tx, repaint) = (done_tx.clone(), repaint.clone());
+            let _ = std::thread::Builder::new()
+                .name("duckfoot-files".into())
+                .spawn(move || {
+                    while let Ok(job) = file_rx.recv() {
+                        let done = match job {
+                            FileJob::Shelf(path) => Done::Shelf(crate::ShelfFacts::read(&path)),
+                            FileJob::Scan {
+                                folder,
+                                purpose,
+                                depth,
+                            } => Done::Scanned {
+                                found: crate::dam::FolderTree::scan_tree(&folder, depth),
+                                folder,
+                                purpose,
+                            },
+                            FileJob::Subfolders(dir) => Done::Subfolders {
+                                subs: crate::dam::FolderTree::list_subfolders(&dir),
+                                dir,
+                            },
+                        };
+                        let _ = done_tx.send(done);
+                        wake(&repaint);
+                    }
+                });
+        }
 
         // The lens database is inflated on first use; do that now, while nothing is open,
         // rather than in the first photo's decode.
@@ -317,9 +382,14 @@ impl Loader {
         Self {
             open_tx,
             thumb_tx,
+            file_tx,
             done,
             repaint,
         }
+    }
+
+    pub fn file_job(&self, job: FileJob) {
+        let _ = self.file_tx.send(job);
     }
 
     pub fn set_context(&self, ctx: &egui::Context) {
