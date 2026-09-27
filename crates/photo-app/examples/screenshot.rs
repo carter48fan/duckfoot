@@ -125,6 +125,11 @@ fn main() -> anyhow::Result<()> {
     app.looks_open = std::env::var_os("DUCKFOOT_SHOT_LOOKS").is_some();
     app.info_open = std::env::var_os("DUCKFOOT_SHOT_INFO").is_some();
     app.clip_overlay = std::env::var_os("DUCKFOOT_SHOT_CLIP").is_some();
+    // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
+    if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
+        app.begin_crop();
+        app.set_crop_aspect(photo_app::crop_tool::Aspect::Ratio(4, 5));
+    }
     // DUCKFOOT_SHOT_EXPORT=1: the Export dialog (desktop) or its options (phone).
     if std::env::var_os("DUCKFOOT_SHOT_EXPORT").is_some() {
         app.export_dialog_open = true;

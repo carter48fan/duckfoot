@@ -1575,3 +1575,55 @@ fn ctrl_e_opens_the_export_settings_and_they_are_remembered() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
+    use photo_app::crop_tool::Aspect;
+    let dir = scratch_dir("cropaspect");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    h.frame(&mut app, key(egui::Key::C));
+    app.set_crop_aspect(Aspect::Ratio(1, 1));
+    h.frame(&mut app, Default::default());
+    let frame = app.stage_frame().expect("the stage drew the frame");
+    let square = |c: photo_engine::Crop| (c.width * 640.0) / (c.height * 426.0);
+    let c = app.stack().geometry.crop;
+    assert!((square(c) - 1.0).abs() < 0.01, "{c:?}");
+
+    // The bottom-right corner, dragged up and in: still square, top-left where it was.
+    let corner = frame.min
+        + egui::vec2(
+            (c.x + c.width) * frame.width(),
+            (c.y + c.height) * frame.height(),
+        );
+    drag(&h, &mut app, corner, corner - egui::vec2(60.0, 20.0));
+    let resized = app.stack().geometry.crop;
+    assert!((square(resized) - 1.0).abs() < 0.02, "{resized:?}");
+    assert!(resized.width < c.width);
+    assert!((resized.x - c.x).abs() < 1e-3 && (resized.y - c.y).abs() < 1e-3);
+
+    // X turns the shape; a square turned is a square.
+    h.frame(&mut app, key(egui::Key::X));
+    assert!((square(app.stack().geometry.crop) - 1.0).abs() < 0.02);
+    app.set_crop_aspect(Aspect::Ratio(3, 2));
+    h.frame(&mut app, key(egui::Key::X));
+    assert_eq!(app.crop_aspect, Aspect::Ratio(2, 3));
+
+    // Outside the crop, a drag turns the photo, as its own undo step.
+    let left = egui::pos2(frame.left() + 6.0, frame.center().y);
+    drag(&h, &mut app, left, left + egui::vec2(0.0, 60.0));
+    let turned = app.stack().geometry.straighten_deg;
+    assert!(turned.abs() > 1.0, "straighten {turned}");
+    h.frame(&mut app, key(egui::Key::Enter));
+    assert!(!app.is_cropping());
+    assert!(app.undo(), "the crop session");
+    assert!(app.undo(), "the turn");
+    assert_eq!(app.stack().geometry.straighten_deg, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -969,11 +969,22 @@ impl PhotoApp {
                     ui.add_space(4.0);
                     // Framing a crop: finishing it comes before anything else.
                     if self.cropping {
-                        if strip_tab(ui, "✓ apply", true, true, None).clicked() {
+                        if strip_tab(ui, "apply", true, true, None).clicked() {
                             self.apply_crop();
                         }
                         if strip_tab(ui, "× cancel", false, false, None).clicked() {
                             self.cancel_crop();
+                        }
+                        divider(ui, STRIP_H);
+                        for (aspect, label) in crate::crop_tool::Aspect::CHOICES {
+                            if strip_tab(ui, label, self.crop_aspect == aspect, false, None)
+                                .clicked()
+                            {
+                                self.set_crop_aspect(aspect);
+                            }
+                        }
+                        if strip_icon(ui, "⇄", "Turn the crop's shape a quarter").clicked() {
+                            self.swap_crop_aspect();
                         }
                         divider(ui, STRIP_H);
                     }

@@ -6,7 +6,7 @@ impl PhotoApp {
     // ── Crop mode ───────────────────────────────────────────────────────────────────────
 
     /// Show the whole frame again, with the crop drawn over it, to reframe.
-    pub(crate) fn begin_crop(&mut self) {
+    pub fn begin_crop(&mut self) {
         if self.cropping || self.ready_image().is_none() {
             return;
         }
@@ -44,6 +44,83 @@ impl PhotoApp {
         self.stack.geometry.crop = self.crop_before;
         self.view = View::default();
         self.needs_render = true;
+    }
+
+    /// Fix the crop's shape (or free it); a fixed one is refitted about its centre at once.
+    pub fn set_crop_aspect(&mut self, aspect: crop_tool::Aspect) {
+        self.crop_aspect = aspect;
+        let Some(frame) = self.frame_pixels() else {
+            return;
+        };
+        if let Some(ratio) = aspect.pixel_ratio(frame) {
+            let fitted = crop_tool::fitted(self.stack.geometry.crop.sanitised(), ratio, frame);
+            if fitted != self.stack.geometry.crop {
+                self.stack.geometry.crop = fitted;
+                self.needs_render = true;
+            }
+        }
+    }
+
+    /// The same shape turned a quarter (X): 3:2 becomes 2:3, the photo's own shape its
+    /// upright or sideways twin.
+    pub(crate) fn swap_crop_aspect(&mut self) {
+        let turned = match self.crop_aspect {
+            crop_tool::Aspect::Original => match self.frame_pixels() {
+                Some((w, h)) => crop_tool::Aspect::Ratio(h.round() as u32, w.round() as u32),
+                None => return,
+            },
+            crop_tool::Aspect::Free => {
+                // A free crop turns too: its own shape, sideways.
+                let Some((fw, fh)) = self.frame_pixels() else {
+                    return;
+                };
+                let c = self.stack.geometry.crop.sanitised();
+                let (w, h) = (c.width * fw, c.height * fh);
+                self.set_crop_aspect(crop_tool::Aspect::Ratio(h.round() as u32, w.round() as u32));
+                self.crop_aspect = crop_tool::Aspect::Free;
+                return;
+            }
+            other => other.swapped(),
+        };
+        self.set_crop_aspect(turned);
+    }
+
+    /// The frame the crop lives in, in pixels: after turns, before the crop.
+    pub(crate) fn frame_pixels(&self) -> Option<(f32, f32)> {
+        let image = self.ready_image()?;
+        let (w, h) = self
+            .stack
+            .geometry
+            .output_size(image.sensor_width, image.sensor_height);
+        Some((w as f32, h as f32))
+    }
+
+    /// The aspect chips, the swap and the guide, for either layout's crop controls.
+    pub(crate) fn crop_shape_chips(&mut self, ui: &mut egui::Ui) {
+        for (aspect, label) in crop_tool::Aspect::CHOICES {
+            if widgets::chip(ui, self.crop_aspect == aspect, label).clicked() {
+                self.set_crop_aspect(aspect);
+            }
+        }
+        // A shape swapped to one without a chip of its own (2:3) still shows which it is.
+        if !crop_tool::Aspect::CHOICES
+            .iter()
+            .any(|(a, _)| *a == self.crop_aspect)
+        {
+            let _ = widgets::chip(ui, true, &self.crop_aspect.label());
+        }
+        if widgets::chip(ui, false, "⇄")
+            .on_hover_text("Turn the shape a quarter: 3:2 to 2:3 (X)")
+            .clicked()
+        {
+            self.swap_crop_aspect();
+        }
+        if widgets::chip(ui, false, self.crop_guide.label())
+            .on_hover_text("Next guide: thirds, golden, diagonals, grid, none (O)")
+            .clicked()
+        {
+            self.crop_guide = self.crop_guide.next();
+        }
     }
 
     pub(crate) fn toggle_crop(&mut self) {

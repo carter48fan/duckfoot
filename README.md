@@ -161,6 +161,8 @@ You can also **drag a RAW file onto the window**.
 | `Ctrl+Alt+V` | the same edits as the photo open before this one |
 | `C` | crop tool on / off |
 | `Enter` / `Esc` | apply / cancel the crop |
+| `X` / `O` while cropping | turn the crop's shape / next guide |
+| `Shift` while resizing a crop | keep its shape |
 | `[` / `]` | rotate 90° left / right |
 | `H` / `V` | mirror / flip |
 | `Esc` while dragging | put the control back where the drag started |

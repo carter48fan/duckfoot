@@ -154,10 +154,25 @@ impl PhotoApp {
             self.batch_dialog_open = true;
         }
 
+        // While framing, X turns the crop's shape and O changes its guide.
+        if self.cropping {
+            let (swap, guide) = ctx.input(|i| {
+                (
+                    !i.modifiers.command && i.key_pressed(egui::Key::X),
+                    !i.modifiers.command && i.key_pressed(egui::Key::O),
+                )
+            });
+            if swap {
+                self.swap_crop_aspect();
+            }
+            if guide {
+                self.crop_guide = self.crop_guide.next();
+            }
+        }
         let (pick, reject, unflag) = ctx.input(|i| {
             (
                 !i.modifiers.command && i.key_pressed(egui::Key::P),
-                !i.modifiers.command && i.key_pressed(egui::Key::X),
+                !self.cropping && !i.modifiers.command && i.key_pressed(egui::Key::X),
                 !i.modifiers.command && i.key_pressed(egui::Key::U),
             )
         });

@@ -8,7 +8,7 @@ impl PhotoApp {
     /// CROP to start framing; APPLY and CANCEL while framing.
     pub(crate) fn crop_chips(&mut self, ui: &mut egui::Ui) {
         if self.cropping {
-            if widgets::chip(ui, true, "✓ apply crop")
+            if widgets::chip(ui, true, "apply crop")
                 .on_hover_text("Keep this framing and carry on editing inside it (Enter or C)")
                 .clicked()
             {
@@ -90,6 +90,12 @@ impl PhotoApp {
                         });
                     });
                 });
+                // Framing a crop: its shapes and guide on a row of their own, which the
+                // row above has no room for.
+                if self.cropping {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| self.crop_shape_chips(ui));
+                }
             });
     }
 

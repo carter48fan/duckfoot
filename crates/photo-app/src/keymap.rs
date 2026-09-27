@@ -84,6 +84,12 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(Editing, "`C`", "crop tool on / off"),
     s(Editing, "`Enter` / `Esc`", "apply / cancel the crop"),
+    s(
+        Editing,
+        "`X` / `O` while cropping",
+        "turn the crop's shape / next guide",
+    ),
+    s(Editing, "`Shift` while resizing a crop", "keep its shape"),
     s(Editing, "`[` / `]`", "rotate 90° left / right"),
     s(Editing, "`H` / `V`", "mirror / flip"),
     s(
