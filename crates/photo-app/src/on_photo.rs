@@ -25,6 +25,16 @@ const FINE_SPEED: f32 = 150.0;
 /// How long the readout stays after the finger lets go.
 const READOUT: Duration = Duration::from_millis(900);
 
+/// How many of each gesture the photo has taken, for the tour to see one done (G-04).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GestureLog {
+    pub(crate) chose: u32,
+    pub(crate) adjusted: u32,
+    pub(crate) reset: u32,
+    pub(crate) held: u32,
+    pub(crate) stepped: u32,
+}
+
 /// What a touch on the photo is doing, kept between frames.
 #[derive(Default)]
 pub(crate) struct PhotoTouch {
@@ -43,6 +53,7 @@ pub(crate) struct PhotoTouch {
     pub(crate) holding: bool,
     /// Did the touch under way start on the stage.
     ours: bool,
+    pub(crate) log: GestureLog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +121,19 @@ impl PhotoApp {
         let t = &mut self.photo_touch;
         if t.recogniser.start().is_none() {
             // A touch belongs to the stage if it lands there; others are left alone.
-            t.ours = sample.pos.is_some_and(|p| rect.contains(p)) && free;
+            // Not one that lands on something floating over the photo (the tour's card).
+            // The tour's layer spans the screen but only its card and dim take touches, so
+            // for it the card is what counts.
+            let tour = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("duckfoot_tour"));
+            let card = self.tour_step.and(self.tour_card).map(|(card, _)| card);
+            let covered = |p: egui::Pos2| {
+                card.is_some_and(|c| c.contains(p))
+                    || ctx.layer_id_at(p).is_some_and(|l| {
+                        l != tour
+                            && matches!(l.order, egui::Order::Foreground | egui::Order::Tooltip)
+                    })
+            };
+            t.ours = sample.pos.is_some_and(|p| rect.contains(p) && !covered(p)) && free;
         }
         if !t.ours && sample.pos.is_some() {
             return;
@@ -222,6 +245,9 @@ impl PhotoApp {
                         i.saturating_sub(1)
                     };
                 }
+                if self.photo_knob().map(|(j, _)| j) != Some(i) {
+                    self.photo_touch.log.chose += 1;
+                }
                 self.photo_touch.knob = Some((module, i));
                 self.photo_touch.shown = Some((Instant::now(), Shown::Choosing));
             }
@@ -236,6 +262,7 @@ impl PhotoApp {
                 };
                 if !self.photo_touch.adjusting {
                     self.photo_touch.adjusting = true;
+                    self.photo_touch.log.adjusted += 1;
                     self.history.checkpoint(&self.stack);
                 }
                 // A slide across the photo's width covers most of the range; slowly, a
@@ -258,6 +285,7 @@ impl PhotoApp {
                 let Some((_, knob)) = self.photo_knob() else {
                     return;
                 };
+                self.photo_touch.log.reset += 1;
                 let home = knob.get(&self.baseline, &white);
                 if (knob.get(&self.stack, &white) - home).abs() > f32::EPSILON {
                     self.history.checkpoint(&self.stack);
@@ -273,6 +301,7 @@ impl PhotoApp {
             }
             Event::HoldEnd => {
                 if self.photo_touch.holding {
+                    self.photo_touch.log.held += 1;
                     self.photo_touch.holding = false;
                     self.photo_touch.shown = None;
                     self.needs_render = true;
@@ -293,6 +322,7 @@ impl PhotoApp {
                 if self.layout.is_compact() && self.compact_tab == Some(crate::compact::Tab::Edit) {
                     self.step_module(step);
                 } else {
+                    self.photo_touch.log.stepped += 1;
                     self.pending_step = Some(step as isize);
                 }
             }

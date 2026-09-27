@@ -13,6 +13,9 @@ use crate::{InspectorSectionConfig, InspectorSectionId};
 pub struct Settings {
     /// The phone tour has been finished or skipped.
     pub tour_done: bool,
+    /// A skipped tour asked to be shown once more, on the next launch.
+    #[serde(default)]
+    pub tour_again: bool,
     /// The phone Edit strip's modules. `None` until the user changes them.
     pub compact_sections: Option<Vec<InspectorSectionConfig>>,
     /// The desktop inspector's modules, in order, and which are shown.
@@ -54,6 +57,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             tour_done: false,
+            tour_again: false,
             compact_sections: None,
             inspector_sections: None,
             single_open: None,

@@ -458,6 +458,8 @@ pub(crate) enum NoticeAction {
     Share,
     /// Stop reading the folder being opened.
     CancelScan,
+    /// Show the skipped tour again on the next launch.
+    TourAgain,
 }
 
 impl NoticeAction {
@@ -466,6 +468,7 @@ impl NoticeAction {
         match self {
             NoticeAction::Share => "share",
             NoticeAction::CancelScan => "cancel",
+            NoticeAction::TourAgain => "next launch",
             _ => "undo",
         }
     }
@@ -750,9 +753,13 @@ pub struct PhotoApp {
     /// The look last applied from Presets, and what it was applied over.
     preset: Option<compact::PresetState>,
     /// The phone tour's current step, while it is showing.
-    tour_step: Option<usize>,
+    pub(crate) tour_step: Option<usize>,
+    /// Where the app stood when the tour's step began.
+    tour_mark: Option<compact::TourMark>,
+    /// The tour card and what it points at, as last drawn.
+    pub(crate) tour_card: Option<(egui::Rect, egui::Rect)>,
     /// Where the phone layout's parts were last frame, for the tour to point at.
-    compact_rects: compact::Rects,
+    pub(crate) compact_rects: compact::Rects,
     /// A touch on the photo, and what it is doing to it (G-02, G-03).
     pub(crate) photo_touch: on_photo::PhotoTouch,
     /// The gesture exclusions last given the platform, in physical pixels.
@@ -775,6 +782,8 @@ impl PhotoApp {
             loader::Loader::new(gpu.device.clone(), gpu.queue.clone(), engine.upload_pool());
         let settings_dir = platform.settings_dir();
         let settings = settings::Settings::load(settings_dir.as_deref());
+        // A skipped tour asked to be shown again: once, now.
+        let tour_step = settings.tour_again.then_some(0);
         let compact_sections = settings
             .compact_sections
             .clone()
@@ -930,7 +939,9 @@ impl PhotoApp {
             settings,
             compact_sections,
             preset: None,
-            tour_step: None,
+            tour_step,
+            tour_mark: None,
+            tour_card: None,
             compact_rects: compact::Rects::default(),
             photo_touch: Default::default(),
             gestures_excluded: Vec::new(),
@@ -1214,6 +1225,16 @@ impl PhotoApp {
         self.tour_step = Some(step);
     }
 
+    /// The tour's card and the rectangle it points at, as last drawn.
+    pub fn tour_card(&self) -> Option<(egui::Rect, egui::Rect)> {
+        self.tour_step.and(self.tour_card)
+    }
+
+    /// Steps in the tour.
+    pub fn tour_len(&self) -> usize {
+        compact::TOUR_LEN
+    }
+
     /// The phone tour's step while it is showing.
     pub fn tour_step(&self) -> Option<usize> {
         self.tour_step
@@ -1278,6 +1299,11 @@ impl PhotoApp {
             NoticeAction::Remove => self.undo_remove_from_shelf(),
             NoticeAction::DeleteSnapshot => self.undo_delete_snapshot(),
             NoticeAction::CancelScan => self.cancel_reading(),
+            NoticeAction::TourAgain => {
+                self.settings.tour_again = true;
+                self.save_settings();
+                self.set_status(crate::i18n::tr("tour-again"));
+            }
             NoticeAction::Share => {
                 if let Export::Done { path, .. } = &self.export {
                     let path = path.clone();

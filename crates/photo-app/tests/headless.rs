@@ -2860,3 +2860,110 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     assert_ne!(app.compact_module, photo_app::InspectorSectionId::ToneCurve);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_tour_waits_for_each_gesture_and_keeps_clear_of_what_it_points_at() {
+    let dir = scratch_dir("tour-gestures");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 640, 426);
+    write_dng(&b, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    let settle = |app: &mut PhotoApp| {
+        for _ in 0..6 {
+            h.frame_sized(app, PORTRAIT, Default::default());
+        }
+    };
+
+    // Every card sits clear of what it points at, upright and on the narrowest phone.
+    for size in [PORTRAIT, egui::vec2(360.0, 740.0)] {
+        for step in 0..app.tour_len() {
+            app.show_tour_step(step);
+            for _ in 0..8 {
+                h.frame_sized(&mut app, size, Default::default());
+            }
+            if app.tour_step() != Some(step) {
+                continue;
+            }
+            let (card, target) = app.tour_card().expect("a card");
+            assert!(
+                !target.is_positive() || !card.intersects(target),
+                "{size:?} step {step}: card {card:?} covers {target:?}"
+            );
+            assert!(
+                card.bottom() <= size.y && card.top() >= 0.0,
+                "{size:?} step {step}: card {card:?} off screen"
+            );
+        }
+    }
+
+    app.start_tour();
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(0));
+    // Nothing happens: it waits.
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(0));
+    // A tab: on.
+    tap(&h, &mut app, PORTRAIT, tab_centre(PORTRAIT, 1));
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(1));
+
+    let stage = app.tour_card().expect("card").1;
+    let centre = stage.center();
+    // Up or down: chosen.
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre + egui::vec2(0.0, 50.0), 8),
+        0,
+    );
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(2));
+    // Sideways: changed.
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre + egui::vec2(100.0, 0.0), 8),
+        0,
+    );
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(3));
+    // Double tap: put back.
+    touch_path(&h, &mut app, &[centre], 0);
+    touch_path(&h, &mut app, &[centre], 0);
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(4));
+    // Hold: compared.
+    touch_path(&h, &mut app, &[centre], 40);
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(5));
+    // A tool from the strip.
+    let strip = app.tour_card().expect("card").1;
+    assert!(strip.is_positive(), "the strip is pointed at");
+    tap(
+        &h,
+        &mut app,
+        PORTRAIT,
+        egui::pos2(strip.left() + 150.0, strip.center().y),
+    );
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(6));
+    // In the Library, a sideways swipe on the photo: the next photo.
+    let stage = app.tour_card().expect("card").1;
+    let c = stage.center();
+    touch_path(
+        &h,
+        &mut app,
+        &line(c + egui::vec2(100.0, 0.0), c - egui::vec2(100.0, 0.0), 6),
+        0,
+    );
+    settle(&mut app);
+    assert_eq!(app.tour_step(), Some(7), "the last card");
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    settle(&mut app);
+    assert_eq!(app.tour_step(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
