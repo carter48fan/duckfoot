@@ -3,7 +3,8 @@
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
 > **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; Android
-> builds in CI and is untested on devices; Windows and macOS not yet built.**
+> and Windows build in CI (Android is untested on devices); Windows and macOS run the
+> test suite in CI and are experimental: not yet smoke-tested by hand.**
 >
 > Duckfoot is a native Rust application on wgpu. The only thing under construction is the
 > **Photo Studio and RAW processor**. Audio and Video are design, not code — see
@@ -397,11 +398,13 @@ How it differs from the desktop, for now:
   across the photo for the next or previous one.
 - Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
 
-### Windows, macOS — not yet built
+### Windows, macOS — experimental
 
-**These have not been attempted and no claim is made that they work.** Both type-check
-(`cargo check --target x86_64-pc-windows-msvc` / `aarch64-apple-darwin`), and the shell in
-`crates/duckfoot/src/lib.rs` holds no Linux-specific code.
+**Built and tested in CI, not yet smoke-tested by hand; no claim is made that they work.**
+Every push runs the workspace tests on `windows-latest` and `macos-latest` (the GPU tests
+skip themselves where the runner has no GPU), builds a Windows zip and an unsigned macOS
+`.dmg`, and attaches them to the run. The shell in `crates/duckfoot/src/lib.rs` holds no
+Linux-specific code.
 
 ```bash
 # Windows (from Linux)
@@ -495,7 +498,7 @@ DESIGN.md invariant 8.
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
 | **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
-| **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
+| **Platform** | Windows / macOS / Android | Built in CI | Android untested on devices; Windows and macOS experimental (tests run in CI, no manual smoke test yet) |
 
 ### Measured
 

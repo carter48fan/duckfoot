@@ -13,6 +13,8 @@ run-name: >-
 # - Android APK (arm64)
 # - Linux AppImage & tarball (x86_64)
 # - Windows portable zip (x86_64)
+# - an unsigned macOS .dmg, and the test suite on Windows and macOS (experimental: see
+#   the desktop-experimental job)
 # and attaches them to the workflow run. On top of that (see the `release` job):
 #
 # - every push to main updates the rolling **nightly** release with all target builds;
@@ -224,6 +226,59 @@ jobs:
           name: duckfoot-windows-x86_64
           path: dist/
           if-no-files-found: error
+
+  # Windows and macOS for real (WP5.7): the test suite on both (the GPU tests skip
+  # themselves where there is no GPU), and an unsigned macOS app. Labelled experimental
+  # (DEC-9): a failure here is reported but does not fail the run, and nothing waits on
+  # it, so the phone's test build is never held back by it.
+  desktop-experimental:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tests-${{ matrix.os }}
+
+      - run: cargo test --workspace --locked
+
+      - name: macOS app
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked -p duckfoot
+          app=dist/Duckfoot.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/duckfoot "$app/Contents/MacOS/duckfoot"
+          cp brand/duckfoot-1024.png "$app/Contents/Resources/duckfoot.png"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Duckfoot</string>
+            <key>CFBundleIdentifier</key><string>com.walker.duckfoot</string>
+            <key>CFBundleExecutable</key><string>duckfoot</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          hdiutil create -volname Duckfoot -srcfolder "$app" -ov -format UDZO dist/duckfoot-macos-unsigned.dmg
+
+      - uses: actions/upload-artifact@v6
+        if: runner.os == 'macOS'
+        with:
+          name: duckfoot-macos-unsigned
+          path: dist/duckfoot-macos-unsigned.dmg
+          if-no-files-found: ignore
 
   release:
     needs: [android, linux, windows]
