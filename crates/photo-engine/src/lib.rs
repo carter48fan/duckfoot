@@ -158,10 +158,9 @@ mod tests {
         let shaders = [
             ("adjust.wgsl", include_str!("shaders/adjust.wgsl")),
             (
-                "demosaic_green.wgsl",
-                include_str!("shaders/demosaic_green.wgsl"),
+                "demosaic_rcd.wgsl",
+                include_str!("shaders/demosaic_rcd.wgsl"),
             ),
-            ("demosaic_rb.wgsl", include_str!("shaders/demosaic_rb.wgsl")),
             ("downsample.wgsl", include_str!("shaders/downsample.wgsl")),
             ("histogram.wgsl", include_str!("shaders/histogram.wgsl")),
             ("denoise.wgsl", include_str!("shaders/denoise.wgsl")),

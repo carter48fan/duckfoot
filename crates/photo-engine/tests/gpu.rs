@@ -1780,3 +1780,67 @@ fn a_keystone_takes_each_pixel_from_where_the_cpu_says() {
         assert!(out.rgba[i] > 0, "empty corner at ({x}, {y})");
     }
 }
+
+/// A grey zone plate (rings getting finer outwards, up to near the sensor's limit) with a
+/// hard diagonal edge across it: where demosaics show zippers, mazes and false colour.
+fn zone_plate(w: u32, h: u32) -> impl Fn(u32, u32) -> [f32; 3] + Copy {
+    move |x: u32, y: u32| {
+        let (dx, dy) = (x as f32 - w as f32 / 2.0, y as f32 - h as f32 / 2.0);
+        let r2 = dx * dx + dy * dy;
+        let rings = 0.5 + 0.35 * (r2 * std::f32::consts::PI / (w as f32 * 1.6)).cos();
+        let edge = if (x as f32) * 0.8 + y as f32 > w as f32 {
+            1.0
+        } else {
+            0.45
+        };
+        [rings * edge * 0.8; 3]
+    }
+}
+
+/// How a demosaic does on the zone plate: its false colour, and its PSNR against the
+/// same scene loaded as a raster, which needs no demosaic.
+fn demosaic_quality(gpu: &Gpu) -> (f32, f32) {
+    let (w, h) = (256u32, 192u32);
+    let scene = zone_plate(w, h);
+    let export = |load: &dyn Fn(&mut Engine)| {
+        let mut engine = Engine::new(&gpu.device);
+        load(&mut engine);
+        engine
+            .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+            .unwrap()
+    };
+    let mosaic = export(&|e| {
+        e.load(&gpu.device, &gpu.queue, testkit::cfa_from_fn(w, h, scene))
+            .unwrap()
+    });
+    let truth = export(&|e| {
+        e.load_raster(
+            &gpu.device,
+            &gpu.queue,
+            testkit::raster_from_fn(w, h, scene),
+        )
+        .unwrap()
+    });
+    let inner = |img: &photo_engine::ExportedImage| {
+        let mut px = Vec::new();
+        for y in 6..h - 6 {
+            for x in 6..w - 6 {
+                let i = ((y * w + x) * 4) as usize;
+                px.extend_from_slice(&img.rgba[i..i + 3]);
+            }
+        }
+        px
+    };
+    (false_colour(&mosaic), psnr(&inner(&mosaic), &inner(&truth)))
+}
+
+#[test]
+fn the_demosaic_keeps_fine_detail_grey_and_where_it_was() {
+    let gpu = gpu_or_skip!();
+    let (false_col, fidelity) = demosaic_quality(gpu);
+    eprintln!("demosaic: false colour {false_col:.3}, PSNR {fidelity:.2} dB");
+    // Hamilton-Adams, which RCD replaced, scored 3.49 and 35.96 dB here; RCD 3.13 and
+    // 36.63 dB. Either getting worse than halfway back is a regression.
+    assert!(false_col < 3.3, "false colour {false_col:.3}");
+    assert!(fidelity > 36.3, "PSNR {fidelity:.2} dB");
+}

@@ -6,7 +6,7 @@
 // which is what keeps a reduced preview from aliasing.
 //
 // Linear camera RGB, no clamp: values above 1.0 are highlight headroom and must survive
-// into every level. Alpha is the reconstructed-highlight neutral (demosaic_rb.wgsl), and a
+// into every level. Alpha is the reconstructed-highlight neutral (demosaic_rcd.wgsl), and a
 // box average of it is exactly right: the reconstruction was split into parts that are
 // linear precisely so that this average could not undo it.
 
