@@ -67,6 +67,10 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
         pictures.display()
     );
 
+    // Once the app has stopped (its edits flushed on the way out), the process goes too:
+    // a second android_main in the same process came up to a black screen (H12), so the
+    // next launch is a clean cold start instead.
+    let exit_bridge = bridge.clone();
     duckfoot::run(
         event_loop,
         duckfoot::Options {
@@ -80,7 +84,9 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
                 })
             }),
         },
-    )
+    )?;
+    exit_bridge.call_void("die", "()V", &[]);
+    Ok(())
 }
 
 /// `DuckfootActivity.nativeWake()`: an import finished, so draw a frame to pick it up.
@@ -161,8 +167,16 @@ impl Bridge {
 
     fn call_void(&self, method: &str, sig: &str, args: &[JValue]) {
         let outcome = self.env().and_then(|mut env| {
-            env.call_method(self.activity.as_obj(), method, sig, args)
-                .map(|_| ())
+            let r = env
+                .call_method(self.activity.as_obj(), method, sig, args)
+                .map(|_| ());
+            // A Java exception left pending makes every later JNI call fail (M-20):
+            // report it to logcat and clear it.
+            if r.is_err() && env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            r
         });
         if let Err(e) = outcome {
             log::error!("DuckfootActivity.{method} failed: {e}");
@@ -353,8 +367,18 @@ impl Platform for AndroidPlatform {
 /// `name` in `dir`, or `stem (2).ext`, `stem (3).ext`… if that is taken. Exporting the
 /// same photo twice must not silently replace the first file in someone's gallery.
 fn unused_name(dir: &Path, name: &str) -> PathBuf {
+    // Claimed by creating it, not by checking it is absent: two exports at once (a single
+    // and a batch) cannot both be handed the same name (L-23). The export writes over the
+    // empty file.
+    let claim = |p: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+            .is_ok()
+    };
     let first = dir.join(name);
-    if !first.exists() {
+    if claim(&first) {
         return first;
     }
     let name = Path::new(name);
@@ -363,8 +387,8 @@ fn unused_name(dir: &Path, name: &str) -> PathBuf {
         .and_then(|s| s.to_str())
         .unwrap_or("export");
     let ext = name.extension().and_then(|s| s.to_str()).unwrap_or("png");
-    (2..)
+    (2..10_000)
         .map(|n| dir.join(format!("{stem} ({n}).{ext}")))
-        .find(|p| !p.exists())
-        .expect("an unbounded range always finds a free name")
+        .find(|p| claim(p))
+        .unwrap_or(first)
 }

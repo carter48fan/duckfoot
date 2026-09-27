@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 10 and 11's backup. The library holds copies of photos that are already on the
+     phone (or its cloud): gigabytes a backup has no business carrying (M-22). The settings
+     and presets are small and are what a restore should bring back. -->
+<full-backup-content>
+    <exclude domain="file" path="library/" />
+    <include domain="file" path="settings/" />
+</full-backup-content>
