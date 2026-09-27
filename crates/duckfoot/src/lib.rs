@@ -40,11 +40,34 @@ impl From<egui_winit::accesskit_winit::Event> for UserEvent {
 
 /// What a bootstrap hands to [`run`].
 pub struct Options {
-    /// Opened once the first window exists.
-    pub pending_open: Option<PathBuf>,
+    /// Shelved once the first window exists, the first opened.
+    pub pending_open: Vec<PathBuf>,
     /// Builds the platform for the app. Called once per app, which is normally once per
     /// run (see [`Shell::resumed`] for the exception).
     pub platform: Box<dyn FnMut() -> Box<dyn Platform>>,
+}
+
+/// Starting failed for want of a GPU (or a window): say so where the user will see it, a
+/// dialog and a log file beside the settings, rather than just exiting (WP5.6).
+fn fatal(detail: &str) {
+    #[cfg(not(target_os = "android"))]
+    {
+        let text = format!(
+            "Duckfoot needs a GPU with Vulkan, Metal or DirectX 12, and could not start one.\n\n\
+             {detail}\n\nSee Troubleshooting in the README."
+        );
+        if let Some(dir) = photo_app::platform::desktop_settings_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("duckfoot.log"), format!("{text}\n"));
+        }
+        let _ = rfd::MessageDialog::new()
+            .set_title("Duckfoot could not start")
+            .set_description(&text)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
+    #[cfg(target_os = "android")]
+    let _ = detail;
 }
 
 /// Create the event loop type [`run`] expects.
@@ -427,8 +450,9 @@ impl Shell {
 
         if self.app.is_none() {
             let mut app = PhotoApp::with_platform(&gpu.gpu(), (self.options.platform)());
-            if let Some(path) = self.options.pending_open.take() {
-                app.open_path(&gpu.gpu(), path);
+            let paths = std::mem::take(&mut self.options.pending_open);
+            if !paths.is_empty() {
+                app.add_to_shelf(&gpu.gpu(), paths);
             }
             self.app = Some(app);
         }
@@ -488,6 +512,7 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
         if let Err(e) = self.open_window(event_loop) {
             log::error!("could not create a window or GPU device: {e:#}");
+            fatal(&format!("{e:#}"));
             event_loop.exit();
         }
     }

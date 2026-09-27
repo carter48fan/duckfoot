@@ -2393,7 +2393,9 @@ fn a_watched_folder_brings_in_new_photos_and_marks_gone_ones() {
     h.frame(&mut app, Default::default());
     assert_eq!(app.saved_filters.len(), 1);
     assert_eq!(app.saved_filters[0].name, "keepers");
-    // The folder is still watched after a restart.
+    // The folder is still watched after a restart, once its listing (read off the UI
+    // thread) is back: what it held then is the baseline, not news.
+    h.settle(&mut app, Duration::from_secs(30));
     let c = roll.join("c.dng");
     write_dng(&c, 320, 214);
     app.rescan_folders_now(&h.gpu());
@@ -2406,7 +2408,11 @@ fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
     let dir = scratch_dir("recursive");
     let settings = dir.join("settings");
     let roll = dir.join("roll");
-    let (day1, day2, hidden) = (roll.join("day1"), roll.join("day1/evening"), roll.join(".cache"));
+    let (day1, day2, hidden) = (
+        roll.join("day1"),
+        roll.join("day1/evening"),
+        roll.join(".cache"),
+    );
     for d in [&day1, &day2, &hidden] {
         std::fs::create_dir_all(d).unwrap();
     }
@@ -2432,10 +2438,17 @@ fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
     assert!(app.shelf.is_empty(), "the folder is read off the UI thread");
     h_.settle(&mut app, Duration::from_secs(30));
     let paths: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
-    assert_eq!(paths, [a.clone(), b.clone(), c.clone()], "hidden folders are skipped");
+    assert_eq!(
+        paths,
+        [a.clone(), b.clone(), c.clone()],
+        "hidden folders are skipped"
+    );
     let item = app.shelf.iter().find(|it| it.path == b).unwrap();
     assert!(!item.pending);
-    assert_eq!(item.metadata.rating, 3, "its marks were read in the background");
+    assert_eq!(
+        item.metadata.rating, 3,
+        "its marks were read in the background"
+    );
 
     // Shelved and marked at once, before its facts arrive: the label it had is kept.
     app.remove_from_shelf(std::slice::from_ref(&b));
