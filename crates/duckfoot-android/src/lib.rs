@@ -70,7 +70,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
     duckfoot::run(
         event_loop,
         duckfoot::Options {
-            pending_open: None,
+            pending_open: Vec::new(),
             platform: Box::new(move || {
                 Box::new(AndroidPlatform {
                     bridge: bridge.clone(),

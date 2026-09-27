@@ -1372,7 +1372,9 @@ impl PhotoApp {
         }
         // Phones, and tablets held upright, get the navigation-bar layout (`compact`): the
         // desktop's side panels need a screen both wide and tall.
-        let screen = ui.max_rect().size();
+        // Measured before the text-size setting's zoom, so a larger text size on a desktop
+        // window does not tip it into the phone's layout (WP5.6).
+        let screen = ui.max_rect().size() * ctx.zoom_factor();
         self.layout = compact::Layout::for_size(screen);
         // Controls size for the last input used: a laptop with a touch screen gets finger-
         // sized controls after a tap and desktop ones again once the mouse moves.
@@ -1399,6 +1401,10 @@ impl PhotoApp {
         self.loader.set_context(&ctx);
         self.clip_held = widgets::take_clip_hold(&ctx);
         self.poll_platform(gpu);
+        // A dialog's answer arrives by polling; keep polling while one is open.
+        if self.platform.busy() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.take_drops(gpu);
         self.poll_loader(&ctx, gpu);
         self.poll_folders(&ctx, gpu);

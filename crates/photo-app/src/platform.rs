@@ -88,6 +88,11 @@ pub trait Platform: Send {
     fn can_share(&self) -> bool {
         false
     }
+
+    /// A dialog is open whose answer has not come back: the app keeps polling for it.
+    fn busy(&self) -> bool {
+        false
+    }
 }
 
 /// Answers nothing. For shells with no pickers, and for tests.
@@ -102,88 +107,129 @@ impl Platform for NoPlatform {
     }
 }
 
-/// Native dialogs through `rfd`, which block until the user answers.
+/// Native dialogs through `rfd`. A dialog blocks until it is answered, so it runs on a
+/// thread of its own and the window keeps drawing (WP5.6), except on macOS, whose dialogs
+/// belong to the main thread.
 #[cfg(not(target_os = "android"))]
 #[derive(Debug, Default)]
 pub struct DesktopPlatform {
     answered: Vec<Response>,
+    open: Option<std::sync::mpsc::Receiver<Option<Response>>>,
+}
+
+/// The directory the desktop keeps settings (and its log) in: %APPDATA% on Windows,
+/// ~/Library/Application Support on macOS, $XDG_CONFIG_HOME or ~/.config elsewhere.
+#[cfg(not(target_os = "android"))]
+pub fn desktop_settings_dir() -> Option<PathBuf> {
+    let var = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let base = if cfg!(windows) {
+        var("APPDATA")
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|h| h.join("Library/Application Support"))
+    } else {
+        var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))
+    };
+    base.map(|b| b.join("duckfoot"))
+}
+
+/// One native dialog, to its answer (`None` when cancelled).
+#[cfg(not(target_os = "android"))]
+fn ask(request: Request) -> Option<Response> {
+    let start = |from: Option<PathBuf>| {
+        let dialog = rfd::FileDialog::new();
+        match from.filter(|d| d.is_dir()) {
+            Some(dir) => dialog.set_directory(dir),
+            None => dialog,
+        }
+    };
+    let images = |from| {
+        start(from)
+            .add_filter(
+                "All Supported Images",
+                &photo_engine::all_image_dialog_extensions(),
+            )
+            .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
+            .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
+            .add_filter("All files", &["*"])
+    };
+    match request {
+        Request::OpenImage { from } => images(from).pick_file().map(Response::OpenImage),
+        Request::AddImages { from } => images(from).pick_files().map(Response::AddImages),
+        Request::BrowseFolder { from } => start(from).pick_folder().map(Response::BrowseFolder),
+        Request::BatchOutputDir { from } => start(from).pick_folder().map(Response::BatchOutputDir),
+        Request::ExportImage { dir, name } => rfd::FileDialog::new()
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("PNG", &["png"])
+            .add_filter("TIFF", &["tif", "tiff"])
+            .add_filter("WebP", &["webp"])
+            .set_directory(dir)
+            .set_file_name(name)
+            .save_file()
+            .map(Response::ExportImage),
+        Request::ImportPreset { from } => start(from)
+            .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
+            .pick_file()
+            .map(Response::ImportPreset),
+        Request::ExportPreset { name } => rfd::FileDialog::new()
+            .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
+            .set_file_name(name)
+            .save_file()
+            .map(Response::ExportPreset),
+        // A desktop has no share sheet; can_share says so, so this is not asked.
+        Request::Share { .. } => None,
+        Request::DisplayProfile { from } => start(from)
+            .add_filter("ICC profile", &["icc", "icm"])
+            .pick_file()
+            .map(Response::DisplayProfile),
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 impl Platform for DesktopPlatform {
     fn request(&mut self, request: Request) {
-        let start = |from: Option<PathBuf>| {
-            let dialog = rfd::FileDialog::new();
-            match from.filter(|d| d.is_dir()) {
-                Some(dir) => dialog.set_directory(dir),
-                None => dialog,
-            }
-        };
-        let images = |from| {
-            start(from)
-                .add_filter(
-                    "All Supported Images",
-                    &photo_engine::all_image_dialog_extensions(),
-                )
-                .add_filter("Camera RAW", &photo_engine::raw_dialog_extensions())
-                .add_filter("Standard Images", &photo_engine::raster_dialog_extensions())
-                .add_filter("All files", &["*"])
-        };
-        let answer = match request {
-            Request::OpenImage { from } => images(from).pick_file().map(Response::OpenImage),
-            Request::AddImages { from } => images(from).pick_files().map(Response::AddImages),
-            Request::BrowseFolder { from } => start(from).pick_folder().map(Response::BrowseFolder),
-            Request::BatchOutputDir { from } => {
-                start(from).pick_folder().map(Response::BatchOutputDir)
-            }
-            Request::ExportImage { dir, name } => rfd::FileDialog::new()
-                .add_filter("JPEG", &["jpg", "jpeg"])
-                .add_filter("PNG", &["png"])
-                .add_filter("TIFF", &["tif", "tiff"])
-                .add_filter("WebP", &["webp"])
-                .set_directory(dir)
-                .set_file_name(name)
-                .save_file()
-                .map(Response::ExportImage),
-            Request::ImportPreset { from } => start(from)
-                .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
-                .pick_file()
-                .map(Response::ImportPreset),
-            Request::ExportPreset { name } => rfd::FileDialog::new()
-                .add_filter("Duckfoot preset", &[crate::user_presets::EXTENSION])
-                .set_file_name(name)
-                .save_file()
-                .map(Response::ExportPreset),
-            // A desktop has no share sheet; can_share says so, so this is not asked.
-            Request::Share { .. } => None,
-            Request::DisplayProfile { from } => start(from)
-                .add_filter("ICC profile", &["icc", "icm"])
-                .pick_file()
-                .map(Response::DisplayProfile),
-        };
-        self.answered.extend(answer);
+        // One dialog at a time, as the OS shows them.
+        if self.open.is_some() {
+            return;
+        }
+        if cfg!(target_os = "macos") {
+            self.answered.extend(ask(request));
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::thread::Builder::new()
+            .name("duckfoot-dialog".into())
+            .spawn(move || {
+                let _ = tx.send(ask(request));
+            });
+        if started.is_ok() {
+            self.open = Some(rx);
+        }
     }
 
     fn poll(&mut self) -> Vec<Response> {
+        if let Some(rx) = &self.open {
+            match rx.try_recv() {
+                Ok(answer) => {
+                    self.answered.extend(answer);
+                    self.open = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.open = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         std::mem::take(&mut self.answered)
     }
 
+    fn busy(&self) -> bool {
+        self.open.is_some()
+    }
+
     fn settings_dir(&self) -> Option<PathBuf> {
-        // The platform's usual place: %APPDATA% on Windows, ~/Library/Application Support
-        // on macOS, $XDG_CONFIG_HOME or ~/.config elsewhere.
-        let var = |k: &str| {
-            std::env::var_os(k)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        let base = if cfg!(windows) {
-            var("APPDATA")
-        } else if cfg!(target_os = "macos") {
-            var("HOME").map(|h| h.join("Library/Application Support"))
-        } else {
-            var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))
-        };
-        base.map(|b| b.join("duckfoot"))
+        desktop_settings_dir()
     }
 }
 

@@ -720,7 +720,7 @@ test.
 - **Versioning (L-17):** `versionCode` comes from a monotonic scheme
   (`major*1e6 + minor*1e4 + patch*100 + build`) that is the same locally and in CI.
 
-**WP5.6 Desktop shell hardening** — M-25, L-01, L-02, L-20, L-21, L-22, L-26
+**WP5.6 Desktop shell hardening** — M-25, L-01, L-02, L-20, L-21, L-22, L-26 — ✅ done except the surface-format rebuild: no GPU shows a native message and writes `duckfoot.log` beside the settings; `args_os`, every argument shelved; the desktop entry lists DNG, ORF, PEF, SRW, WebP and more; dialogs on a thread (macOS keeps its main-thread dialogs) with the app polling while one is open; bookmarks from USERPROFILE on Windows; the layout measured before the text-size zoom. Still to do: a surface-format change rebuilds the renderer without dropping the app (rare; it re-opens the photo today).
 - **No adapter:** show a native message box via `rfd::MessageDialog` ("No Vulkan/Metal/DX12
   GPU found — see README Troubleshooting"), and write a log file to the state directory
   (`dirs::state_dir()` / `%LOCALAPPDATA%`).

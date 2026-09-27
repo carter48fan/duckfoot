@@ -20,7 +20,9 @@ impl Default for FolderTree {
     fn default() -> Self {
         let mut bookmarks = Vec::new();
 
-        if let Ok(home) = std::env::var("HOME") {
+        // HOME, or on Windows USERPROFILE (HOME is usually unset there).
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+        if let Ok(home) = home {
             let home_path = PathBuf::from(&home);
             bookmarks.push(FolderBookmark {
                 name: "Home".into(),
