@@ -123,6 +123,11 @@ impl ExportQueue {
                                         engine = Engine::new(&device);
                                         Err(anyhow::anyhow!("the decoder crashed on this file"))
                                     });
+                                // Nothing kept between jobs: this engine runs beside the
+                                // interactive one, and on a phone the two cannot both
+                                // hold a full-size photo's textures while idle (WP5.2).
+                                engine.unload();
+                                engine.release_spares();
                                 match outcome {
                                     Ok(()) => {
                                         completed += 1;

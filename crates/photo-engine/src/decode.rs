@@ -1627,7 +1627,12 @@ mod tests {
         ]);
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
-            .encode(&[120u8; 48 * 32 * 3], 48, 32, image::ExtendedColorType::Rgb8)
+            .encode(
+                &[120u8; 48 * 32 * 3],
+                48,
+                32,
+                image::ExtendedColorType::Rgb8,
+            )
             .unwrap();
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)

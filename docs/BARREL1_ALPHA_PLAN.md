@@ -659,7 +659,13 @@ nightly CI lane (needs a nightly toolchain), and rawler's own mmap on removable 
 - **Fuzzing:** `cargo fuzz` targets for the TIFF walker, the embedded-JPEG scanner,
   `decode_bytes`, sidecar parsing and preset import. Run them nightly for 10 minutes in CI.
 
-**WP5.2 Memory discipline** — M-23, M-29, M-30
+**WP5.2 Memory discipline** — M-23, M-29, M-30 — ✅ done in code: thumbnails are asked for
+as their tiles come within 24 of the view (and the open photo's always, for its Info),
+kept under an LRU cap of 1,500 on the desktop and 400 on the phone, and evicted on remove;
+one mosaic-fallback thumbnail decodes at a time; Android's onTrimMemory releases the
+engine's spare textures and all but a quarter of the thumbnails; the batch engine unloads
+and drops its spares after every job. The 2,000-photo PSS measurement waits on the device
+test.
 - **Low memory:** `memory_warning` and Android `onTrimMemory` release the engine's spare
   textures (scratch green, pooled mosaic, `retired_sensor`) and evict thumbnails to 25%.
 - **Thumbnails:**

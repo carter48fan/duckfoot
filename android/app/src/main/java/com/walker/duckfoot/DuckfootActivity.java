@@ -90,6 +90,15 @@ public class DuckfootActivity extends NativeActivity {
         }
     }
 
+    /** The system is short of memory: Rust lets go of what it can make again. */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            post("trim");
+        }
+    }
+
     @Override
     protected void onDestroy() {
         importer.shutdown();

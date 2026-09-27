@@ -574,8 +574,11 @@ pub struct PhotoApp {
     loading: Option<(PathBuf, Instant)>,
     thumbs: HashMap<PathBuf, egui::TextureHandle>,
     thumbs_requested: HashSet<PathBuf>,
-    /// Thumbnail requests the workers have answered, including those that failed.
-    thumbs_answered: usize,
+    /// Thumbnail requests the workers have not answered yet.
+    thumbs_pending: HashSet<PathBuf>,
+    /// When each thumbnail was last drawn (a frame count), to evict the stalest (WP5.2).
+    thumb_used: HashMap<PathBuf, u64>,
+    frame_no: u64,
     /// The camera's embedded preview of the photo being opened, shown on the stage until
     /// its decode lands.
     stage_preview: Option<(PathBuf, egui::TextureHandle)>,
@@ -779,7 +782,9 @@ impl PhotoApp {
             loading: None,
             thumbs: HashMap::new(),
             thumbs_requested: HashSet::new(),
-            thumbs_answered: 0,
+            thumbs_pending: HashSet::new(),
+            thumb_used: HashMap::new(),
+            frame_no: 0,
             stage_preview: None,
             split_dragging: false,
             reveal_section: None,
@@ -1119,7 +1124,7 @@ impl PhotoApp {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.loading.is_some() || self.thumbs_requested.len() > self.thumbs_answered
+        self.loading.is_some() || !self.thumbs_pending.is_empty()
     }
 
     fn sidecar_state(&self) -> SidecarState {
@@ -1300,6 +1305,7 @@ impl PhotoApp {
 
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let ctx = ui.ctx().clone();
+        self.frame_no += 1;
         // The text-size setting, and only it: egui's own Ctrl+/- zoom would fight it.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let scale = self.settings.ui_scale.clamp(0.85, 1.5);
