@@ -29,8 +29,8 @@ pub use decode::{
     RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{
-    upload_cfa, upload_raster, Engine, LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL,
-    OUTPUT_FORMAT,
+    sensor_point, upload_cfa, upload_raster, AutoTone, Engine, LoadedImage, UploadPool,
+    UploadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT,
 };
 pub use exif_out::MetadataPolicy;
 pub use export::{

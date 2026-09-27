@@ -1627,3 +1627,47 @@ fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
     assert_eq!(app.stack().geometry.straighten_deg, 0.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn w_then_a_click_on_the_photo_takes_one_white_balance_pick() {
+    let dir = scratch_dir("eyedropper");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    h.frame(&mut app, Default::default());
+    let before = app.stack().white_balance.clone();
+
+    h.frame(&mut app, key(egui::Key::W));
+    assert!(app.picking_wb);
+    // A quarter across: the ramp's middle has red near its clip once balanced, which the
+    // dropper rightly refuses.
+    let frame = app.stage_frame().expect("the stage drew the frame");
+    let at = egui::pos2(frame.left() + frame.width() * 0.25, frame.center().y);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame(
+        &mut app,
+        pointer(vec![egui::Event::PointerMoved(at), button(true)]),
+    );
+    h.frame(&mut app, pointer(vec![button(false)]));
+    h.frame(&mut app, Default::default());
+    assert!(!app.picking_wb, "one pick, then the dropper is put down");
+    // The headless device has no GPU behind it, so the patch reads back empty and the pick
+    // is refused (the GPU suite checks the balance it finds); the click was taken as a pick.
+    let said = app.status_notification.as_ref().map(|(m, _)| m.as_str());
+    assert!(matches!(said, Some(m) if m.contains("balance")), "{said:?}");
+    assert_eq!(
+        app.stack().white_balance,
+        before,
+        "a refused pick changes nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

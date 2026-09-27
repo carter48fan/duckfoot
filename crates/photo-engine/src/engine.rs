@@ -13,7 +13,7 @@ use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
-use crate::params::{Geometry, PhotoStack};
+use crate::params::{Geometry, PhotoStack, WhiteBalance};
 use crate::temperature::WhiteScale;
 
 /// The adjusted image is written here, and egui samples it directly.
@@ -963,9 +963,11 @@ impl Engine {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: SENSOR_FORMAT,
+                // COPY_SRC for the eyedropper and the Auto buttons' one-shot reads.
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_DST,
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             }),
         };
@@ -1852,6 +1854,27 @@ pub(crate) fn read_back(
     texel: u32,
     band_bytes: u64,
 ) -> Result<Vec<u8>> {
+    read_back_level(
+        device,
+        queue,
+        texture,
+        0,
+        (ox, oy, width, height),
+        texel,
+        band_bytes,
+    )
+}
+
+/// [`read_back`] from mip level `mip`, in that level's coordinates.
+pub(crate) fn read_back_level(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    mip: u32,
+    (ox, oy, width, height): (u32, u32, u32, u32),
+    texel: u32,
+    band_bytes: u64,
+) -> Result<Vec<u8>> {
     let stride = crate::export::padded_row_bytes(width, texel);
     let row = (width * texel) as usize;
     // At least one row, whatever the limit: a row is never more than 64 KiB × 4.
@@ -1880,7 +1903,7 @@ pub(crate) fn read_back(
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
-                mip_level: 0,
+                mip_level: mip,
                 origin: wgpu::Origin3d {
                     x: ox,
                     y: oy + y,
@@ -2058,4 +2081,229 @@ mod tests {
         drop(ErrorScopes::push(&device));
         drop(outer);
     }
+}
+
+// ── One-shot sensor reads ───────────────────────────────────────────────────────────────
+//
+// The white-balance eyedropper and the Auto buttons read the sensor back once, when asked:
+// a user action, never a frame (DESIGN invariant 4 names scopes and export; these are the
+// third sanctioned kind, and just as rare).
+
+/// Where full-resolution output pixel `out_px` (in the turned, uncropped frame) came from
+/// on the sensor: the shader's `sensor_coords`, on the CPU.
+pub fn sensor_point(g: &Geometry, sensor: (u32, u32), out_px: (f32, f32)) -> (f32, f32) {
+    let (ow, oh) = g.output_size(sensor.0, sensor.1);
+    let (mut x, mut y) = (out_px.0 - ow as f32 * 0.5, out_px.1 - oh as f32 * 0.5);
+    let (s, c) = (-g.straighten_deg.to_radians()).sin_cos();
+    (x, y) = (x * c - y * s, x * s + y * c);
+    if g.mirror_h {
+        x = -x;
+    }
+    if g.mirror_v {
+        y = -y;
+    }
+    for _ in 0..g.quarter_turns {
+        (x, y) = (y, -x);
+    }
+    (x + sensor.0 as f32 * 0.5, y + sensor.1 as f32 * 0.5)
+}
+
+/// What Auto tone chose: exposure and the four tonal controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoTone {
+    pub ev: f32,
+    pub tonal: crate::params::Tonal,
+}
+
+impl Engine {
+    /// Sensor texels (rgb camera values before white balance, a = reconstructed neutral)
+    /// of `rect` at mip `level`.
+    fn sensor_texels(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        level: u32,
+        rect: (u32, u32, u32, u32),
+    ) -> Result<Vec<[f32; 4]>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let bytes = read_back_level(
+            device,
+            queue,
+            &image.sensor,
+            level,
+            rect,
+            8,
+            MAX_BAND_BYTES.min(device.limits().max_buffer_size),
+        )?;
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|t| {
+                std::array::from_fn(|i| half::f16::from_le_bytes([t[2 * i], t[2 * i + 1]]).to_f32())
+            })
+            .collect())
+    }
+
+    /// The whole sensor at the finest level no more than `side` texels across.
+    fn sensor_overview(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        side: u32,
+    ) -> Result<Vec<[f32; 4]>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let mut level = 0;
+        while level + 1 < image.mip_levels
+            && image.sensor_width.max(image.sensor_height) >> level > side
+        {
+            level += 1;
+        }
+        let (w, h) = scaled(image.sensor_width, image.sensor_height, level);
+        self.sensor_texels(device, queue, level, (0, 0, w, h))
+    }
+
+    /// The white balance that makes the 5×5 patch around `point` (0..1 of the turned,
+    /// uncropped frame, as `geometry` frames it) neutral. `None` over a clipped highlight or
+    /// black, where the colour is not the scene's.
+    pub fn neutral_at(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        geometry: &Geometry,
+        point: (f32, f32),
+    ) -> Result<Option<WhiteBalance>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let sensor = (image.sensor_width, image.sensor_height);
+        let (ow, oh) = geometry.output_size(sensor.0, sensor.1);
+        let (sx, sy) = sensor_point(geometry, sensor, (point.0 * ow as f32, point.1 * oh as f32));
+        if !(0.0..sensor.0 as f32).contains(&sx) || !(0.0..sensor.1 as f32).contains(&sy) {
+            return Ok(None);
+        }
+        let x0 = (sx as u32)
+            .saturating_sub(2)
+            .min(sensor.0.saturating_sub(5));
+        let y0 = (sy as u32)
+            .saturating_sub(2)
+            .min(sensor.1.saturating_sub(5));
+        let patch =
+            self.sensor_texels(device, queue, 0, (x0, y0, 5.min(sensor.0), 5.min(sensor.1)))?;
+        Ok(neutralising(&patch, image.wb))
+    }
+
+    /// A white balance for the whole photo: grey-world and white-patch estimates on an
+    /// overview of the sensor, clipped and near-black texels left out, and their geometric
+    /// mean taken (each is wrong in its own way; together they rarely are).
+    pub fn auto_white_balance(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<WhiteBalance>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let texels = self.sensor_overview(device, queue, 128)?;
+        let wb = image.wb;
+        let bright = |t: &[f32; 4]| t[0] * wb[0] + t[1] * wb[1] + t[2] * wb[2];
+        let peak = texels.iter().map(bright).fold(0.0f32, f32::max);
+        let usable: Vec<[f32; 4]> = texels
+            .into_iter()
+            .filter(|t| {
+                let b = bright(t);
+                t.iter().all(|v| v.is_finite())
+                    && t[3] <= 1e-4
+                    && b > 0.03 * peak
+                    && t[..3].iter().all(|&v| v > 0.0)
+            })
+            .collect();
+        if usable.len() < 16 {
+            return Ok(None);
+        }
+        let grey = neutralising(&usable, wb);
+        let mut by_brightness = usable.clone();
+        by_brightness.sort_by(|a, b| bright(b).total_cmp(&bright(a)));
+        let top = &by_brightness[..(by_brightness.len() / 20).max(4)];
+        let white = neutralising(top, wb);
+        Ok(match (grey, white) {
+            (Some(g), Some(w)) => Some(WhiteBalance {
+                tint_r: (g.tint_r * w.tint_r).sqrt(),
+                tint_b: (g.tint_b * w.tint_b).sqrt(),
+            }),
+            (one, other) => one.or(other),
+        })
+    }
+
+    /// Exposure and tone for the photo as `stack` white-balances it: the median at mid
+    /// grey, highlights pulled in when the brightest tones would clip, shadows lifted when
+    /// the darkest would crush.
+    pub fn auto_tone(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+    ) -> Result<Option<AutoTone>> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let texels = self.sensor_overview(device, queue, 128)?;
+        let w = stack.white_balance.params;
+        let wb = if stack.white_balance.enabled {
+            [image.wb[0] * w.tint_r, image.wb[1], image.wb[2] * w.tint_b]
+        } else {
+            image.wb
+        };
+        let m = image.cam_to_srgb;
+        let mut luma: Vec<f32> = texels
+            .iter()
+            .filter_map(|t| {
+                let c = [0, 1, 2].map(|i| t[i] * wb[i] + t[3]);
+                let rgb = [0, 1, 2].map(|r| m[r][0] * c[0] + m[r][1] * c[1] + m[r][2] * c[2]);
+                let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+                y.is_finite().then_some(y.max(0.0))
+            })
+            .collect();
+        if luma.len() < 16 {
+            return Ok(None);
+        }
+        luma.sort_by(f32::total_cmp);
+        let at = |q: f32| luma[((luma.len() - 1) as f32 * q) as usize];
+        let median = at(0.5).max(1e-5);
+        let ev = (0.18 / median).log2().clamp(-4.0, 4.0);
+        let gain = ev.exp2();
+        let (high, low) = (at(0.998) * gain, at(0.005) * gain);
+        let mut tonal = crate::params::Tonal::default();
+        if high > 1.0 {
+            // Stops over white, into the highlight control's range.
+            tonal.highlights = -(high.log2() * 0.4).clamp(0.0, 0.8);
+        }
+        if low < 0.004 {
+            tonal.shadows = ((0.004 / low.max(1e-6)).log2() * 0.08).clamp(0.0, 0.5);
+        }
+        Ok(Some(AutoTone { ev, tonal }))
+    }
+}
+
+/// The white balance that turns the mean of `texels` grey, as tints on `as_shot`.
+fn neutralising(texels: &[[f32; 4]], as_shot: [f32; 3]) -> Option<WhiteBalance> {
+    let n = texels.len() as f32;
+    if n == 0.0 {
+        return None;
+    }
+    let mean = |i: usize| texels.iter().map(|t| t[i]).sum::<f32>() / n;
+    let (r, g, b, clipped) = (mean(0), mean(1), mean(2), mean(3));
+    // A patch mostly rebuilt from its neutral (a clipped highlight) says nothing about the
+    // light's colour.
+    if !(r > 0.0 && g > 0.0 && b > 0.0) || clipped > 0.25 * g * as_shot[1] {
+        return None;
+    }
+    let tint_r = (g * as_shot[1]) / (r * as_shot[0]);
+    let tint_b = (g * as_shot[1]) / (b * as_shot[2]);
+    (tint_r.is_finite() && tint_b.is_finite()).then(|| WhiteBalance {
+        tint_r: tint_r.clamp(0.2, 5.0),
+        tint_b: tint_b.clamp(0.2, 5.0),
+    })
 }

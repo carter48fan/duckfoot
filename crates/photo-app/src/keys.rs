@@ -235,6 +235,12 @@ impl PhotoApp {
         if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::J)) {
             self.clip_overlay = !self.clip_overlay;
         }
+        if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::W))
+            && self.ready_image().is_some()
+            && !self.cropping
+        {
+            self.picking_wb = !self.picking_wb;
+        }
 
         let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc, crop_enter) =
             ctx.input(|i| {
@@ -265,6 +271,7 @@ impl PhotoApp {
         }
         if crop_esc {
             self.cancel_crop();
+            self.picking_wb = false;
         }
         if crop_enter {
             self.apply_crop();

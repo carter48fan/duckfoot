@@ -321,6 +321,15 @@ impl History {
     }
 }
 
+/// A one-shot read of the photo, asked for by the UI and done where the GPU is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Sample {
+    /// The white-balance eyedropper at this point, 0..1 of the uncropped frame.
+    Pick(egui::Pos2),
+    AutoWb,
+    AutoTone,
+}
+
 /// What a notice's Undo button takes back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoticeAction {
@@ -477,6 +486,9 @@ pub struct PhotoApp {
     pub shortcuts_open: bool,
     /// Blown and crushed pixels painted on the stage (J).
     pub clip_overlay: bool,
+    /// The white-balance eyedropper is armed (W): the next click on the photo picks.
+    pub picking_wb: bool,
+    pub(crate) pending_sample: Option<Sample>,
     /// The desktop Export dialog.
     pub export_dialog_open: bool,
     /// The phone Export sheet's settings, unfolded.
@@ -646,6 +658,8 @@ impl PhotoApp {
             batch_dialog_open: false,
             shortcuts_open: false,
             clip_overlay: false,
+            picking_wb: false,
+            pending_sample: None,
             export_dialog_open: false,
             export_options_open: false,
             editing_recipe: None,
@@ -752,6 +766,62 @@ impl PhotoApp {
     pub fn set_ui_scale(&mut self, scale: f32) {
         self.settings.ui_scale = scale.clamp(0.85, 1.5);
         self.save_settings();
+    }
+
+    /// Carry out a one-shot read, as one undo step.
+    fn take_sample(&mut self, gpu: &Gpu, sample: Sample) {
+        let (device, queue) = (gpu.device, gpu.queue);
+        let before = self.stack.clone();
+        let outcome = match sample {
+            Sample::Pick(p) => self
+                .engine
+                .neutral_at(device, queue, &self.stack.geometry, (p.x, p.y))
+                .map(|wb| match wb {
+                    Some(wb) => {
+                        self.stack.white_balance.params = wb;
+                        self.stack.white_balance.enabled = true;
+                        Ok("White balance picked")
+                    }
+                    None => {
+                        Err("Nothing to balance there: pick something grey, not blown or black")
+                    }
+                }),
+            Sample::AutoWb => self
+                .engine
+                .auto_white_balance(device, queue)
+                .map(|wb| match wb {
+                    Some(wb) => {
+                        self.stack.white_balance.params = wb;
+                        self.stack.white_balance.enabled = true;
+                        Ok("Auto white balance")
+                    }
+                    None => Err("Not enough of the photo to judge its light by"),
+                }),
+            Sample::AutoTone => self
+                .engine
+                .auto_tone(device, queue, &self.stack)
+                .map(|tone| match tone {
+                    Some(tone) => {
+                        self.stack.exposure.params.ev = tone.ev;
+                        self.stack.exposure.enabled = true;
+                        self.stack.tonal.params = tone.tonal;
+                        self.stack.tonal.enabled = tone.tonal != Default::default();
+                        Ok("Auto tone")
+                    }
+                    None => Err("Not enough of the photo to judge its tones by"),
+                }),
+        };
+        match outcome {
+            Ok(Ok(msg)) => {
+                if self.stack != before {
+                    self.history.checkpoint(&before);
+                    self.needs_render = true;
+                }
+                self.set_status(msg);
+            }
+            Ok(Err(msg)) => self.set_status(msg),
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
     }
 
     /// Where the whole frame (uncropped while framing a crop) was on the stage last frame.
@@ -936,6 +1006,10 @@ impl PhotoApp {
                 renderer_write(gpu).free_texture(&id);
             }
             self.needs_render = true;
+        }
+
+        if let Some(sample) = self.pending_sample.take() {
+            self.take_sample(gpu, sample);
         }
 
         // The clipping overlay, toggled or held: a texture of its own, registered in place
