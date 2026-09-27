@@ -185,6 +185,7 @@ You can also **drag a RAW file onto the window**.
 | Touch a control in a module that's off | turns the module on |
 | Click a History row | jump to that step |
 | Drag the split divider | move it; double-click centres it |
+| Hold the scope's clip readout | show clipping while held |
 | Drop files on the window | add them to the shelf and open the first |
 <!-- keymap:end -->
 

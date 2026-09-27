@@ -47,6 +47,18 @@ pub fn set_fine(ctx: &egui::Context, on: bool) {
 
 const FOCUSED_RAIL: &str = "duckfoot.focused_rail";
 
+/// A control asked, this frame, to show the clipping overlay while it is held.
+pub fn hold_clip_overlay(ctx: &egui::Context) {
+    set_flag(ctx, "duckfoot.clip_hold", true);
+}
+
+/// Whether one did since the last call, which clears it.
+pub fn take_clip_hold(ctx: &egui::Context) -> bool {
+    let held = flag(ctx, "duckfoot.clip_hold");
+    set_flag(ctx, "duckfoot.clip_hold", false);
+    held
+}
+
 /// A slider has keyboard focus, so ← and → are its, not the photo stepper's.
 pub fn rail_has_focus(ctx: &egui::Context) -> bool {
     let rail = ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new(FOCUSED_RAIL)));

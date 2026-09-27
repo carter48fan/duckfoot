@@ -135,6 +135,9 @@ pub struct LoadedImage {
     pub output_view: wgpu::TextureView,
     output_texture: wgpu::Texture,
     adjust_bind: wgpu::BindGroup,
+    /// The clipping overlay's texture and the bind group that reads the preview into it,
+    /// while the overlay is on. Preview-sized; replaced with the preview.
+    overlay: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
 }
 
 impl LoadedImage {
@@ -213,6 +216,10 @@ pub struct Engine {
     adjust_bgl: wgpu::BindGroupLayout,
     adjust_buffer: wgpu::Buffer,
     mip_pipeline: wgpu::RenderPipeline,
+    clip_pipeline: wgpu::RenderPipeline,
+    clip_bgl: wgpu::BindGroupLayout,
+    /// See [`Engine::set_clip_overlay`].
+    clip_overlay: bool,
     mip_bgl: wgpu::BindGroupLayout,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
@@ -486,6 +493,30 @@ impl Engine {
                 count: None,
             }],
         });
+        let clip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("clip overlay"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/clip_mask.wgsl").into()),
+        });
+        let clip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clip overlay bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let clip_pipeline = fullscreen_pipeline(
+            device,
+            "clip overlay",
+            &clip_shader,
+            &clip_bgl,
+            OUTPUT_FORMAT,
+        );
         let mip_pipeline = fullscreen_pipeline(
             device,
             "sensor downsample",
@@ -730,7 +761,70 @@ impl Engine {
             export_buffer,
             export_band_bytes: None,
             nan_paint: false,
+            clip_pipeline,
+            clip_bgl,
+            clip_overlay: false,
         }
+    }
+
+    /// Show clipping on the preview: every pixel at white red, at black blue. Drawn into a
+    /// texture of its own, so the preview the histogram measures and export equals is
+    /// untouched. Returns true when [`Self::display_view`] changed, which, like a new
+    /// preview texture, means re-registering it with the UI.
+    pub fn set_clip_overlay(&mut self, device: &wgpu::Device, on: bool) -> bool {
+        if self.clip_overlay == on {
+            return false;
+        }
+        self.clip_overlay = on;
+        self.sync_overlay(device);
+        self.image.is_some()
+    }
+
+    pub fn clip_overlay(&self) -> bool {
+        self.clip_overlay
+    }
+
+    /// What the stage should show: the preview, or the preview with its clipping painted.
+    pub fn display_view(&self) -> Option<&wgpu::TextureView> {
+        let image = self.image.as_ref()?;
+        Some(match &image.overlay {
+            Some((_, view, _)) => view,
+            None => &image.output_view,
+        })
+    }
+
+    /// The texture behind [`Self::display_view`].
+    pub fn display_texture(&self) -> Option<&wgpu::Texture> {
+        let image = self.image.as_ref()?;
+        Some(match &image.overlay {
+            Some((texture, _, _)) => texture,
+            None => &image.output_texture,
+        })
+    }
+
+    /// Give the loaded image an overlay texture matching its preview while the overlay is
+    /// on, and none while it is off.
+    fn sync_overlay(&mut self, device: &wgpu::Device) {
+        let on = self.clip_overlay;
+        let Some(image) = &mut self.image else {
+            return;
+        };
+        if !on {
+            image.overlay = None;
+            return;
+        }
+        let (w, h) = image.preview_size();
+        let texture = output_texture(device, w, h);
+        let view = texture.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clip overlay bind"),
+            layout: &self.clip_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&image.output_view),
+            }],
+        });
+        image.overlay = Some((texture, view, bind));
     }
 
     /// Paint any pixel whose value went NaN or infinite anywhere in the chain transparent
@@ -1048,7 +1142,9 @@ impl Engine {
             output_view,
             output_texture,
             adjust_bind,
+            overlay: None,
         });
+        self.sync_overlay(device);
         Ok(())
     }
 
@@ -1227,6 +1323,7 @@ impl Engine {
         // Whatever readback is in flight describes a texture that no longer exists.
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
         self.histogram = Histogram::default();
+        self.sync_overlay(device);
     }
 
     /// Apply orientation, resizing the output texture only when right-angle turns actually
@@ -1323,6 +1420,16 @@ impl Engine {
             self.encode_histogram(device, queue, &mut encoder, region, level);
         } else {
             self.hist_owed = Some((region, level));
+        }
+
+        if let Some((_, view, bind)) = self.image.as_ref().and_then(|im| im.overlay.as_ref()) {
+            draw_fullscreen(
+                &mut encoder,
+                "clip overlay pass",
+                &self.clip_pipeline,
+                bind,
+                view,
+            );
         }
 
         queue.submit([encoder.finish()]);

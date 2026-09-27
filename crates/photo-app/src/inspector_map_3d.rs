@@ -136,10 +136,19 @@ pub fn render_inspector_map(ui: &mut egui::Ui, state: &mut InspectorMapState, hi
                 theme::num(format!("{v:.2}%"))
             }
         };
-        ui.label(theme::tag("clip lo").color(theme::TEXT_DIM));
-        ui.label(warn(low));
-        ui.label(theme::tag("hi").color(theme::TEXT_DIM));
-        ui.label(warn(high));
+        let readout = ui
+            .scope(|ui| {
+                ui.label(theme::tag("clip lo").color(theme::TEXT_DIM));
+                ui.label(warn(low));
+                ui.label(theme::tag("hi").color(theme::TEXT_DIM));
+                ui.label(warn(high));
+            })
+            .response
+            .interact(egui::Sense::click_and_drag())
+            .on_hover_text("Hold to see where: red is blown, blue is crushed (J toggles it)");
+        if readout.is_pointer_button_down_on() {
+            crate::widgets::hold_clip_overlay(ui.ctx());
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let expand_icon = if state.large_view { "⊟" } else { "⊞" };

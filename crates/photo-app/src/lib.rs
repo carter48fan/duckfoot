@@ -457,6 +457,8 @@ pub struct PhotoApp {
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
+    /// Blown and crushed pixels painted on the stage (J).
+    pub clip_overlay: bool,
     /// The desktop Export dialog.
     pub export_dialog_open: bool,
     /// The phone Export sheet's settings, unfolded.
@@ -465,6 +467,8 @@ pub struct PhotoApp {
     pub(crate) editing_recipe: Option<usize>,
     /// The photo open before this one, for "Same as previous".
     pub(crate) previous_photo: Option<PathBuf>,
+    /// The clipping overlay is being held on (the scope's clip readout, pressed).
+    clip_held: bool,
     /// The snapshot last deleted, the photo it belonged to and where it stood.
     pub(crate) deleted_snapshot: Option<(PathBuf, usize, (String, PhotoStack))>,
     /// Which list the phone's Presets sheet shows.
@@ -620,10 +624,12 @@ impl PhotoApp {
             )),
             batch_dialog_open: false,
             shortcuts_open: false,
+            clip_overlay: false,
             export_dialog_open: false,
             export_options_open: false,
             editing_recipe: None,
             previous_photo: None,
+            clip_held: false,
             deleted_snapshot: None,
             presets_view: compact::PresetsView::default(),
             looks_open: false,
@@ -906,6 +912,16 @@ impl PhotoApp {
             self.needs_render = true;
         }
 
+        // The clipping overlay, toggled or held: a texture of its own, registered in place
+        // of the preview's while it is on.
+        let clip = self.clip_overlay || self.clip_held;
+        if self.engine.set_clip_overlay(gpu.device, clip) {
+            if let Some(id) = self.texture_id.take() {
+                renderer_write(gpu).free_texture(&id);
+            }
+            self.needs_render = true;
+        }
+
         if !self.needs_render {
             return;
         }
@@ -921,11 +937,11 @@ impl PhotoApp {
         self.render_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.needs_render = false;
 
-        if self.texture_id.is_none() {
-            if let Some(image) = self.ready_image() {
+        if self.texture_id.is_none() && self.ready_image().is_some() {
+            if let Some(view) = self.engine.display_view() {
                 let id = renderer_write(gpu).register_native_texture(
                     gpu.device,
-                    &image.output_view,
+                    view,
                     wgpu::FilterMode::Linear,
                 );
                 self.texture_id = Some(id);
@@ -968,6 +984,7 @@ impl PhotoApp {
         widgets::set_touch(&ctx, self.touch_seen || self.layout.is_compact());
         widgets::set_fine(&ctx, self.fine_adjust);
         self.loader.set_context(&ctx);
+        self.clip_held = widgets::take_clip_hold(&ctx);
         self.poll_platform(gpu);
         self.take_drops(gpu);
         self.poll_loader(&ctx, gpu);
