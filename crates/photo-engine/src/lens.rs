@@ -84,6 +84,61 @@ fn finite(v: f32) -> f32 {
     }
 }
 
+/// A DNG's own `WarpRectilinear` (see `opcodes`), in the sensor texture's pixels: where
+/// each colour plane of an ideal image point was recorded. Radial terms only; the
+/// tangential ones, which no phone this was checked against sets, are left out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FileWarp {
+    /// The optical centre, in texture pixels.
+    pub centre: [f32; 2],
+    /// The radius the polynomial is normalised by: the centre's farthest image corner.
+    pub m: f32,
+    /// kr0..kr3 for red, green and blue: f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶.
+    pub planes: [[f32; 4]; 3],
+}
+
+impl FileWarp {
+    /// `warp`, for a mosaic kept from `area` of the image the opcode describes.
+    pub fn new(warp: &crate::opcodes::Warp, area: crate::opcodes::Area) -> Option<Self> {
+        let (aw, ah) = (area.size.0 as f64, area.size.1 as f64);
+        let (cx, cy) = (warp.centre.0 * aw, warp.centre.1 * ah);
+        let m = crate::opcodes::max_corner_distance2(cx, cy, aw, ah).sqrt();
+        let plane = |i: usize| {
+            let k = warp.planes.get(i).or(warp.planes.first())?;
+            Some([k[0] as f32, k[1] as f32, k[2] as f32, k[3] as f32])
+        };
+        let planes = [plane(0)?, plane(1)?, plane(2)?];
+        // A warp that moves nothing is no warp.
+        if planes.iter().all(|k| *k == [1.0, 0.0, 0.0, 0.0]) {
+            return None;
+        }
+        Some(Self {
+            centre: [
+                (cx - area.offset.0 as f64) as f32,
+                (cy - area.offset.1 as f64) as f32,
+            ],
+            m: m as f32,
+            planes,
+        })
+    }
+
+    /// Where plane `plane` (0 R, 1 G, 2 B) of the ideal point `p` was recorded, both in
+    /// texture pixels. The shader's `file_warp`.
+    pub fn source(&self, plane: usize, p: (f32, f32)) -> (f32, f32) {
+        let k = self.planes[plane];
+        let (dx, dy) = (
+            (p.0 - self.centre[0]) / self.m,
+            (p.1 - self.centre[1]) / self.m,
+        );
+        let r2 = dx * dx + dy * dy;
+        let f = k[0] + r2 * (k[1] + r2 * (k[2] + r2 * k[3]));
+        (
+            self.centre[0] + dx * f * self.m,
+            self.centre[1] + dy * f * self.m,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +184,35 @@ mod tests {
         assert!(x < 3000.0 * 0.95, "{x}");
         // The centre does not move.
         assert_eq!(m.distorted((0.0, 0.0), (6000, 4000)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_file_warp_is_placed_in_the_kept_mosaic() {
+        let warp = crate::opcodes::Warp {
+            planes: vec![[1.0, -0.05, 0.0, 0.0, 0.0, 0.0]],
+            centre: (0.5, 0.5),
+        };
+        // Kept from (10, 20) of a 200 × 100 active area.
+        let area = crate::opcodes::Area {
+            offset: (10, 20),
+            size: (200, 100),
+        };
+        let w = FileWarp::new(&warp, area).unwrap();
+        assert_eq!(w.centre, [90.0, 30.0]);
+        // The centre does not move; the corner is pulled in by 5%.
+        assert_eq!(w.source(1, (90.0, 30.0)), (90.0, 30.0));
+        let m = (100.0f32 * 100.0 + 50.0 * 50.0).sqrt();
+        let corner = (90.0 + 100.0, 30.0 + 50.0);
+        let (x, y) = w.source(0, corner);
+        assert!((x - (90.0 + 100.0 * 0.95)).abs() < 1e-3, "{x}");
+        assert!((y - (30.0 + 50.0 * 0.95)).abs() < 1e-3, "{y}");
+        assert!((w.m - m).abs() < 1e-3);
+        // An identity warp is none.
+        let flat = crate::opcodes::Warp {
+            planes: vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            centre: (0.5, 0.5),
+        };
+        assert!(FileWarp::new(&flat, area).is_none());
     }
 
     #[test]

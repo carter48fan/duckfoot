@@ -984,7 +984,7 @@ fn distortion_moves_the_frame_where_the_eyedropper_thinks_it_does() {
     stack.lens.enabled = true;
     stack.lens.params.distortion = 80.0;
     let target = (230.0, 110.0);
-    let (sx, sy) = photo_engine::sensor_point(&stack, (w, h), target);
+    let (sx, sy) = photo_engine::sensor_point(&stack, None, (w, h), target);
     // Pulled toward the middle, as removing barrel does.
     assert!(sx < target.0 - 5.0 && sy < target.1 - 2.0, "({sx}, {sy})");
     let raster = testkit::raster_from_fn(w, h, |x, y| {
@@ -1390,5 +1390,51 @@ fn a_display_p3_jpeg_renders_in_its_own_colours() {
         out.rgba[at] as i32 - 200 >= 8,
         "P3 orange came out {:?}",
         &out.rgba[at..at + 3]
+    );
+}
+
+#[test]
+fn a_files_own_warp_moves_each_plane_where_it_says() {
+    let gpu = gpu_or_skip!();
+    // A barrel correction for green and blue, and a stronger one for red: the file's own
+    // lateral colour fringe correction.
+    let (w, h) = (256u32, 128u32);
+    let warp = photo_engine::FileWarp {
+        centre: [w as f32 * 0.5, h as f32 * 0.5],
+        m: (w as f32 * 0.5).hypot(h as f32 * 0.5),
+        planes: [
+            [1.0, -0.3, 0.0, 0.0],
+            [1.0, -0.2, 0.0, 0.0],
+            [1.0, -0.2, 0.0, 0.0],
+        ],
+    };
+    let target = (230.0, 110.0);
+    let stack = PhotoStack::default();
+    let (gx, gy) = photo_engine::sensor_point(&stack, Some(&warp), (w, h), target);
+    let (rx, ry) = warp.source(0, target);
+    assert!(
+        gx < target.0 - 5.0 && (rx - gx).abs() > 3.0,
+        "g ({gx}, {gy}) r ({rx}, {ry})"
+    );
+    // Green where green belongs, red where red does, and nothing elsewhere.
+    let near = |x: u32, y: u32, (cx, cy): (f32, f32)| {
+        (x as f32 + 0.5 - cx).abs() < 3.0 && (y as f32 + 0.5 - cy).abs() < 3.0
+    };
+    let mut cfa = testkit::cfa_from_fn(w, h, |x, y| {
+        [
+            if near(x, y, (rx, ry)) { 0.8 } else { 0.02 },
+            if near(x, y, (gx, gy)) { 0.8 } else { 0.02 },
+            0.02,
+        ]
+    });
+    cfa.warp = Some(warp);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let at = ((target.1 as u32 * out.width + target.0 as u32) * 4) as usize;
+    let px = &out.rgba[at..at + 3];
+    assert!(
+        px[0] > 150 && px[1] > 150,
+        "the planes did not meet: {px:?}"
     );
 }

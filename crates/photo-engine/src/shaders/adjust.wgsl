@@ -47,6 +47,10 @@ struct Adjust {
     frame:      vec4<f32>,   // the crop in the oriented frame: x, y, width, height (0..1)
     lens:       vec4<f32>,   // x = radial distortion k, y = fill zoom, z/w = red/blue CA scale
     lens_b:     vec4<f32>,   // x = vignetting correction, stops at the corner
+    warp_r:     vec4<f32>,   // the file's own warp (a DNG's WarpRectilinear): kr0..kr3
+    warp_g:     vec4<f32>,   //   per colour plane,
+    warp_b:     vec4<f32>,
+    warp_c:     vec4<f32>,   //   and xy = optical centre (px), z = radius, w = 1 when on
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -280,14 +284,38 @@ fn lens_gain_at(src: vec2<f32>) -> f32 {
     return exp2(u.lens_b.x * r * r);
 }
 
+// The file's own distortion correction, as a DNG states it: plane `k` of the ideal point
+// `p` was recorded at centre + d·f(r), f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶, with d and
+// r measured from the optical centre in units of its farthest corner. It comes after the
+// manual correction, nearest the sensor, since the manual one corrects what it left.
+fn file_warp(p: vec2<f32>, k: vec4<f32>) -> vec2<f32> {
+    let d = (p - u.warp_c.xy) / u.warp_c.z;
+    let r2 = dot(d, d);
+    let f = k.x + r2 * (k.y + r2 * (k.z + r2 * k.w));
+    return u.warp_c.xy + d * f * u.warp_c.z;
+}
+
+fn file_warp_on() -> bool {
+    return u.warp_c.w > 0.5;
+}
+
 // Lateral chromatic aberration: the lens images red and blue at slightly different sizes
-// from green. Each is sampled from where its own size put it, about the optical axis.
-fn lens_ca(s: vec4<f32>, src: vec2<f32>, lod: f32) -> vec4<f32> {
+// from green. Each is sampled from where its own size put it, about the optical axis: the
+// manual scale, then the file's own polynomial for that plane.
+fn lens_ca(s: vec4<f32>, ideal: vec2<f32>, lod: f32) -> vec4<f32> {
     let half = u.sizes.zw * 0.5;
-    let uv_r = ((src - half) * u.lens.z + half) / u.sizes.zw;
-    let uv_b = ((src - half) * u.lens.w + half) / u.sizes.zw;
-    let red = tap(uv_r, lod).r;
-    let blue = tap(uv_b, lod).b;
+    var at_r = ideal;
+    var at_b = ideal;
+    if (enabled(FLAG_LENS)) {
+        at_r = (ideal - half) * u.lens.z + half;
+        at_b = (ideal - half) * u.lens.w + half;
+    }
+    if (file_warp_on()) {
+        at_r = file_warp(at_r, u.warp_r);
+        at_b = file_warp(at_b, u.warp_b);
+    }
+    let red = tap(at_r / u.sizes.zw, lod).r;
+    let blue = tap(at_b / u.sizes.zw, lod).b;
     return vec4<f32>(red, s.g, blue, s.a);
 }
 
@@ -526,7 +554,12 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // differ only in how densely it is sampled (DESIGN.md: preview and export).
     let out_px = pos.xy * u.sizes.xy / u.dest.xy;
     let lod = u.dest.z;
-    let src = sensor_coords(out_px);
+    // Where the point belongs on an ideal sensor, then where the lens recorded it.
+    let ideal = sensor_coords(out_px);
+    var src = ideal;
+    if (file_warp_on()) {
+        src = file_warp(ideal, u.warp_g);
+    }
 
     // Straightening rotates the corners outside the sensor. Those pixels were never
     // photographed, so they are black rather than a smeared edge clamp.
@@ -538,8 +571,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
     var s = tap(uv, lod);
-    if (enabled(FLAG_LENS) && (u.lens.z != 1.0 || u.lens.w != 1.0)) {
-        s = lens_ca(s, src, lod);
+    if ((enabled(FLAG_LENS) && (u.lens.z != 1.0 || u.lens.w != 1.0)) || file_warp_on()) {
+        s = lens_ca(s, ideal, lod);
     }
 
     let split_pos = u.split.x;

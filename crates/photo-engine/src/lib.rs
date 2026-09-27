@@ -17,6 +17,7 @@ pub mod histogram;
 pub mod icc;
 pub mod lens;
 pub mod metadata;
+pub mod opcodes;
 pub mod params;
 pub mod preview;
 pub mod sidecar;
@@ -39,7 +40,7 @@ pub use export::{
     SharpenFor, JPEG_QUALITY,
 };
 pub use histogram::Histogram;
-pub use lens::LensModel;
+pub use lens::{FileWarp, LensModel};
 pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Denoise, Exposure,

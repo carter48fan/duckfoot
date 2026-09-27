@@ -73,6 +73,7 @@ pub fn mosaic_from_fn(
         orientation: Geometry::default(),
         make: "synthetic".into(),
         model: "testkit".into(),
+        warp: None,
     }
 }
 
@@ -156,6 +157,16 @@ pub fn srgb_to_linear(v: u8) -> f32 {
 /// Sony A7 IV metadata and an embedded JPEG preview, so every stage of a real open —
 /// white-level measurement, the thumbnail scan — has real work to do.
 pub fn synth_dng(width: usize, height: usize, lossless: bool) -> Result<Vec<u8>> {
+    synth_dng_with(width, height, lossless, &[])
+}
+
+/// `synth_dng` with extra tags of undefined type in the raw IFD: opcode lists, say.
+pub fn synth_dng_with(
+    width: usize,
+    height: usize,
+    lossless: bool,
+    extra: &[(u16, Vec<u8>)],
+) -> Result<Vec<u8>> {
     let (w, h) = (width, height);
     let black = 512u16;
     let white = 16383u16;
@@ -244,6 +255,10 @@ pub fn synth_dng(width: usize, height: usize, lossless: bool) -> Result<Vec<u8>>
             DngPhotometricConversion::Original,
             1,
         )?;
+        for (tag, bytes) in extra {
+            sub.ifd_mut()
+                .add_untyped_tag(*tag, rawler::formats::tiff::Value::Undefined(bytes.clone()));
+        }
         sub.finalize()?;
         let mut prev = dng.subframe(1);
         prev.preview(&preview, 0.9)?;
