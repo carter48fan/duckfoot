@@ -568,6 +568,20 @@ impl PhotoApp {
         let mut jump = None;
         {
             let timeline = self.history.timeline(&self.stack);
+            // Labels between stored states change only with the history; the two beside
+            // the live stack follow it (WP5.4).
+            if self.history_labels.0 != self.history.revision {
+                let labels = (0..timeline.len())
+                    .map(|k| {
+                        if k == 0 || k == now || k == now + 1 {
+                            String::new()
+                        } else {
+                            describe_change(timeline[k - 1], timeline[k])
+                        }
+                    })
+                    .collect();
+                self.history_labels = (self.history.revision, labels);
+            }
             // Rows above NOW are redo steps: not applied, so faint.
             for k in (0..timeline.len()).rev() {
                 let label = if k == 0 {
@@ -577,8 +591,14 @@ impl PhotoApp {
                         "opened"
                     }
                     .to_string()
-                } else {
+                } else if k == now || k == now + 1 {
                     describe_change(timeline[k - 1], timeline[k])
+                } else {
+                    self.history_labels
+                        .1
+                        .get(k)
+                        .cloned()
+                        .unwrap_or_else(|| describe_change(timeline[k - 1], timeline[k]))
                 };
                 let (style, right) = if k == now {
                     (RowStyle::Now, "NOW".to_string())

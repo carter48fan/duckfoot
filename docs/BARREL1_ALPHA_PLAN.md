@@ -685,7 +685,7 @@ test.
 - **Test:** adding 2,000 files returns within one frame, and items fill in as they are
   parsed.
 
-**WP5.4 Per-frame waste** — L-13
+**WP5.4 Per-frame waste** — L-13 — 🟡 in part: the History list's labels are cached against a revision every history mutation bumps (only the two beside the live stack are described each frame; each was a whole-stack comparison, brush strokes included); the stack is cloned per frame only while it changes. Still to come: the counting-allocator bench and the smaller caches (histogram bind group, curve-editor LUT, ribbon arena, lowercased names).
 - **Implementation:**
   - Cache the histogram bind group per output view.
   - Upload the curve LUT only on a node change, without cloning the `Vec`.

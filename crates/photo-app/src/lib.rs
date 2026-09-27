@@ -337,20 +337,39 @@ struct History {
     /// The oldest state has been dropped to stay under the cap, so `past[0]` is no longer
     /// the stack the file opened with.
     truncated: bool,
+    /// Changes whenever `past` or `future` does, unique across every history: what the
+    /// History list's labels are cached against (WP5.4).
+    revision: u64,
+}
+
+/// A number no history has had yet.
+fn fresh_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl History {
     fn new() -> Self {
+        Self::from_past(Vec::new(), false)
+    }
+
+    fn from_past(past: Vec<PhotoStack>, truncated: bool) -> Self {
         Self {
-            past: Vec::new(),
+            past,
             future: Vec::new(),
-            truncated: false,
+            truncated,
+            revision: fresh_revision(),
         }
+    }
+
+    fn changed(&mut self) {
+        self.revision = fresh_revision();
     }
 
     /// Call before mutating. Coalescing is the caller's job: a slider drag pushes once, on
     /// drag start, not once per frame.
     fn checkpoint(&mut self, current: &PhotoStack) {
+        self.changed();
         self.past.push(current.clone());
         if self.past.len() > 256 {
             self.past.remove(0);
@@ -363,6 +382,7 @@ impl History {
         let Some(prev) = self.past.pop() else {
             return false;
         };
+        self.changed();
         self.future.push(std::mem::replace(current, prev));
         true
     }
@@ -371,6 +391,7 @@ impl History {
         let Some(next) = self.future.pop() else {
             return false;
         };
+        self.changed();
         self.past.push(std::mem::replace(current, next));
         true
     }
@@ -389,6 +410,7 @@ impl History {
     /// guess. Every state still carrying the guess gets the real one, so undoing past
     /// the moment it arrived does not turn the photo.
     fn rebase_geometry(&mut self, from: Geometry, to: Geometry) {
+        self.changed();
         for stack in self.past.iter_mut().chain(self.future.iter_mut()) {
             if stack.geometry == from {
                 stack.geometry = to;
@@ -558,6 +580,9 @@ pub struct PhotoApp {
     spot_drag: Option<(bool, egui::Pos2, photo_engine::heal::Spot)>,
     /// What the engine is showing, to notice a change.
     shown_dust: bool,
+    /// The History list's labels for the history revision they were made from; the two
+    /// beside the live stack are made fresh each frame.
+    history_labels: (u64, Vec<String>),
     /// The screen the settings name (W-14), why a profile file could not be used, and
     /// what the engine was last told.
     screen: photo_engine::gamut::Screen,
@@ -797,6 +822,7 @@ impl PhotoApp {
             pending_spot: None,
             spot_drag: None,
             shown_dust: false,
+            history_labels: (0, Vec::new()),
             screen: photo_engine::gamut::Screen::SRGB,
             screen_note: None,
             shown_screen: photo_engine::gamut::Screen::SRGB,
@@ -1459,6 +1485,7 @@ impl PhotoApp {
         if self.stack != self.stack_before_drag {
             if self.history.past.last() == Some(&self.stack_before_drag) {
                 self.history.past.pop();
+                self.history.changed();
             }
             self.stack = self.stack_before_drag.clone();
             self.needs_render = true;
