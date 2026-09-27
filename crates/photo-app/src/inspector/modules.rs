@@ -135,10 +135,16 @@ impl PhotoApp {
                 if turned {
                     self.rebase_crop();
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let pad = widgets::sized(ui, 3.0, 6.0);
                     ui.spacing_mut().item_spacing = vec2(pad, pad);
                     self.crop_chips(ui);
+                    if widgets::chip(ui, self.settings.constrain_crop, "no empty corners")
+                        .on_hover_text("When straightened, keep the crop on what was photographed")
+                        .clicked()
+                    {
+                        self.set_constrain_crop(!self.settings.constrain_crop);
+                    }
                 });
                 track!(widgets::param_slider(
                     ui,

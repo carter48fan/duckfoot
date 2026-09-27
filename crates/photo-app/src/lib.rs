@@ -768,6 +768,31 @@ impl PhotoApp {
         self.save_settings();
     }
 
+    /// Whether straightening keeps the crop on photographed pixels; remembered.
+    pub fn set_constrain_crop(&mut self, on: bool) {
+        self.settings.constrain_crop = on;
+        self.save_settings();
+    }
+
+    /// A straightened photo's corners swing out of the frame; unless told otherwise, the
+    /// crop is kept to what was photographed, moved in and only then shrunk. Part of
+    /// whatever edit turned it, so it undoes with that edit.
+    fn constrain_crop(&mut self) {
+        let deg = self.stack.geometry.straighten_deg;
+        if !self.settings.constrain_crop || deg == 0.0 {
+            return;
+        }
+        let Some(frame) = self.frame_pixels() else {
+            return;
+        };
+        let crop = self.stack.geometry.crop.sanitised();
+        let fitted = crop_tool::constrained(crop, deg, frame);
+        if fitted != crop {
+            self.stack.geometry.crop = fitted;
+            self.needs_render = true;
+        }
+    }
+
     /// Carry out a one-shot read, as one undo step.
     fn take_sample(&mut self, gpu: &Gpu, sample: Sample) {
         let (device, queue) = (gpu.device, gpu.queue);
@@ -1011,6 +1036,7 @@ impl PhotoApp {
         if let Some(sample) = self.pending_sample.take() {
             self.take_sample(gpu, sample);
         }
+        self.constrain_crop();
 
         // The clipping overlay, toggled or held: a texture of its own, registered in place
         // of the preview's while it is on.
