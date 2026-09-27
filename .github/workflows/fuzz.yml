@@ -1,11 +1,12 @@
-# Nightly fuzzing (WP5.1): every parser a hostile file reaches, ten minutes each, on a
-# nightly toolchain with cargo-fuzz. Found inputs are attached to the run; each becomes a
+# Weekly fuzzing (WP5.1): every parser a hostile file reaches, ten minutes each, on a
+# nightly toolchain with cargo-fuzz; weekly rather than nightly, since seven targets cost
+# over an hour and a half of runner time, and it can be run by hand at any time. Found inputs are attached to the run; each becomes a
 # regression test once fixed (see decode.rs's hostile-input tests). Nothing waits on it.
 name: fuzz
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 3 * * 0"
   workflow_dispatch:
 
 jobs:
