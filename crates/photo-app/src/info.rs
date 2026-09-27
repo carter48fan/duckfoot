@@ -1,6 +1,7 @@
 //! What the file says about the photo, shown: the desktop inspector's Info band, the
 //! phone Library's line under the open photo, and the filmstrip's tooltips.
 
+use crate::i18n::tr;
 use crate::*;
 use photo_engine::PhotoInfo;
 
@@ -111,7 +112,7 @@ impl PhotoApp {
                 self.info_rows(ui, &path);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(theme::dim("label").size(11.5));
+                    ui.label(theme::dim(tr("info-label")).size(11.5));
                     self.label_picker(ui);
                 });
                 self.keywords_editor(ui);
@@ -122,11 +123,11 @@ impl PhotoApp {
     /// Info band's body and the phone Library sheet's detail card.
     pub(crate) fn info_rows(&self, ui: &mut egui::Ui, path: &std::path::Path) {
         let info = self.open_info().cloned();
-        let mut rows: Vec<(&str, String)> = vec![("file", file_name(path))];
+        let mut rows: Vec<(&str, String)> = vec![(tr("info-file"), file_name(path))];
         if let Some(image) = self.ready_image() {
             let mp = image.sensor_width as f32 * image.sensor_height as f32 / 1e6;
             rows.push((
-                "pixels",
+                tr("info-pixels"),
                 format!(
                     "{} × {} · {mp:.1} MP",
                     image.sensor_width, image.sensor_height
@@ -134,35 +135,35 @@ impl PhotoApp {
             ));
         }
         if let Some(item) = self.shelf.iter().find(|it| it.path == path) {
-            rows.push(("size", crate::parts::format_bytes(item.bytes)));
+            rows.push((tr("info-size"), crate::parts::format_bytes(item.bytes)));
         }
         match &info {
             Some(info) => {
                 let cam = camera(info);
                 if !cam.is_empty() {
-                    rows.push(("camera", cam));
+                    rows.push((tr("info-camera"), cam));
                 }
                 if let Some(lens) = &info.lens {
-                    rows.push(("lens", lens.clone()));
+                    rows.push((tr("info-lens"), lens.clone()));
                 }
                 let exposure = exposure_line(info);
                 if !exposure.is_empty() {
-                    rows.push(("exposure", exposure));
+                    rows.push((tr("info-exposure"), exposure));
                 }
                 if let Some(when) = captured(info) {
-                    rows.push(("taken", when));
+                    rows.push((tr("info-taken"), when));
                 }
                 if let Some(at) = place(info) {
-                    rows.push(("location", at));
+                    rows.push((tr("info-location"), at));
                 }
                 if let Some(a) = &info.artist {
-                    rows.push(("artist", a.clone()));
+                    rows.push((tr("info-artist"), a.clone()));
                 }
                 if let Some(c) = &info.copyright {
-                    rows.push(("copyright", c.clone()));
+                    rows.push((tr("info-copyright"), c.clone()));
                 }
             }
-            None => rows.push(("", "the file says nothing more".into())),
+            None => rows.push(("", tr("info-nothing-more").into())),
         }
         egui::Grid::new(("info_rows", path))
             .num_columns(2)

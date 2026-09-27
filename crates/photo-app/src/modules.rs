@@ -8,7 +8,7 @@
 use crate::*;
 
 macro_rules! module_table {
-    ($( $id:ident => $field:ident, $title:literal, $short:literal; )*) => {
+    ($( $id:ident => $field:ident; )*) => {
         /// The modules that are a `Module<T>` in the stack, in pipeline order.
         pub(crate) const PIPELINE_MODULES: &[InspectorSectionId] =
             &[$(InspectorSectionId::$id),*];
@@ -18,22 +18,22 @@ macro_rules! module_table {
         pub(crate) const PIPELINE_FIELDS: &[&str] = &[$(stringify!($field)),*];
 
         impl InspectorSectionId {
-            /// The name on its card.
+            /// The name on its card (`module-<field>` in `locales/`).
             pub fn title(&self) -> &'static str {
-                match self {
-                    Self::Scope => "scope",
-                    Self::Geometry => "crop & rotate",
-                    $(Self::$id => $title,)*
-                }
+                crate::i18n::tr(match self {
+                    Self::Scope => "module-scope",
+                    Self::Geometry => "module-geometry",
+                    $(Self::$id => concat!("module-", stringify!($field)),)*
+                })
             }
 
             /// The name on the phone's module strip, where every letter costs width.
             pub fn short_name(&self) -> &'static str {
-                match self {
-                    Self::Scope => "scope",
-                    Self::Geometry => "crop",
-                    $(Self::$id => $short,)*
-                }
+                crate::i18n::tr(match self {
+                    Self::Scope => "module-short-scope",
+                    Self::Geometry => "module-short-geometry",
+                    $(Self::$id => concat!("module-short-", stringify!($field)),)*
+                })
             }
 
             /// Its on/off switch, if it has one. Scope and geometry do not: there is no
@@ -98,22 +98,22 @@ macro_rules! module_table {
 }
 
 module_table! {
-    Lens => lens, "lens corrections", "lens";
-    Denoise => denoise, "noise reduction", "noise";
-    WhiteBalance => white_balance, "white balance", "wb";
-    Exposure => exposure, "exposure", "exposure";
-    Tonal => tonal, "shadows & highlights", "tone";
-    ToneCurve => tone_curve, "tone curve", "curve";
-    Clarity => clarity, "clarity & texture", "clarity";
-    Dehaze => dehaze, "dehaze", "dehaze";
-    ColorEq => color_eq, "colour eq (8-band)", "colour";
-    Filmic3D => filmic, "filmic rgb", "filmic";
-    ColorBalance => color_balance, "colour balance", "balance";
-    Vibrance => vibrance, "vibrance", "vibrance";
-    Sharpen => sharpen, "sharpen", "sharpen";
-    Vignette => vignette, "vignette", "vignette";
-    Local => local, "local adjustments", "local";
-    Heal => heal, "spot heal", "heal";
+    Lens => lens;
+    Denoise => denoise;
+    WhiteBalance => white_balance;
+    Exposure => exposure;
+    Tonal => tonal;
+    ToneCurve => tone_curve;
+    Clarity => clarity;
+    Dehaze => dehaze;
+    ColorEq => color_eq;
+    Filmic3D => filmic;
+    ColorBalance => color_balance;
+    Vibrance => vibrance;
+    Sharpen => sharpen;
+    Vignette => vignette;
+    Local => local;
+    Heal => heal;
 }
 
 /// What changed between two adjacent undo states, for the History list.

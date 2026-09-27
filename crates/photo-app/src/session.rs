@@ -420,7 +420,10 @@ impl PhotoApp {
         self.request_thumbnail(&copy);
         self.shelf.insert(at, ShelfItem::new(copy.clone()));
         self.open_path(gpu, copy.clone());
-        self.set_status(format!("Virtual copy: {}", file_name(&copy)));
+        self.set_status(crate::i18n::tr_args(
+            "virtual-copy-made",
+            &[("name", file_name(&copy).into())],
+        ));
     }
 
     /// Take in what the last read of the watched folders found, and start the next.

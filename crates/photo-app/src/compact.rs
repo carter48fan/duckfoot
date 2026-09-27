@@ -54,10 +54,10 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Library => "library",
-            Tab::Presets => "presets",
-            Tab::Edit => "edit",
-            Tab::Export => "export",
+            Tab::Library => crate::i18n::tr("tab-library"),
+            Tab::Presets => crate::i18n::tr("tab-presets"),
+            Tab::Edit => crate::i18n::tr("tab-edit"),
+            Tab::Export => crate::i18n::tr("tab-export"),
         }
     }
 
@@ -1710,22 +1710,31 @@ impl PhotoApp {
                                     .color(theme::TEXT_FAINT),
                             );
                             ui.label(
-                                RichText::new(s.title)
+                                RichText::new(crate::i18n::tr(s.title_id))
                                     .family(theme::sans_strong())
                                     .size(16.0)
                                     .color(theme::TEXT_HI),
                             );
-                            ui.label(RichText::new(s.text).size(13.0).color(theme::TEXT));
+                            ui.label(
+                                RichText::new(crate::i18n::tr(s.text_id))
+                                    .size(13.0)
+                                    .color(theme::TEXT),
+                            );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 let last = step + 1 == TOUR.len();
-                                if widgets::chip(ui, false, "skip").clicked() {
+                                if widgets::chip(ui, false, crate::i18n::tr("tour-skip")).clicked()
+                                {
                                     skip = true;
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        let label = if last { "Done" } else { "Next" };
+                                        let label = crate::i18n::tr(if last {
+                                            "tour-done"
+                                        } else {
+                                            "tour-next"
+                                        });
                                         if widgets::button(ui, Kind::Primary, label, 72.0).clicked()
                                         {
                                             next = true;
@@ -1779,8 +1788,9 @@ enum Target {
 }
 
 struct TourStep {
-    title: &'static str,
-    text: &'static str,
+    /// Message ids, in `locales/`.
+    title_id: &'static str,
+    text_id: &'static str,
     target: Target,
     /// The tab to open for the step, if it is about one.
     tab: Option<Tab>,
@@ -1788,45 +1798,38 @@ struct TourStep {
 
 const TOUR: [TourStep; 6] = [
     TourStep {
-        title: "Four tabs",
-        text: "Library, Presets, Edit and Export. Swipe along this bar to move between them, \
-               or tap one. Tap the open tab again to hide its sheet and see the whole photo.",
+        title_id: "tour-tabs-title",
+        text_id: "tour-tabs-text",
         target: Target::Nav,
         tab: None,
     },
     TourStep {
-        title: "Edit, one module at a time",
-        text: "Swipe the controls sideways — or tap ‹ › — for the next module. Tap a name in \
-               the strip to jump straight to it; tap it again to fold the controls away.",
+        title_id: "tour-modules-title",
+        text_id: "tour-modules-text",
         target: Target::Sheet,
         tab: Some(Tab::Edit),
     },
     TourStep {
-        title: "On, off, back",
-        text: "The switch turns a module on or off, and ⟲ beside ‹ › puts just that module \
-               back. ＋ modules at the end of the strip chooses which show: the scope and \
-               filmic are in there, off to start.",
+        title_id: "tour-switch-title",
+        text_id: "tour-switch-text",
         target: Target::Sheet,
         tab: Some(Tab::Edit),
     },
     TourStep {
-        title: "Fine and reset, on every tab",
-        text: "FINE makes every slider ten times finer. ⟲ up here resets the whole photo, \
-               and undo and redo sit beside it. Double-tap any slider to reset just that one.",
+        title_id: "tour-fine-title",
+        text_id: "tour-fine-text",
         target: Target::Top,
         tab: None,
     },
     TourStep {
-        title: "Presets",
-        text: "One tap for sepia, mono, film and more, with a strength slider. A look is an \
-               ordinary edit, so you can keep refining it in Edit.",
+        title_id: "tour-presets-title",
+        text_id: "tour-presets-text",
         target: Target::Sheet,
         tab: Some(Tab::Presets),
     },
     TourStep {
-        title: "The photo",
-        text: "Pinch to zoom, and swipe across the photo for the next one. This tour is \
-               under Library → ? tour whenever you want it again.",
+        title_id: "tour-photo-title",
+        text_id: "tour-photo-text",
         target: Target::Stage,
         tab: None,
     },

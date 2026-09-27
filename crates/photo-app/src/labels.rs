@@ -125,7 +125,7 @@ impl PhotoApp {
         let mut remove = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(theme::dim("keywords").size(11.5));
+            ui.label(theme::dim(crate::i18n::tr("info-keywords")).size(11.5));
             for word in &keywords {
                 if widgets::chip(ui, true, &format!("{word} ×"))
                     .on_hover_text("Take this keyword off")
@@ -136,7 +136,7 @@ impl PhotoApp {
             }
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.keyword_draft)
-                    .hint_text("add…")
+                    .hint_text(crate::i18n::tr("info-keyword-hint"))
                     .desired_width(110.0),
             );
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

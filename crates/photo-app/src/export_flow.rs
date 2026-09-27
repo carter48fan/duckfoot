@@ -104,7 +104,13 @@ impl PhotoApp {
         match outcome {
             Some(Ok(())) => {
                 self.platform.export_completed(&path);
-                let msg = format!("Exported {} in {seconds:.1}s", file_name(&path));
+                let msg = crate::i18n::tr_args(
+                    "exported",
+                    &[
+                        ("name", file_name(&path).into()),
+                        ("seconds", format!("{seconds:.1}").into()),
+                    ],
+                );
                 if self.platform.can_share() {
                     self.set_status_undoable(msg, NoticeAction::Share);
                 } else {
