@@ -30,6 +30,8 @@ pub enum Request {
     /// Hand an exported photo to another app (the Android share sheet). Only asked for
     /// when [`Platform::can_share`] says it can be.
     Share { path: PathBuf },
+    /// The monitor's ICC profile (W-14).
+    DisplayProfile { from: Option<PathBuf> },
 }
 
 /// The user's answer to a [`Request`]. A cancelled picker produces nothing.
@@ -42,6 +44,7 @@ pub enum Response {
     ExportImage(PathBuf),
     ImportPreset(PathBuf),
     ExportPreset(PathBuf),
+    DisplayProfile(PathBuf),
     /// Progress or a problem to show in the status bar.
     Status(String),
 }
@@ -151,6 +154,10 @@ impl Platform for DesktopPlatform {
                 .map(Response::ExportPreset),
             // A desktop has no share sheet; can_share says so, so this is not asked.
             Request::Share { .. } => None,
+            Request::DisplayProfile { from } => start(from)
+                .add_filter("ICC profile", &["icc", "icm"])
+                .pick_file()
+                .map(Response::DisplayProfile),
         };
         self.answered.extend(answer);
     }

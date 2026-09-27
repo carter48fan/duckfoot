@@ -44,6 +44,10 @@ pub struct Settings {
     pub saved_filters: Vec<crate::dam::SavedFilter>,
     /// The folders opened whole, watched for photos that arrive.
     pub watched_folders: Vec<PathBuf>,
+    /// The screen the preview is shown on (W-14): a named space, or a profile file
+    /// (which wins while it reads).
+    pub display: Option<photo_engine::gamut::OutputSpace>,
+    pub display_icc: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -69,6 +73,8 @@ impl Default for Settings {
             paste: None,
             saved_filters: Vec::new(),
             watched_folders: Vec::new(),
+            display: None,
+            display_icc: None,
         }
     }
 }

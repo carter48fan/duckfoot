@@ -52,6 +52,7 @@ impl PhotoApp {
                         {
                             self.clip_overlay = !self.clip_overlay;
                         }
+                        self.proof_chips(ui);
                     });
 
                     // Zoom at the right end when it fits beside the rest, as measured last

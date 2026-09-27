@@ -72,6 +72,9 @@ struct Adjust {
     // Working → output linear, rows; [0].w = the output's gamma (0: the sRGB curve),
     // [1].w = 1 when the output's primaries differ from the working space's.
     out_m:      array<vec4<f32>, 3>,
+    // W-10: the proof's space → the screen's; [0].w = 1 while proofing, [1].w = 1 to
+    // mark what the proof cannot hold.
+    proof_m:    array<vec4<f32>, 3>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -234,8 +237,18 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
     if (u.out_m[1].w > 0.5) {
         c = vec3<f32>(dot(u.out_m[0].xyz, c), dot(u.out_m[1].xyz, c), dot(u.out_m[2].xyz, c));
     }
-    if (u.luma_w.w > 0.5) {
-        c = into_gamut(c, y);
+    let proofing = u.proof_m[0].w > 0.5;
+    var outside = false;
+    if (u.luma_w.w > 0.5 || proofing) {
+        let s = gamut_scale(c, y);
+        outside = s < 0.97;
+        c = vec3<f32>(y) + (c - vec3<f32>(y)) * s;
+    }
+    if (proofing) {
+        // What the proof holds, as the screen shows it (a wide proof on a narrower screen
+        // is brought in again).
+        c = vec3<f32>(dot(u.proof_m[0].xyz, c), dot(u.proof_m[1].xyz, c), dot(u.proof_m[2].xyz, c));
+        c = vec3<f32>(y) + (c - vec3<f32>(y)) * gamut_scale(c, y);
     }
     c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
     var e: vec3<f32>;
@@ -249,6 +262,10 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
         let n = fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
         e = clamp(e + (n - 0.5) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
     }
+    if (outside && proofing && u.proof_m[1].w > 0.5) {
+        // Photoshop's gamut warning: flat grey where the proof loses colour.
+        e = vec3<f32>(0.5);
+    }
     return vec4<f32>(e, 1.0);
 }
 
@@ -256,12 +273,11 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
 // luminance, just far enough: its hue and brightness kept, only its saturation given up.
 // Clipping each channel instead, as the sRGB working space did, shifts the hue (a
 // saturated blue goes violet, an orange goes yellow) and throws away the others' detail.
-fn into_gamut(c: vec3<f32>, y: f32) -> vec3<f32> {
-    if (y <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    if (y >= 1.0) {
-        return vec3<f32>(1.0);
+//
+// Returned as how far towards the grey to go: 1 for a colour that fits, 0 for the grey.
+fn gamut_scale(c: vec3<f32>, y: f32) -> f32 {
+    if (y <= 0.0 || y >= 1.0) {
+        return 0.0;
     }
     var s = 1.0;
     let lo = min(c.r, min(c.g, c.b));
@@ -272,7 +288,7 @@ fn into_gamut(c: vec3<f32>, y: f32) -> vec3<f32> {
     if (hi > 1.0) {
         s = min(s, (1.0 - y) / (hi - y));
     }
-    return vec3<f32>(y) + (c - vec3<f32>(y)) * s;
+    return s;
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {

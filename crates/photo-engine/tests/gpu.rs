@@ -2009,3 +2009,71 @@ fn a_wide_colour_survives_to_a_display_p3_export_and_only_there() {
         "the sRGB working space kept a colour it cannot hold: {clipped:?}"
     );
 }
+
+#[test]
+fn a_wide_screen_shows_the_file_and_a_proof_marks_what_srgb_loses() {
+    use image::ImageEncoder;
+    use photo_engine::engine::Proof;
+    use photo_engine::gamut::{OutputSpace, Screen};
+    let gpu = gpu_or_skip!();
+    // Left half a P3 green no sRGB screen can show, right half a grey any can.
+    let (w, h) = (32u32, 16u32);
+    let (green, grey) = ([40u8, 200, 60], [120u8, 120, 120]);
+    let px: Vec<u8> = (0..w * h)
+        .flat_map(|i| if i % w < 16 { green } else { grey })
+        .collect();
+    let mut jpeg = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100);
+    enc.set_icc_profile(photo_engine::icc::display_p3_profile().to_vec())
+        .unwrap();
+    enc.write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            photo_engine::decode_raster(&jpeg).unwrap(),
+        )
+        .unwrap();
+    let stack = PhotoStack::default();
+    let at = |px: &[u8], x: u32| {
+        let i = ((8 * w + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let near = |a: [u8; 3], b: [u8; 3]| (0..3).all(|c| (a[c] as i32 - b[c] as i32).abs() <= 2);
+
+    engine.set_screen(Screen::of(OutputSpace::DisplayP3));
+    let (_, _, shown) = preview(gpu, &mut engine, &stack, 0);
+    assert!(
+        near(at(&shown, 6), green),
+        "a P3 screen shows {:?}",
+        at(&shown, 6)
+    );
+
+    engine.set_proof(Some(Proof {
+        space: Screen::SRGB,
+        warn: true,
+    }));
+    let (_, _, proofed) = preview(gpu, &mut engine, &stack, 0);
+    assert_eq!(
+        at(&proofed, 6),
+        [128, 128, 128],
+        "the green sRGB cannot hold is marked"
+    );
+    assert!(
+        near(at(&proofed, 24), at(&shown, 24)),
+        "a grey sRGB holds is left alone"
+    );
+    // Without the warning, the proof shows the green as an sRGB export will have it.
+    engine.set_proof(Some(Proof {
+        space: Screen::SRGB,
+        warn: false,
+    }));
+    let (_, _, proofed) = preview(gpu, &mut engine, &stack, 0);
+    let g = at(&proofed, 6);
+    assert!(
+        g[0] > green[0] + 10,
+        "the proof shows the green as sRGB brings it in: {g:?}"
+    );
+}

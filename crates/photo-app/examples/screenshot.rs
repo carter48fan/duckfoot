@@ -241,6 +241,8 @@ fn main() -> anyhow::Result<()> {
         app.filter.rating = photo_app::dam::RatingFilter::MinStars(3);
         app.library_filters_open = true;
     }
+    // DUCKFOOT_SHOT_PROOF=1: soft proofing with the gamut warning.
+    app.proofing = std::env::var_os("DUCKFOOT_SHOT_PROOF").is_some();
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();
