@@ -684,15 +684,23 @@ impl PhotoApp {
             }
             (false, None) => {}
         }
-        // What the file says about it, in one line; tapped, everything it says.
-        if !many {
-            let line = self
-                .open_info()
+        // Its colour label, then what the file says about it in one line; tapped,
+        // everything it says.
+        let line = if many {
+            String::new()
+        } else {
+            self.open_info()
                 .map(crate::info::one_line)
-                .unwrap_or_default();
-            if let (false, Some(path)) = (line.is_empty(), self.loaded_path.clone()) {
+                .unwrap_or_default()
+        };
+        let mut tapped = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            self.label_picker(ui);
+            if !line.is_empty() {
+                ui.add_space(8.0);
                 let arrow = if self.info_open { "▾" } else { "▸" };
-                let tapped = ui
+                tapped = ui
                     .add(
                         egui::Label::new(theme::dim(format!("{arrow} {line}")).size(11.5))
                             .truncate()
@@ -700,9 +708,13 @@ impl PhotoApp {
                     )
                     .on_hover_text("Everything the file says about this photo")
                     .clicked();
-                if tapped {
-                    self.info_open = !self.info_open;
-                }
+            }
+        });
+        if tapped {
+            self.info_open = !self.info_open;
+        }
+        if !many {
+            if let (false, Some(path)) = (line.is_empty(), self.loaded_path.clone()) {
                 if self.info_open {
                     egui::Frame::new()
                         .fill(theme::BG_925)
@@ -711,6 +723,8 @@ impl PhotoApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             self.info_rows(ui, &path);
+                            ui.add_space(6.0);
+                            self.keywords_editor(ui);
                         });
                 }
             }

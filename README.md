@@ -176,6 +176,7 @@ You can also **drag a RAW file onto the window**.
 | `?` or `F1` | this list of shortcuts |
 | **Library** | |
 | `0`–`5` | star rating for the selection (`0` clears) |
+| `6` / `7` / `8` / `9` | red / yellow / green / blue label (again takes it off) |
 | `P` / `X` / `U` | flag as pick / reject / clear the flag |
 | `Ctrl+A` | select every photo on the shelf |
 | `Shift`+click / `Ctrl`+click | select a range / add to the selection |

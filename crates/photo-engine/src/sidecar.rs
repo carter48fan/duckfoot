@@ -32,6 +32,37 @@ pub struct AssetMetadata {
     /// Color label (e.g. "red", "yellow", "green", "blue", "purple").
     #[serde(default)]
     pub color_label: Option<String>,
+    /// Words to find the photo by, in the order given, none twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+}
+
+/// The longest a keyword may be, in characters.
+pub const KEYWORD_MAX: usize = 64;
+
+impl AssetMetadata {
+    /// Add the keywords in `text`, split at commas and semicolons: trimmed, cut to
+    /// [`KEYWORD_MAX`], and skipped when already there in any case. True if any were new.
+    pub fn add_keywords(&mut self, text: &str) -> bool {
+        let before = self.keywords.len();
+        for word in text.split([',', ';']) {
+            let word: String = word.trim().chars().take(KEYWORD_MAX).collect();
+            let word = word.trim().to_string();
+            if !word.is_empty() && !self.has_keyword(&word) {
+                self.keywords.push(word);
+            }
+        }
+        self.keywords.len() > before
+    }
+
+    pub fn has_keyword(&self, word: &str) -> bool {
+        let word = word.to_lowercase();
+        self.keywords.iter().any(|k| k.to_lowercase() == word)
+    }
+
+    pub fn remove_keyword(&mut self, word: &str) {
+        self.keywords.retain(|k| k != word);
+    }
 }
 
 /// The sidecar format this build writes. A file from a newer build is read for display
@@ -164,6 +195,9 @@ fn parse_sidecar(content: &str) -> Result<SidecarData> {
     for stack in &mut data.history {
         *stack = stack.sanitised();
     }
+    // A hand-edited file's keywords, held to what the app itself would keep.
+    let keywords = std::mem::take(&mut data.metadata.keywords);
+    data.metadata.add_keywords(&keywords.join(","));
     data.metadata.rating = data.metadata.rating.min(5);
     Ok(data)
 }
@@ -283,6 +317,18 @@ mod tests {
     use super::*;
     use crate::curve::CurveNode;
     use crate::params::{Crop, Geometry, Module, WhiteBalance};
+
+    #[test]
+    fn keywords_are_trimmed_split_and_kept_once() {
+        let mut m = AssetMetadata::default();
+        assert!(m.add_keywords(" Iceland, waterfall;; iceland ,"));
+        assert_eq!(m.keywords, ["Iceland", "waterfall"]);
+        assert!(!m.add_keywords("WATERFALL"));
+        m.remove_keyword("Iceland");
+        assert_eq!(m.keywords, ["waterfall"]);
+        assert!(m.add_keywords(&"x".repeat(100)));
+        assert_eq!(m.keywords[1].len(), KEYWORD_MAX);
+    }
 
     #[test]
     fn history_keeps_the_newest_steps_within_budget() {

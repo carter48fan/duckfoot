@@ -25,6 +25,7 @@ mod info;
 mod inspector;
 mod keymap;
 mod keys;
+mod labels;
 pub mod mask_tool;
 mod modules;
 mod parts;
@@ -468,6 +469,8 @@ pub struct PhotoApp {
     pub paste_set: paste::PasteSet,
     /// The paste picker: a dialog on the desktop, inline on the phone.
     pub paste_picker_open: bool,
+    /// What is typed in a keywords field, not yet added.
+    keyword_draft: String,
     /// The local mask being placed and adjusted (W-01): its handles are on the stage.
     pub selected_mask: Option<usize>,
     /// Show the selected mask as a red wash on the preview.
@@ -699,6 +702,7 @@ impl PhotoApp {
             clipboard_stack: None,
             paste_set: paste::PasteSet::default(),
             paste_picker_open: false,
+            keyword_draft: String::new(),
             selected_mask: None,
             mask_overlay: false,
             mask_drag: None,

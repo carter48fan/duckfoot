@@ -114,7 +114,13 @@ impl FilterState {
                 .unwrap_or("")
                 .to_lowercase();
             let query = self.search_query.to_lowercase();
-            if !file_name.contains(&query) {
+            let keyword = || {
+                metadata
+                    .keywords
+                    .iter()
+                    .any(|k| k.to_lowercase().contains(&query))
+            };
+            if !file_name.contains(&query) && !keyword() {
                 return false;
             }
         }
@@ -136,12 +142,14 @@ mod tests {
             rating: 4,
             flag: Flag::Pick,
             color_label: Some("green".into()),
+            keywords: vec!["Iceland".into()],
         };
 
         let meta_rejected = AssetMetadata {
             rating: 5,
             flag: Flag::Reject,
             color_label: None,
+            keywords: Vec::new(),
         };
 
         assert!(filter.matches(path, &meta_good, false, false));
@@ -155,5 +163,31 @@ mod tests {
         // Filter: Min 5 stars
         filter.rating = RatingFilter::MinStars(5);
         assert!(!filter.matches(path, &meta_good, false, false));
+    }
+
+    #[test]
+    fn a_label_or_a_keyword_finds_a_photo() {
+        let path = Path::new("/photos/DSC08450.ARW");
+        let mut tagged = AssetMetadata {
+            color_label: Some("red".into()),
+            ..Default::default()
+        };
+        tagged.add_keywords("Iceland, waterfall");
+        let plain = AssetMetadata::default();
+        let mut filter = FilterState {
+            color_label: Some("red".into()),
+            ..Default::default()
+        };
+        assert!(filter.matches(path, &tagged, false, false));
+        assert!(!filter.matches(path, &plain, false, false));
+        filter.color_label = None;
+        filter.search_query = "WATERF".into();
+        assert!(filter.matches(path, &tagged, false, false));
+        assert!(!filter.matches(path, &plain, false, false));
+        filter.search_query = "dsc084".into();
+        assert!(
+            filter.matches(path, &plain, false, false),
+            "the name still finds it"
+        );
     }
 }

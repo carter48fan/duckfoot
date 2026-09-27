@@ -506,6 +506,16 @@ pub(crate) fn film_tile(
     if selected && !active {
         painter.rect_filled(inner, 0.0, theme::ACCENT.linear_multiply(0.12));
     }
+    // The colour label, as a band along the top.
+    if let Some(fill) = item
+        .metadata
+        .color_label
+        .as_deref()
+        .and_then(crate::labels::colour)
+    {
+        let band = Rect::from_min_size(inner.left_top(), vec2(inner.width(), 4.0));
+        painter.rect_filled(band, 0.0, fill);
+    }
 
     // File stem on a black strip, bottom-left, as the frame number.
     let stem = item
