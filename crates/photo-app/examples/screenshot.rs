@@ -146,6 +146,8 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Denoise;
         }
     }
+    // DUCKFOOT_SHOT_PASTE=1: the paste picker open.
+    app.paste_picker_open = std::env::var_os("DUCKFOOT_SHOT_PASTE").is_some();
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

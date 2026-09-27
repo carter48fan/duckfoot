@@ -588,7 +588,7 @@ impl PhotoApp {
         }
     }
 
-    /// Undo · Redo | Reset all · Copy stack · Paste · Previous · Paste to all. `right_to_left` callers
+    /// Undo · Redo | Reset all · Copy stack · Paste · Modules… · Previous · Paste to all. `right_to_left` callers
     /// get them reversed, so they read the same way on screen either way.
     pub(crate) fn filmstrip_actions(&mut self, ui: &mut egui::Ui, right_to_left: bool) {
         #[derive(Clone, Copy)]
@@ -599,6 +599,7 @@ impl PhotoApp {
             Reset,
             Copy,
             Paste,
+            Choose,
             Previous,
             PasteAll,
         }
@@ -609,6 +610,7 @@ impl PhotoApp {
             Action::Reset,
             Action::Copy,
             Action::Paste,
+            Action::Choose,
             Action::Previous,
             Action::PasteAll,
         ];
@@ -673,6 +675,19 @@ impl PhotoApp {
                         .clicked()
                     {
                         self.paste_adjustments();
+                    }
+                }
+                Action::Choose => {
+                    let tip = format!(
+                        "Choose what Paste, Previous and Paste to all carry: now {} \
+                         (Ctrl+Shift+V)",
+                        self.paste_set.describe()
+                    );
+                    if widgets::button(ui, Kind::Secondary, "Modules…", 0.0)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.paste_picker_open = !self.paste_picker_open;
                     }
                 }
                 Action::Previous => {

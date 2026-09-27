@@ -20,6 +20,8 @@ impl PhotoApp {
                 self.batch_dialog_open = false;
             } else if self.export_dialog_open {
                 self.export_dialog_open = false;
+            } else if self.paste_picker_open {
+                self.paste_picker_open = false;
             } else if self.customize_open {
                 self.customize_open = false;
             } else if self.select_mode {
@@ -74,6 +76,16 @@ impl PhotoApp {
             return;
         }
         if self.batch_dialog_open {
+            return;
+        }
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::V)) {
+            self.paste_picker_open = !self.paste_picker_open;
+            return;
+        }
+        if self.paste_picker_open && !self.layout.is_compact() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.paste_picker_open = false;
+            }
             return;
         }
         if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::E))

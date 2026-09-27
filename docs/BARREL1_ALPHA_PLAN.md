@@ -932,7 +932,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 
 | ID | Feature | Shape | Est. |
 |---|---|---|---|
-| **W-03** | Selective paste / sync; **Same as previous** | A per-module checkbox picker driven by the module registry, geometry off by default. Cmd/Ctrl+Alt+V pastes from the previous photo (pairs with U-01). | 2 d |
+| **W-03** ✅ | Selective paste / sync; **Same as previous** (done: a remembered module set — crop & rotate off by default — that Paste, Previous and Paste to all follow; a dialog on the desktop via Modules… or Ctrl+Shift+V, inline on the phone's Export sheet) | A per-module checkbox picker driven by the module registry, geometry off by default. Cmd/Ctrl+Alt+V pastes from the previous photo (pairs with U-01). | 2 d |
 | **W-04** | User presets: save, import, export | `.duckfoot-preset` JSON (versioned, sanitised through the registry on import, with an included-modules mask); a Presets panel on both layouts. | 2 d |
 | **W-01** | Local adjustments (DEC-5) | ≤8 masks, each **linear gradient**, **radial** or **brush**, with a fixed parameter block: exposure, temperature, tint, contrast, saturation, clarity, sharpness, denoise. Gradient and radial masks are evaluated analytically in the fused shader; brush masks are rasterised into an R8 texture array at preview and full resolution. Mask overlay UI, feather and invert. | 10 d |
 | **W-02** | Spot heal / clone (DEC-5) | ≤32 circular spots `{dst, src, radius, feather, mode}`, evaluated in the sampling stage: clone samples the source; heal matches the source's mean to the destination's ring via mips. Automatic source search, plus a "visualise dust" high-pass view. | 5 d |

@@ -216,17 +216,18 @@ impl PhotoApp {
         self.clipboard_stack = Some(self.stack.clone());
         // A new look on the clipboard: the last paste to all is settled.
         self.bulk_paste_undo = None;
-        self.set_status("Copied adjustments (everything but crop and rotation)");
+        self.set_status(format!(
+            "Copied adjustments (paste carries {})",
+            self.paste_set.describe()
+        ));
     }
 
-    /// The clipboard's look on `target`'s own framing: rotation, mirroring, straighten
-    /// and crop belong to a photo, not to a look, and pasting them turns and crops photos
+    /// The clipboard's look on `target`, as far as the paste set carries it: by default
+    /// every module on `target`'s own framing, since rotation, mirroring, straighten and
+    /// crop belong to a photo, not to a look, and pasting them turns and crops photos
     /// that were never framed that way.
-    pub(crate) fn pasted_onto(copied: &PhotoStack, target: &PhotoStack) -> PhotoStack {
-        PhotoStack {
-            geometry: target.geometry,
-            ..copied.clone()
-        }
+    pub(crate) fn pasted_onto(&self, copied: &PhotoStack, target: &PhotoStack) -> PhotoStack {
+        self.paste_set.apply(copied, target)
     }
 
     pub fn paste_adjustments(&mut self) {
@@ -237,7 +238,7 @@ impl PhotoApp {
         if self.loaded_path.is_none() {
             return;
         }
-        let pasted = Self::pasted_onto(copied, &self.stack);
+        let pasted = self.pasted_onto(copied, &self.stack);
         self.history.checkpoint(&self.stack);
         self.stack = pasted;
         self.needs_render = true;
@@ -261,7 +262,7 @@ impl PhotoApp {
                 return;
             }
         };
-        let pasted = Self::pasted_onto(&look, &self.stack);
+        let pasted = self.pasted_onto(&look, &self.stack);
         if pasted == self.stack {
             self.set_status(format!("Already the same as {}", file_name(&prev)));
             return;
@@ -290,7 +291,7 @@ impl PhotoApp {
         let paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
         for path in paths {
             if self.loaded_path.as_ref() == Some(&path) {
-                let pasted = Self::pasted_onto(&copied, &self.stack);
+                let pasted = self.pasted_onto(&copied, &self.stack);
                 if pasted != self.stack {
                     self.history.checkpoint(&self.stack);
                     self.stack = pasted;
@@ -306,7 +307,7 @@ impl PhotoApp {
                     geometry: photo_engine::file_orientation(&path),
                     ..PhotoStack::default()
                 });
-                data.stack = Some(Self::pasted_onto(&copied, &own));
+                data.stack = Some(self.pasted_onto(&copied, &own));
             });
             match result {
                 Ok(_) => {

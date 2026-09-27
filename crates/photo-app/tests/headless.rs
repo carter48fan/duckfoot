@@ -1577,6 +1577,78 @@ fn ctrl_e_opens_the_export_settings_and_they_are_remembered() {
 }
 
 #[test]
+fn paste_carries_only_the_chosen_modules_and_the_choice_is_remembered() {
+    let dir = scratch_dir("selectivepaste");
+    let settings = dir.join("settings");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let ctrl_shift_v = egui::RawInput {
+        events: vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
+            egui::Event::Key {
+                key: egui::Key::V,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            },
+        ],
+        ..Default::default()
+    };
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+        h.settle(&mut app, Duration::from_secs(30));
+        h.frame(&mut app, ctrl_shift_v);
+        assert!(app.paste_picker_open);
+        h.frame(
+            &mut app,
+            pointer(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]),
+        );
+        // Behind the picker, keys wait; Esc closes it.
+        h.frame(&mut app, key(egui::Key::ArrowRight));
+        assert_eq!(app.loaded_path(), Some(a.as_path()));
+        h.frame(&mut app, key(egui::Key::Escape));
+        assert!(!app.paste_picker_open);
+
+        app.edit(|s| {
+            s.exposure.params.ev = 0.8;
+            s.vignette.enabled = true;
+            s.vignette.params.amount = -0.5;
+            s.geometry.rotate_right();
+        });
+        app.copy_adjustments();
+        app.paste_set
+            .set(photo_app::InspectorSectionId::Vignette, false);
+        app.paste_set
+            .set(photo_app::InspectorSectionId::Geometry, true);
+        app.open_path(&h.gpu(), b.clone());
+        h.settle(&mut app, Duration::from_secs(30));
+        app.paste_adjustments();
+        assert_eq!(app.stack().exposure.params.ev, 0.8);
+        assert!(!app.stack().vignette.enabled, "the vignette was left out");
+        assert_eq!(
+            app.stack().geometry.quarter_turns,
+            1,
+            "the framing was asked for"
+        );
+        app.shutdown();
+    }
+    let app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    assert!(!app
+        .paste_set
+        .carries(photo_app::InspectorSectionId::Vignette));
+    assert!(app
+        .paste_set
+        .carries(photo_app::InspectorSectionId::Geometry));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
     use photo_app::crop_tool::Aspect;
     let dir = scratch_dir("cropaspect");
@@ -1832,6 +1904,13 @@ fn no_controls_overlap_on_any_screen() {
             check(&mut app, tab.label(), size);
         }
     }
+    // The Export sheet with the paste picker open.
+    app.compact_tab = Some(Tab::Export);
+    app.paste_picker_open = true;
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "export + paste picker", size);
+    }
+    app.paste_picker_open = false;
     // The Library sheet with the photo's info card open.
     app.compact_tab = Some(Tab::Library);
     app.info_open = true;
@@ -1869,6 +1948,11 @@ fn no_controls_overlap_on_any_screen() {
         in_dialog(&mut app, "shortcuts", size);
     }
     app.shortcuts_open = false;
+    app.paste_picker_open = true;
+    for size in desktops {
+        in_dialog(&mut app, "paste picker", size);
+    }
+    app.paste_picker_open = false;
     for f in &found {
         eprintln!("{f}");
     }

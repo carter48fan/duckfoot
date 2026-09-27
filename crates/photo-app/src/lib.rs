@@ -27,6 +27,7 @@ mod keymap;
 mod keys;
 mod modules;
 mod parts;
+pub mod paste;
 mod requests;
 mod session;
 mod view;
@@ -425,6 +426,10 @@ pub struct PhotoApp {
     pub split_pos: f32,
     /// In-memory clipboard for copying/pasting adjustment stacks across photos.
     pub clipboard_stack: Option<PhotoStack>,
+    /// What paste, same-as-previous and paste-to-all carry (W-03).
+    pub paste_set: paste::PasteSet,
+    /// The paste picker: a dialog on the desktop, inline on the phone.
+    pub paste_picker_open: bool,
     /// The open photo's named snapshots, kept in its sidecar.
     pub snapshots: Vec<(String, PhotoStack)>,
     /// Undo history for photos stepped away from, most recent last, so returning to one
@@ -622,6 +627,8 @@ impl PhotoApp {
             split_active: false,
             split_pos: 0.5,
             clipboard_stack: None,
+            paste_set: paste::PasteSet::default(),
+            paste_picker_open: false,
             snapshots: Vec::new(),
             parked_histories: Vec::new(),
             pending_drops: Vec::new(),
@@ -733,6 +740,9 @@ impl PhotoApp {
         if let Some(filter) = s.filter {
             self.filter = filter;
         }
+        if let Some(set) = s.paste {
+            self.paste_set = set;
+        }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
         // Missing photos are shelved too, and shown as missing.
         let shelf = s.shelf;
@@ -761,6 +771,7 @@ impl PhotoApp {
         s.rename_pattern = Some(self.batch_renamer.pattern.clone());
         s.filter = Some(self.filter.clone());
         s.export = Some(self.export_settings);
+        s.paste = Some(self.paste_set.clone());
         s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
         s.last_open = self.loaded_path.clone();
         self.save_settings();
@@ -1146,6 +1157,7 @@ impl PhotoApp {
             self.workspace(ui);
             self.batch_export_dialog(ui);
             self.export_dialog(&ctx);
+            self.paste_picker(&ctx);
             self.shortcuts_overlay(&ctx);
         }
         if let Some(dir) = self.pending_step.take() {

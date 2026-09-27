@@ -77,6 +77,7 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Ctrl+C` / `Ctrl+V`",
         "copy / paste the adjustments (crop and rotation stay put)",
     ),
+    s(Editing, "`Ctrl+Shift+V`", "choose what paste carries"),
     s(
         Editing,
         "`Ctrl+Alt+V`",
