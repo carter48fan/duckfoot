@@ -12,7 +12,7 @@
 // A slider drag rewrites `Adjust` and nothing else. No re-decode, no re-upload.
 
 struct Adjust {
-    cam0:       vec4<f32>,   // camera RGB -> linear sRGB, row 0 (xyz used)
+    cam0:       vec4<f32>,   // camera RGB -> linear working space, row 0 (xyz used)
     cam1:       vec4<f32>,
     cam2:       vec4<f32>,
     wb:         vec4<f32>,   // xyz = neutral multipliers
@@ -67,6 +67,11 @@ struct Adjust {
     spots:      array<vec4<f32>, 64>,
     // Keystone (W-07): a homography's rows; [0].w = its unit (px), [1].w = 1 when on.
     persp:      array<vec4<f32>, 3>,
+    // W-09: the working space's luminance weights; w = 1 when it is wide (Rec.2020).
+    luma_w:     vec4<f32>,
+    // Working → output linear, rows; [0].w = the output's gamma (0: the sRGB curve),
+    // [1].w = 1 when the output's primaries differ from the working space's.
+    out_m:      array<vec4<f32>, 3>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -224,13 +229,50 @@ fn filmic(c: vec3<f32>) -> vec3<f32> {
 // pixel, so the preview at 1:1 and the export agree exactly, and has a mean of zero, so it
 // shifts no tone. A 16-bit target has levels to spare and is left alone.
 fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
-    var e = linear_to_srgb(clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0)));
+    var c = linear;
+    let y = luma(c);
+    if (u.out_m[1].w > 0.5) {
+        c = vec3<f32>(dot(u.out_m[0].xyz, c), dot(u.out_m[1].xyz, c), dot(u.out_m[2].xyz, c));
+    }
+    if (u.luma_w.w > 0.5) {
+        c = into_gamut(c, y);
+    }
+    c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    var e: vec3<f32>;
+    if (u.out_m[0].w > 0.0) {
+        e = pow(c, vec3<f32>(1.0 / u.out_m[0].w));
+    } else {
+        e = linear_to_srgb(c);
+    }
     if (u.flags.z == 1u) {
         let p = floor(out_px);
         let n = fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
         e = clamp(e + (n - 0.5) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     return vec4<f32>(e, 1.0);
+}
+
+// A colour the output cannot show, brought in along the line to the grey of its own
+// luminance, just far enough: its hue and brightness kept, only its saturation given up.
+// Clipping each channel instead, as the sRGB working space did, shifts the hue (a
+// saturated blue goes violet, an orange goes yellow) and throws away the others' detail.
+fn into_gamut(c: vec3<f32>, y: f32) -> vec3<f32> {
+    if (y <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    if (y >= 1.0) {
+        return vec3<f32>(1.0);
+    }
+    var s = 1.0;
+    let lo = min(c.r, min(c.g, c.b));
+    if (lo < 0.0) {
+        s = min(s, y / (y - lo));
+    }
+    let hi = max(c.r, max(c.g, c.b));
+    if (hi > 1.0) {
+        s = min(s, (1.0 - y) / (hi - y));
+    }
+    return vec3<f32>(y) + (c - vec3<f32>(y)) * s;
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -427,7 +469,7 @@ fn exposed(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn luma(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return dot(c, u.luma_w.xyz);
 }
 
 // The sensor around `uv`, blurred to the scale of mip `level`: nine bilinear taps a texel
@@ -668,17 +710,17 @@ fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
     return rgb + vec3<f32>(m);
 }
 
-fn apply_color_eq(rgb: vec3<f32>) -> vec3<f32> {
-    var hsv = rgb_to_hsv(rgb);
-    // Each hue takes its two neighbouring bands' moves, blended by where it sits between
-    // their centres: a band's own hue gets exactly its move, and every hue's weights sum
-    // to one, so no hue is pushed harder (or softer) than the sliders say.
+// Each hue takes its two neighbouring bands' moves, blended by where it sits between their
+// centres: a band's own hue gets exactly its move, and every hue's weights sum to one, so
+// no hue is pushed harder (or softer) than the sliders say. `hue` in degrees, as HSV has it
+// in sRGB primaries; the move is (hue degrees, saturation %, lightness %).
+fn eq_move(hue: f32) -> vec3<f32> {
     var centres = array<f32, 9>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 280.0, 320.0, 360.0);
     var bands = array<vec4<f32>, 9>(
         u.eq_red, u.eq_orange, u.eq_yellow, u.eq_green,
         u.eq_aqua, u.eq_blue, u.eq_purple, u.eq_magenta, u.eq_red,
     );
-    let h = clamp(hsv.x, 0.0, 359.999);
+    let h = clamp(hue, 0.0, 359.999);
     var i = 0;
     for (var k = 0; k < 8; k = k + 1) {
         if (h >= centres[k]) {
@@ -686,7 +728,39 @@ fn apply_color_eq(rgb: vec3<f32>) -> vec3<f32> {
         }
     }
     let t = (h - centres[i]) / (centres[i + 1] - centres[i]);
-    let m = mix(bands[i].xyz, bands[i + 1].xyz, t);
+    return mix(bands[i].xyz, bands[i + 1].xyz, t);
+}
+
+// Rec.2020 → sRGB, linear: only to name a wide colour's hue as the bands know it.
+const REC2020_TO_SRGB = mat3x3<f32>(
+    vec3<f32>(1.660491, -0.124550, -0.018151),
+    vec3<f32>(-0.587641, 1.132900, -0.100579),
+    vec3<f32>(-0.072850, -0.008349, 1.118730),
+);
+
+// The colour EQ in the wide working space. HSV clamps saturation to one, which in sRGB
+// terms a wide colour exceeds, so it would be pulled into sRGB here, mid-chain. Instead the
+// hue picks the bands as before, and the move is made on the colour's chroma (its offset
+// from the grey of its luminance): turned about the grey axis, scaled, and the whole
+// scaled for lightness, with nothing clamped.
+fn apply_color_eq_wide(rgb: vec3<f32>) -> vec3<f32> {
+    let m = eq_move(rgb_to_hsv(REC2020_TO_SRGB * rgb).x);
+    let y = luma(rgb);
+    let chroma = rgb - vec3<f32>(y);
+    // Rodrigues' rotation about (1, 1, 1): positive turns red towards green, as HSV does.
+    let n = vec3<f32>(0.57735027);
+    let a = radians(m.x);
+    let turned = chroma * cos(a) + cross(n, chroma) * sin(a) + n * dot(n, chroma) * (1.0 - cos(a));
+    let moved = vec3<f32>(y) + turned * max(1.0 + m.y * 0.01, 0.0);
+    return moved * max(1.0 + m.z * 0.01, 0.0);
+}
+
+fn apply_color_eq(rgb: vec3<f32>) -> vec3<f32> {
+    if (u.luma_w.w > 0.5) {
+        return apply_color_eq_wide(rgb);
+    }
+    var hsv = rgb_to_hsv(rgb);
+    let m = eq_move(hsv.x);
 
     hsv.x = (hsv.x + m.x + 360.0) % 360.0;
     hsv.y = clamp(hsv.y * (1.0 + m.y * 0.01), 0.0, 1.0);
@@ -829,7 +903,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_TONAL)) {
-        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma = luma(c);
         let s_weight = 1.0 - smoothstep(0.0, 0.5, luma);
         let h_weight = smoothstep(0.35, 1.0, luma);
         let w_weight = smoothstep(0.7, 1.2, luma);
@@ -863,7 +937,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_VIBRANCE)) {
-        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma = luma(c);
         let max_ch = max(c.r, max(c.g, c.b));
         let min_ch = min(c.r, min(c.g, c.b));
         let cur_sat = (max_ch - min_ch) / max(max_ch, 0.001);

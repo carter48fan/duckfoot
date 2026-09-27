@@ -276,6 +276,39 @@ impl PhotoApp {
                     *p = wb;
                     discrete!();
                 }
+                // Where every module works (W-09): wide for every new edit; an edit made
+                // before keeps sRGB, and its look, until it is moved.
+                use photo_engine::gamut::WorkingSpace;
+                let mut space = None;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    ui.label(theme::tag("colour space").color(theme::TEXT_DIM));
+                    let now = self.stack.working_space;
+                    for (s, label, tip) in [
+                        (
+                            WorkingSpace::Rec2020,
+                            "wide",
+                            "Rec.2020: saturated colours keep their hue and detail",
+                        ),
+                        (
+                            WorkingSpace::Srgb,
+                            "sRGB (older)",
+                            "How edits were made before: saturated colours clip, and shift hue",
+                        ),
+                    ] {
+                        if widgets::chip(ui, now == s, label)
+                            .on_hover_text(tip)
+                            .clicked()
+                            && now != s
+                        {
+                            space = Some(s);
+                        }
+                    }
+                });
+                if let Some(s) = space {
+                    self.stack.working_space = s;
+                    discrete!();
+                }
             }
             InspectorSectionId::Exposure => {
                 if self.ready_image().is_some()

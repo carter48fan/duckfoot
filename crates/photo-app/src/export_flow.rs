@@ -18,10 +18,13 @@ impl PhotoApp {
             ..self.export_settings
         };
         let depth = settings.effective_depth();
-        let exported = match self
-            .engine
-            .export_at(gpu.device, gpu.queue, &self.stack, depth)
-        {
+        let exported = match self.engine.export_in(
+            gpu.device,
+            gpu.queue,
+            &self.stack,
+            depth,
+            settings.color_space,
+        ) {
             Ok(e) => e,
             Err(e) => {
                 self.export = Export::Failed(format!("{e:#}"));

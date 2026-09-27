@@ -1375,8 +1375,15 @@ fn a_display_p3_jpeg_renders_in_its_own_colours() {
         let (cx, cy) = ((i as u32 % 2) * 32 + 16, (i as u32 / 2) * 16 + 8);
         let at = ((cy * w + cx) * 4) as usize;
         let l = p.map(lin);
-        for (c, row) in P3_TO_SRGB.iter().enumerate() {
-            let want = encode(row.iter().zip(l).map(|(m, v)| m * v).sum());
+        let srgb: [f32; 3] =
+            std::array::from_fn(|c| P3_TO_SRGB[c].iter().zip(l).map(|(m, v)| m * v).sum());
+        // A colour beyond sRGB (the P3 green) is brought in towards the grey of its own
+        // luminance, keeping its hue, rather than having its negative channel cut off.
+        let y = 0.2126 * srgb[0] + 0.7152 * srgb[1] + 0.0722 * srgb[2];
+        let lo = srgb.iter().cloned().fold(f32::INFINITY, f32::min);
+        let s = if lo < 0.0 { y / (y - lo) } else { 1.0 };
+        for (c, v) in srgb.iter().enumerate() {
+            let want = encode(y + (v - y) * s);
             let got = out.rgba[at + c] as f32;
             assert!(
                 (got - want).abs() <= 2.5,
@@ -1864,7 +1871,11 @@ fn a_clipped_channel_is_rebuilt_from_the_ones_that_were_not() {
     let sky = move |x: u32, y: u32| {
         let base = 0.3 + 0.6 * x as f32 / w as f32;
         let stripes = 1.0 + 0.2 * (y as f32 * 0.8).sin();
-        [1.8 * base * stripes, 0.7 * base * stripes, 0.4 * base * stripes]
+        [
+            1.8 * base * stripes,
+            0.7 * base * stripes,
+            0.4 * base * stripes,
+        ]
     };
     let mut engine = Engine::new(&gpu.device);
     engine
@@ -1890,7 +1901,11 @@ fn a_clipped_channel_is_rebuilt_from_the_ones_that_were_not() {
     // And red follows the stripes that green shows.
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
     let (mr, mg) = (mean(&reds), mean(&greens));
-    let cov: f32 = reds.iter().zip(&greens).map(|(r, g)| (r - mr) * (g - mg)).sum();
+    let cov: f32 = reds
+        .iter()
+        .zip(&greens)
+        .map(|(r, g)| (r - mr) * (g - mg))
+        .sum();
     let var_r: f32 = reds.iter().map(|r| (r - mr).powi(2)).sum();
     let var_g: f32 = greens.iter().map(|g| (g - mg).powi(2)).sum();
     let correlation = cov / (var_r * var_g).sqrt().max(1e-9);
@@ -1929,5 +1944,68 @@ fn a_blown_white_specular_stays_white_to_its_rim() {
             worst = worst.max(px.iter().max().unwrap() - px.iter().min().unwrap());
         }
     }
-    assert!(worst <= 12, "a tint of {worst} in or around the blown light");
+    assert!(
+        worst <= 12,
+        "a tint of {worst} in or around the blown light"
+    );
+}
+
+#[test]
+fn a_wide_colour_survives_to_a_display_p3_export_and_only_there() {
+    use image::ImageEncoder;
+    let gpu = gpu_or_skip!();
+    // A green no sRGB screen can show, in a P3 file.
+    let (w, h) = (32u32, 32u32);
+    let green = [40u8, 200, 60];
+    let px: Vec<u8> = (0..w * h).flat_map(|_| green).collect();
+    let mut jpeg = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100);
+    enc.set_icc_profile(photo_engine::icc::display_p3_profile().to_vec())
+        .unwrap();
+    enc.write_image(&px, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            photo_engine::decode_raster(&jpeg).unwrap(),
+        )
+        .unwrap();
+    let mut centre = |stack: &PhotoStack, space| {
+        let out = engine
+            .export_in(
+                &gpu.device,
+                &gpu.queue,
+                stack,
+                photo_engine::BitDepth::Eight,
+                space,
+            )
+            .unwrap();
+        let photo_engine::export::Exported::Eight(img) = out else {
+            unreachable!()
+        };
+        let at = ((16 * w + 16) * 4) as usize;
+        [img.rgba[at], img.rgba[at + 1], img.rgba[at + 2]]
+    };
+    use photo_engine::gamut::{OutputSpace, WorkingSpace};
+    let wide = PhotoStack::default();
+    assert_eq!(wide.working_space, WorkingSpace::Rec2020);
+    let got = centre(&wide, OutputSpace::DisplayP3);
+    for c in 0..3 {
+        assert!(
+            (got[c] as i32 - green[c] as i32).abs() <= 2,
+            "P3 in, P3 out: {got:?} for {green:?}"
+        );
+    }
+    // The older working space cut it to sRGB on the way: its red comes back raised.
+    let older = PhotoStack {
+        working_space: WorkingSpace::Srgb,
+        ..PhotoStack::default()
+    };
+    let clipped = centre(&older, OutputSpace::DisplayP3);
+    assert!(
+        clipped[0] as i32 - green[0] as i32 >= 10,
+        "the sRGB working space kept a colour it cannot hold: {clipped:?}"
+    );
 }

@@ -132,6 +132,11 @@ struct AdjustUniforms {
     /// The keystone homography's rows (xyz), the first's w its unit in pixels; the second's
     /// w is 1 while there is one.
     persp: [[f32; 4]; 3],
+    /// The working space's luminance weights (xyz); w = 1 for the wide working space.
+    luma_w: [f32; 4],
+    /// Working → output linear RGB, rows (xyz); [0].w = the output's gamma (0 for the
+    /// sRGB curve), [1].w = 1 when the output's primaries are not the working space's.
+    out_m: [[f32; 4]; 3],
 }
 
 pub struct LoadedImage {
@@ -1663,7 +1668,17 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
     ) -> Result<ExportedImage> {
-        let (width, height, rgba) = self.render_export(device, queue, stack, false)?;
+        self.export_8(device, queue, stack, crate::gamut::OutputSpace::Srgb)
+    }
+
+    fn export_8(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        space: crate::gamut::OutputSpace,
+    ) -> Result<ExportedImage> {
+        let (width, height, rgba) = self.render_export(device, queue, stack, false, space)?;
         Ok(ExportedImage {
             width,
             height,
@@ -1679,7 +1694,17 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
     ) -> Result<ExportedImage<u16>> {
-        let (width, height, halves) = self.render_export(device, queue, stack, true)?;
+        self.export_16_in(device, queue, stack, crate::gamut::OutputSpace::Srgb)
+    }
+
+    fn export_16_in(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        space: crate::gamut::OutputSpace,
+    ) -> Result<ExportedImage<u16>> {
+        let (width, height, halves) = self.render_export(device, queue, stack, true, space)?;
         let rgba = halves
             .chunks_exact(2)
             .map(|h| {
@@ -1702,10 +1727,22 @@ impl Engine {
         stack: &PhotoStack,
         depth: crate::export::BitDepth,
     ) -> Result<crate::export::Exported> {
+        self.export_in(device, queue, stack, depth, crate::gamut::OutputSpace::Srgb)
+    }
+
+    /// [`Self::export_at`], written in `space` (W-09): what the file's ICC profile says.
+    pub fn export_in(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        depth: crate::export::BitDepth,
+        space: crate::gamut::OutputSpace,
+    ) -> Result<crate::export::Exported> {
         use crate::export::{BitDepth, Exported};
         Ok(match depth {
-            BitDepth::Eight => Exported::Eight(self.export(device, queue, stack)?),
-            BitDepth::Sixteen => Exported::Sixteen(self.export_16(device, queue, stack)?),
+            BitDepth::Eight => Exported::Eight(self.export_8(device, queue, stack, space)?),
+            BitDepth::Sixteen => Exported::Sixteen(self.export_16_in(device, queue, stack, space)?),
         })
     }
 
@@ -1717,6 +1754,7 @@ impl Engine {
         queue: &wgpu::Queue,
         stack: &PhotoStack,
         deep: bool,
+        space: crate::gamut::OutputSpace,
     ) -> Result<(u32, u32, Vec<u8>)> {
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
@@ -1739,7 +1777,7 @@ impl Engine {
         };
         let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
-        self.write_uniforms(queue, stack, None, sizes, true, !deep);
+        self.write_uniforms(queue, stack, None, sizes, true, !deep, space);
 
         let Some(image) = &self.image else {
             bail!("no image is loaded");
@@ -1892,6 +1930,8 @@ impl Engine {
             (out_size, target, level, base),
             false,
             true,
+            // The screen is taken to be sRGB until W-14.
+            crate::gamut::OutputSpace::Srgb,
         );
         let Some(image) = &self.image else { return };
 
@@ -1962,6 +2002,7 @@ impl Engine {
     /// Everything a pass needs, into the one uniform buffer, plus the curve LUT if it
     /// changed. `out_size` is the full-resolution frame after right-angle turns, `target`
     /// the render target's size and `level` the sensor mip to sample.
+    #[allow(clippy::too_many_arguments)]
     fn write_uniforms(
         &mut self,
         queue: &wgpu::Queue,
@@ -1970,6 +2011,7 @@ impl Engine {
         (out_size, target, level, base): ((u32, u32), (u32, u32), u32, u32),
         for_export: bool,
         dither: bool,
+        space: crate::gamut::OutputSpace,
     ) {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
@@ -2011,7 +2053,18 @@ impl Engine {
 
         let g = stack.geometry;
         let wb = stack.white_balance.params;
-        let m = image.cam_to_srgb;
+        // Camera → working space, and working → output (W-09).
+        let working = stack.working_space.primaries();
+        let m = match stack.working_space {
+            crate::gamut::WorkingSpace::Srgb => image.cam_to_srgb,
+            crate::gamut::WorkingSpace::Rec2020 => crate::gamut::compose(
+                &crate::gamut::convert(&crate::gamut::SRGB, &working),
+                &image.cam_to_srgb,
+            ),
+        };
+        let output = space.primaries();
+        let to_out = crate::gamut::convert(&working, &output);
+        let luma_w = crate::gamut::luminance(&working);
         let f = stack.filmic.params;
         let cb = stack.color_balance.params;
 
@@ -2189,6 +2242,27 @@ impl Engine {
                     ],
                     None => [[0.0; 4]; 3],
                 },
+                luma_w: [
+                    luma_w[0],
+                    luma_w[1],
+                    luma_w[2],
+                    f32::from(stack.working_space == crate::gamut::WorkingSpace::Rec2020),
+                ],
+                out_m: [
+                    [
+                        to_out[0][0],
+                        to_out[0][1],
+                        to_out[0][2],
+                        space.gamma().unwrap_or(0.0),
+                    ],
+                    [
+                        to_out[1][0],
+                        to_out[1][1],
+                        to_out[1][2],
+                        f32::from(working != output),
+                    ],
+                    [to_out[2][0], to_out[2][1], to_out[2][2], 0.0],
+                ],
             }),
         );
     }
@@ -3357,6 +3431,8 @@ mod uniform_layout_tests {
             ("mask_info", std::mem::offset_of!(AdjustUniforms, mask_info)),
             ("spots", std::mem::offset_of!(AdjustUniforms, spots)),
             ("persp", std::mem::offset_of!(AdjustUniforms, persp)),
+            ("luma_w", std::mem::offset_of!(AdjustUniforms, luma_w)),
+            ("out_m", std::mem::offset_of!(AdjustUniforms, out_m)),
         ];
         assert_eq!(members.len(), rust.len(), "a member on one side only");
         for (m, (name, offset)) in members.iter().zip(rust) {

@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 /// The profile's bytes, built once.
 pub fn srgb_profile() -> &'static [u8] {
     static PROFILE: OnceLock<Vec<u8>> = OnceLock::new();
-    PROFILE.get_or_init(|| build("sRGB (Duckfoot)", SRGB_D50))
+    PROFILE.get_or_init(|| build("sRGB (Duckfoot)", SRGB_D50, None))
 }
 
 /// Display P3 (DCI-P3 primaries, D65 white, the sRGB curve), as phones shoot it. The
@@ -27,6 +27,25 @@ pub fn display_p3_profile() -> &'static [u8] {
                 [0.291965, 0.692245, 0.041885],
                 [0.157153, 0.066562, 0.784073],
             ],
+            None,
+        )
+    })
+}
+
+/// The Adobe RGB (1998) primaries and white with its 2.2 (563/256) gamma, adapted to D50
+/// with Bradford as Adobe's own profile has them. Named as compatible with it: the
+/// encoding is Adobe's published specification, the profile is built here.
+pub fn adobe_rgb_profile() -> &'static [u8] {
+    static PROFILE: OnceLock<Vec<u8>> = OnceLock::new();
+    PROFILE.get_or_init(|| {
+        build(
+            "Compatible with Adobe RGB (1998) (Duckfoot)",
+            [
+                [0.609741, 0.311111, 0.019470],
+                [0.205276, 0.625671, 0.060867],
+                [0.149185, 0.063217, 0.744568],
+            ],
+            Some(563.0 / 256.0),
         )
     })
 }
@@ -65,16 +84,26 @@ fn mluc(text: &str) -> Vec<u8> {
 }
 
 /// A matrix/TRC display profile: `colorants` are the red, green and blue primaries' D50
-/// XYZ, and every channel takes the sRGB curve.
-fn build(description: &str, colorants: [[f64; 3]; 3]) -> Vec<u8> {
+/// XYZ, and every channel takes the sRGB curve, or the pure power `gamma`.
+fn build(description: &str, colorants: [[f64; 3]; 3], gamma: Option<f64>) -> Vec<u8> {
     // D50, the profile connection space's white.
     const D50: (f64, f64, f64) = (0.9642, 1.0, 0.8249);
-    // The sRGB curve: Y = (aX + b)^g for X >= d, else cX.
     let mut para = b"para\0\0\0\0".to_vec();
-    para.extend_from_slice(&3u16.to_be_bytes());
-    para.extend_from_slice(&[0, 0]);
-    for v in [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045] {
-        para.extend_from_slice(&fixed(v));
+    match gamma {
+        // Y = X^g.
+        Some(g) => {
+            para.extend_from_slice(&0u16.to_be_bytes());
+            para.extend_from_slice(&[0, 0]);
+            para.extend_from_slice(&fixed(g));
+        }
+        // The sRGB curve: Y = (aX + b)^g for X >= d, else cX.
+        None => {
+            para.extend_from_slice(&3u16.to_be_bytes());
+            para.extend_from_slice(&[0, 0]);
+            for v in [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045] {
+                para.extend_from_slice(&fixed(v));
+            }
+        }
     }
     // Bradford D65 → D50: what the viewer undoes to get back to the display's white.
     let mut chad = b"sf32\0\0\0\0".to_vec();
@@ -404,6 +433,19 @@ mod tests {
         for row in p.to_srgb {
             assert!((row.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn adobe_rgb_reads_back_with_its_primaries_and_gamma() {
+        let p = MatrixTrc::parse(adobe_rgb_profile()).expect("parse");
+        assert!(!p.is_srgb());
+        // Its green is wider than sRGB's; its red and blue are sRGB's.
+        let want = crate::gamut::convert(&crate::gamut::ADOBE_RGB, &crate::gamut::SRGB);
+        for (got, want) in p.to_srgb.iter().flatten().zip(want.iter().flatten()) {
+            assert!((got - want).abs() < 2e-3, "{:?}", p.to_srgb);
+        }
+        let mid = p.curves[1].eval(0.5);
+        assert!((mid - 0.5f32.powf(563.0 / 256.0)).abs() < 1e-3, "{mid}");
     }
 
     #[test]

@@ -666,6 +666,10 @@ pub struct PhotoStack {
     pub tone_curve: Module<Vec<CurveNode>>,
     #[serde(default = "CurveDomain::legacy")]
     pub curve_domain: CurveDomain,
+    /// Where the adjust pass works (W-09). A sidecar without it was made in linear sRGB
+    /// and keeps it, so its look does not change; every new edit is wide.
+    #[serde(default = "crate::gamut::WorkingSpace::legacy")]
+    pub working_space: crate::gamut::WorkingSpace,
     pub filmic: Module<Filmic>,
     pub color_balance: Module<ColorBalance>,
     #[serde(default)]
@@ -705,6 +709,7 @@ impl Default for PhotoStack {
             tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
             curve_domain: CurveDomain::Display,
+            working_space: crate::gamut::WorkingSpace::Rec2020,
             filmic: Module::new(
                 false,
                 Filmic {
@@ -1096,9 +1101,15 @@ mod tests {
     fn curves_saved_before_the_display_domain_stay_linear() {
         let mut json = serde_json::to_value(PhotoStack::default()).unwrap();
         json.as_object_mut().unwrap().remove("curve_domain");
+        json.as_object_mut().unwrap().remove("working_space");
         let old: PhotoStack = serde_json::from_value(json).unwrap();
         assert_eq!(old.curve_domain, CurveDomain::Linear);
         assert_eq!(PhotoStack::default().curve_domain, CurveDomain::Display);
+        assert_eq!(old.working_space, crate::gamut::WorkingSpace::Srgb);
+        assert_eq!(
+            PhotoStack::default().working_space,
+            crate::gamut::WorkingSpace::Rec2020
+        );
     }
 
     #[test]

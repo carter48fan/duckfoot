@@ -135,6 +135,9 @@ pub(crate) fn describe_change(a: &PhotoStack, b: &PhotoStack) -> String {
     if ga.crop != gb.crop {
         names.push("crop".into());
     }
+    if a.working_space != b.working_space {
+        names.push("colour space".into());
+    }
     names.extend(PIPELINE_MODULES.iter().filter_map(|id| id.describe(a, b)));
 
     match names.len() {
@@ -158,7 +161,9 @@ mod tests {
         for key in json.as_object().unwrap().keys() {
             let covered = PIPELINE_FIELDS.contains(&key.as_str())
                 || key == "geometry"
-                || key == "curve_domain";
+                || key == "curve_domain"
+                // Not a module: the space every module works in (W-09).
+                || key == "working_space";
             assert!(covered, "PhotoStack::{key} has no row in the module table");
         }
         assert_eq!(PIPELINE_FIELDS.len(), PIPELINE_MODULES.len());
