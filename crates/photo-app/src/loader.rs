@@ -65,6 +65,12 @@ pub enum Done {
     },
     /// A folder's folders, for the folder browser.
     Subfolders { dir: PathBuf, subs: Vec<PathBuf> },
+    /// The library's photos once `deleted` are gone, and what could not be deleted.
+    Library {
+        entries: Vec<crate::dam::storage::LibraryEntry>,
+        deleted: usize,
+        failed: Vec<String>,
+    },
     Thumbnail {
         path: PathBuf,
         /// `None` if nothing could be built; the request is still answered, so the UI
@@ -102,6 +108,11 @@ pub enum FileJob {
         depth: u32,
     },
     Subfolders(PathBuf),
+    /// The phone's library of copies: delete these, then read what is left.
+    Library {
+        dir: PathBuf,
+        delete: Vec<PathBuf>,
+    },
 }
 
 pub struct Loader {
@@ -209,6 +220,28 @@ impl Loader {
                                 subs: crate::dam::FolderTree::list_subfolders(&dir),
                                 dir,
                             },
+                            FileJob::Library { dir, delete } => {
+                                let mut failed = Vec::new();
+                                let mut deleted = 0;
+                                let before = if delete.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    crate::dam::storage::list(&dir)
+                                };
+                                for entry in before.iter().filter(|e| delete.contains(&e.path)) {
+                                    match crate::dam::storage::delete(entry) {
+                                        Ok(()) => deleted += 1,
+                                        Err(e) => {
+                                            failed.push(format!("{}: {e}", entry.path.display()))
+                                        }
+                                    }
+                                }
+                                Done::Library {
+                                    entries: crate::dam::storage::list(&dir),
+                                    deleted,
+                                    failed,
+                                }
+                            }
                         };
                         let _ = done_tx.send(done);
                         wake(&repaint);

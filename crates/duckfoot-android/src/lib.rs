@@ -336,6 +336,10 @@ impl Platform for AndroidPlatform {
         Some(self.pictures.clone())
     }
 
+    fn library_dir(&self) -> Option<PathBuf> {
+        Some(self.library.clone())
+    }
+
     fn settings_dir(&self) -> Option<PathBuf> {
         // Private to the app, like the library it sits beside.
         self.library.parent().map(|p| p.join("settings"))

@@ -2461,3 +2461,89 @@ fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
     assert_eq!(data.metadata.color_label.as_deref(), Some("green"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A phone's platform: photos picked are copied into a library of the app's own.
+struct LibraryPlatform(PathBuf);
+
+impl Platform for LibraryPlatform {
+    fn request(&mut self, _request: Request) {}
+    fn poll(&mut self) -> Vec<Response> {
+        Vec::new()
+    }
+    fn library_dir(&self) -> Option<PathBuf> {
+        Some(self.0.clone())
+    }
+}
+
+/// Frames until the Library screen has read the library.
+fn storage_read(h: &Headless, app: &mut PhotoApp) -> Vec<PathBuf> {
+    let started = Instant::now();
+    loop {
+        h.frame(app, Default::default());
+        if let Some(entries) = app.storage.as_ref().and_then(|v| v.entries.as_ref()) {
+            return entries.iter().map(|e| e.path.clone()).collect();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the library was never read"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn the_library_lists_its_copies_and_deletes_them_but_not_the_open_one() {
+    let dir = scratch_dir("library-storage");
+    let library = dir.join("library");
+    std::fs::create_dir_all(library.join("Camera")).unwrap();
+    let (a, b, c) = (
+        library.join("a.dng"),
+        library.join("Camera/b.dng"),
+        library.join("c.dng"),
+    );
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    write_dng(&c, 320, 214);
+    let h = Headless::new();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(LibraryPlatform(library.clone())));
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.open_path(&h.gpu(), b.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    app.edit(|s| s.exposure.params.ev = 0.5);
+    app.make_virtual_copy(&h.gpu(), &b);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.open_path(&h.gpu(), a.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(photo_engine::find_sidecar(&b).is_some());
+
+    app.open_storage();
+    let mut listed = storage_read(&h, &mut app);
+    listed.sort();
+    assert_eq!(listed, [b.clone(), a.clone(), c.clone()]);
+    // Laid out without overlaps, upright and on the narrowest phone.
+    app.compact_tab = Some(Tab::Library);
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        let found = overlapping_controls(&h, &mut app, size);
+        assert!(found.is_empty(), "library storage {size:?}: {found:?}");
+    }
+
+    // b goes with its sidecars and its copy; the open photo stays, however asked.
+    app.delete_copies(&[a.clone(), b.clone()]);
+    let listed = storage_read(&h, &mut app);
+    assert!(!b.exists());
+    assert!(photo_engine::find_sidecar(&b).is_none());
+    assert!(photo_engine::find_sidecar(&library.join("Camera/b (v2).dng")).is_none());
+    assert!(a.exists(), "the open photo is kept");
+    let mut listed = listed;
+    listed.sort();
+    assert_eq!(listed, [a.clone(), c.clone()]);
+    let shelved: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(
+        shelved,
+        std::slice::from_ref(&a),
+        "b and its copy left the shelf"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
