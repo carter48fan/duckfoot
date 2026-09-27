@@ -103,6 +103,7 @@ pub enum InspectorSectionId {
     Sharpen,
     Vignette,
     Local,
+    Heal,
 }
 
 impl InspectorSectionId {
@@ -125,6 +126,7 @@ impl InspectorSectionId {
             Self::Sharpen,
             Self::Vignette,
             Self::Local,
+            Self::Heal,
         ]
     }
 }
@@ -467,6 +469,20 @@ pub struct PhotoApp {
     pub brush: BrushTool,
     /// A brush stroke in progress: where its last dab went (sensor, 0..1).
     painting: Option<[f32; 2]>,
+    /// Spot heal (W-02): a tap on the photo heals a spot there.
+    pub healing: bool,
+    /// The spot whose source is shown and can be moved.
+    pub selected_spot: Option<usize>,
+    /// A new spot's radius, percent of the long side.
+    pub spot_size: f32,
+    /// The preview as its finest detail, so dust shows.
+    pub dust_view: bool,
+    /// A spot to add once its source is found: where, and how big (sensor, long side).
+    pending_spot: Option<([f32; 2], f32)>,
+    /// A spot circle being dragged: its source's (true) or its own, from where, as it was.
+    spot_drag: Option<(bool, egui::Pos2, photo_engine::heal::Spot)>,
+    /// What the engine is showing, to notice a change.
+    shown_dust: bool,
     /// The user's own presets, as their files say (W-04).
     pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
     /// The name being typed for a preset about to be saved.
@@ -678,6 +694,13 @@ impl PhotoApp {
             shown_mask: None,
             brush: BrushTool::default(),
             painting: None,
+            healing: false,
+            selected_spot: None,
+            spot_size: 1.5,
+            dust_view: false,
+            pending_spot: None,
+            spot_drag: None,
+            shown_dust: false,
             user_presets: Vec::new(),
             preset_draft: None,
             exporting_preset: None,
@@ -1123,6 +1146,34 @@ impl PhotoApp {
             self.engine.set_mask_overlay(shown);
             self.shown_mask = shown;
             self.needs_render = true;
+        }
+        if self.dust_view != self.shown_dust {
+            self.engine.set_dust_view(self.dust_view);
+            self.shown_dust = self.dust_view;
+            self.needs_render = true;
+        }
+        if self
+            .selected_spot
+            .is_some_and(|i| i >= self.stack.heal.params.spots.len())
+        {
+            self.selected_spot = None;
+        }
+        // A tapped spot: its source found on the GPU's copy of the sensor, then one edit.
+        if let Some((dst, radius)) = self.pending_spot.take() {
+            match self.engine.heal_source(gpu.device, gpu.queue, dst, radius) {
+                Ok(src) => {
+                    self.history.checkpoint(&self.stack);
+                    self.stack.heal.enabled = true;
+                    self.stack
+                        .heal
+                        .params
+                        .spots
+                        .push(photo_engine::heal::Spot::new(dst, src, radius));
+                    self.selected_spot = Some(self.stack.heal.params.spots.len() - 1);
+                    self.needs_render = true;
+                }
+                Err(e) => self.error = Some(format!("Could not heal there: {e:#}")),
+            }
         }
 
         // The clipping overlay, toggled or held: a texture of its own, registered in place

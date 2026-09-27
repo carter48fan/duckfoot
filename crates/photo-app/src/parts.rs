@@ -645,13 +645,22 @@ pub(crate) fn hud_badge(
     colour: Color32,
     border: Color32,
 ) {
-    let galley = painter.layout_no_wrap(
+    // Wrapped to the view it sits in, so a long hint on a phone takes two lines instead of
+    // running off both edges.
+    let room = (painter.clip_rect().width() - 32.0).max(80.0);
+    let galley = painter.layout(
         text.to_owned(),
         FontId::new(11.0, theme::mono_bold()),
         colour,
+        room,
     );
     let size = galley.size() + vec2(16.0, 8.0);
-    let rect = align.anchor_size(anchor, size);
+    let mut rect = align.anchor_size(anchor, size);
+    let clip = painter.clip_rect().shrink(8.0);
+    if rect.width() <= clip.width() {
+        let dx = (clip.left() - rect.left()).max(0.0) + (clip.right() - rect.right()).min(0.0);
+        rect = rect.translate(vec2(dx, 0.0));
+    }
     painter.rect(
         rect,
         3.0,

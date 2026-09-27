@@ -121,8 +121,10 @@ struct AdjustUniforms {
     warp_vig: [f32; 4],
     /// Local masks, four vec4 each: see `adjust.wgsl`'s `masks`.
     masks: [[f32; 4]; 32],
-    /// Masks in use, and 1 + the one shown as an overlay (0 for none).
+    /// Masks in use, 1 + the one shown as an overlay (0 for none), the dust view, spots.
     mask_info: [u32; 4],
+    /// Heal spots, two vec4 each: see `adjust.wgsl`'s `spots`.
+    spots: [[f32; 4]; 64],
 }
 
 pub struct LoadedImage {
@@ -387,6 +389,8 @@ pub struct Engine {
     clip_overlay: bool,
     /// See [`Engine::set_mask_overlay`].
     mask_overlay: Option<usize>,
+    /// See [`Engine::set_dust_view`].
+    dust_view: bool,
     mip_bgl: wgpu::BindGroupLayout,
     denoise_pipeline: wgpu::RenderPipeline,
     denoise_bgl: wgpu::BindGroupLayout,
@@ -1020,7 +1024,14 @@ impl Engine {
             clip_bgl,
             clip_overlay: false,
             mask_overlay: None,
+            dust_view: false,
         }
+    }
+
+    /// Show the preview as its finest detail alone, so sensor dust stands out. Never in an
+    /// export.
+    pub fn set_dust_view(&mut self, on: bool) {
+        self.dust_view = on;
     }
 
     /// Wash local mask `index` (of the stack's masks) red on the preview, to show where it
@@ -1904,6 +1915,11 @@ impl Engine {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
         let warp = image.warp_for(stack);
+        let spots = spot_uniforms(
+            stack,
+            (image.sensor_width, image.sensor_height),
+            image.mip_levels,
+        );
         let masks = mask_uniforms(
             stack,
             (image.sensor_width, image.sensor_height),
@@ -2099,7 +2115,13 @@ impl Engine {
                     .and_then(|w| w.vignetting)
                     .map_or([0.0; 4], |(k, unit)| [k[0], k[1], k[2], unit]),
                 masks: masks.0,
-                mask_info: [masks.1, if for_export { 0 } else { masks.2 }, 0, 0],
+                mask_info: [
+                    masks.1,
+                    if for_export { 0 } else { masks.2 },
+                    u32::from(self.dust_view && !for_export),
+                    spots.1,
+                ],
+                spots: spots.0,
             }),
         );
     }
@@ -2434,6 +2456,45 @@ pub(crate) fn read_back_level(
         y += rows;
     }
     Ok(out)
+}
+
+/// Sensor texels and the grid they form (width, height).
+type Overview = (Vec<[f32; 4]>, (u32, u32));
+
+/// The heal spots, packed for the shader, and how many.
+fn spot_uniforms(stack: &PhotoStack, sensor: (u32, u32), mip_levels: u32) -> ([[f32; 4]; 64], u32) {
+    let mut out = [[0.0f32; 4]; 64];
+    if !stack.heal.enabled {
+        return (out, 0);
+    }
+    let (w, h) = (sensor.0 as f32, sensor.1 as f32);
+    let long = w.max(h);
+    let mut n = 0;
+    for spot in stack.heal.params.spots.iter().take(crate::heal::MAX_SPOTS) {
+        let r = (spot.radius * long).max(1.0);
+        // The ring is measured where a texel is about half the spot's radius.
+        let level = (r * 0.5)
+            .max(1.0)
+            .log2()
+            .clamp(0.0, mip_levels.saturating_sub(1) as f32);
+        out[n * 2] = [
+            spot.dst[0] * w,
+            spot.dst[1] * h,
+            spot.src[0] * w,
+            spot.src[1] * h,
+        ];
+        out[n * 2 + 1] = [
+            r,
+            spot.feather.clamp(0.01, 1.0),
+            match spot.mode {
+                crate::heal::Mode::Heal => 0.0,
+                crate::heal::Mode::Clone => 1.0,
+            },
+            level,
+        ];
+        n += 1;
+    }
+    (out, n as u32)
 }
 
 /// The masks that are on, packed for the shader, how many, and 1 + the shown one's slot.
@@ -2801,6 +2862,16 @@ impl Engine {
         queue: &wgpu::Queue,
         side: u32,
     ) -> Result<Vec<[f32; 4]>> {
+        Ok(self.sensor_overview_sized(device, queue, side)?.0)
+    }
+
+    /// [`Self::sensor_overview`], and its size.
+    fn sensor_overview_sized(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        side: u32,
+    ) -> Result<Overview> {
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
@@ -2810,8 +2881,31 @@ impl Engine {
         {
             level += 1;
         }
-        let (w, h) = scaled(image.sensor_width, image.sensor_height, level);
-        self.sensor_texels(device, queue, level, (0, 0, w, h))
+        // Mip sizes round down; rounding up would read a texel past an odd sensor's edge.
+        let (w, h) = (
+            (image.sensor_width >> level).max(1),
+            (image.sensor_height >> level).max(1),
+        );
+        Ok((
+            self.sensor_texels(device, queue, level, (0, 0, w, h))?,
+            (w, h),
+        ))
+    }
+
+    /// Where to take a heal spot's patch from, for a spot at `dst` of `radius` (sensor
+    /// coordinates, long-side fraction): see `heal::find_source`. A one-shot read, as the
+    /// eyedropper's is.
+    pub fn heal_source(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        dst: [f32; 2],
+        radius: f32,
+    ) -> Result<[f32; 2]> {
+        // Fine enough that the spot is several texels across, and no finer.
+        let side = (12.0 / radius.max(1e-3)).clamp(256.0, 1024.0) as u32;
+        let (texels, size) = self.sensor_overview_sized(device, queue, side)?;
+        Ok(crate::heal::find_source(&texels, size, dst, radius))
     }
 
     /// The white balance that makes the 5×5 patch around `point` (0..1 of the turned,

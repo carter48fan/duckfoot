@@ -113,6 +113,7 @@ module_table! {
     Sharpen => sharpen, "sharpen", "sharpen";
     Vignette => vignette, "vignette", "vignette";
     Local => local, "local adjustments", "local";
+    Heal => heal, "spot heal", "heal";
 }
 
 /// What changed between two adjacent undo states, for the History list.

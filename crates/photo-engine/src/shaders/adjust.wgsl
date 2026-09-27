@@ -60,7 +60,11 @@ struct Adjust {
     //   the second's w = kind (0 linear, 1 radial, 2 brush) + 4 if inverted
     //   exposure (EV), temperature, tint, contrast; saturation, clarity, sharpness, 0
     masks:      array<vec4<f32>, 32>,
-    mask_info:  vec4<u32>,   // x = masks in use, y = 1 + the mask shown as an overlay, or 0
+    mask_info:  vec4<u32>,   // x = masks in use, y = 1 + the mask shown as an overlay, or 0,
+                             // z = 1 for the dust view, w = heal spots in use
+    // Spot heal (W-02), two vec4 each: destination xy, source xy (sensor px); radius (px),
+    // feather, mode (0 heal, 1 clone), the sensor level its surroundings are measured at.
+    spots:      array<vec4<f32>, 64>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -77,6 +81,7 @@ const FLAG_DEHAZE:   u32 = 1024u;
 const FLAG_COLOR_EQ: u32 = 2048u;
 const FLAG_LENS:     u32 = 4096u;
 const FLAG_LOCAL:    u32 = 16384u;
+const FLAG_HEAL:     u32 = 32768u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -334,6 +339,43 @@ fn file_warp_on() -> bool {
     return u.warp_c.w > 0.5;
 }
 
+// The mean of the sensor in a ring just outside a spot of radius `r` about `c` (px), at
+// sensor level `level`: what heal matches a patch's tone to.
+fn ring_mean(c: vec2<f32>, r: f32, level: f32) -> vec4<f32> {
+    var sum = vec4<f32>(0.0);
+    for (var k = 0; k < 8; k = k + 1) {
+        let a = f32(k) * 0.785398;
+        sum += tap((c + vec2<f32>(cos(a), sin(a)) * r * 1.25) / u.sizes.zw, level);
+    }
+    return sum * 0.125;
+}
+
+// The sensor at `p` (px) with every heal spot over it applied: inside a spot, its source's
+// pixel, shifted (heal) by how the ground around the destination differs from the ground
+// around the source, and faded out over the spot's feather.
+fn spot_sample(p: vec2<f32>, lod: f32) -> vec4<f32> {
+    var s = tap(p / u.sizes.zw, lod);
+    if (!enabled(FLAG_HEAL)) {
+        return s;
+    }
+    for (var i = 0u; i < min(u.mask_info.w, 32u); i = i + 1u) {
+        let a = u.spots[i * 2u];
+        let b = u.spots[i * 2u + 1u];
+        let d = length(p - a.xy) / b.x;
+        if (d >= 1.0) {
+            continue;
+        }
+        let w = 1.0 - smoothstep(1.0 - b.y, 1.0, d);
+        var taken = tap((p - a.xy + a.zw) / u.sizes.zw, lod);
+        if (b.z < 0.5) {
+            let level = max(b.w, lod);
+            taken = max(taken + ring_mean(a.xy, b.x, level) - ring_mean(a.zw, b.x, level), vec4<f32>(0.0));
+        }
+        s = mix(s, taken, w);
+    }
+    return s;
+}
+
 // Lateral chromatic aberration: the lens images red and blue at slightly different sizes
 // from green. Each is sampled from where its own size put it, about the optical axis: the
 // manual scale, then the file's own polynomial for that plane.
@@ -349,8 +391,8 @@ fn lens_ca(s: vec4<f32>, ideal: vec2<f32>, lod: f32) -> vec4<f32> {
         at_r = file_warp(at_r, 0u);
         at_b = file_warp(at_b, 2u);
     }
-    let red = tap(at_r / u.sizes.zw, lod).r;
-    let blue = tap(at_b / u.sizes.zw, lod).b;
+    let red = spot_sample(at_r, lod).r;
+    let blue = spot_sample(at_b, lod).b;
     return vec4<f32>(red, s.g, blue, s.a);
 }
 
@@ -667,7 +709,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Sampled rather than loaded, because straightening lands between texels. With no
     // straighten the coordinates fall on texel centres and this is exact.
     let uv = src / u.sizes.zw;
-    var s = tap(uv, lod);
+    var s = spot_sample(src, lod);
     if ((enabled(FLAG_LENS) && (u.lens.z != 1.0 || u.lens.w != 1.0)) || file_warp_on()) {
         s = lens_ca(s, ideal, lod);
     }
@@ -706,11 +748,12 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         // this level's scale and scaled back by 4^-L, which is exact at 1:1 and faithful
         // at fit, where sharpening is correctly all but invisible.
         // All four channels: the neutral in `a` is part of the pixel's light too.
-        let step = exp2(lod) / u.sizes.zw;
-        let s_up = tap(uv - vec2<f32>(0.0, step.y), lod);
-        let s_dn = tap(uv + vec2<f32>(0.0, step.y), lod);
-        let s_lf = tap(uv - vec2<f32>(step.x, 0.0), lod);
-        let s_rt = tap(uv + vec2<f32>(step.x, 0.0), lod);
+        // Through the heal spots too, or a healed spot's edge would read as detail.
+        let step = exp2(lod);
+        let s_up = spot_sample(src - vec2<f32>(0.0, step), lod);
+        let s_dn = spot_sample(src + vec2<f32>(0.0, step), lod);
+        let s_lf = spot_sample(src - vec2<f32>(step, 0.0), lod);
+        let s_rt = spot_sample(src + vec2<f32>(step, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
     }
@@ -844,6 +887,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let rad = max(u.vignette.y, 0.05);
         let v_falloff = smoothstep(rad * 0.4, rad, dist);
         c = c * max(1.0 + u.vignette.x * v_falloff, 0.0);
+    }
+
+    // The dust view (preview only): the finest detail alone, as grey, so specks from a dirty
+    // sensor stand out against a sky.
+    if (u.mask_info.z == 1u) {
+        let fine = max(luma(scene(s, wb)), 1e-4);
+        let around = max(luma(scene(blurred(uv, lod + 2.0), wb)), 1e-4);
+        let hp = clamp(0.5 + log2(fine / around) * 1.5, 0.0, 1.0);
+        return vec4<f32>(vec3<f32>(hp), 1.0);
     }
 
     // The shown mask, as a red wash where it applies (preview only: export sends 0).

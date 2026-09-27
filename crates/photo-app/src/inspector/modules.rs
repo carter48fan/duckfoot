@@ -774,6 +774,104 @@ impl PhotoApp {
                     ));
                 }
             }
+            InspectorSectionId::Heal => {
+                use photo_engine::heal::{Mode, MAX_SPOTS};
+                let n = self.stack.heal.params.spots.len();
+                ui.horizontal_wrapped(|ui| {
+                    let tip = if self.healing {
+                        "Stop healing (Esc)"
+                    } else {
+                        "Tap or click a spot on the photo to heal it"
+                    };
+                    if widgets::chip_enabled(
+                        ui,
+                        self.ready_image().is_some(),
+                        self.healing,
+                        "heal spots",
+                    )
+                    .on_hover_text(tip)
+                    .clicked()
+                    {
+                        self.healing = !self.healing;
+                        if self.healing {
+                            self.selected_mask = None;
+                            if self.cropping {
+                                self.cancel_crop();
+                            }
+                        } else {
+                            self.selected_spot = None;
+                        }
+                    }
+                    if widgets::chip(ui, self.dust_view, "dust view")
+                        .on_hover_text(
+                            "Show only the finest detail, so dust on the sensor stands out",
+                        )
+                        .clicked()
+                    {
+                        self.dust_view = !self.dust_view;
+                    }
+                });
+                if self.healing {
+                    widgets::param_slider(ui, "spot size", &mut self.spot_size, 0.3..=8.0, 1, 1.5);
+                    if n >= MAX_SPOTS {
+                        ui.label(theme::dim(format!("All {MAX_SPOTS} spots are used.")).size(11.5));
+                    }
+                }
+                if let Some(i) = self.selected_spot {
+                    let spot = &mut self.stack.heal.params.spots[i];
+                    ui.label(theme::dim(format!("spot {} of {n}", i + 1)).size(11.5));
+                    let mut size = spot.radius * 100.0;
+                    let r = widgets::param_slider(ui, "size", &mut size, 0.1..=10.0, 1, 1.5);
+                    if r.changed() {
+                        spot.radius = size / 100.0;
+                    }
+                    track!(r);
+                    let mut feather = spot.feather * 100.0;
+                    let r =
+                        widgets::param_slider(ui, "feather", &mut feather, 1.0..=100.0, 0, 40.0);
+                    if r.changed() {
+                        spot.feather = feather / 100.0;
+                    }
+                    track!(r);
+                    let mode = spot.mode;
+                    let mut set_mode = None;
+                    let mut delete = false;
+                    ui.horizontal_wrapped(|ui| {
+                        if widgets::chip(ui, mode == Mode::Heal, "heal")
+                            .on_hover_text("Cover it, matched to the tone around it")
+                            .clicked()
+                        {
+                            set_mode = Some(Mode::Heal);
+                        }
+                        if widgets::chip(ui, mode == Mode::Clone, "clone")
+                            .on_hover_text("Cover it with the source exactly as it is")
+                            .clicked()
+                        {
+                            set_mode = Some(Mode::Clone);
+                        }
+                        if widgets::chip(ui, false, "delete").clicked() {
+                            delete = true;
+                        }
+                    });
+                    if let Some(m) = set_mode {
+                        self.stack.heal.params.spots[i].mode = m;
+                        discrete!();
+                    }
+                    if delete {
+                        self.stack.heal.params.spots.remove(i);
+                        self.selected_spot = None;
+                        discrete!();
+                    }
+                } else if n > 0 {
+                    ui.label(
+                        theme::dim(format!(
+                            "{n} spot{} healed. Heal spots, then tap one to move its source.",
+                            if n == 1 { "" } else { "s" }
+                        ))
+                        .size(11.5),
+                    );
+                }
+            }
             InspectorSectionId::Local => {
                 use photo_engine::local::{Mask, Shape, MAX_MASKS};
                 let n = self.stack.local.params.masks.len();
