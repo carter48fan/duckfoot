@@ -146,6 +146,26 @@ impl RasterImage {
 }
 
 /// Decode standard raster image formats into linear camera space.
+/// The most pixels a photo may have: past every camera (a 150 MP medium format is the
+/// largest in common use), short of what a hostile file's header can claim.
+pub const MAX_PIXELS: u64 = 250_000_000;
+
+/// Refuse a photo too large to open, from its header, before its pixels are allocated.
+pub fn check_pixels(width: u64, height: u64) -> Result<()> {
+    if width == 0 || height == 0 {
+        bail!("the file says its image is {width} × {height}");
+    }
+    let pixels = width.saturating_mul(height);
+    if pixels > MAX_PIXELS {
+        bail!(
+            "{width} × {height} is {} MP, more than the {} MP this opens",
+            pixels / 1_000_000,
+            MAX_PIXELS / 1_000_000
+        );
+    }
+    Ok(())
+}
+
 pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
     use image::ImageDecoder;
     use rayon::prelude::*;
@@ -155,6 +175,8 @@ pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
         .context("reading raster image format")?
         .into_decoder()
         .context("decoding raster image format")?;
+    let (w, h) = decoder.dimensions();
+    check_pixels(u64::from(w), u64::from(h))?;
     // A profile that cannot be read is sRGB's fault-tolerant default, as every browser
     // treats it; one that is sRGB takes the fast path below.
     let profile = decoder
@@ -296,6 +318,10 @@ impl RawDecoder for RawlerBackend {
 }
 
 fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
+    // What the file says it holds, before anything is allocated for it.
+    if let Some((w, h)) = dng::largest_image(source.buf()) {
+        check_pixels(w, h)?;
+    }
     let mut img = decode_reader_rawler(source)?;
     with_dng_opcodes(&mut img, source.buf());
     Ok(with_dng_colour(img, source.buf()))
@@ -395,6 +421,9 @@ fn both_failed(rawler: anyhow::Error, rawloader: anyhow::Error) -> anyhow::Error
 
 /// rawloader alone, with the DNG white-balance fallback, and no second try with rawler.
 fn rawloader_only(bytes: &[u8]) -> Result<CfaImage> {
+    if let Some((w, h)) = dng::largest_image(bytes) {
+        check_pixels(w, h)?;
+    }
     Ok(with_dng_colour(
         decode_reader(&mut Cursor::new(bytes))?,
         bytes,
@@ -1086,6 +1115,57 @@ mod dng {
         Tiff::new(bytes)?.find(tag)?.first().copied()
     }
 
+    /// The largest image any IFD of a TIFF-structured file says it holds, as width and
+    /// height: read before a decode allocates for it.
+    pub fn largest_image(bytes: &[u8]) -> Option<(u64, u64)> {
+        let tiff = Tiff::new(bytes)?;
+        let mut best: Option<(u64, u64)> = None;
+        let mut walk = Walk::default();
+        let mut stack = vec![(tiff.u32(4)? as usize, 0u32)];
+        while let Some((ifd, depth)) = stack.pop() {
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
+                continue;
+            }
+            let Some(n) = tiff.u16(ifd).map(usize::from) else {
+                continue;
+            };
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                break;
+            }
+            let (mut w, mut h) = (None, None);
+            for i in 0..n {
+                let e = ifd + 2 + 12 * i;
+                let (Some(t), Some(kind), Some(count)) =
+                    (tiff.u16(e), tiff.u16(e + 2), tiff.u32(e + 4))
+                else {
+                    break;
+                };
+                let first = || tiff.values(e, kind, count as usize)?.first().copied();
+                match t {
+                    0x0100 => w = first(),
+                    0x0101 => h = first(),
+                    SUB_IFDS => {
+                        for sub in tiff.values(e, kind, count as usize).unwrap_or_default() {
+                            stack.push((sub as usize, depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(w), Some(h)) = (w, h) {
+                let (w, h) = (w as u64, h as u64);
+                if best.is_none_or(|(bw, bh)| w * h > bw * bh) {
+                    best = Some((w, h));
+                }
+            }
+            if let Some(next) = tiff.u32(ifd + 2 + 12 * n) {
+                stack.push((next as usize, depth + 1));
+            }
+        }
+        best
+    }
+
     /// As-shot white balance and a matching colour matrix, if the file has a white
     /// (`AsShotWhiteXY` or `AsShotNeutral`) and at least one `ColorMatrix`.
     ///
@@ -1220,6 +1300,18 @@ mod dng {
         })
     }
 
+    /// The most IFDs and entries one search reads: far past any camera's (a DNG has a
+    /// handful of IFDs of a few dozen entries), well short of a hostile file's millions.
+    const MAX_IFDS: usize = 64;
+    const MAX_ENTRIES: usize = 20_000;
+
+    /// Where a search has been.
+    #[derive(Default)]
+    struct Walk {
+        seen: std::collections::HashSet<usize>,
+        entries: usize,
+    }
+
     /// Just enough TIFF to find a numeric tag anywhere in IFD0, its chain, and SubIFDs.
     struct Tiff<'a> {
         b: &'a [u8],
@@ -1256,14 +1348,14 @@ mod dng {
         }
 
         fn find(&self, tag: u16) -> Option<Vec<f64>> {
-            let mut seen = Vec::new();
+            let mut walk = Walk::default();
             let values = |e: usize, kind: u16, count: usize| self.values(e, kind, count);
-            self.search(self.u32(4)? as usize, tag, &mut seen, 0, &values)
+            self.search(self.u32(4)? as usize, tag, &mut walk, 0, &values)
         }
 
         /// A tag's bytes as they are, for the byte and undefined types (opcode lists).
         fn find_bytes(&self, tag: u16) -> Option<&'a [u8]> {
-            let mut seen = Vec::new();
+            let mut walk = Walk::default();
             let bytes = |e: usize, kind: u16, count: usize| {
                 if !matches!(kind, 1 | 7) {
                     return None;
@@ -1275,23 +1367,27 @@ mod dng {
                 };
                 self.b.get(at..at.checked_add(count)?)
             };
-            self.search(self.u32(4)? as usize, tag, &mut seen, 0, &bytes)
+            self.search(self.u32(4)? as usize, tag, &mut walk, 0, &bytes)
         }
 
         fn search<T>(
             &self,
             ifd: usize,
             tag: u16,
-            seen: &mut Vec<usize>,
+            walk: &mut Walk,
             depth: u32,
             read: &dyn Fn(usize, u16, usize) -> Option<T>,
         ) -> Option<T> {
-            // Malformed files can loop an IFD chain back on itself.
-            if ifd == 0 || depth > 8 || seen.contains(&ifd) {
+            // Malformed files can loop an IFD chain back on itself, or fan out into more
+            // IFDs and entries than any camera writes: both end the walk.
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
                 return None;
             }
-            seen.push(ifd);
             let n = self.u16(ifd)? as usize;
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                return None;
+            }
             let mut subs = Vec::new();
             for i in 0..n {
                 let e = ifd + 2 + 12 * i;
@@ -1304,12 +1400,12 @@ mod dng {
                 }
             }
             for sub in subs {
-                if let Some(v) = self.search(sub as usize, tag, seen, depth + 1, read) {
+                if let Some(v) = self.search(sub as usize, tag, walk, depth + 1, read) {
                     return Some(v);
                 }
             }
             let next = self.u32(ifd + 2 + 12 * n)? as usize;
-            self.search(next, tag, seen, depth + 1, read)
+            self.search(next, tag, walk, depth + 1, read)
         }
 
         fn values(&self, entry: usize, kind: u16, count: usize) -> Option<Vec<f64>> {
@@ -1483,6 +1579,97 @@ mod tests {
 
     fn flat(m: &[[f32; 3]; 3]) -> Vec<f32> {
         m.iter().flatten().copied().collect()
+    }
+
+    /// A reproducible stream of mutations: the same seeds fail the same way on every run.
+    struct Mutations(u64);
+
+    impl Mutations {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// `seed` with a few bytes changed, or cut short.
+        fn of(&mut self, seed: &[u8]) -> Vec<u8> {
+            let mut b = seed.to_vec();
+            if b.is_empty() {
+                return b;
+            }
+            for _ in 0..1 + self.next() % 6 {
+                let at = (self.next() % b.len() as u64) as usize;
+                b[at] = match self.next() % 4 {
+                    0 => 0xFF,
+                    1 => 0x00,
+                    2 => b[at].wrapping_add(1),
+                    _ => self.next() as u8,
+                };
+            }
+            if self.next().is_multiple_of(5) {
+                let keep = (self.next() % b.len() as u64) as usize;
+                b.truncate(keep);
+            }
+            b
+        }
+    }
+
+    #[test]
+    fn hostile_bytes_are_refused_not_crashed_on() {
+        use image::ImageEncoder;
+        let tiff = dng_tags(&[
+            (0xC621, flat(&XYZ_TO_SRGB)),
+            (0xC65A, vec![21.0]),
+            (0xC628, vec![0.5, 1.0, 0.7]),
+            (0x0100, vec![4000.0]),
+            (0x0101, vec![3000.0]),
+        ]);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(&[120u8; 48 * 32 * 3], 48, 32, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[90u8; 16 * 16 * 3], 16, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // A RAW-shaped file: a TIFF header with the preview inside it.
+        let mut raw = tiff.clone();
+        raw.extend_from_slice(&jpeg);
+        let mut m = Mutations(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..3000 {
+            let t = m.of(&tiff);
+            let _ = dng::colour(&t);
+            let _ = dng::largest_image(&t);
+            let _ = dng::opcodes(&t);
+            let _ = tiff_orientation(&t);
+            let r = m.of(&raw);
+            if let Some(j) = crate::preview::find_embedded_jpeg(&r, 64) {
+                let _ = crate::preview::decode_jpeg_scaled(j.data, 64);
+            }
+            let _ = decode_raster(&m.of(&jpeg));
+            let _ = decode_raster(&m.of(&png));
+        }
+    }
+
+    #[test]
+    fn a_file_claiming_a_huge_image_is_refused_before_it_is_read() {
+        use image::ImageEncoder;
+        let tiff = dng_tags(&[(0x0100, vec![100_000.0]), (0x0101, vec![100_000.0])]);
+        assert_eq!(dng::largest_image(&tiff), Some((100_000, 100_000)));
+        assert!(RawlerBackend.decode_bytes(&tiff).is_err());
+        // A PNG whose header says 30000 × 30000: refused from the header alone.
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0u8; 3], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // IHDR's width and height sit at bytes 16..24; its CRC no longer matches, which
+        // is exactly what a hostile file would look like.
+        png[16..20].copy_from_slice(&30_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&30_000u32.to_be_bytes());
+        assert!(decode_raster(&png).is_err(), "refused");
+        assert!(check_pixels(30_000, 30_000).is_err());
+        assert!(check_pixels(9_504, 6_336).is_ok(), "a 60 MP camera opens");
     }
 
     #[test]
