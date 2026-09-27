@@ -124,6 +124,7 @@ fn main() -> anyhow::Result<()> {
     // DUCKFOOT_SHOT_LOOKS=1: the desktop inspector's Looks band open.
     app.looks_open = std::env::var_os("DUCKFOOT_SHOT_LOOKS").is_some();
     app.info_open = std::env::var_os("DUCKFOOT_SHOT_INFO").is_some();
+    app.clip_overlay = std::env::var_os("DUCKFOOT_SHOT_CLIP").is_some();
     // DUCKFOOT_SHOT_EXPORT=1: the Export dialog (desktop) or its options (phone).
     if std::env::var_os("DUCKFOOT_SHOT_EXPORT").is_some() {
         app.export_dialog_open = true;

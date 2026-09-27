@@ -43,6 +43,12 @@ impl PhotoApp {
                             self.split_active = !self.split_active;
                             self.needs_render = true;
                         }
+                        if widgets::chip(ui, self.clip_overlay, "clip")
+                            .on_hover_text("Show clipping: red where blown, blue where crushed (J)")
+                            .clicked()
+                        {
+                            self.clip_overlay = !self.clip_overlay;
+                        }
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

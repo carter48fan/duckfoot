@@ -787,3 +787,70 @@ fn the_dither_shifts_no_tone() {
         "dithered mean {mean8:.3} against the true level {mean16:.3}"
     );
 }
+
+#[test]
+fn the_clipping_overlay_paints_the_preview_and_never_the_export() {
+    let gpu = gpu_or_skip!();
+    // Left third black, middle grey, right third far past white.
+    let (w, h) = (96u32, 16u32);
+    let cfa = testkit::cfa_from_fn(w, h, |x, _| match x * 3 / w {
+        0 => [0.0, 0.0, 0.0],
+        1 => [0.18, 0.18, 0.18],
+        _ => [0.95, 0.95, 0.95],
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let mut stack = PhotoStack::default();
+    stack.exposure.params.ev = 2.0;
+    engine.render(&gpu.device, &gpu.queue, &stack, None);
+    let clean_export = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let clean_preview = testkit::read_texture(
+        &gpu.device,
+        &gpu.queue,
+        engine.image().unwrap().output_texture(),
+    )
+    .unwrap();
+
+    assert!(
+        engine.set_clip_overlay(&gpu.device, true),
+        "the stage must re-register"
+    );
+    engine.render(&gpu.device, &gpu.queue, &stack, None);
+    let shown =
+        testkit::read_texture(&gpu.device, &gpu.queue, engine.display_texture().unwrap()).unwrap();
+    let (pw, _) = engine.image().unwrap().preview_size();
+    let at = |x: u32| {
+        let i = ((h / 2 * pw + x) * 4) as usize;
+        [shown[i], shown[i + 1], shown[i + 2]]
+    };
+    assert_eq!(at(pw / 6), [0, 89, 255], "crushed black shows blue");
+    assert_eq!(at(pw * 5 / 6), [255, 0, 0], "blown white shows red");
+    let mid = at(pw / 2);
+    assert!(
+        mid[0] == mid[1] && mid[1] == mid[2],
+        "mid-grey shows as itself: {mid:?}"
+    );
+
+    // The preview under it, and the export, are exactly what they were.
+    let preview = testkit::read_texture(
+        &gpu.device,
+        &gpu.queue,
+        engine.image().unwrap().output_texture(),
+    )
+    .unwrap();
+    assert!(
+        preview == clean_preview,
+        "the overlay leaked into the preview"
+    );
+    let export = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(
+        export.rgba == clean_export.rgba,
+        "the overlay leaked into the export"
+    );
+
+    assert!(engine.set_clip_overlay(&gpu.device, false));
+    assert!(std::ptr::eq(
+        engine.display_texture().unwrap(),
+        engine.image().unwrap().output_texture()
+    ));
+}

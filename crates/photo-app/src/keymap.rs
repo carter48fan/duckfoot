@@ -159,6 +159,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(
         Pointer,
+        "Hold the scope's clip readout",
+        "show clipping while held",
+    ),
+    s(
+        Pointer,
         "Drop files on the window",
         "add them to the shelf and open the first",
     ),

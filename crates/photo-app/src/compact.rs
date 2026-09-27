@@ -347,6 +347,12 @@ impl PhotoApp {
                         {
                             self.fine_adjust = !self.fine_adjust;
                         }
+                        if widgets::chip(ui, self.clip_overlay, "clip")
+                            .on_hover_text("Show clipping: red where blown, blue where crushed")
+                            .clicked()
+                        {
+                            self.clip_overlay = !self.clip_overlay;
+                        }
                         ui.add_enabled_ui(loaded, |ui| {
                             // One control for zoom: it reads the zoom, and flips fit ↔ 1:1.
                             let percent = self.zoom_percent(self.last_panel);

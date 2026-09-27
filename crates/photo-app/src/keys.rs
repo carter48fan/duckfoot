@@ -217,6 +217,10 @@ impl PhotoApp {
             }
         }
 
+        if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::J)) {
+            self.clip_overlay = !self.clip_overlay;
+        }
+
         let (rot_left, rot_right, flip_h, flip_v, crop_toggle, crop_esc, crop_enter) =
             ctx.input(|i| {
                 (
