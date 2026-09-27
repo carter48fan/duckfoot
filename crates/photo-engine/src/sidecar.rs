@@ -170,7 +170,7 @@ pub fn load_sidecar_full(raw_path: &Path) -> Result<Option<SidecarData>> {
         .with_context(|| format!("failed to parse sidecar file {}", path.display()))
 }
 
-fn parse_sidecar(content: &str) -> Result<SidecarData> {
+pub(crate) fn parse_sidecar(content: &str) -> Result<SidecarData> {
     let mut value: serde_json::Value = serde_json::from_str(content)?;
     clamp_numbers(&mut value);
     let is_container = value.as_object().is_some_and(|o| {

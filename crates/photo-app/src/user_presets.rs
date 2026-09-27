@@ -212,6 +212,24 @@ mod tests {
     use super::*;
     use crate::InspectorSectionId;
 
+    /// Writes the preset fuzz target's seed (see photo-engine's `write_fuzz_seeds`).
+    #[test]
+    #[ignore]
+    fn write_fuzz_seeds() {
+        let Some(root) = std::env::var_os("DUCKFOOT_FUZZ_SEEDS").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let dir = root.join("preset");
+        std::fs::create_dir_all(&dir).unwrap();
+        let preset = UserPreset::new("Evening", PasteSet::default(), &look());
+        std::fs::write(
+            dir.join("evening.duckfoot-preset"),
+            serde_json::to_vec_pretty(&preset).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn look() -> PhotoStack {
         let mut s = PhotoStack::default();
         s.vibrance.enabled = true;

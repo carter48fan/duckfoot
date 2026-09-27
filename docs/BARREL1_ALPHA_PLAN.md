@@ -646,8 +646,20 @@ header before pixels are allocated (rasters by `image`'s dimensions, TIFF-based 
 largest IFD), the TIFF walker on a 64-IFD / 20,000-entry budget with a `HashSet`, previews
 read (an 8 MB head, the rest only when needed, up to 256 MB) instead of mapped, and
 seeded mutation tests of the TIFF walker, JPEG scanner, raster decode, DNG colour and
-sidecar parsing that run with every `cargo test`. Still to come: `cargo fuzz` targets on a
-nightly CI lane (needs a nightly toolchain), and rawler's own mmap on removable media.
+sidecar parsing that run with every `cargo test`. `fuzz/` holds cargo-fuzz targets for the
+TIFF walker, the embedded-JPEG scanner, raster decode, RAW decode, sidecars, presets and ICC
+profiles, run ten minutes each every night (`.github/workflows/fuzz.yml`) from seeds the
+code writes (`write_fuzz_seeds`). Its first runs found, each now fixed and a regression
+test: an offset overflow in the TIFF walker (SubIFD values taken as offsets unchecked); a
+TIFF entry counting four billion values, which rawler allocates before reading (13 GB),
+now refused when any entry claims more than the file holds, including in an MRW's TTW
+block; an IFD chain that points back at itself, which rawler follows until memory runs
+out; an MRW block length that wraps rawler's step to zero (a hang); a file starting like
+a JPEG whose APP1 rawler cannot read, which loops rawler's JFIF parser for ever (four bytes
+did it); and a QuickTake file, reached by content whatever its name, whose decoder sizes
+its pixels from the header. rawler now only sees the families the RAW extensions name.
+Panics inside rawler stay contained, as in the app, and are for reporting upstream. Still to
+come: rawler's own mmap on removable media, and reporting the rawler findings upstream.
 - **Size check first:** read the dimensions from rawler metadata before decoding pixels.
   Reject anything over the pixel cap (default 250 MP) or `max_texture_dimension_2d`, *before*
   allocating. The same applies to rasters (`image::ImageReader::into_dimensions` first).

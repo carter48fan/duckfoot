@@ -318,13 +318,89 @@ impl RawDecoder for RawlerBackend {
 }
 
 fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
+    // rawler tells formats apart by their bytes, not their names, so a .dng holding an
+    // Apple QuickTake's would reach a decoder that sizes its pixels from the header
+    // unchecked (found by the fuzzer). Only the families the RAW extensions name go on.
+    if !rawler_family(source.buf()) {
+        bail!("not a RAW format Duckfoot opens");
+    }
     // What the file says it holds, before anything is allocated for it.
+    if source.buf().starts_with(&[0xFF, 0xD8, 0xFF, 0xE1]) && !rawler_may_read_jfif(source.buf()) {
+        bail!("this is a JPEG, not a RAW file");
+    }
+    if dng::overclaims(source.buf()) {
+        bail!("this file is damaged: it claims more data than it holds");
+    }
     if let Some((w, h)) = dng::largest_image(source.buf()) {
         check_pixels(w, h)?;
     }
     let mut img = decode_reader_rawler(source)?;
     with_dng_opcodes(&mut img, source.buf());
     Ok(with_dng_colour(img, source.buf()))
+}
+
+/// Whether the bytes are one of the RAW families [`crate::RAW_EXTENSIONS`] names: a TIFF
+/// or TIFF-shaped RAW (DNG, CR2, NEF, ARW, PEF, ORF, RW2 and the rest), Fujifilm's RAF,
+/// Canon's CR3 (an ISO box file of brand `crx `), or Minolta's MRW, bare or in a JPEG.
+fn rawler_family(bytes: &[u8]) -> bool {
+    dng::is_tiff_like(bytes)
+        || bytes.starts_with(b"FUJIFILMCCD-RAW")
+        || (bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12) == Some(b"crx "))
+        || bytes.starts_with(b"\0MRM")
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF, 0xE1])
+}
+
+/// Whether a file that starts like a JPEG with EXIF (`FF D8 FF E1`) is safe to hand to
+/// rawler. rawler 0.8 reads such a file segment by segment, and one it cannot read (an
+/// EXIF block it cannot parse, a segment cut short, a length under two) sends
+/// `Jfif::parse` round the same loop for ever: four bytes hung it (found by the fuzzer,
+/// WP5.1). It only decodes one make from there, Konica Minolta's; anything else it gives
+/// up on after the walk. So only a file whose segments are all whole and whose EXIF names
+/// that make goes on.
+fn rawler_may_read_jfif(bytes: &[u8]) -> bool {
+    const XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    let mut minolta = false;
+    let mut at = 2;
+    loop {
+        match bytes.get(at..at + 2) {
+            // The end, at a segment's edge: rawler stops there too.
+            None => return minolta && at == bytes.len(),
+            Some(&[0xFF, 0xD9]) | Some(&[0xFF, 0xDA]) => return minolta,
+            Some(&[0xFF, marker]) => {
+                let Some(len) = bytes
+                    .get(at + 2..at + 4)
+                    .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+                else {
+                    return false;
+                };
+                let end = at + 2 + len;
+                if len < 2 || end > bytes.len() {
+                    return false;
+                }
+                let body = &bytes[at + 4..end];
+                if marker == 0xE1 {
+                    if let Some(tiff) = body.strip_prefix(b"Exif\0\0") {
+                        let Ok(exif) = exif::Reader::new().read_raw(tiff.to_vec()) else {
+                            return false;
+                        };
+                        minolta |= exif
+                            .get_field(exif::Tag::Make, exif::In::PRIMARY)
+                            .is_some_and(|f| {
+                                f.display_value().to_string().trim_matches('"').trim_end()
+                                    == "Konica Minolta Photo Imaging, Inc."
+                            });
+                    } else if body.starts_with(&XMP[..XMP.len().min(body.len())])
+                        && body.len() < XMP.len()
+                    {
+                        // An XMP marker with no room for its packet.
+                        return false;
+                    }
+                }
+                at = end;
+            }
+            Some(_) => return false,
+        }
+    }
 }
 
 /// A DNG's own lens corrections: its gain maps and radial vignette applied to the mosaic
@@ -1070,6 +1146,52 @@ fn neutral_for_white(xyz_to_cam: &[[f32; 3]; 3], (x, y): (f32, f32)) -> Option<[
 }
 
 /// DNG colour tags that rawloader does not read, parsed straight from the TIFF structure.
+/// What the fuzz targets (`fuzz/`) drive: every parser a hostile file reaches, each
+/// expected to refuse bad bytes rather than panic, hang or allocate without bound
+/// (WP5.1). Not part of the API.
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+
+    /// The TIFF walker and what reads through it: DNG colour, image sizes, opcodes and
+    /// orientation.
+    pub fn tiff(bytes: &[u8]) {
+        let _ = dng::colour(bytes);
+        let _ = dng::largest_image(bytes);
+        let _ = dng::opcodes(bytes);
+        let _ = tiff_orientation(bytes);
+    }
+
+    /// The embedded-preview scanner, and decoding what it finds.
+    pub fn embedded_jpeg(bytes: &[u8]) {
+        if let Some(j) = crate::preview::find_embedded_jpeg(bytes, 64) {
+            let _ = crate::preview::decode_jpeg_scaled(j.data, 64);
+        }
+    }
+
+    /// A raster file (JPEG, PNG, TIFF, WebP…).
+    pub fn raster(bytes: &[u8]) {
+        let _ = decode_raster(bytes);
+    }
+
+    /// A RAW file, through rawler.
+    pub fn raw(bytes: &[u8]) {
+        let _ = RawlerBackend.decode_bytes(bytes);
+    }
+
+    /// A display's ICC profile, as the user picks one (W-14).
+    pub fn icc(bytes: &[u8]) {
+        let _ = crate::icc::MatrixTrc::parse(bytes);
+    }
+
+    /// A sidecar's text.
+    pub fn sidecar(bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            let _ = crate::sidecar::parse_sidecar(text);
+        }
+    }
+}
+
 mod dng {
     /// What the decode needs from a DNG that recorded its white as a chromaticity.
     pub struct Colour {
@@ -1147,7 +1269,9 @@ mod dng {
                     0x0101 => h = first(),
                     SUB_IFDS => {
                         for sub in tiff.values(e, kind, count as usize).unwrap_or_default() {
-                            stack.push((sub as usize, depth + 1));
+                            if (1.0..=u32::MAX as f64).contains(&sub) {
+                                stack.push((sub as usize, depth + 1));
+                            }
                         }
                     }
                     _ => {}
@@ -1155,7 +1279,7 @@ mod dng {
             }
             if let (Some(w), Some(h)) = (w, h) {
                 let (w, h) = (w as u64, h as u64);
-                if best.is_none_or(|(bw, bh)| w * h > bw * bh) {
+                if best.is_none_or(|(bw, bh)| w.saturating_mul(h) > bw.saturating_mul(bh)) {
                     best = Some((w, h));
                 }
             }
@@ -1164,6 +1288,133 @@ mod dng {
             }
         }
         best
+    }
+
+    /// Whether any entry of the file's TIFF structure (IFD0's chain, SubIFDs, the EXIF,
+    /// GPS and interoperability IFDs) claims more data than the whole file holds. rawler
+    /// allocates an entry's values from its count before reading them, so a count of four
+    /// billion in a 600-byte file asked it for 13 GB (found by the fuzzer, WP5.1): such a
+    /// file is refused before rawler sees it. Only what no file could hold is refused; an
+    /// entry merely pointing somewhere odd is left to rawler, as some cameras write them.
+    /// A TIFF, or a RAW shaped like one under a magic number of its own.
+    pub fn is_tiff_like(bytes: &[u8]) -> bool {
+        Tiff::any(bytes).is_some()
+    }
+
+    pub fn overclaims(bytes: &[u8]) -> bool {
+        if bytes.starts_with(b"\0MRM") {
+            return mrw_overclaims(bytes);
+        }
+        let Some(tiff) = Tiff::any(bytes) else {
+            return false;
+        };
+        let Some(first) = tiff.u32(4) else {
+            return false;
+        };
+        tiff_overclaims(&tiff, first)
+    }
+
+    /// Minolta's MRW: blocks, one of which (TTW) holds a big-endian TIFF whose IFD rawler
+    /// reads at 8, or at 8 in the file itself when there is no TTW. rawler steps from block
+    /// to block by `len + 8` in 32 bits, which a length of 0xFFFF_FFF8 wraps to nothing:
+    /// it would never move again.
+    fn mrw_overclaims(bytes: &[u8]) -> bool {
+        let be32 = |at: u64| -> Option<u32> {
+            let at = usize::try_from(at).ok()?;
+            Some(u32::from_be_bytes(
+                bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
+        };
+        let Some(data) = be32(4) else {
+            return false;
+        };
+        let data_offset = data as u64 + 8;
+        let (mut at, mut tiff_at) = (8u64, 0u64);
+        while at + 20 < data_offset {
+            let (Some(tag), Some(len)) = (be32(at), be32(at + 4)) else {
+                // rawler would read past the end and panic, which is contained.
+                return false;
+            };
+            if tag == 0x0054_5457 {
+                tiff_at = at + 8;
+            }
+            let step = len.wrapping_add(8);
+            if step == 0 {
+                return true;
+            }
+            at += step as u64;
+        }
+        let Some(b) = usize::try_from(tiff_at).ok().and_then(|at| bytes.get(at..)) else {
+            return false;
+        };
+        tiff_overclaims(&Tiff { b, le: false }, 8)
+    }
+
+    fn tiff_overclaims(tiff: &Tiff, first: u32) -> bool {
+        let bytes = tiff.b;
+        let len = bytes.len() as u64;
+        let mut walk = Walk::default();
+        let mut stack = vec![(first as usize, 0u32)];
+        // rawler follows the chain of next-IFD pointers with no limit and no memory of
+        // where it has been, so a chain that comes back on itself grows until the process
+        // is killed (found by the fuzzer).
+        let mut chain = std::collections::HashSet::from([first as usize]);
+        while let Some((ifd, depth)) = stack.pop() {
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
+                continue;
+            }
+            let Some(n) = tiff.u16(ifd).map(usize::from) else {
+                continue;
+            };
+            // Only the entries the file has room for: rawler reads on until one is cut
+            // short, so those are the ones to check.
+            let n = n.min(bytes.len().saturating_sub(ifd + 2) / 12);
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                // More than any camera writes: not a file to vouch for.
+                return true;
+            }
+            for i in 0..n {
+                let e = ifd + 2 + 12 * i;
+                let (Some(t), Some(kind), Some(count)) =
+                    (tiff.u16(e), tiff.u16(e + 2), tiff.u32(e + 4))
+                else {
+                    break;
+                };
+                let size: u64 = match kind {
+                    3 | 8 => 2,
+                    4 | 9 | 11 | 13 => 4,
+                    5 | 10 | 12 | 16..=18 => 8,
+                    _ => 1,
+                };
+                if size * count as u64 > len {
+                    return true;
+                }
+                match t {
+                    SUB_IFDS => {
+                        for sub in tiff.values(e, kind, count as usize).unwrap_or_default() {
+                            if (1.0..=u32::MAX as f64).contains(&sub) {
+                                stack.push((sub as usize, depth + 1));
+                            }
+                        }
+                    }
+                    // EXIF, GPS, interoperability: one offset each.
+                    0x8769 | 0x8825 | 0xA005 => {
+                        if let Some(at) = tiff.u32(e + 8) {
+                            stack.push((at as usize, depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(next) = tiff.u32(ifd + 2 + 12 * n).filter(|&next| next != 0) {
+                if chain.contains(&ifd) && (!chain.insert(next as usize) || chain.len() > 64) {
+                    return true;
+                }
+                stack.push((next as usize, depth + 1));
+            }
+        }
+        false
     }
 
     /// As-shot white balance and a matching colour matrix, if the file has a white
@@ -1329,8 +1580,20 @@ mod dng {
             (t.u16(2)? == 42).then_some(t)
         }
 
+        /// A TIFF, or one of the TIFF-shaped RAWs that mark themselves with a magic of
+        /// their own: Olympus ORF (`RO`, `RS`) and Panasonic RW2 (0x55).
+        fn any(b: &'a [u8]) -> Option<Self> {
+            let le = match b.get(..2)? {
+                b"II" => true,
+                b"MM" => false,
+                _ => return None,
+            };
+            let t = Self { b, le };
+            matches!(t.u16(2)?, 42 | 0x4F52 | 0x5352 | 0x55).then_some(t)
+        }
+
         fn u16(&self, at: usize) -> Option<u16> {
-            let s: [u8; 2] = self.b.get(at..at + 2)?.try_into().ok()?;
+            let s: [u8; 2] = self.b.get(at..at.checked_add(2)?)?.try_into().ok()?;
             Some(if self.le {
                 u16::from_le_bytes(s)
             } else {
@@ -1339,7 +1602,7 @@ mod dng {
         }
 
         fn u32(&self, at: usize) -> Option<u32> {
-            let s: [u8; 4] = self.b.get(at..at + 4)?.try_into().ok()?;
+            let s: [u8; 4] = self.b.get(at..at.checked_add(4)?)?.try_into().ok()?;
             Some(if self.le {
                 u32::from_le_bytes(s)
             } else {
@@ -1399,7 +1662,11 @@ mod dng {
                     subs = self.values(e, kind, count).unwrap_or_default();
                 }
             }
-            for sub in subs {
+            // An offset is a u32; anything else a hostile file claims is skipped.
+            for sub in subs
+                .into_iter()
+                .filter(|s| (1.0..=u32::MAX as f64).contains(s))
+            {
                 if let Some(v) = self.search(sub as usize, tag, walk, depth + 1, read) {
                     return Some(v);
                 }
@@ -1655,6 +1922,110 @@ mod tests {
             let _ = decode_raster(&m.of(&jpeg));
             let _ = decode_raster(&m.of(&png));
         }
+    }
+
+    /// Writes the fuzz targets' seed files (`fuzz/seeds`); run by hand when a format
+    /// changes: `DUCKFOOT_FUZZ_SEEDS=fuzz/seeds cargo test -p photo-engine --lib
+    /// write_fuzz_seeds -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_fuzz_seeds() {
+        use image::ImageEncoder;
+        let Some(root) = std::env::var_os("DUCKFOOT_FUZZ_SEEDS").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let put = |target: &str, name: &str, bytes: &[u8]| {
+            let dir = root.join(target);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), bytes).unwrap();
+        };
+        let tiff = dng_tags(&[
+            (0xC621, flat(&XYZ_TO_SRGB)),
+            (0xC65A, vec![21.0]),
+            (0xC628, vec![0.5, 1.0, 0.7]),
+            (0x0100, vec![64.0]),
+            (0x0101, vec![48.0]),
+            (0x0112, vec![6.0]),
+        ]);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(&[120u8; 16 * 8 * 3], 16, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[90u8; 8 * 8 * 3], 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut raw = tiff.clone();
+        raw.extend_from_slice(&jpeg);
+        put("tiff", "dng-tags", &tiff);
+        put("raw", "dng-tags", &tiff);
+        put("embedded_jpeg", "tiff-with-preview", &raw);
+        put("raster", "small.jpg", &jpeg);
+        put("raster", "small.png", &png);
+        let mut stack = crate::PhotoStack::default();
+        stack.exposure.params.ev = 0.5;
+        stack.tone_curve.enabled = true;
+        let data = crate::SidecarData {
+            stack: Some(stack),
+            ..Default::default()
+        };
+        put("icc", "srgb.icc", crate::icc::srgb_profile());
+        put("icc", "adobe-rgb.icc", crate::icc::adobe_rgb_profile());
+        put(
+            "sidecar",
+            "edited.duckfoot",
+            serde_json::to_string_pretty(&data).unwrap().as_bytes(),
+        );
+    }
+
+    #[test]
+    fn an_entry_claiming_more_than_the_file_holds_is_refused_before_rawler() {
+        // A float tag counting four billion values, in a file of a few dozen bytes: rawler
+        // would allocate 16 GB for it before reading a value.
+        let mut tiff = dng_tags(&[(0x0100, vec![64.0]), (0x0101, vec![48.0])]);
+        assert!(!dng::overclaims(&tiff), "a sound file passes");
+        // The first entry's count, at 8 (header) + 2 (entry count) + 4 (tag, type).
+        tiff[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(dng::overclaims(&tiff));
+        let Err(err) = RawlerBackend.decode_bytes(&tiff) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("damaged"), "{err:#}");
+        // An IFD whose next pointer is itself: rawler's chain would grow for ever.
+        let mut looped = dng_tags(&[(0x0100, vec![64.0]), (0x0101, vec![48.0])]);
+        let n = u16::from_le_bytes([looped[8], looped[9]]) as usize;
+        let next = 8 + 2 + 12 * n;
+        looped[next..next + 4].copy_from_slice(&8u32.to_le_bytes());
+        assert!(dng::overclaims(&looped));
+        // An MRW whose block length wraps rawler's step to nothing.
+        let mut mrw = b"\0MRM".to_vec();
+        mrw.extend_from_slice(&100u32.to_be_bytes());
+        mrw.extend_from_slice(b"\0PRD");
+        mrw.extend_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
+        mrw.resize(120, 0);
+        assert!(dng::overclaims(&mrw));
+        // A QuickTake's bytes, whatever the name: not a family the app opens.
+        let mut qtk = b"qktn".to_vec();
+        qtk.resize(800, 0);
+        let Err(err) = RawlerBackend.decode_bytes(&qtk) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("not a RAW format"), "{err:#}");
+        // A JPEG's start and nothing more hung rawler; now it is refused at once.
+        let Err(err) = RawlerBackend.decode_bytes(&[0xFF, 0xD8, 0xFF, 0xE1]) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("JPEG"), "{err:#}");
+        // The fuzzer's: an IFD claiming 21,830 entries in 47 bytes, one of them four
+        // billion shorts. Only the entries the file has room for are checked.
+        let found: &[u8] = &[
+            0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x55, 0x4a, 0x49, 0x46, 0x49,
+            0x4c, 0x4d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x80, 0x42, 0x01, 0x01, 0x0b, 0x00,
+            0x0b, 0x00, 0x01, 0x00, 0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0xc4, 0xbf, 0x82,
+            0x37, 0xff, 0xbe, 0xd1, 0x00,
+        ];
+        assert!(dng::overclaims(found));
     }
 
     #[test]
