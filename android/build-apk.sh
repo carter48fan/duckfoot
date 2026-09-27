@@ -63,4 +63,18 @@ if ! grep -q ' ANativeActivity_onCreate$' <<<"$exported"; then
     echo "$lib does not export ANativeActivity_onCreate" >&2
     exit 1
 fi
+# And that it is signed as expected, so it installs over the last build: with the
+# repository's key when one is given, otherwise the testing key beside this script.
+signer=("${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"/build-tools/*/apksigner)
+if [[ -x "${signer[-1]}" ]]; then
+    certs="$("${signer[-1]}" verify --print-certs "$apk")"
+    if [[ -z "${DUCKFOOT_KEYSTORE:-}" ]] && ! grep -q "CN=Duckfoot testing" <<<"$certs"; then
+        echo "$apk is not signed with the testing key:" >&2
+        echo "$certs" >&2
+        exit 1
+    fi
+    grep -m1 "Signer #1 certificate DN" <<<"$certs" || true
+else
+    echo "apksigner not found; skipping the signature check" >&2
+fi
 echo "APK: $apk ($(du -h "$apk" | cut -f1); $lib $(du -h "$root/target/apk-check.so" | cut -f1))"

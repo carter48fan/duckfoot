@@ -16,6 +16,8 @@ run-name: >-
 # and attaches them to the workflow run. On top of that (see the `release` job):
 #
 # - every push to main updates the rolling **nightly** release with all target builds;
+# - every push to any other branch updates that branch's rolling **test build**
+#   pre-release with the APK (the `test-build` job), downloadable straight onto a phone;
 # - a tag starting with v (v0.1.0, v0.2.0-alpha.1), or a manual run given a version,
 #   publishes a release with all artifacts attached.
 on:
@@ -107,7 +109,7 @@ jobs:
           if [ -n "${DUCKFOOT_KEYSTORE:-}" ]; then
             echo "repository key" > dist/android-signing.txt
           else
-            echo "one-off key" > dist/android-signing.txt
+            echo "testing key" > dist/android-signing.txt
           fi
 
       - uses: actions/upload-artifact@v6
@@ -253,11 +255,12 @@ jobs:
           # arbitrary text.
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          if [ -f dist/android-signing.txt ] && [ "$(cat dist/android-signing.txt)" = "repository key" ]; then
-            signing="The APK is signed with the repository's key, so it installs over earlier builds."
-          else
-            signing="The APK is signed with a one-off key: uninstall any earlier Duckfoot before installing it (android/README.md explains how to fix this for good)."
-          fi
+          case "$(cat dist/android-signing.txt 2>/dev/null)" in
+            "repository key")
+              signing="The APK is signed with the repository's key, so it installs over earlier builds." ;;
+            *)
+              signing="The APK is signed with the testing key, so it installs over any earlier testing build (uninstall once if an older build signed with a one-off key is on the phone)." ;;
+          esac
           {
             echo "Built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
             echo
@@ -316,6 +319,60 @@ jobs:
             --prerelease \
             --title "Duckfoot $RELEASE_TAG" \
             --generate-notes \
+            --notes-file notes.md
+
+  # Every push to a branch other than main: that branch's rolling pre-release, replaced
+  # on every push, with the APK as a plain file a phone can download and open. It waits
+  # for the Android build alone, so a desktop build failing never withholds the APK.
+  test-build:
+    needs: [android]
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref, 'refs/heads/')
+      && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: test-build-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.ref_name }}
+      HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: duckfoot-android
+          path: dist
+
+      - name: Publish the test build
+        run: |
+          slug="$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
+          tag="build-$slug"
+          apk="dist/duckfoot-$slug-android-arm64.apk"
+          mv dist/duckfoot-android-arm64.apk "$apk"
+          {
+            echo "Built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
+            echo
+            echo "**Android** (\`$(basename "$apk")\`): Android 11+, Vulkan GPU, arm64. Open it on the phone, or \`adb install -r\`."
+            if [ "$(cat dist/android-signing.txt 2>/dev/null)" = "repository key" ]; then
+              echo "Signed with the repository's key: installs over earlier builds."
+            else
+              echo "Signed with the testing key: installs over any earlier testing build. (If a build signed with a one-off key is on the phone, uninstall it once.)"
+            fi
+            echo
+            echo "Desktop builds for this commit are on its workflow run: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
+          } > notes.md
+          for id in $(gh api "repos/$GH_REPO/releases" --paginate \
+                        --jq ".[] | select(.tag_name == \"$tag\") | .id"); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" 2>/dev/null || true
+          gh release create "$tag" "$apk" \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Test build: $BRANCH @ ${GITHUB_SHA::7}" \
             --notes-file notes.md
 
   no-release:
