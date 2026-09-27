@@ -177,6 +177,24 @@ pub(crate) fn summarise(
             let p = &s.sharpen.params;
             (format!("amount {:.2}", p.amount), *p != d.sharpen.params)
         }
+        S::Lens => {
+            let p = &s.lens.params;
+            let parts: Vec<String> = [
+                ("dist", p.distortion),
+                ("ca", if p.ca_red != 0.0 { p.ca_red } else { p.ca_blue }),
+                ("vig", p.vignetting),
+            ]
+            .into_iter()
+            .filter(|(_, v)| *v != 0.0)
+            .map(|(name, v)| format!("{name} {v:+.0}"))
+            .collect();
+            let text = if parts.is_empty() {
+                "neutral".to_string()
+            } else {
+                parts.join(" · ")
+            };
+            (text, *p != d.lens.params)
+        }
         S::Vignette => {
             let p = &s.vignette.params;
             (

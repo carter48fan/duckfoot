@@ -838,6 +838,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
   6 dB; the edge MTF50 drop is at most 10% at defaults; preview matches export (WP2.1).
 
 **F-04 Lens correction** (DEC-8)
+- **Status:** manual corrections and constrained crop are done, under GPU tests: distortion (a pincushion correction zooms to fill), red and blue fringes, vignetting. Profiles and DNG opcodes are next.
 - **Module "Lens":**
   - **Profile:** automatic from EXIF `LensModel` against the bundled lensfun XML (parsed
     with `quick-xml`). It gives distortion (ptlens/poly3), TCA and vignetting. A manual

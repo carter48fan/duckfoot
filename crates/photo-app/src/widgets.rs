@@ -662,15 +662,21 @@ pub fn scaled_slider(
         let value_w =
             (digit_w + 2.0 * ui.spacing().button_padding.x + 4.0).max(sized(ui, 50.0, 56.0));
         let row_h = sized(ui, 18.0, 32.0);
-        let (label_rect, mut label_response) =
-            ui.allocate_exact_size(vec2(LABEL_W, row_h), Sense::click());
         let modified = (*value - default).abs() > 1e-6;
-        ui.painter().text(
-            label_rect.left_center(),
-            Align2::LEFT_CENTER,
-            label,
+        let text = ui.painter().layout_no_wrap(
+            label.to_string(),
             FontId::proportional(sized(ui, 12.0, 13.0)),
             if modified { TEXT } else { TEXT_DIM },
+        );
+        // Wider than the common column only for a label that needs it: painted text is no
+        // widget, so nothing else would stop it running under the rail.
+        let label_w = LABEL_W.max(text.size().x + 6.0);
+        let (label_rect, mut label_response) =
+            ui.allocate_exact_size(vec2(label_w, row_h), Sense::click());
+        ui.painter().galley(
+            label_rect.left_center() - vec2(0.0, text.size().y * 0.5),
+            text,
+            TEXT,
         );
         if label_response.double_clicked() && modified {
             *value = default;

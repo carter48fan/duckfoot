@@ -697,6 +697,25 @@ impl PhotoApp {
                     dp.amount
                 ));
             }
+            InspectorSectionId::Lens => {
+                let p = &mut self.stack.lens.params;
+                let dp = d.lens.params;
+                for (label, value, default) in [
+                    ("distortion", &mut p.distortion, dp.distortion),
+                    ("red fringe", &mut p.ca_red, dp.ca_red),
+                    ("blue fringe", &mut p.ca_blue, dp.ca_blue),
+                    ("vignetting", &mut p.vignetting, dp.vignetting),
+                ] {
+                    track!(widgets::param_slider(
+                        ui,
+                        label,
+                        value,
+                        -100.0..=100.0,
+                        0,
+                        default
+                    ));
+                }
+            }
             InspectorSectionId::Vignette => {
                 let p = &mut self.stack.vignette.params;
                 let dp = d.vignette.params;

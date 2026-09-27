@@ -15,6 +15,7 @@ pub mod export;
 pub mod fsio;
 pub mod histogram;
 pub mod icc;
+pub mod lens;
 pub mod metadata;
 pub mod params;
 pub mod preview;
@@ -38,10 +39,12 @@ pub use export::{
     SharpenFor, JPEG_QUALITY,
 };
 pub use histogram::Histogram;
+pub use lens::LensModel;
 pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Exposure, ExposureMode,
-    Filmic, Geometry, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette, WhiteBalance,
+    Filmic, Geometry, Lens, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette,
+    WhiteBalance,
 };
 pub use preview::{
     decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
