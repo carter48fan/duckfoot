@@ -115,30 +115,33 @@ impl Bridge {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
             let activity = env.new_global_ref(activity)?;
 
-            // Registered here rather than resolved by name, because NativeActivity
-            // dlopen()s this library itself and JNI would not search it.
-            let class = env.get_object_class(activity.as_obj())?;
-            env.register_native_methods(
-                &class,
-                &[NativeMethod {
-                    name: "nativeWake".into(),
-                    sig: "()V".into(),
-                    fn_ptr: native_wake as *mut c_void,
-                }],
-            )?;
+            env.with_local_frame(8, |env| -> jni::errors::Result<()> {
+                // Registered here rather than resolved by name, because NativeActivity
+                // dlopen()s this library itself and JNI would not search it.
+                let class = env.get_object_class(activity.as_obj())?;
+                env.register_native_methods(
+                    &class,
+                    &[NativeMethod {
+                        name: "nativeWake".into(),
+                        sig: "()V".into(),
+                        fn_ptr: native_wake as *mut c_void,
+                    }],
+                )?;
 
-            // Tell the activity which files are photos, and that it may now wake us.
-            let extensions: Vec<String> = photo_engine::all_image_dialog_extensions()
-                .into_iter()
-                .map(|e| e.to_lowercase())
-                .collect();
-            let array = string_array(&mut env, &extensions)?;
-            env.call_method(
-                activity.as_obj(),
-                "onNativeReady",
-                "([Ljava/lang/String;)V",
-                &[JValue::Object(&array)],
-            )?;
+                // Tell the activity which files are photos, and that it may now wake us.
+                let extensions: Vec<String> = photo_engine::all_image_dialog_extensions()
+                    .into_iter()
+                    .map(|e| e.to_lowercase())
+                    .collect();
+                let array = string_array(env, &extensions)?;
+                env.call_method(
+                    activity.as_obj(),
+                    "onNativeReady",
+                    "([Ljava/lang/String;)V",
+                    &[JValue::Object(&array)],
+                )?;
+                Ok(())
+            })?;
             activity
         };
         Ok(Self {
@@ -153,40 +156,70 @@ impl Bridge {
 
     /// A directory the activity reports through a `String name()` method.
     fn dir(&self, method: &str) -> anyhow::Result<PathBuf> {
-        let mut env = self.env()?;
-        let path = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
-            let s = env
-                .call_method(self.activity.as_obj(), method, "()Ljava/lang/String;", &[])?
-                .l()?;
-            Ok(env.get_string(&JString::from(s))?.into())
-        })?;
+        let path = self
+            .with_env(method, |env| {
+                let s = env
+                    .call_method(self.activity.as_obj(), method, "()Ljava/lang/String;", &[])?
+                    .l()?;
+                Ok(String::from(env.get_string(&JString::from(s))?))
+            })
+            .ok_or_else(|| anyhow::anyhow!("DuckfootActivity.{method} gave no directory"))?;
         let path = PathBuf::from(path);
         std::fs::create_dir_all(&path)?;
         Ok(path)
     }
 
-    fn call_void(&self, method: &str, sig: &str, args: &[JValue]) {
+    /// Runs `f` in a local frame of its own, so every local reference it makes is freed
+    /// when it returns: this thread is attached for good and never returns to Java, so
+    /// nothing else would free them, and the table they fill holds 512 (M-20). A Java
+    /// exception left pending makes every later JNI call fail: it is reported to logcat
+    /// and cleared. `None` if the call failed.
+    fn with_env<T>(
+        &self,
+        what: &str,
+        f: impl FnOnce(&mut JNIEnv) -> jni::errors::Result<T>,
+    ) -> Option<T> {
         let outcome = self.env().and_then(|mut env| {
-            let r = env
-                .call_method(self.activity.as_obj(), method, sig, args)
-                .map(|_| ());
-            // A Java exception left pending makes every later JNI call fail (M-20):
-            // report it to logcat and clear it.
+            let r = env.with_local_frame(16, f);
             if r.is_err() && env.exception_check().unwrap_or(false) {
                 let _ = env.exception_describe();
                 let _ = env.exception_clear();
             }
             r
         });
-        if let Err(e) = outcome {
-            log::error!("DuckfootActivity.{method} failed: {e}");
+        match outcome {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::error!("DuckfootActivity.{what} failed: {e}");
+                None
+            }
         }
+    }
+
+    fn call_void(&self, method: &str, sig: &str, args: &[JValue]) {
+        self.with_env(method, |env| {
+            env.call_method(self.activity.as_obj(), method, sig, args)
+                .map(|_| ())
+        });
+    }
+
+    /// `void method(String)`, the string made inside the call's frame.
+    fn call_with_string(&self, method: &str, arg: &str) {
+        self.with_env(method, |env| {
+            let s = env.new_string(arg)?;
+            env.call_method(
+                self.activity.as_obj(),
+                method,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&s)],
+            )
+            .map(|_| ())
+        });
     }
 
     /// The next finished import, as `[kind, args…]`, or `None` once the queue is empty.
     fn poll_event(&self) -> Option<Vec<String>> {
-        let mut env = self.env().ok()?;
-        let event = env.with_local_frame(8, |env| -> jni::errors::Result<Option<Vec<String>>> {
+        self.with_env("pollEvent", |env| {
             let array = env
                 .call_method(
                     self.activity.as_obj(),
@@ -207,14 +240,8 @@ impl Bridge {
                 env.delete_local_ref(item)?;
             }
             Ok(Some(items))
-        });
-        match event {
-            Ok(event) => event,
-            Err(e) => {
-                log::error!("DuckfootActivity.pollEvent failed: {e}");
-                None
-            }
-        }
+        })
+        .flatten()
     }
 }
 
@@ -287,15 +314,8 @@ impl Platform for AndroidPlatform {
                 }
             }
             Request::Share { path } => {
-                let Some(path) = path.to_str() else { return };
-                if let Ok(env) = self.bridge.env() {
-                    if let Ok(jpath) = env.new_string(path) {
-                        self.bridge.call_void(
-                            "shareFile",
-                            "(Ljava/lang/String;)V",
-                            &[JValue::Object(&jpath)],
-                        );
-                    }
+                if let Some(path) = path.to_str() {
+                    self.bridge.call_with_string("shareFile", path);
                 }
             }
             Request::ImportPreset { .. } => self.pick(PICK_PRESET),
@@ -354,16 +374,8 @@ impl Platform for AndroidPlatform {
     }
 
     fn export_completed(&mut self, path: &Path) {
-        if let Some(path_str) = path.to_str() {
-            if let Ok(env) = self.bridge.env() {
-                if let Ok(jpath) = env.new_string(path_str) {
-                    self.bridge.call_void(
-                        "scanMediaFile",
-                        "(Ljava/lang/String;)V",
-                        &[JValue::Object(&jpath)],
-                    );
-                }
-            }
+        if let Some(path) = path.to_str() {
+            self.bridge.call_with_string("scanMediaFile", path);
         }
     }
 }
