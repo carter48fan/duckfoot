@@ -741,7 +741,16 @@ impl PhotoApp {
             .filter(|p| p.applied == self.stack)
             .map(|p| (p.look, p.strength));
         let mut pick: Option<Option<usize>> = None;
-        let tiles = |ui: &mut egui::Ui, pick: &mut Option<Option<usize>>| {
+        // The user's own presets follow the built-in looks: (apply, export, delete).
+        let mut mine: (Option<usize>, Option<usize>, Option<usize>) = (None, None, None);
+        let user: Vec<String> = self
+            .user_presets
+            .iter()
+            .map(|(_, p)| p.name.clone())
+            .collect();
+        let tiles = |ui: &mut egui::Ui,
+                     pick: &mut Option<Option<usize>>,
+                     mine: &mut (Option<usize>, Option<usize>, Option<usize>)| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             let original = [Color32::from_gray(0x55), Color32::from_gray(0x22)];
             if look_tile(ui, "original", original, live.is_none())
@@ -759,9 +768,37 @@ impl PhotoApp {
                     *pick = Some(Some(i));
                 }
             }
+            let swatch = [
+                Color32::from_rgb(0x5c, 0x4b, 0x2e),
+                Color32::from_gray(0x26),
+            ];
+            for (i, name) in user.iter().enumerate() {
+                // Eleven letters fit under a tile.
+                let short: String = if name.chars().count() > 11 {
+                    name.chars().take(10).chain(std::iter::once('…')).collect()
+                } else {
+                    name.clone()
+                };
+                let tile = look_tile(ui, &short, swatch, false).on_hover_text(format!(
+                    "{name}: your preset. Right-click or hold for more."
+                ));
+                if tile.clicked() {
+                    mine.0 = Some(i);
+                }
+                tile.context_menu(|ui| {
+                    if ui.button("Export…").clicked() {
+                        mine.1 = Some(i);
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        mine.2 = Some(i);
+                        ui.close();
+                    }
+                });
+            }
         };
         if wrap {
-            ui.horizontal_wrapped(|ui| tiles(ui, &mut pick));
+            ui.horizontal_wrapped(|ui| tiles(ui, &mut pick, &mut mine));
         } else {
             egui::ScrollArea::horizontal()
                 .id_salt("compact_looks")
@@ -772,8 +809,18 @@ impl PhotoApp {
                     ..Default::default()
                 })
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| tiles(ui, &mut pick));
+                    ui.horizontal(|ui| tiles(ui, &mut pick, &mut mine));
                 });
+        }
+        if let Some(i) = mine.0 {
+            self.preset = None;
+            self.apply_user_preset(i);
+        }
+        if let Some(i) = mine.1 {
+            self.export_user_preset(ui.ctx(), i);
+        }
+        if let Some(i) = mine.2 {
+            self.delete_user_preset(i);
         }
 
         match pick {
@@ -815,6 +862,74 @@ impl PhotoApp {
             ui.label(theme::dim("Click a look to try it; its strength appears here.").size(11.5));
         } else {
             ui.label(theme::dim("Tap a look to try it. Swipe the row for more.").size(11.5));
+        }
+        self.preset_saver(ui);
+    }
+
+    /// Save this photo's look as a preset, or bring one in from a file.
+    fn preset_saver(&mut self, ui: &mut egui::Ui) {
+        let editable = self.can_edit();
+        match self.preset_draft.take() {
+            None => {
+                ui.horizontal_wrapped(|ui| {
+                    if widgets::chip_enabled(ui, editable, false, "save as preset")
+                        .on_hover_text("Keep this photo's look to use again")
+                        .clicked()
+                    {
+                        self.preset_draft = Some(String::new());
+                    }
+                    if widgets::chip(ui, false, "import…")
+                        .on_hover_text("Add a .duckfoot-preset file")
+                        .clicked()
+                    {
+                        let from = self.settings.import_dir.clone();
+                        self.request(ui.ctx(), crate::platform::Request::ImportPreset { from });
+                    }
+                });
+            }
+            Some(mut name) => {
+                let mut done = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .hint_text("preset name")
+                            .desired_width((ui.available_width() - 150.0).max(80.0)),
+                    );
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if widgets::button_enabled(
+                        ui,
+                        !name.trim().is_empty(),
+                        Kind::Primary,
+                        "Save",
+                        0.0,
+                    )
+                    .clicked()
+                        || (enter && !name.trim().is_empty())
+                    {
+                        done = true;
+                    }
+                    if widgets::button(ui, Kind::Secondary, "Cancel", 0.0).clicked() {
+                        cancel = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        theme::dim(format!("It carries {}.", self.paste_set.describe())).size(11.5),
+                    );
+                    if widgets::chip(ui, self.paste_picker_open, "what it carries").clicked() {
+                        self.paste_picker_open = !self.paste_picker_open;
+                    }
+                });
+                if self.paste_picker_open && self.layout.is_compact() {
+                    self.paste_set_editor(ui);
+                }
+                if done {
+                    self.save_user_preset(&name);
+                } else if !cancel {
+                    self.preset_draft = Some(name);
+                }
+            }
         }
     }
 

@@ -264,6 +264,16 @@ impl Platform for AndroidPlatform {
                     self.answered.push(Response::ExportImage(path));
                 }
             }
+            // Beside the exports, where a file manager or the share sheet finds it.
+            Request::ExportPreset { name } => {
+                if let Some(dir) = self.exports_dir() {
+                    let path = unused_name(&dir, &name);
+                    self.answered.push(Response::ExportPreset(path));
+                }
+            }
+            Request::ImportPreset { .. } => self.answered.push(Response::Status(
+                "Importing presets needs a file picker this build does not have yet".into(),
+            )),
         }
     }
 

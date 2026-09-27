@@ -30,6 +30,7 @@ mod parts;
 pub mod paste;
 mod requests;
 mod session;
+pub mod user_presets;
 mod view;
 
 use curve_editor::*;
@@ -430,6 +431,12 @@ pub struct PhotoApp {
     pub paste_set: paste::PasteSet,
     /// The paste picker: a dialog on the desktop, inline on the phone.
     pub paste_picker_open: bool,
+    /// The user's own presets, as their files say (W-04).
+    pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
+    /// The name being typed for a preset about to be saved.
+    pub preset_draft: Option<String>,
+    /// A preset waiting for the export picker's answer.
+    exporting_preset: Option<user_presets::UserPreset>,
     /// The open photo's named snapshots, kept in its sidecar.
     pub snapshots: Vec<(String, PhotoStack)>,
     /// Undo history for photos stepped away from, most recent last, so returning to one
@@ -629,6 +636,9 @@ impl PhotoApp {
             clipboard_stack: None,
             paste_set: paste::PasteSet::default(),
             paste_picker_open: false,
+            user_presets: Vec::new(),
+            preset_draft: None,
+            exporting_preset: None,
             snapshots: Vec::new(),
             parked_histories: Vec::new(),
             pending_drops: Vec::new(),
@@ -715,6 +725,7 @@ impl PhotoApp {
     /// Photos no longer where they were are skipped.
     fn restore_session(&mut self, gpu: &Gpu) {
         let s = self.settings.clone();
+        self.reload_user_presets();
         if let Some(sections) = s.inspector_sections {
             self.inspector_sections =
                 settings::merge_sections_with(sections, InspectorSectionConfig::default_sections());

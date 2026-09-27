@@ -148,6 +148,16 @@ fn main() -> anyhow::Result<()> {
     }
     // DUCKFOOT_SHOT_PASTE=1: the paste picker open.
     app.paste_picker_open = std::env::var_os("DUCKFOOT_SHOT_PASTE").is_some();
+    // DUCKFOOT_SHOT_PRESETS=1: a user preset beside the looks, and one being named.
+    if std::env::var_os("DUCKFOOT_SHOT_PRESETS").is_some() {
+        app.looks_open = true;
+        let stack = app.stack().clone();
+        app.user_presets.push((
+            PathBuf::from("evening.duckfoot-preset"),
+            photo_app::user_presets::UserPreset::new("Evening glow", Default::default(), &stack),
+        ));
+        app.preset_draft = Some("Portrait".into());
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();
