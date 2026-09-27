@@ -648,7 +648,7 @@ read (an 8 MB head, the rest only when needed, up to 256 MB) instead of mapped, 
 seeded mutation tests of the TIFF walker, JPEG scanner, raster decode, DNG colour and
 sidecar parsing that run with every `cargo test`. `fuzz/` holds cargo-fuzz targets for the
 TIFF walker, the embedded-JPEG scanner, raster decode, RAW decode, sidecars, presets and ICC
-profiles, run ten minutes each every night (`.github/workflows/fuzz.yml`) from seeds the
+profiles, run ten minutes each every week and on demand (`.github/workflows/fuzz.yml`) from seeds the
 code writes (`write_fuzz_seeds`). Its first runs found, each now fixed and a regression
 test: an offset overflow in the TIFF walker (SubIFD values taken as offsets unchecked); a
 TIFF entry counting four billion values, which rawler allocates before reading (13 GB),
