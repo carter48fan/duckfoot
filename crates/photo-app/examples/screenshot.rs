@@ -136,6 +136,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(module) = module {
         app.compact_module = module?;
     }
+    // DUCKFOOT_SHOT_READOUT=value|list: the on-photo readout, or the list of values.
+    if let Ok(what) = std::env::var("DUCKFOOT_SHOT_READOUT") {
+        app.show_photo_readout(what == "list");
+    }
     if let Some(step) = args.next() {
         app.show_tour_step(step.parse()?);
     }

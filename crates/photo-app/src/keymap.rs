@@ -69,6 +69,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     s(Photos, "`Ctrl+Shift+E`", "batch export the selection"),
     s(
         Editing,
+        "`Alt+↑` / `Alt+↓`, `Alt+←` / `Alt+→`",
+        "choose a value of the card last worked on, then turn it (as a right-drag on the photo does)",
+    ),
+    s(
+        Editing,
         "`Ctrl+Z` / `Ctrl+Shift+Z`",
         "undo / redo, per photo",
     ),

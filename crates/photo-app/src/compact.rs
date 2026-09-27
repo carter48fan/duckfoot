@@ -1391,7 +1391,7 @@ impl PhotoApp {
     }
 
     /// Move to the next (`+1`) or previous (`-1`) module, stopping at the ends.
-    fn step_module(&mut self, step: i32) {
+    pub(crate) fn step_module(&mut self, step: i32) {
         let ids = self.compact_ids();
         let Some(i) = ids.iter().position(|id| *id == self.compact_module) else {
             return;

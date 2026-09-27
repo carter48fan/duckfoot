@@ -112,10 +112,11 @@ impl PhotoApp {
             }
             return;
         }
+        self.knob_keys(ctx);
         let (prev, next) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::ArrowLeft),
-                i.key_pressed(egui::Key::ArrowRight),
+                !i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft),
+                !i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight),
             )
         });
         // A slider reached with Tab takes the arrows for itself.

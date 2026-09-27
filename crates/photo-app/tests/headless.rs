@@ -2685,26 +2685,178 @@ fn a_long_folder_read_shows_its_progress_and_can_be_cancelled() {
     let h = Headless::new();
     let mut app = quiet_app(&h);
     h.frame(&mut app, Default::default());
+    // Cancelled before a frame has passed: the file thread cannot have finished.
+    app.open_session_folder(&h.gpu(), dir.clone());
+    app.cancel_reading();
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(
+        app.shelf.is_empty(),
+        "a cancelled read shelves nothing: {} shelved, status {:?}",
+        app.shelf.len(),
+        app.status_notification
+    );
+    let said = app.status_notification.as_ref().map(|(m, _)| m.as_str());
+    assert_eq!(said, Some("Stopped reading the folder"));
+
+    // Asked again and left alone, it says how far it has got, then finishes.
     app.open_session_folder(&h.gpu(), dir.clone());
     h.frame(&mut app, Default::default());
     let said = app.status_notification.as_ref().map(|(m, _)| m.clone());
     assert!(
-        said.as_deref().is_some_and(|m| m.starts_with("Reading ")),
+        said.as_deref()
+            .is_some_and(|m| m.starts_with("Reading ") || m.starts_with("Added ")),
         "{said:?}"
     );
-    app.cancel_reading();
-    h.settle(&mut app, Duration::from_secs(30));
-    assert!(app.shelf.is_empty(), "a cancelled read shelves nothing");
-    let said = app.status_notification.as_ref().map(|(m, _)| m.as_str());
-    assert_eq!(said, Some("Stopped reading the folder"));
-
-    // Asked again and left alone, it finishes.
-    app.open_session_folder(&h.gpu(), dir.clone());
     h.settle(&mut app, Duration::from_secs(30));
     assert_eq!(
         app.shelf.len(),
         256,
         "the first 256 folders that hold photos"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A finger down at the first point, through the rest a frame each (egui's clock moves
+/// a sixtieth of a second a frame), held `still` frames at the end, then up.
+fn touch_path(h: &Headless, app: &mut PhotoApp, points: &[egui::Pos2], still: usize) {
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let first = points[0];
+    let last = *points.last().unwrap();
+    h.frame_sized(
+        app,
+        PORTRAIT,
+        pointer(vec![egui::Event::PointerMoved(first)]),
+    );
+    h.frame_sized(app, PORTRAIT, pointer(vec![button(first, true)]));
+    for p in &points[1..] {
+        h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerMoved(*p)]));
+    }
+    for _ in 0..still {
+        h.frame_sized(app, PORTRAIT, Default::default());
+    }
+    h.frame_sized(app, PORTRAIT, pointer(vec![button(last, false)]));
+    h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerGone]));
+}
+
+/// `n` points from `from` to `to`.
+fn line(from: egui::Pos2, to: egui::Pos2, n: usize) -> Vec<egui::Pos2> {
+    (0..=n)
+        .map(|i| from + (to - from) * (i as f32 / n as f32))
+        .collect()
+}
+
+#[test]
+fn on_a_phone_the_photo_is_the_edit_sheets_control() {
+    let dir = scratch_dir("on-photo");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.compact_tab = Some(Tab::Edit);
+    app.compact_module = photo_app::InspectorSectionId::Exposure;
+    for _ in 0..6 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    assert_eq!(app.photo_value(), Some("EV"));
+    let centre = egui::pos2(PORTRAIT.x / 2.0, 220.0);
+
+    // Right across the photo, quickly: exposure goes up, in one undo step.
+    let ev0 = app.stack().exposure.params.ev;
+    touch_path(
+        &h,
+        &mut app,
+        &line(
+            centre - egui::vec2(120.0, 0.0),
+            centre + egui::vec2(120.0, 0.0),
+            8,
+        ),
+        0,
+    );
+    let ev1 = app.stack().exposure.params.ev;
+    assert!(ev1 > ev0 + 0.5, "EV {ev0} → {ev1}");
+    assert!(app.undo());
+    assert_eq!(
+        app.stack().exposure.params.ev,
+        ev0,
+        "one step undoes the whole slide"
+    );
+    assert!(app.redo());
+
+    // Slowly, the same distance changes it a quarter as much.
+    let before = app.stack().exposure.params.ev;
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre - egui::vec2(60.0, 0.0), 40),
+        0,
+    );
+    let slow = before - app.stack().exposure.params.ev;
+    // Fast, 60 points would be about 1 EV.
+    assert!(slow > 0.0 && slow < 0.35, "a slow slide moved EV by {slow}");
+
+    // Down to choose the next value.
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre + egui::vec2(0.0, 50.0), 8),
+        0,
+    );
+    assert_eq!(app.photo_value(), Some("black"));
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre - egui::vec2(0.0, 50.0), 8),
+        0,
+    );
+    assert_eq!(app.photo_value(), Some("EV"));
+
+    // Double-tap: EV back where it started.
+    touch_path(&h, &mut app, &[centre], 0);
+    touch_path(&h, &mut app, &[centre], 0);
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+
+    // Held: the original shows until the finger lets go.
+    let button = |pressed| egui::Event::PointerButton {
+        pos: centre,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.frame_sized(
+        &mut app,
+        PORTRAIT,
+        pointer(vec![egui::Event::PointerMoved(centre)]),
+    );
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(true)]));
+    for _ in 0..40 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    assert!(app.showing_original());
+    h.frame_sized(&mut app, PORTRAIT, pointer(vec![button(false)]));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    assert!(!app.showing_original());
+
+    // A module with nothing to turn: a sideways flick on the photo moves to the next.
+    app.compact_module = photo_app::InspectorSectionId::ToneCurve;
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    touch_path(
+        &h,
+        &mut app,
+        &line(
+            centre + egui::vec2(100.0, 0.0),
+            centre - egui::vec2(100.0, 0.0),
+            6,
+        ),
+        0,
+    );
+    assert_ne!(app.compact_module, photo_app::InspectorSectionId::ToneCurve);
     let _ = std::fs::remove_dir_all(&dir);
 }
