@@ -39,6 +39,10 @@ pub struct CfaImage {
     pub wb: [f32; 3],
     /// White-balanced camera RGB → linear sRGB; neutral maps to neutral (see `cam_to_srgb`).
     pub cam_to_srgb: [[f32; 3]; 3],
+    /// The same, as the DNG's own profile has it: its ForwardMatrix, or its two colour
+    /// matrices interpolated for the white it was shot under (W-09). Used by the wide
+    /// working space only, so an edit made before keeps the colour it had.
+    pub cam_profiled: Option<[[f32; 3]; 3]>,
     /// Multipliers that neutralise a D65 white, green = 1. The normalisation of
     /// `cam_to_srgb` discards the camera's response to daylight, and kelvin cannot be
     /// read off a white balance without it (`temperature::WhiteScale`).
@@ -325,14 +329,41 @@ fn with_dng_opcodes(img: &mut Decoded, bytes: &[u8]) {
 /// A decode that found no as-shot white balance of its own takes the DNG's colour tags
 /// (AsShotWhiteXY and the dual-illuminant matrices), as Pixel-style DNGs need.
 fn with_dng_colour(mut img: Decoded, bytes: &[u8]) -> CfaImage {
-    if img.wb_missing {
-        if let Some(dng) = dng::colour(bytes) {
+    if let Some(dng) = dng::colour(bytes) {
+        if img.wb_missing {
             img.cfa.wb = dng.wb;
             img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
             img.cfa.daylight_wb = daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
         }
+        img.cfa.cam_profiled = Some(match dng.forward {
+            Some(fm) => forward_to_srgb(&fm),
+            None => cam_to_srgb(&dng.xyz_to_cam),
+        });
     }
     img.cfa
+}
+
+/// Bradford D50 → D65 (Lindbloom): the ForwardMatrix's connection space to sRGB's white.
+const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
+    [0.955_576_6, -0.023_039_3, 0.063_163_6],
+    [-0.028_289_5, 1.009_941_6, 0.021_007_7],
+    [0.012_298_2, -0.020_483, 1.329_909_8],
+];
+
+/// A DNG ForwardMatrix (white-balanced camera → XYZ D50) as camera → linear sRGB. The
+/// spec scales its rows so the neutral maps to D50's white; what that leaves of rounding
+/// is taken out, so a neutral lands exactly on a neutral as `cam_to_srgb`'s does.
+fn forward_to_srgb(fm: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut m = mul3(&XYZ_TO_SRGB, &mul3(&BRADFORD_D50_TO_D65, fm));
+    for row in m.iter_mut() {
+        let sum: f32 = row.iter().sum();
+        if (sum - 1.0).abs() < 0.1 {
+            for v in row.iter_mut() {
+                *v /= sum;
+            }
+        }
+    }
+    m
 }
 
 /// Default decoder: tries `rawler` first (~2,500 modern cameras including Sony A7 IV),
@@ -484,6 +515,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             white,
             wb,
             cam_to_srgb: cam_to_srgb(&raw.xyz_to_cam),
+            cam_profiled: None,
             daylight_wb: daylight_multipliers(&raw.xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry(raw.orientation),
             make: raw.make.clone(),
@@ -722,6 +754,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             white,
             wb,
             cam_to_srgb: cam_to_srgb(&xyz_to_cam),
+            cam_profiled: None,
             daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry_rawler(raw.orientation),
             make,
@@ -1014,7 +1047,13 @@ mod dng {
         pub wb: [f32; 3],
         /// Interpolated for the as-shot white's colour temperature, in rawloader's layout.
         pub xyz_to_cam: [[f32; 3]; 4],
+        /// ForwardMatrix, interpolated the same way, if the file has one.
+        pub forward: Option<[[f32; 3]; 3]>,
     }
+
+    const AS_SHOT_NEUTRAL: u16 = 0xC628;
+    const FORWARD_MATRIX_1: u16 = 0xC714;
+    const FORWARD_MATRIX_2: u16 = 0xC715;
 
     const AS_SHOT_WHITE_XY: u16 = 0xC629;
     const COLOR_MATRIX_1: u16 = 0xC621;
@@ -1047,47 +1086,79 @@ mod dng {
         Tiff::new(bytes)?.find(tag)?.first().copied()
     }
 
-    /// As-shot white balance and a matching colour matrix, if the file has
-    /// `AsShotWhiteXY` and at least one `ColorMatrix`.
+    /// As-shot white balance and a matching colour matrix, if the file has a white
+    /// (`AsShotWhiteXY` or `AsShotNeutral`) and at least one `ColorMatrix`.
     ///
     /// Follows the DNG spec's model: XYZ → camera is `CameraCalibration · ColorMatrix`,
-    /// each interpolated between its two calibration illuminants linearly in inverse
-    /// colour temperature. The white is given as a chromaticity, so its temperature is
-    /// known directly and no iteration is needed (that is only for `AsShotNeutral`).
+    /// each (and `ForwardMatrix`) interpolated between its two calibration illuminants
+    /// linearly in inverse colour temperature. A white given as a chromaticity says its
+    /// temperature directly; one given as the camera's neutral is found by iterating:
+    /// the matrix for a temperature puts the neutral at some white, whose temperature
+    /// picks the next matrix, until they agree.
     pub fn colour(bytes: &[u8]) -> Option<Colour> {
         let tiff = Tiff::new(bytes)?;
-        let white = tiff.find(AS_SHOT_WHITE_XY)?;
-        let (x, y) = (*white.first()?, *white.get(1)?);
-
-        let cm1 = tiff.find(COLOR_MATRIX_1).and_then(|v| matrix(&v));
-        let cm2 = tiff.find(COLOR_MATRIX_2).and_then(|v| matrix(&v));
-        let cc1 = tiff.find(CAMERA_CALIBRATION_1).and_then(|v| matrix(&v));
-        let cc2 = tiff.find(CAMERA_CALIBRATION_2).and_then(|v| matrix(&v));
+        let get = |tag| tiff.find(tag).and_then(|v| matrix(&v));
+        let (cm1, cm2) = (get(COLOR_MATRIX_1), get(COLOR_MATRIX_2));
+        let (cc1, cc2) = (get(CAMERA_CALIBRATION_1), get(CAMERA_CALIBRATION_2));
+        let (fm1, fm2) = (get(FORWARD_MATRIX_1), get(FORWARD_MATRIX_2));
         let t1 = tiff
             .find(CALIBRATION_ILLUMINANT_1)
             .and_then(|v| kelvin(*v.first()?));
         let t2 = tiff
             .find(CALIBRATION_ILLUMINANT_2)
             .and_then(|v| kelvin(*v.first()?));
+        let dual = match (cm1, cm2, t1, t2) {
+            (Some(_), Some(_), Some(t1), Some(t2)) if t1 != t2 => Some((t1, t2)),
+            _ => None,
+        };
+        cm1.or(cm2)?;
 
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let (cm, cc) = match (cm1, cm2, t1, t2) {
-            (Some(m1), Some(m2), Some(t1), Some(t2)) if t1 != t2 => {
-                let w = weight(cct(x, y), t1, t2);
-                (
-                    lerp(&m1, &m2, w),
-                    lerp(&cc1.unwrap_or(identity), &cc2.unwrap_or(identity), w),
-                )
-            }
-            (Some(m), _, _, _) => (m, cc1.unwrap_or(identity)),
-            (None, Some(m), _, _) => (m, cc2.unwrap_or(identity)),
-            (None, None, _, _) => return None,
+        // XYZ → camera and the forward matrix, weighted `w` towards illuminant 1.
+        let at = |w: f32| {
+            let pick = |a: Option<[[f32; 3]; 3]>, b: Option<[[f32; 3]; 3]>| match (a, b, dual) {
+                (Some(a), Some(b), Some(_)) => Some(lerp(&a, &b, w)),
+                (a, b, _) => a.or(b),
+            };
+            let cm = pick(cm1, cm2).expect("one matrix, checked above");
+            let cc = pick(cc1, cc2).unwrap_or(identity);
+            (super::mul3(&cc, &cm), pick(fm1, fm2))
         };
-        let xyz_to_cam = super::mul3(&cc, &cm);
-        let wb = super::neutral_for_white(&xyz_to_cam, (x as f32, y as f32))?;
+        let weight_for = |x: f64, y: f64| dual.map_or(1.0, |(t1, t2)| weight(cct(x, y), t1, t2));
+
+        let (w, wb) = if let Some(white) = tiff.find(AS_SHOT_WHITE_XY) {
+            let (x, y) = (*white.first()?, *white.get(1)?);
+            let w = weight_for(x, y);
+            (w, super::neutral_for_white(&at(w).0, (x as f32, y as f32))?)
+        } else {
+            let n = tiff.find(AS_SHOT_NEUTRAL)?;
+            let n = [*n.first()?, *n.get(1)?, *n.get(2)?];
+            if n.iter().any(|v| v.is_nan() || *v <= 0.0) {
+                return None;
+            }
+            let mut w = 0.5;
+            for _ in 0..30 {
+                let inv = super::invert3(&at(w).0)?;
+                let xyz = super::mul3v(&inv, n);
+                let sum = xyz.iter().sum::<f64>();
+                if sum.is_nan() || sum <= 0.0 {
+                    break;
+                }
+                let next = weight_for(xyz[0] / sum, xyz[1] / sum);
+                let done = (next - w).abs() < 1e-5;
+                w = next;
+                if done {
+                    break;
+                }
+            }
+            let g = n[1] as f32;
+            (w, [g / n[0] as f32, 1.0, g / n[2] as f32])
+        };
+        let (xyz_to_cam, forward) = at(w);
         Some(Colour {
             wb,
             xyz_to_cam: [xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2], [0.0; 3]],
+            forward,
         })
     }
 
@@ -1372,6 +1443,109 @@ pub(crate) fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A little-endian TIFF with one IFD: each tag's values as FLOATs, or a SHORT.
+    fn dng_tags(tags: &[(u16, Vec<f32>)]) -> Vec<u8> {
+        let mut tags = tags.to_vec();
+        tags.sort_by_key(|t| t.0);
+        let ifd = 8;
+        let data_at = ifd + 2 + 12 * tags.len() + 4;
+        let (mut entries, mut data) = (Vec::new(), Vec::new());
+        for (tag, values) in &tags {
+            entries.extend_from_slice(&tag.to_le_bytes());
+            let short = *tag == 0xC65A || *tag == 0xC65B;
+            if short {
+                entries.extend_from_slice(&3u16.to_le_bytes());
+                entries.extend_from_slice(&1u32.to_le_bytes());
+                entries.extend_from_slice(&(values[0] as u32).to_le_bytes());
+                continue;
+            }
+            entries.extend_from_slice(&11u16.to_le_bytes());
+            entries.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            if values.len() == 1 {
+                entries.extend_from_slice(&values[0].to_le_bytes());
+            } else {
+                entries.extend_from_slice(&((data_at + data.len()) as u32).to_le_bytes());
+                for v in values {
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        let mut b = b"II".to_vec();
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&(ifd as u32).to_le_bytes());
+        b.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        b.extend_from_slice(&entries);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&data);
+        b
+    }
+
+    fn flat(m: &[[f32; 3]; 3]) -> Vec<f32> {
+        m.iter().flatten().copied().collect()
+    }
+
+    #[test]
+    fn a_forward_matrix_for_an_srgb_camera_is_the_identity() {
+        // White-balanced linear sRGB → XYZ D50: sRGB → XYZ, then Bradford D65 → D50.
+        let srgb_to_xyz = invert3(&XYZ_TO_SRGB).unwrap();
+        let d65_to_d50 = invert3(&BRADFORD_D50_TO_D65).unwrap();
+        let fm = mul3(&d65_to_d50, &srgb_to_xyz);
+        let m = forward_to_srgb(&fm);
+        for (i, row) in m.iter().enumerate() {
+            for (j, v) in row.iter().enumerate() {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((v - want).abs() < 2e-3, "{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_as_shot_neutral_finds_its_white_between_two_illuminants() {
+        // A camera whose matrix under tungsten (A) differs from its daylight one.
+        let d65 = XYZ_TO_SRGB;
+        let mut a = XYZ_TO_SRGB;
+        a[0] = a[0].map(|v| v * 1.3);
+        a[2] = a[2].map(|v| v * 0.7);
+        let fm1 = [[0.7, 0.2, 0.1], [0.3, 0.6, 0.1], [0.0, 0.1, 0.7]];
+        let fm2 = [[0.6, 0.3, 0.1], [0.2, 0.7, 0.1], [0.0, 0.0, 0.8]];
+        let neutral = [0.55f32, 1.0, 0.8];
+        let file = dng_tags(&[
+            (0xC621, flat(&a)),
+            (0xC622, flat(&d65)),
+            (0xC65A, vec![17.0]),
+            (0xC65B, vec![21.0]),
+            (0xC714, flat(&fm1)),
+            (0xC715, flat(&fm2)),
+            (0xC628, neutral.to_vec()),
+        ]);
+        let c = dng::colour(&file).expect("the colour tags");
+        // The balance undoes the neutral.
+        for (k, v) in c.wb.iter().enumerate() {
+            assert!((v * neutral[k] - 1.0).abs() < 1e-5, "{:?}", c.wb);
+        }
+        // Whatever white the matrix found, both the colour and forward matrices are the
+        // same blend of their pair.
+        let fm = c.forward.expect("forward matrices");
+        let w = (fm[0][0] - fm2[0][0]) / (fm1[0][0] - fm2[0][0]);
+        assert!((0.0..=1.0).contains(&w), "{w}");
+        let cm0 = c.xyz_to_cam[0][0];
+        let want = w * a[0][0] + (1.0 - w) * d65[0][0];
+        assert!((cm0 - want).abs() < 1e-4, "{cm0} for {want}");
+        // And the white that blend puts the neutral at has the temperature it assumed.
+        let m = [c.xyz_to_cam[0], c.xyz_to_cam[1], c.xyz_to_cam[2]];
+        let xyz = mul3v(&invert3(&m).unwrap(), neutral.map(f64::from));
+        let sum: f64 = xyz.iter().sum();
+        let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        let n = (x - 0.3320) / (0.1858 - y);
+        let t = 449.0 * n.powi(3) + 3525.0 * n.powi(2) + 6823.3 * n + 5520.33;
+        let inv = |k: f64| 1.0 / k;
+        let w_of_t = ((inv(t) - inv(6504.0)) / (inv(2856.0) - inv(6504.0))).clamp(0.0, 1.0);
+        assert!(
+            (w_of_t as f32 - w).abs() < 1e-3,
+            "{t:.0} K gives {w_of_t}, used {w}"
+        );
+    }
 
     #[test]
     fn raster_pixels_become_linear_half_floats() {

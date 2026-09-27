@@ -69,6 +69,7 @@ pub fn mosaic_from_fn(
         white: [WHITE as f32; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: IDENTITY,
+        cam_profiled: None,
         daylight_wb: [1.0, 1.0, 1.0],
         orientation: Geometry::default(),
         make: "synthetic".into(),
