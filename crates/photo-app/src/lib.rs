@@ -183,6 +183,8 @@ pub struct ShelfItem {
     /// photo itself).
     pub sort_name: String,
     pub copy: u32,
+    /// Its name lowercased once, for the search box to match every frame.
+    pub search_name: String,
     /// Its sidecar and file not read yet (WP5.3): shelved at once, filled in when the
     /// loader has read them.
     pub pending: bool,
@@ -232,8 +234,10 @@ impl ShelfItem {
             Some((source, n)) => (file_name(&source), n),
             None => (file_name(&path), 1),
         };
+        let name = file_name(&path);
         Self {
-            name: file_name(&path),
+            search_name: name.to_lowercase(),
+            name,
             sort_name,
             copy,
             is_edited: false,

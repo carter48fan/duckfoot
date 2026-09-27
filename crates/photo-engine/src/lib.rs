@@ -37,8 +37,8 @@ pub use decode::{
     RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{
-    output_point, sensor_point, upload_cfa, upload_raster, AutoTone, Engine, LoadedImage,
-    UploadPool, UploadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT,
+    gpu_objects_made, output_point, sensor_point, upload_cfa, upload_raster, AutoTone, Engine,
+    LoadedImage, UploadPool, UploadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT,
 };
 pub use exif_out::MetadataPolicy;
 pub use export::{

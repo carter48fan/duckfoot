@@ -9,6 +9,47 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Result};
 use wgpu::util::DeviceExt;
 
+/// How many bind groups, textures and buffers the engine has made, ever. Every one goes
+/// through [`Make`], so a test can hold the engine to invariant 6: a slider drag makes
+/// none (tests/drag.rs).
+static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn gpu_objects_made() -> u64 {
+    MADE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The engine's way to make a GPU object: `create_*`, counted.
+trait Make {
+    fn make_bind_group(&self, desc: &wgpu::BindGroupDescriptor) -> wgpu::BindGroup;
+    fn make_texture(&self, desc: &wgpu::TextureDescriptor) -> wgpu::Texture;
+    fn make_buffer(&self, desc: &wgpu::BufferDescriptor) -> wgpu::Buffer;
+    fn make_buffer_init(&self, desc: &wgpu::util::BufferInitDescriptor) -> wgpu::Buffer;
+}
+
+fn made() {
+    MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Make for wgpu::Device {
+    fn make_bind_group(&self, desc: &wgpu::BindGroupDescriptor) -> wgpu::BindGroup {
+        made();
+        self.create_bind_group(desc)
+    }
+    fn make_texture(&self, desc: &wgpu::TextureDescriptor) -> wgpu::Texture {
+        made();
+        self.create_texture(desc)
+    }
+    fn make_buffer(&self, desc: &wgpu::BufferDescriptor) -> wgpu::Buffer {
+        made();
+        self.create_buffer(desc)
+    }
+    fn make_buffer_init(&self, desc: &wgpu::util::BufferInitDescriptor) -> wgpu::Buffer {
+        made();
+        self.create_buffer_init(desc)
+    }
+}
+
 use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, CfaPattern, RasterImage};
 use crate::export::ExportedImage;
@@ -191,6 +232,9 @@ pub struct LoadedImage {
     pub output_view: wgpu::TextureView,
     output_texture: wgpu::Texture,
     adjust_bind: wgpu::BindGroup,
+    /// The histogram pass's bind group, which reads the preview: made on first use and
+    /// again only when the preview is replaced, not every frame (WP5.4).
+    hist_bind: std::sync::OnceLock<wgpu::BindGroup>,
     /// The clipping overlay's texture and the bind group that reads the preview into it,
     /// while the overlay is on. Preview-sized; replaced with the preview.
     overlay: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
@@ -215,7 +259,7 @@ struct Brushes {
 impl Brushes {
     fn new(device: &wgpu::Device, sensor: (u32, u32)) -> Self {
         let size = crate::local::brush_size(sensor);
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.make_texture(&wgpu::TextureDescriptor {
             label: Some("brush masks"),
             size: wgpu::Extent3d {
                 width: size.0,
@@ -381,7 +425,7 @@ fn output_texture_as(
     height: u32,
     format: wgpu::TextureFormat,
 ) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
+    device.make_texture(&wgpu::TextureDescriptor {
         label: Some("adjusted output"),
         size: wgpu::Extent3d {
             width,
@@ -586,7 +630,7 @@ pub fn upload_cfa(
     };
     let texture = scoped(device, "uploading the mosaic", || {
         let texture = pool.take(extent).unwrap_or_else(|| {
-            device.create_texture(&wgpu::TextureDescriptor {
+            device.make_texture(&wgpu::TextureDescriptor {
                 label: Some("cfa mosaic"),
                 size: extent,
                 mip_level_count: 1,
@@ -649,7 +693,7 @@ pub fn upload_raster(
         depth_or_array_layers: 1,
     };
     let texture = scoped(device, "uploading the image", || {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.make_texture(&wgpu::TextureDescriptor {
             label: Some("raster upload"),
             size: extent,
             mip_level_count: 1,
@@ -985,7 +1029,7 @@ impl Engine {
         );
 
         let uniform_buffer = |label| {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            device.make_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: std::mem::size_of::<AdjustUniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -995,7 +1039,7 @@ impl Engine {
         let adjust_buffer = uniform_buffer("adjust uniforms");
         let export_buffer = uniform_buffer("export uniforms");
 
-        let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+        let lut_texture = device.make_texture(&wgpu::TextureDescriptor {
             label: Some("tone curve lut"),
             size: wgpu::Extent3d {
                 width: LUT_SIZE as u32,
@@ -1063,7 +1107,7 @@ impl Engine {
             compilation_options: Default::default(),
             cache: None,
         });
-        let hist_bins = device.create_buffer(&wgpu::BufferDescriptor {
+        let hist_bins = device.make_buffer(&wgpu::BufferDescriptor {
             label: Some("histogram bins"),
             size: BUFFER_BYTES,
             usage: wgpu::BufferUsages::STORAGE
@@ -1071,13 +1115,13 @@ impl Engine {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let hist_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        let hist_staging = device.make_buffer(&wgpu::BufferDescriptor {
             label: Some("histogram staging"),
             size: BUFFER_BYTES,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let hist_params = device.create_buffer(&wgpu::BufferDescriptor {
+        let hist_params = device.make_buffer(&wgpu::BufferDescriptor {
             label: Some("histogram params"),
             size: std::mem::size_of::<HistogramParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1205,7 +1249,7 @@ impl Engine {
         let (w, h) = image.preview_size();
         let texture = output_texture(device, w, h);
         let view = texture.create_view(&Default::default());
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("clip overlay bind"),
             layout: &self.clip_bgl,
             entries: &[wgpu::BindGroupEntry {
@@ -1242,7 +1286,7 @@ impl Engine {
         brushes: &wgpu::TextureView,
         uniforms: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.make_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("adjust bind"),
             layout: &self.adjust_bgl,
             entries: &[
@@ -1294,7 +1338,7 @@ impl Engine {
             Some(d) if d.base == base => (d.texture, d.view),
             _ => {
                 let texture = scoped(device, "the denoised copy", || {
-                    device.create_texture(&wgpu::TextureDescriptor {
+                    device.make_texture(&wgpu::TextureDescriptor {
                         label: Some("denoised sensor"),
                         // The sensor's own level `base`: mip sizes round down.
                         size: wgpu::Extent3d {
@@ -1327,12 +1371,12 @@ impl Engine {
         for k in 0..levels {
             let mut uniforms = u;
             uniforms.a[0] = (base + k) as f32;
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let buffer = device.make_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("denoise params"),
                 contents: bytemuck::bytes_of(&uniforms),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("denoise bind"),
                 layout: &self.denoise_bgl,
                 entries: &[
@@ -1509,7 +1553,7 @@ impl Engine {
         let mip_levels = mip_count(width, height);
         let sensor = match self.retired_sensor.take() {
             Some((e, m, texture)) if e == extent && m == mip_levels => texture,
-            _ => device.create_texture(&wgpu::TextureDescriptor {
+            _ => device.make_texture(&wgpu::TextureDescriptor {
                 label: Some("sensor rgb"),
                 size: extent,
                 mip_level_count: mip_levels,
@@ -1550,7 +1594,7 @@ impl Engine {
                     Some(s) if s.extent == extent => s,
                     _ => Scratch {
                         extent,
-                        green: device.create_texture(&wgpu::TextureDescriptor {
+                        green: device.make_texture(&wgpu::TextureDescriptor {
                             label: Some("green plane"),
                             size: extent,
                             mip_level_count: 1,
@@ -1566,7 +1610,7 @@ impl Engine {
                 let green_view = scratch.green.create_view(&Default::default());
 
                 let demosaic_uniforms =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    device.make_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("demosaic uniforms"),
                         contents: bytemuck::bytes_of(&DemosaicUniforms {
                             size: [width, height, cfa.width, cfa.height],
@@ -1578,7 +1622,7 @@ impl Engine {
                     });
 
                 let mosaic_view = mosaic.create_view(&Default::default());
-                let green_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let green_bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("demosaic green bind"),
                     layout: &self.green_bgl,
                     entries: &[
@@ -1592,7 +1636,7 @@ impl Engine {
                         },
                     ],
                 });
-                let rb_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let rb_bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("demosaic rb bind"),
                     layout: &self.rb_bgl,
                     entries: &[
@@ -1655,7 +1699,7 @@ impl Engine {
         // whole sensor texture, every level of it, is immutable (invariant 5).
         for level in 1..mip_levels {
             let parent = level_view(level - 1);
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("sensor downsample bind"),
                 layout: &self.mip_bgl,
                 entries: &[wgpu::BindGroupEntry {
@@ -1719,6 +1763,7 @@ impl Engine {
             output_view,
             output_texture,
             adjust_bind,
+            hist_bind: std::sync::OnceLock::new(),
             overlay: None,
             brushes,
             denoised: None,
@@ -1948,6 +1993,7 @@ impl Engine {
             Ok(texture) => {
                 image.output_view = texture.create_view(&Default::default());
                 image.output_texture = texture;
+                image.hist_bind = std::sync::OnceLock::new();
             }
             // Preview-sized, so this is a device in real trouble. The old texture is still
             // valid to draw and show, which beats a panic mid-frame.
@@ -2400,23 +2446,25 @@ impl Engine {
                 stride: [stride, 0, 0, 0],
             }),
         );
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("histogram bind"),
-            layout: &self.hist_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&image.output_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.hist_bins.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.hist_params.as_entire_binding(),
-                },
-            ],
+        let bind = image.hist_bind.get_or_init(|| {
+            device.make_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("histogram bind"),
+                layout: &self.hist_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&image.output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.hist_bins.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.hist_params.as_entire_binding(),
+                    },
+                ],
+            })
         });
 
         encoder.clear_buffer(&self.hist_bins, 0, None);
@@ -2426,7 +2474,7 @@ impl Engine {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.hist_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, bind, &[]);
             let groups_x = w.div_ceil(stride).div_ceil(16).max(1);
             let groups_y = h.div_ceil(stride).div_ceil(16).max(1);
             pass.dispatch_workgroups(groups_x, groups_y, 1);
@@ -2641,7 +2689,7 @@ pub(crate) fn read_back_level(
         .map_err(|_| anyhow::anyhow!("no memory for a {width}×{height} export"))?;
 
     let buffer = scoped(device, "export readback buffer", || {
-        device.create_buffer(&wgpu::BufferDescriptor {
+        device.make_buffer(&wgpu::BufferDescriptor {
             label: Some("export readback"),
             size: stride as u64 * band_rows as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -2979,7 +3027,7 @@ impl Engine {
         extent: wgpu::Extent3d,
     ) {
         let texture = |label, size, format, mips| {
-            device.create_texture(&wgpu::TextureDescriptor {
+            device.make_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size,
                 mip_level_count: mips,
@@ -3022,7 +3070,7 @@ impl Engine {
         };
         let all_ratios = ratios.create_view(&Default::default());
         let bind = |label, reads: [&wgpu::TextureView; 4]| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout: &self.rcd_bgl,
                 entries: &[
@@ -3069,7 +3117,7 @@ impl Engine {
         );
         for level in 1..ratio_levels {
             let parent = ratio_level(level - 1);
-            let mip = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let mip = device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rcd ratio downsample"),
                 layout: &self.mip_bgl,
                 entries: &[wgpu::BindGroupEntry {
@@ -3194,7 +3242,7 @@ mod tests {
         let device = device();
         let too_big = device.limits().max_buffer_size + 1;
         let result = scoped(&device, "a huge buffer", || {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            device.make_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: too_big,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -3206,7 +3254,7 @@ mod tests {
 
         // The scopes are gone again: a good allocation afterwards is fine.
         scoped(&device, "a small buffer", || {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            device.make_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: 256,
                 usage: wgpu::BufferUsages::COPY_DST,

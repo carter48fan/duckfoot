@@ -174,21 +174,39 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
         4.0,
     ));
 
-    // The curve as it will be once the gesture ends: without a node being torn off.
-    let shown: Vec<CurveNode> = nodes
+    // The curve as it will be once the gesture ends: without a node being torn off. Its
+    // samples are kept between frames and made again only when a node moves (WP5.4).
+    let shown = || {
+        nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != tearing)
+            .map(|(_, n)| *n)
+    };
+    let samples = ui.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<CurveSamples>(response.id.with("samples"));
+        if cache.values.is_empty() || !cache.nodes.iter().copied().eq(shown()) {
+            cache.nodes = shown().collect();
+            let lut = photo_engine::curve::build_lut(&cache.nodes);
+            cache.values = std::sync::Arc::new(
+                (0..128)
+                    .map(|i| {
+                        let t = i as f32 / 127.0;
+                        lut[(t * (lut.len() - 1) as f32) as usize].clamp(0.0, 1.0)
+                    })
+                    .collect(),
+            );
+        }
+        cache.values.clone()
+    });
+    let points: Vec<egui::Pos2> = samples
         .iter()
         .enumerate()
-        .filter(|(i, _)| Some(*i) != tearing)
-        .map(|(_, n)| *n)
-        .collect();
-    let lut = photo_engine::curve::build_lut(&shown);
-    let points: Vec<egui::Pos2> = (0..128)
-        .map(|i| {
+        .map(|(i, v)| {
             let t = i as f32 / 127.0;
-            let v = lut[(t * (lut.len() - 1) as f32) as usize];
             egui::pos2(
                 rect.left() + t * rect.width(),
-                rect.bottom() - v.clamp(0.0, 1.0) * rect.height(),
+                rect.bottom() - v * rect.height(),
             )
         })
         .collect();
@@ -246,4 +264,11 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
         });
     }
     response
+}
+
+/// The curve's plotted samples and the nodes they were made from.
+#[derive(Clone, Default)]
+struct CurveSamples {
+    nodes: Vec<CurveNode>,
+    values: std::sync::Arc<Vec<f32>>,
 }

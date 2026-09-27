@@ -32,6 +32,7 @@ kamadak-exif = "0.6"
 
 [dev-dependencies]
 # The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.
-wgpu = { workspace = true, features = ["noop"] }
+# Counters: tests/drag.rs counts what is alive on the GPU through a drag (invariant 6).
+wgpu = { workspace = true, features = ["noop", "counters"] }
 pollster = "1"
 env_logger = "0.11"
