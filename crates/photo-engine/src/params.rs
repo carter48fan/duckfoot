@@ -187,6 +187,13 @@ pub struct Geometry {
     /// the corners rotate out of frame and a crop is expected to take them.
     pub straighten_deg: f32,
     pub crop: Crop,
+    /// Keystone, -100..=100. Positive vertical widens the top: lines that lean in toward
+    /// the top of the frame, as a building's do when shot looking up, stand straight.
+    #[serde(default)]
+    pub perspective_v: f32,
+    /// Positive horizontal widens the right side, for a wall shot at an angle from the left.
+    #[serde(default)]
+    pub perspective_h: f32,
 }
 
 impl Default for Geometry {
@@ -197,14 +204,126 @@ impl Default for Geometry {
             mirror_v: false,
             straighten_deg: 0.0,
             crop: Crop::default(),
+            perspective_v: 0.0,
+            perspective_h: 0.0,
         }
     }
+}
+
+/// A keystone correction as the shader applies it: a homography from the output (centred,
+/// in units of half its long side) to the frame before straightening, with the zoom that
+/// keeps every corner of the frame on the photo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Perspective {
+    /// Row-major, acting on (x, y, 1).
+    pub m: [[f32; 3]; 3],
+    /// Pixels per unit: half the output's long side.
+    pub unit: f32,
+}
+
+impl Perspective {
+    /// Where the output point `p` (pixels from the frame's centre) is taken from.
+    pub fn source(&self, p: (f32, f32)) -> (f32, f32) {
+        let (x, y) = (p.0 / self.unit, p.1 / self.unit);
+        let m = &self.m;
+        let w = m[2][0] * x + m[2][1] * y + m[2][2];
+        let (sx, sy) = (
+            (m[0][0] * x + m[0][1] * y + m[0][2]) / w,
+            (m[1][0] * x + m[1][1] * y + m[1][2]) / w,
+        );
+        (sx * self.unit, sy * self.unit)
+    }
+
+    /// The output point that takes from `q`: [`Self::source`]'s inverse.
+    pub fn output(&self, q: (f32, f32)) -> (f32, f32) {
+        let inv = invert3(&self.m);
+        Perspective {
+            m: inv,
+            unit: self.unit,
+        }
+        .source(q)
+    }
+}
+
+fn invert3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = if det.abs() < 1e-12 { 1.0 } else { 1.0 / det };
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * d,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * d,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * d,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * d,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * d,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * d,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * d,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * d,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * d,
+        ],
+    ]
 }
 
 impl Geometry {
     /// Right-angle turns swap the axes; straightening does not.
     pub fn swaps_axes(&self) -> bool {
         self.quarter_turns % 2 == 1
+    }
+
+    /// The keystone correction for an output of `out` pixels, if any is set.
+    pub fn perspective(&self, out: (u32, u32)) -> Option<Perspective> {
+        let finite = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-100.0, 100.0)
+            } else {
+                0.0
+            }
+        };
+        let (kv, kh) = (
+            finite(self.perspective_v) / 100.0 * 0.6,
+            finite(self.perspective_h) / 100.0 * 0.6,
+        );
+        if kv == 0.0 && kh == 0.0 {
+            return None;
+        }
+        let unit = out.0.max(out.1) as f32 * 0.5;
+        let (hx, hy) = (out.0 as f32 * 0.5 / unit, out.1 as f32 * 0.5 / unit);
+        let matrix = |s: f32| [[s, 0.0, 0.0], [0.0, s, 0.0], [-kh * s, -kv * s, 1.0]];
+        // The largest zoom at which all four corners still take from inside the frame.
+        let fits = |s: f32| {
+            let p = Perspective {
+                m: matrix(s),
+                unit: 1.0,
+            };
+            [(-hx, -hy), (hx, -hy), (-hx, hy), (hx, hy)]
+                .iter()
+                .all(|&c| {
+                    let (x, y) = p.source(c);
+                    x.abs() <= hx * 1.0001 && y.abs() <= hy * 1.0001
+                })
+        };
+        let (mut lo, mut hi) = (0.05f32, 1.0f32);
+        if fits(hi) {
+            lo = hi;
+        } else {
+            for _ in 0..24 {
+                let mid = (lo + hi) * 0.5;
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        Some(Perspective {
+            m: matrix(lo),
+            unit,
+        })
     }
 
     pub fn output_size(&self, sensor_w: u32, sensor_h: u32) -> (u32, u32) {
@@ -703,6 +822,8 @@ impl PhotoStack {
         let g = &mut s.geometry;
         g.quarter_turns %= 4;
         g.straighten_deg = finite_or(g.straighten_deg, 0.0).clamp(-45.0, 45.0);
+        g.perspective_v = finite_or(g.perspective_v, 0.0).clamp(-100.0, 100.0);
+        g.perspective_h = finite_or(g.perspective_h, 0.0).clamp(-100.0, 100.0);
         g.crop = Crop {
             x: finite_or(g.crop.x, 0.0),
             y: finite_or(g.crop.y, 0.0),
@@ -748,6 +869,37 @@ mod tests {
         assert_eq!((high.luminance, high.color), (48.0, 57.0));
         assert!(Denoise::for_iso(204_800).luminance <= 70.0);
         assert_eq!(Denoise::for_iso(0), Denoise::for_iso(1));
+    }
+
+    #[test]
+    fn a_keystone_keeps_the_frame_on_the_photo_and_inverts() {
+        let mut g = Geometry::default();
+        assert!(g.perspective((6000, 4000)).is_none());
+        g.perspective_v = 60.0;
+        let p = g.perspective((6000, 4000)).unwrap();
+        // Every corner of the output takes from inside the frame.
+        for c in [
+            (-3000.0, -2000.0),
+            (3000.0, -2000.0),
+            (-3000.0, 2000.0),
+            (3000.0, 2000.0),
+        ] {
+            let (x, y) = p.source(c);
+            assert!(
+                x.abs() <= 3000.5 && y.abs() <= 2000.5,
+                "{c:?} -> ({x}, {y})"
+            );
+        }
+        // Widening the top: the top row takes from a narrower strip than the bottom row.
+        let top = p.source((3000.0, -2000.0)).0;
+        let bottom = p.source((3000.0, 2000.0)).0;
+        assert!(top < bottom * 0.9, "top {top} bottom {bottom}");
+        let q = p.source((1234.0, -567.0));
+        let back = p.output(q);
+        assert!(
+            (back.0 - 1234.0).abs() < 1e-2 && (back.1 + 567.0).abs() < 1e-2,
+            "{back:?}"
+        );
     }
 
     #[test]

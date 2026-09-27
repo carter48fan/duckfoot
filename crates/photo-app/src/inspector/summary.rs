@@ -34,6 +34,9 @@ pub(crate) fn summarise(
                     c.height * 100.0
                 ));
             }
+            if g.perspective_v != 0.0 || g.perspective_h != 0.0 {
+                parts.push("keystone".to_string());
+            }
             if g.straighten_deg != 0.0 {
                 parts.push(format!("{:+.1}°", g.straighten_deg));
             }

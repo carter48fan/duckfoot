@@ -125,6 +125,9 @@ struct AdjustUniforms {
     mask_info: [u32; 4],
     /// Heal spots, two vec4 each: see `adjust.wgsl`'s `spots`.
     spots: [[f32; 4]; 64],
+    /// The keystone homography's rows (xyz), the first's w its unit in pixels; the second's
+    /// w is 1 while there is one.
+    persp: [[f32; 4]; 3],
 }
 
 pub struct LoadedImage {
@@ -2122,6 +2125,14 @@ impl Engine {
                     spots.1,
                 ],
                 spots: spots.0,
+                persp: match stack.geometry.perspective(out_size) {
+                    Some(p) => [
+                        [p.m[0][0], p.m[0][1], p.m[0][2], p.unit],
+                        [p.m[1][0], p.m[1][1], p.m[1][2], 1.0],
+                        [p.m[2][0], p.m[2][1], p.m[2][2], 0.0],
+                    ],
+                    None => [[0.0; 4]; 3],
+                },
             }),
         );
     }
@@ -2689,6 +2700,8 @@ mod output_point_tests {
                 g.mirror_h = mh;
                 g.mirror_v = mv;
                 g.straighten_deg = 7.5;
+                g.perspective_v = 35.0;
+                g.perspective_h = -20.0;
                 let out = (123.0, 77.0);
                 let s = sensor_point(&stack, None, sensor, out);
                 let back = output_point(&stack.geometry, sensor, s);
@@ -2776,6 +2789,9 @@ pub fn sensor_point(
     let g = &stack.geometry;
     let (ow, oh) = g.output_size(sensor.0, sensor.1);
     let (mut x, mut y) = (out_px.0 - ow as f32 * 0.5, out_px.1 - oh as f32 * 0.5);
+    if let Some(p) = g.perspective((ow, oh)) {
+        (x, y) = p.source((x, y));
+    }
     let (s, c) = (-g.straighten_deg.to_radians()).sin_cos();
     (x, y) = (x * c - y * s, x * s + y * c);
     if g.mirror_h {
@@ -2815,6 +2831,9 @@ pub fn output_point(g: &Geometry, sensor: (u32, u32), sensor_px: (f32, f32)) -> 
     }
     let (s, c) = g.straighten_deg.to_radians().sin_cos();
     (x, y) = (x * c - y * s, x * s + y * c);
+    if let Some(p) = g.perspective((ow, oh)) {
+        (x, y) = p.output((x, y));
+    }
     (x + ow as f32 * 0.5, y + oh as f32 * 0.5)
 }
 
@@ -3056,4 +3075,87 @@ fn neutralising(texels: &[[f32; 4]], as_shot: [f32; 3]) -> Option<WhiteBalance> 
         tint_r: tint_r.clamp(0.2, 5.0),
         tint_b: tint_b.clamp(0.2, 5.0),
     })
+}
+
+#[cfg(test)]
+mod uniform_layout_tests {
+    use super::*;
+
+    /// The Rust uniform struct and the shader's must agree member by member: a field added
+    /// in a different place on each side reads another's bytes, and nothing else notices.
+    #[test]
+    fn the_adjust_uniforms_match_the_shader_member_by_member() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("shaders/adjust.wgsl"))
+            .expect("adjust.wgsl parses");
+        let mut layouter = wgpu::naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        let (handle, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("Adjust"))
+            .expect("struct Adjust");
+        let wgpu::naga::TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("Adjust is not a struct")
+        };
+        let rust = [
+            ("cam0", std::mem::offset_of!(AdjustUniforms, cam0)),
+            ("cam1", std::mem::offset_of!(AdjustUniforms, cam1)),
+            ("cam2", std::mem::offset_of!(AdjustUniforms, cam2)),
+            ("wb", std::mem::offset_of!(AdjustUniforms, wb)),
+            ("exposure", std::mem::offset_of!(AdjustUniforms, exposure)),
+            ("filmic", std::mem::offset_of!(AdjustUniforms, filmic)),
+            ("lift", std::mem::offset_of!(AdjustUniforms, lift)),
+            ("gamma", std::mem::offset_of!(AdjustUniforms, gamma)),
+            ("gain", std::mem::offset_of!(AdjustUniforms, gain)),
+            ("offset", std::mem::offset_of!(AdjustUniforms, offset)),
+            ("flags", std::mem::offset_of!(AdjustUniforms, flags)),
+            ("sizes", std::mem::offset_of!(AdjustUniforms, sizes)),
+            ("orient", std::mem::offset_of!(AdjustUniforms, orient)),
+            ("turns", std::mem::offset_of!(AdjustUniforms, turns)),
+            ("split", std::mem::offset_of!(AdjustUniforms, split)),
+            (
+                "as_shot_wb",
+                std::mem::offset_of!(AdjustUniforms, as_shot_wb),
+            ),
+            ("tonal", std::mem::offset_of!(AdjustUniforms, tonal)),
+            ("vibrance", std::mem::offset_of!(AdjustUniforms, vibrance)),
+            ("vignette", std::mem::offset_of!(AdjustUniforms, vignette)),
+            ("sharpen", std::mem::offset_of!(AdjustUniforms, sharpen)),
+            ("dest", std::mem::offset_of!(AdjustUniforms, dest)),
+            ("detail", std::mem::offset_of!(AdjustUniforms, detail)),
+            ("eq_red", std::mem::offset_of!(AdjustUniforms, eq_red)),
+            ("eq_orange", std::mem::offset_of!(AdjustUniforms, eq_orange)),
+            ("eq_yellow", std::mem::offset_of!(AdjustUniforms, eq_yellow)),
+            ("eq_green", std::mem::offset_of!(AdjustUniforms, eq_green)),
+            ("eq_aqua", std::mem::offset_of!(AdjustUniforms, eq_aqua)),
+            ("eq_blue", std::mem::offset_of!(AdjustUniforms, eq_blue)),
+            ("eq_purple", std::mem::offset_of!(AdjustUniforms, eq_purple)),
+            (
+                "eq_magenta",
+                std::mem::offset_of!(AdjustUniforms, eq_magenta),
+            ),
+            ("frame", std::mem::offset_of!(AdjustUniforms, frame)),
+            ("lens", std::mem::offset_of!(AdjustUniforms, lens)),
+            ("lens_b", std::mem::offset_of!(AdjustUniforms, lens_b)),
+            ("warp", std::mem::offset_of!(AdjustUniforms, warp)),
+            ("warp_c", std::mem::offset_of!(AdjustUniforms, warp_c)),
+            ("tca_r", std::mem::offset_of!(AdjustUniforms, tca_r)),
+            ("tca_b", std::mem::offset_of!(AdjustUniforms, tca_b)),
+            ("warp_vig", std::mem::offset_of!(AdjustUniforms, warp_vig)),
+            ("masks", std::mem::offset_of!(AdjustUniforms, masks)),
+            ("mask_info", std::mem::offset_of!(AdjustUniforms, mask_info)),
+            ("spots", std::mem::offset_of!(AdjustUniforms, spots)),
+            ("persp", std::mem::offset_of!(AdjustUniforms, persp)),
+        ];
+        assert_eq!(members.len(), rust.len(), "a member on one side only");
+        for (m, (name, offset)) in members.iter().zip(rust) {
+            assert_eq!(m.name.as_deref(), Some(name), "members out of order");
+            assert_eq!(m.offset as usize, offset, "{name} is at a different offset");
+        }
+        assert_eq!(
+            layouter[handle].size as usize,
+            std::mem::size_of::<AdjustUniforms>(),
+            "sizes differ"
+        );
+    }
 }

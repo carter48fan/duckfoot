@@ -646,11 +646,14 @@ pub fn scaled_slider(
         // The value box is sized from its widest possible text, not a guess. In a side panel,
         // a row that overflows by even a few pixels is read as content asking for a wider
         // panel — and it asks again every frame.
+        // At least seven characters ("-0.1000", "-15.00"), so every row's rail is one length
+        // whatever its range and decimals.
         let widest = [*range.start(), *range.end()]
             .map(|v| format!("{v:.decimals$}").len())
             .into_iter()
             .max()
-            .unwrap_or(4);
+            .unwrap_or(4)
+            .max(7);
         let digit_w = ui
             .painter()
             .layout_no_wrap(

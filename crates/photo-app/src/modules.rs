@@ -129,6 +129,9 @@ pub(crate) fn describe_change(a: &PhotoStack, b: &PhotoStack) -> String {
     if ga.straighten_deg != gb.straighten_deg {
         names.push("straighten".into());
     }
+    if ga.perspective_v != gb.perspective_v || ga.perspective_h != gb.perspective_h {
+        names.push("keystone".into());
+    }
     if ga.crop != gb.crop {
         names.push("crop".into());
     }

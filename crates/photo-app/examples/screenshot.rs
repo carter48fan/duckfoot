@@ -225,6 +225,13 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Heal;
         }
     }
+    // DUCKFOOT_SHOT_KEYSTONE=1: a vertical keystone, the crop & rotate card open.
+    if std::env::var_os("DUCKFOOT_SHOT_KEYSTONE").is_some() {
+        app.edit(|s| s.geometry.perspective_v = 40.0);
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Geometry;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

@@ -65,6 +65,8 @@ struct Adjust {
     // Spot heal (W-02), two vec4 each: destination xy, source xy (sensor px); radius (px),
     // feather, mode (0 heal, 1 clone), the sensor level its surroundings are measured at.
     spots:      array<vec4<f32>, 64>,
+    // Keystone (W-07): a homography's rows; [0].w = its unit (px), [1].w = 1 when on.
+    persp:      array<vec4<f32>, 3>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -261,6 +263,13 @@ fn sensor_coords(out_px: vec2<f32>) -> vec2<f32> {
 
     // Centred, so rotation is about the middle of the frame rather than a corner.
     var p = out_px - out_size * 0.5;
+
+    // Undo the keystone first: it is set against the frame as the user sees it.
+    if (u.persp[1].w > 0.5) {
+        let n = vec3<f32>(p / u.persp[0].w, 1.0);
+        let h = vec3<f32>(dot(u.persp[0].xyz, n), dot(u.persp[1].xyz, n), dot(u.persp[2].xyz, n));
+        p = h.xy / h.z * u.persp[0].w;
+    }
 
     // Undo the fine straighten.
     let c = u.orient.x;

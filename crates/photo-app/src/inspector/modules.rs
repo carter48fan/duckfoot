@@ -154,6 +154,25 @@ impl PhotoApp {
                     2,
                     d.geometry.straighten_deg,
                 ));
+                // Keystone: converging lines stood up, the frame zoomed to stay on the photo.
+                track!(widgets::param_slider(
+                    ui,
+                    "vertical",
+                    &mut self.stack.geometry.perspective_v,
+                    -100.0..=100.0,
+                    0,
+                    0.0,
+                )
+                .on_hover_text("Stand up lines that lean in toward the top (positive) or bottom"));
+                track!(widgets::param_slider(
+                    ui,
+                    "horizontal",
+                    &mut self.stack.geometry.perspective_h,
+                    -100.0..=100.0,
+                    0,
+                    0.0,
+                )
+                .on_hover_text("Square up a wall shot from one side"));
             }
             InspectorSectionId::WhiteBalance if self.ready_image().is_none() => {
                 // Kelvin and tint are this camera's; until the decode says which camera,
