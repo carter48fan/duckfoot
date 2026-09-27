@@ -2074,9 +2074,12 @@ fn no_controls_overlap_on_any_screen() {
     }
     app.looks_open = true;
     app.info_open = true;
+    // Soft proofing, its gamut chip beside it on the stage toolbar.
+    app.proofing = true;
     for size in desktops {
-        check(&mut app, "looks + info", size);
+        check(&mut app, "looks + info + proofing", size);
     }
+    app.proofing = false;
     app.preset_draft = Some("Evening".into());
     for size in desktops {
         check(&mut app, "looks + naming a preset", size);

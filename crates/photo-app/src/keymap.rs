@@ -116,6 +116,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     s(View, "`\\`", "before / after split"),
     s(
         View,
+        "`S`",
+        "soft proof: the preview in the export's colour space",
+    ),
+    s(
+        View,
         "`Ctrl+0` / `Ctrl+1` / `Z`",
         "fit / 100% / toggle between them",
     ),

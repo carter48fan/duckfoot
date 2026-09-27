@@ -137,6 +137,23 @@ struct AdjustUniforms {
     /// Working → output linear RGB, rows (xyz); [0].w = the output's gamma (0 for the
     /// sRGB curve), [1].w = 1 when the output's primaries are not the working space's.
     out_m: [[f32; 4]; 3],
+    /// Proofing: the proof's space → the screen's, rows; [0].w = 1 while proofing,
+    /// [1].w = 1 to mark what the proof cannot hold.
+    proof_m: [[f32; 4]; 3],
+}
+
+/// A soft proof: the space proofed against, and whether to mark what it cannot hold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Proof {
+    pub space: crate::gamut::Screen,
+    pub warn: bool,
+}
+
+/// Where a render ends: the space and curve it is encoded for, and a proof on the way.
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    out: crate::gamut::Screen,
+    proof: Option<Proof>,
 }
 
 pub struct LoadedImage {
@@ -406,6 +423,9 @@ pub struct Engine {
     mask_overlay: Option<usize>,
     /// See [`Engine::set_dust_view`].
     dust_view: bool,
+    /// The screen the preview is shown on (W-14), and what it is proofed against (W-10).
+    screen: crate::gamut::Screen,
+    proof: Option<Proof>,
     mip_bgl: wgpu::BindGroupLayout,
     denoise_pipeline: wgpu::RenderPipeline,
     denoise_bgl: wgpu::BindGroupLayout,
@@ -1082,6 +1102,8 @@ impl Engine {
             clip_overlay: false,
             mask_overlay: None,
             dust_view: false,
+            screen: crate::gamut::Screen::SRGB,
+            proof: None,
         }
     }
 
@@ -1089,6 +1111,18 @@ impl Engine {
     /// export.
     pub fn set_dust_view(&mut self, on: bool) {
         self.dust_view = on;
+    }
+
+    /// The screen the preview is for (W-14): its primaries and curve. Exports are not
+    /// touched; they are written in their own space.
+    pub fn set_screen(&mut self, screen: crate::gamut::Screen) {
+        self.screen = screen;
+    }
+
+    /// Proof the preview against an output space (W-10): colours it cannot hold are
+    /// brought in as the export will bring them, and with `warn`, shown grey.
+    pub fn set_proof(&mut self, proof: Option<Proof>) {
+        self.proof = proof;
     }
 
     /// Wash local mask `index` (of the stack's masks) red on the preview, to show where it
@@ -1777,7 +1811,11 @@ impl Engine {
         };
         let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
-        self.write_uniforms(queue, stack, None, sizes, true, !deep, space);
+        let target = Target {
+            out: crate::gamut::Screen::of(space),
+            proof: None,
+        };
+        self.write_uniforms(queue, stack, None, sizes, true, !deep, target);
 
         let Some(image) = &self.image else {
             bail!("no image is loaded");
@@ -1930,8 +1968,10 @@ impl Engine {
             (out_size, target, level, base),
             false,
             true,
-            // The screen is taken to be sRGB until W-14.
-            crate::gamut::OutputSpace::Srgb,
+            Target {
+                out: self.screen,
+                proof: self.proof,
+            },
         );
         let Some(image) = &self.image else { return };
 
@@ -2011,7 +2051,7 @@ impl Engine {
         (out_size, target, level, base): ((u32, u32), (u32, u32), u32, u32),
         for_export: bool,
         dither: bool,
-        space: crate::gamut::OutputSpace,
+        ends: Target,
     ) {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
@@ -2062,8 +2102,14 @@ impl Engine {
                 &image.cam_to_srgb,
             ),
         };
-        let output = space.primaries();
-        let to_out = crate::gamut::convert(&working, &output);
+        // Working → the proof's space if there is one, else the output's; then, proofing,
+        // on to the screen.
+        use crate::gamut::{compose, convert, invert3, Screen, SRGB};
+        let first = ends.proof.map_or(ends.out, |p| p.space);
+        let to_out = compose(&first.from_srgb, &convert(&working, &SRGB));
+        let converts = stack.working_space != crate::gamut::WorkingSpace::Srgb
+            || first.from_srgb != Screen::SRGB.from_srgb;
+        let proof_to_screen = compose(&ends.out.from_srgb, &invert3(&first.from_srgb));
         let luma_w = crate::gamut::luminance(&working);
         let f = stack.filmic.params;
         let cb = stack.color_balance.params;
@@ -2253,16 +2299,25 @@ impl Engine {
                         to_out[0][0],
                         to_out[0][1],
                         to_out[0][2],
-                        space.gamma().unwrap_or(0.0),
+                        ends.out.gamma.unwrap_or(0.0),
                     ],
                     [
                         to_out[1][0],
                         to_out[1][1],
                         to_out[1][2],
-                        f32::from(working != output),
+                        f32::from(converts),
                     ],
                     [to_out[2][0], to_out[2][1], to_out[2][2], 0.0],
                 ],
+                proof_m: {
+                    let m = proof_to_screen;
+                    let (on, warn) = ends.proof.map_or((0.0, 0.0), |p| (1.0, f32::from(p.warn)));
+                    [
+                        [m[0][0], m[0][1], m[0][2], on],
+                        [m[1][0], m[1][1], m[1][2], warn],
+                        [m[2][0], m[2][1], m[2][2], 0.0],
+                    ]
+                },
             }),
         );
     }
@@ -3433,6 +3488,7 @@ mod uniform_layout_tests {
             ("persp", std::mem::offset_of!(AdjustUniforms, persp)),
             ("luma_w", std::mem::offset_of!(AdjustUniforms, luma_w)),
             ("out_m", std::mem::offset_of!(AdjustUniforms, out_m)),
+            ("proof_m", std::mem::offset_of!(AdjustUniforms, proof_m)),
         ];
         assert_eq!(members.len(), rust.len(), "a member on one side only");
         for (m, (name, offset)) in members.iter().zip(rust) {

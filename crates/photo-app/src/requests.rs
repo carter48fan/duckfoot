@@ -65,6 +65,7 @@ impl PhotoApp {
                     self.export_to(gpu, path);
                 }
                 platform::Response::ImportPreset(path) => self.import_preset(&path),
+                platform::Response::DisplayProfile(path) => self.use_display_profile(path),
                 platform::Response::ExportPreset(path) => {
                     if let Some(preset) = self.exporting_preset.take() {
                         match photo_engine::fsio::atomic_write_bytes(

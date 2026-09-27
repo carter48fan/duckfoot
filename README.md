@@ -172,6 +172,7 @@ You can also **drag a RAW file onto the window**.
 | `W`, then click | white balance from something that should be grey |
 | **View** | |
 | `\` | before / after split |
+| `S` | soft proof: the preview in the export's colour space |
 | `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
 | `?` or `F1` | this list of shortcuts |
 | **Library** | |

@@ -18,6 +18,7 @@ pub mod widgets;
 pub mod crop_tool;
 mod curve_editor;
 mod desktop;
+mod display;
 mod export_flow;
 mod export_ui;
 mod i18n;
@@ -514,6 +515,15 @@ pub struct PhotoApp {
     spot_drag: Option<(bool, egui::Pos2, photo_engine::heal::Spot)>,
     /// What the engine is showing, to notice a change.
     shown_dust: bool,
+    /// The screen the settings name (W-14), why a profile file could not be used, and
+    /// what the engine was last told.
+    screen: photo_engine::gamut::Screen,
+    screen_note: Option<String>,
+    shown_screen: photo_engine::gamut::Screen,
+    /// Soft proofing against the export's colour space (W-10), with the gamut warning.
+    pub proofing: bool,
+    pub proof_warn: bool,
+    shown_proof: Option<photo_engine::engine::Proof>,
     /// The user's own presets, as their files say (W-04).
     pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
     /// The name being typed for a preset about to be saved.
@@ -736,6 +746,12 @@ impl PhotoApp {
             pending_spot: None,
             spot_drag: None,
             shown_dust: false,
+            screen: photo_engine::gamut::Screen::SRGB,
+            screen_note: None,
+            shown_screen: photo_engine::gamut::Screen::SRGB,
+            proofing: false,
+            proof_warn: true,
+            shown_proof: None,
             user_presets: Vec::new(),
             preset_draft: None,
             exporting_preset: None,
@@ -855,6 +871,8 @@ impl PhotoApp {
             self.paste_set = set;
         }
         self.saved_filters = s.saved_filters;
+        // Settings already hold the screen; the matrix is worked out from them once.
+        self.refresh_screen();
         for dir in s.watched_folders.into_iter().filter(|d| d.is_dir()) {
             let listing = dam::FolderTree::scan_supported_images(&dir);
             self.folder_watch.watch(dir, &listing);
@@ -1198,6 +1216,7 @@ impl PhotoApp {
             self.shown_mask = shown;
             self.needs_render = true;
         }
+        self.sync_display();
         if self.dust_view != self.shown_dust {
             self.engine.set_dust_view(self.dust_view);
             self.shown_dust = self.dust_view;

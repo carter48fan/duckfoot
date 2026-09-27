@@ -282,6 +282,11 @@ impl PhotoApp {
         if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::J)) {
             self.clip_overlay = !self.clip_overlay;
         }
+        if ctx.input(|i| !i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S))
+            && !self.layout.is_compact()
+        {
+            self.proofing = !self.proofing;
+        }
         if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::W))
             && self.ready_image().is_some()
             && !self.cropping

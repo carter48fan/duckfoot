@@ -285,6 +285,8 @@ impl Platform for AndroidPlatform {
                 }
             }
             Request::ImportPreset { .. } => self.pick(PICK_PRESET),
+            // The phone's screen is drawn as sRGB; there is no profile to choose.
+            Request::DisplayProfile { .. } => {}
         }
     }
 

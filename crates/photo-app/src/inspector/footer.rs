@@ -6,6 +6,8 @@ impl PhotoApp {
     pub(crate) fn customize_body(&mut self, ui: &mut egui::Ui) {
         self.ui_scale_row(ui);
         ui.add_space(6.0);
+        self.screen_row(ui);
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, Kind::Secondary, "Reset order", 0.0)
                 .on_hover_text("Restore the default pipeline order")
