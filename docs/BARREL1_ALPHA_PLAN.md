@@ -35,7 +35,7 @@ left to the implementer's judgement, so the recommendations for DEC-3 onwards ar
 | **4** | Interaction, batch, design | done (recipe editor with F-02) | Batch and renamer correct; drags cancel; accessibility floor; layout parity |
 | **5** | Robustness, performance, platforms | next | Fuzzed decoders; memory-bounded on a 4 GB phone; Windows/macOS built *and tested* |
 | **6** | Release engineering and licensing | licensing deferred; CI hardening partly done | Licence notices; hardened CI signing; versioned and changelogged |
-| **7** | Alpha feature floor (F-01 … F-10) | in progress | Feature checklist in [§9](#9-alpha-release-gate) |
+| **7** | Alpha feature floor (F-01 … F-10) | done | Feature checklist in [§9](#9-alpha-release-gate) |
 | — | **Alpha release** | | [§9](#9-alpha-release-gate) all green |
 | **8** | Worth considering (W-01 … W-14) | after alpha | Post-alpha roadmap |
 
@@ -917,6 +917,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 **F-09 Session persistence.** Delivered by WP4.9.
 
 **F-10 Metadata panel**
+- **Status:** done. The desktop Info band, the phone Library sheet's one-line summary opens the same card, and filmstrip tooltips.
 - **`photo_engine::metadata::PhotoInfo`:** camera, lens, shutter, aperture, ISO, focal
   length (and 35 mm equivalent), date and time with offset, dimensions, file size, GPS (as
   text — no map, local-first), copyright and artist. It comes from rawler `Exif` for RAWs

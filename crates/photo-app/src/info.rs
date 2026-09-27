@@ -107,67 +107,72 @@ impl PhotoApp {
         }
         egui::Frame::new()
             .inner_margin(Margin::symmetric(12, 8))
+            .show(ui, |ui| self.info_rows(ui, &path));
+    }
+
+    /// Everything known about the photo at `path`, as label and value rows: the desktop
+    /// Info band's body and the phone Library sheet's detail card.
+    pub(crate) fn info_rows(&self, ui: &mut egui::Ui, path: &std::path::Path) {
+        let info = self.open_info().cloned();
+        let mut rows: Vec<(&str, String)> = vec![("file", file_name(path))];
+        if let Some(image) = self.ready_image() {
+            let mp = image.sensor_width as f32 * image.sensor_height as f32 / 1e6;
+            rows.push((
+                "pixels",
+                format!(
+                    "{} × {} · {mp:.1} MP",
+                    image.sensor_width, image.sensor_height
+                ),
+            ));
+        }
+        if let Some(item) = self.shelf.iter().find(|it| it.path == path) {
+            rows.push(("size", crate::parts::format_bytes(item.bytes)));
+        }
+        match &info {
+            Some(info) => {
+                let cam = camera(info);
+                if !cam.is_empty() {
+                    rows.push(("camera", cam));
+                }
+                if let Some(lens) = &info.lens {
+                    rows.push(("lens", lens.clone()));
+                }
+                let exposure = exposure_line(info);
+                if !exposure.is_empty() {
+                    rows.push(("exposure", exposure));
+                }
+                if let Some(when) = captured(info) {
+                    rows.push(("taken", when));
+                }
+                if let Some(at) = place(info) {
+                    rows.push(("location", at));
+                }
+                if let Some(a) = &info.artist {
+                    rows.push(("artist", a.clone()));
+                }
+                if let Some(c) = &info.copyright {
+                    rows.push(("copyright", c.clone()));
+                }
+            }
+            None => rows.push(("", "the file says nothing more".into())),
+        }
+        egui::Grid::new(("info_rows", path))
+            .num_columns(2)
+            .spacing(vec2(12.0, 4.0))
             .show(ui, |ui| {
-                let mut rows: Vec<(&str, String)> = vec![("file", file_name(&path))];
-                if let Some(image) = self.ready_image() {
-                    let mp = image.sensor_width as f32 * image.sensor_height as f32 / 1e6;
-                    rows.push((
-                        "pixels",
-                        format!(
-                            "{} × {} · {mp:.1} MP",
-                            image.sensor_width, image.sensor_height
-                        ),
-                    ));
+                for (label, value) in rows {
+                    ui.label(theme::dim(label).size(11.5));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(value)
+                                .monospace()
+                                .size(11.5)
+                                .color(theme::TEXT),
+                        )
+                        .wrap(),
+                    );
+                    ui.end_row();
                 }
-                if let Some(item) = self.shelf.iter().find(|it| it.path == path) {
-                    rows.push(("size", crate::parts::format_bytes(item.bytes)));
-                }
-                match &info {
-                    Some(info) => {
-                        let cam = camera(info);
-                        if !cam.is_empty() {
-                            rows.push(("camera", cam));
-                        }
-                        if let Some(lens) = &info.lens {
-                            rows.push(("lens", lens.clone()));
-                        }
-                        let exposure = exposure_line(info);
-                        if !exposure.is_empty() {
-                            rows.push(("exposure", exposure));
-                        }
-                        if let Some(when) = captured(info) {
-                            rows.push(("taken", when));
-                        }
-                        if let Some(at) = place(info) {
-                            rows.push(("location", at));
-                        }
-                        if let Some(a) = &info.artist {
-                            rows.push(("artist", a.clone()));
-                        }
-                        if let Some(c) = &info.copyright {
-                            rows.push(("copyright", c.clone()));
-                        }
-                    }
-                    None => rows.push(("", "the file says nothing more".into())),
-                }
-                egui::Grid::new("info_rows")
-                    .num_columns(2)
-                    .spacing(vec2(12.0, 4.0))
-                    .show(ui, |ui| {
-                        for (label, value) in rows {
-                            ui.label(theme::dim(label).size(11.5));
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(value)
-                                        .monospace()
-                                        .size(11.5)
-                                        .color(theme::TEXT),
-                                )
-                                .wrap(),
-                            );
-                            ui.end_row();
-                        }
-                    });
             });
     }
 }
