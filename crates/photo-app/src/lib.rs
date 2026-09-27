@@ -663,6 +663,8 @@ pub struct PhotoApp {
     pub filter: dam::FilterState,
     pub folder_tree: dam::FolderTree,
     pub folder_browser_open: bool,
+    /// The phone's list of the copies in its library, while it is open.
+    pub storage: Option<dam::storage::StorageView>,
     pub batch_renamer: batch::Renamer,
     pub export_recipes: Vec<batch::ExportRecipe>,
     pub export_queue: Option<batch::ExportQueue>,
@@ -868,6 +870,7 @@ impl PhotoApp {
             filter: dam::FilterState::default(),
             folder_tree,
             folder_browser_open: false,
+            storage: None,
             batch_renamer: batch::Renamer::default(),
             export_recipes: batch::ExportRecipe::default_recipes(),
             export_queue: Some(batch::ExportQueue::new(

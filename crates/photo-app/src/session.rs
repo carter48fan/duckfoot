@@ -886,6 +886,11 @@ impl PhotoApp {
                 loader::Done::Subfolders { dir, subs } => {
                     self.subfolders = Some((dir, subs, Instant::now()));
                 }
+                loader::Done::Library {
+                    entries,
+                    deleted,
+                    failed,
+                } => self.take_library(entries, deleted, failed),
                 loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_pending.remove(&path);
                     if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
@@ -1100,11 +1105,27 @@ impl PhotoApp {
         if self.loaded_path.as_ref().is_some_and(|p| paths.contains(p)) {
             self.flush();
         }
+        let removed = self.take_off_shelf(|p| paths.contains(p));
+        let n = removed.len();
+        self.removed_from_shelf = removed;
+        self.set_status_undoable(
+            if n == 1 {
+                "Removed 1 photo from the shelf".to_string()
+            } else {
+                format!("Removed {n} photos from the shelf")
+            },
+            NoticeAction::Remove,
+        );
+    }
+
+    /// The shelf's items `gone` picks, taken off it with their thumbnails, each with the
+    /// index it stood at.
+    fn take_off_shelf(&mut self, gone: impl Fn(&PathBuf) -> bool) -> Vec<(usize, ShelfItem)> {
         let mut removed = Vec::new();
         let mut i = 0;
         let mut index = 0;
         while i < self.shelf.len() {
-            if paths.contains(&self.shelf[i].path) {
+            if gone(&self.shelf[i].path) {
                 removed.push((index, self.shelf.remove(i)));
             } else {
                 i += 1;
@@ -1119,16 +1140,90 @@ impl PhotoApp {
             self.thumbs_pending.remove(&item.path);
             self.thumb_used.remove(&item.path);
         }
-        let n = removed.len();
-        self.removed_from_shelf = removed;
-        self.set_status_undoable(
-            if n == 1 {
-                "Removed 1 photo from the shelf".to_string()
+        removed
+    }
+
+    /// The phone's Library screen: open it and read the library off this thread.
+    pub fn open_storage(&mut self) {
+        let Some(dir) = self.platform.library_dir() else {
+            return;
+        };
+        self.storage = Some(crate::dam::storage::StorageView::default());
+        self.loader.file_job(loader::FileJob::Library {
+            dir,
+            delete: Vec::new(),
+        });
+    }
+
+    /// Whether `path` (or the photo it is a copy of) is one of the library's copies.
+    pub(crate) fn is_library_copy(&self, path: &Path) -> bool {
+        self.platform
+            .library_dir()
+            .is_some_and(|dir| crate::dam::storage::is_in(&dir, path))
+    }
+
+    /// Deletes these photos of the library, with their sidecars and virtual copies, and
+    /// takes them off the shelf. There is no undo, so the buttons that ask for it ask
+    /// twice. The open photo is kept: its edits would be written back beside it.
+    pub fn delete_copies(&mut self, photos: &[PathBuf]) {
+        let Some(dir) = self.platform.library_dir() else {
+            return;
+        };
+        let open = self
+            .loaded_path
+            .as_deref()
+            .map(|p| photo_engine::copies::source_file(p).into_owned());
+        let delete: Vec<PathBuf> = photos
+            .iter()
+            .filter(|p| p.starts_with(&dir) && Some(*p) != open.as_ref())
+            .cloned()
+            .collect();
+        if delete.len() < photos.len() && open.is_some() {
+            self.set_status("The open photo is kept: open another to delete it");
+        }
+        if delete.is_empty() {
+            return;
+        }
+        self.take_off_shelf(|p| {
+            delete
+                .iter()
+                .any(|d| *photo_engine::copies::source_file(p) == **d)
+        });
+        // What Undo would put back no longer exists.
+        self.removed_from_shelf.retain(|(_, it)| {
+            !delete
+                .iter()
+                .any(|d| *photo_engine::copies::source_file(&it.path) == **d)
+        });
+        let view = self.storage.get_or_insert_with(Default::default);
+        view.entries = None;
+        view.selected.clear();
+        view.confirming = None;
+        self.loader
+            .file_job(loader::FileJob::Library { dir, delete });
+    }
+
+    fn take_library(
+        &mut self,
+        entries: Vec<crate::dam::storage::LibraryEntry>,
+        deleted: usize,
+        failed: Vec<String>,
+    ) {
+        if let Some(first) = failed.first() {
+            log::warn!("could not delete from the library: {failed:?}");
+            self.set_status(format!("Could not delete {first}"));
+        } else if deleted > 0 {
+            self.set_status(if deleted == 1 {
+                "Deleted 1 copy from the library".to_string()
             } else {
-                format!("Removed {n} photos from the shelf")
-            },
-            NoticeAction::Remove,
-        );
+                format!("Deleted {deleted} copies from the library")
+            });
+        }
+        if let Some(view) = &mut self.storage {
+            view.selected
+                .retain(|p| entries.iter().any(|e| &e.path == p));
+            view.entries = Some(entries);
+        }
     }
 
     pub fn undo_remove_from_shelf(&mut self) {

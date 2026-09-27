@@ -117,6 +117,11 @@ mod tests {
                 let src = std::fs::read_to_string(&p).unwrap();
                 for opener in ["tr(\"", "tr_args(\"", "title_id: \"", "text_id: \""] {
                     for (i, _) in src.match_indices(opener) {
+                        // `push_str("` ends in `tr("` too: only a whole name counts.
+                        let before = src[..i].chars().next_back();
+                        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
                         let rest = &src[i + opener.len()..];
                         if let Some(end) = rest.find('"') {
                             ids.push(rest[..end].to_string());

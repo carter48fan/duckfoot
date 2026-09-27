@@ -10,7 +10,7 @@
 //!
 //! | Tab | Holds |
 //! |---|---|
-//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, filters, select mode and the tour |
+//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
 //! | Presets | one-tap looks — sepia, mono, film… — and how strongly to apply them |
 //! | Edit | the chosen module's controls over a one-line strip: turn, every module by name, and the list that chooses them |
 //! | Export | the single export and batch export |
@@ -513,7 +513,9 @@ impl PhotoApp {
     /// The roll, then one row of actions under it. Filters, select mode and the folder
     /// tree are chips in that row, and take room only while they are on.
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        if self.folder_browser_open {
+        if self.storage.is_some() {
+            self.storage_panel(ui);
+        } else if self.folder_browser_open {
             self.shelf_folders(ui, gpu);
         } else {
             let displayed = self.displayed_indices();
@@ -544,6 +546,21 @@ impl PhotoApp {
             divider(ui, 28.0);
             if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
                 self.folder_browser_open = !self.folder_browser_open;
+                self.storage = None;
+            }
+            if self.platform.library_dir().is_some()
+                && widgets::chip(ui, self.storage.is_some(), "storage")
+                    .on_hover_text(
+                        "The copies in Duckfoot's library, their sizes, and deleting them",
+                    )
+                    .clicked()
+            {
+                if self.storage.is_some() {
+                    self.storage = None;
+                } else {
+                    self.folder_browser_open = false;
+                    self.open_storage();
+                }
             }
             if !self.shelf.is_empty() {
                 let label = if filtering { "filter •" } else { "filter" };
@@ -601,6 +618,208 @@ impl PhotoApp {
         }
     }
 
+    /// The Library screen (H11): every copy Duckfoot made from the picker, largest first,
+    /// with what it costs, which are on the shelf, and deleting them.
+    fn storage_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::dam::storage::Confirm;
+        let Some(view) = &self.storage else { return };
+        let Some(entries) = &view.entries else {
+            ui.label(theme::tag("Reading the library…").color(theme::TEXT_DIM));
+            return;
+        };
+        let shelved: std::collections::HashSet<PathBuf> = self
+            .shelf
+            .iter()
+            .map(|it| photo_engine::copies::source_file(&it.path).into_owned())
+            .collect();
+        let total: u64 = entries.iter().map(|e| e.bytes).sum();
+        let unused: Vec<PathBuf> = entries
+            .iter()
+            .filter(|e| !shelved.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        let unused_bytes: u64 = entries
+            .iter()
+            .filter(|e| !shelved.contains(&e.path))
+            .map(|e| e.bytes)
+            .sum();
+        let chosen: Vec<PathBuf> = entries
+            .iter()
+            .filter(|e| view.selected.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        let confirming = view.confirming;
+        let count = entries.len();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                theme::tag(format!(
+                    "{count} {} · {}",
+                    if count == 1 { "copy" } else { "copies" },
+                    crate::parts::format_bytes(total)
+                ))
+                .color(theme::TEXT),
+            );
+        });
+        let mut toggle = None;
+        let mut select_all = None;
+        let mut delete = None;
+        let mut arm = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if count > 0 {
+                if widgets::chip(ui, false, "all").clicked() {
+                    select_all = Some(true);
+                }
+                if widgets::chip(ui, false, "none").clicked() {
+                    select_all = Some(false);
+                }
+            }
+            if !chosen.is_empty() {
+                let armed = confirming == Some(Confirm::Selected);
+                let label = if armed {
+                    format!("delete {}? tap again", chosen.len())
+                } else {
+                    format!("delete {}", chosen.len())
+                };
+                if widgets::chip(ui, armed, &label).clicked() {
+                    if armed {
+                        delete = Some(chosen.clone());
+                    } else {
+                        arm = Some(Some(Confirm::Selected));
+                    }
+                }
+            }
+            if !unused.is_empty() {
+                let armed = confirming == Some(Confirm::Unused);
+                let label = if armed {
+                    format!("delete {}? tap again", unused.len())
+                } else {
+                    format!(
+                        "clear unused · {}",
+                        crate::parts::format_bytes(unused_bytes)
+                    )
+                };
+                if widgets::chip(ui, armed, &label)
+                    .on_hover_text("Delete every copy that is not on the shelf")
+                    .clicked()
+                {
+                    if armed {
+                        delete = Some(unused.clone());
+                    } else {
+                        arm = Some(Some(Confirm::Unused));
+                    }
+                }
+            }
+        });
+
+        let row_h = widgets::sized(ui, 26.0, 40.0);
+        egui::ScrollArea::vertical()
+            .id_salt("library storage")
+            .max_height(row_h * 4.5)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if entries.is_empty() {
+                    ui.label(
+                        theme::tag(
+                            "Nothing copied in yet: photos opened from the phone are copied here.",
+                        )
+                        .color(theme::TEXT_DIM),
+                    );
+                }
+                for entry in entries {
+                    let on = view.selected.contains(&entry.path);
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                    let painter = ui.painter();
+                    if on {
+                        painter.rect_filled(rect, 3.0, Color32::from_gray(0x1c));
+                    }
+                    let side = 14.0;
+                    let check = Rect::from_center_size(
+                        pos2(rect.left() + 4.0 + side / 2.0, rect.center().y),
+                        vec2(side, side),
+                    );
+                    widgets::paint_checkbox(painter, check, on, response.hovered());
+                    let size = crate::parts::format_bytes(entry.bytes);
+                    let size_galley =
+                        painter.layout_no_wrap(size, FontId::monospace(11.0), theme::TEXT_DIM);
+                    let size_w = size_galley.size().x;
+                    painter.galley(
+                        pos2(
+                            rect.right() - 4.0 - size_w,
+                            rect.center().y - size_galley.size().y / 2.0,
+                        ),
+                        size_galley,
+                        theme::TEXT_DIM,
+                    );
+                    let mut name = file_name(&entry.path);
+                    if shelved.contains(&entry.path) {
+                        name.push_str("  · on shelf");
+                    }
+                    let name_left = check.right() + 8.0;
+                    let name_w = (rect.right() - 12.0 - size_w - name_left).max(0.0);
+                    let galley = painter.layout(
+                        name,
+                        FontId::new(12.0, theme::sans_strong()),
+                        theme::TEXT,
+                        f32::INFINITY,
+                    );
+                    let clip = Rect::from_min_max(
+                        pos2(name_left, rect.top()),
+                        pos2(name_left + name_w, rect.bottom()),
+                    );
+                    painter.with_clip_rect(clip).galley(
+                        pos2(name_left, rect.center().y - galley.size().y / 2.0),
+                        galley,
+                        theme::TEXT,
+                    );
+                    widgets::describe(ui, &response, rect, || {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            true,
+                            on,
+                            file_name(&entry.path),
+                        )
+                    });
+                    if response.clicked() {
+                        toggle = Some(entry.path.clone());
+                    }
+                }
+            });
+
+        if let Some(paths) = delete {
+            self.delete_copies(&paths);
+            return;
+        }
+        let Some(view) = &mut self.storage else {
+            return;
+        };
+        if let Some(a) = arm {
+            view.confirming = a;
+        }
+        if let Some(path) = toggle {
+            view.confirming = None;
+            if !view.selected.remove(&path) {
+                view.selected.insert(path);
+            }
+        }
+        match select_all {
+            Some(true) => {
+                view.confirming = None;
+                if let Some(entries) = &view.entries {
+                    view.selected = entries.iter().map(|e| e.path.clone()).collect();
+                }
+            }
+            Some(false) => {
+                view.confirming = None;
+                view.selected.clear();
+            }
+            None => {}
+        }
+    }
+
     /// Select mode and what it acts on. A touch screen has no Ctrl or Shift, so this is
     /// how several photos get chosen for a batch export or a shared rating.
     fn selection_bar(&mut self, ui: &mut egui::Ui) {
@@ -619,6 +838,35 @@ impl PhotoApp {
                 if widgets::chip(ui, false, "remove").clicked() {
                     let paths: Vec<PathBuf> = self.selection.selected.iter().cloned().collect();
                     self.remove_from_shelf(&paths);
+                }
+                // Removing leaves the library's copy taking up the phone's space; this
+                // deletes it too. Asked twice: there is no undo.
+                let copies: Vec<PathBuf> = self
+                    .selection
+                    .selected
+                    .iter()
+                    .filter(|p| self.is_library_copy(p))
+                    .map(|p| photo_engine::copies::source_file(p).into_owned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !copies.is_empty() {
+                    let id = ui.id().with("delete copies");
+                    let armed = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+                    let label = if armed {
+                        format!("delete {}? tap again", copies.len())
+                    } else {
+                        "remove + delete copy".to_string()
+                    };
+                    let response = widgets::chip(ui, armed, &label).on_hover_text(
+                        "Take off the shelf and delete Duckfoot's copy, edits and all",
+                    );
+                    if response.clicked() {
+                        if armed {
+                            self.delete_copies(&copies);
+                        }
+                        ui.data_mut(|d| d.insert_temp(id, !armed));
+                    }
                 }
             }
         });

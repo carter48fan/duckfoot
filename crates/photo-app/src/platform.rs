@@ -80,6 +80,12 @@ pub trait Platform: Send {
         None
     }
 
+    /// Where photos picked on this platform are copied to, if it copies them (Android's
+    /// pickers hand out documents, not paths). The Library screen lists and deletes them.
+    fn library_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Called when an image has been successfully written to disk. Used on mobile
     /// platforms to request system indexing into the media library/gallery.
     fn export_completed(&mut self, _path: &std::path::Path) {}

@@ -72,7 +72,12 @@ fn main() -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     photo_app::theme::apply(&ctx);
 
-    let mut app = PhotoApp::with_platform(&gpu, Box::new(NoPlatform));
+    // DUCKFOOT_SHOT_STORAGE=<dir>: a phone's library of copies in <dir>, its screen open.
+    let library = std::env::var_os("DUCKFOOT_SHOT_STORAGE").map(std::path::PathBuf::from);
+    let mut app = match library.clone() {
+        Some(dir) => PhotoApp::with_platform(&gpu, Box::new(LibraryPlatform(dir))),
+        None => PhotoApp::with_platform(&gpu, Box::new(NoPlatform)),
+    };
     let screen = egui::vec2(w, h);
     let frame = |app: &mut PhotoApp| {
         let mut input = egui::RawInput {
@@ -109,6 +114,21 @@ fn main() -> anyhow::Result<()> {
     while app.is_busy() && started.elapsed() < Duration::from_secs(60) {
         frame(&mut app);
         std::thread::sleep(Duration::from_millis(10));
+    }
+    if library.is_some() {
+        app.open_storage();
+        let started = Instant::now();
+        while app.storage.as_ref().is_some_and(|v| v.entries.is_none())
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            frame(&mut app);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(view) = &mut app.storage {
+            if let Some(first) = view.entries.as_ref().and_then(|e| e.first()) {
+                view.selected.insert(first.path.clone());
+            }
+        }
     }
     if let Some(tab) = tab {
         app.compact_tab = tab;
@@ -348,4 +368,17 @@ fn main() -> anyhow::Result<()> {
         .save(&out)?;
     eprintln!("wrote {out}");
     Ok(())
+}
+
+/// A phone's platform, as far as the Library screen needs one.
+struct LibraryPlatform(std::path::PathBuf);
+
+impl photo_app::platform::Platform for LibraryPlatform {
+    fn request(&mut self, _request: photo_app::platform::Request) {}
+    fn poll(&mut self) -> Vec<photo_app::platform::Response> {
+        Vec::new()
+    }
+    fn library_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.0.clone())
+    }
 }
