@@ -69,14 +69,30 @@ impl FolderTree {
     /// `dir` and the folders inside it, `depth` levels down, skipping hidden and system
     /// folders (WP5.8): each folder that holds photos, with them, the top one first.
     pub fn scan_tree(dir: &Path, depth: u32) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        Self::scan_tree_with(dir, depth, |_, _| true).unwrap_or_default()
+    }
+
+    /// [`FolderTree::scan_tree`], told after each folder how many folders it has read and
+    /// photos it has found; `None` if `keep_going` said to stop.
+    pub fn scan_tree_with(
+        dir: &Path,
+        depth: u32,
+        keep_going: impl Fn(usize, usize) -> bool,
+    ) -> Option<Vec<(PathBuf, Vec<PathBuf>)>> {
         let mut out = Vec::new();
         let mut queue = vec![(dir.to_path_buf(), 0u32)];
+        let (mut read, mut photos) = (0, 0);
         // A tree of thousands of folders is not a roll of photos: stop well before.
         while let Some((d, level)) = queue.pop() {
             if out.len() >= 256 {
                 break;
             }
+            if !keep_going(read, photos) {
+                return None;
+            }
             let images = Self::scan_supported_images(&d);
+            read += 1;
+            photos += images.len();
             if level < depth {
                 let mut subs = Self::list_subfolders(&d);
                 subs.retain(|s| {
@@ -96,7 +112,7 @@ impl FolderTree {
                 out.push((d, images));
             }
         }
-        out
+        keep_going(read, photos).then_some(out)
     }
 
     /// Scan directory for all supported photo files (RAW + Raster), and the virtual

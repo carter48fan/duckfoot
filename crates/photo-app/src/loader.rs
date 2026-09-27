@@ -19,6 +19,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -62,6 +63,8 @@ pub enum Done {
         folder: PathBuf,
         purpose: ScanFor,
         found: Vec<(PathBuf, Vec<PathBuf>)>,
+        /// Stopped by a cancel: `found` is empty and nothing is to be shelved.
+        cancelled: bool,
     },
     /// A folder's folders, for the folder browser.
     Subfolders { dir: PathBuf, subs: Vec<PathBuf> },
@@ -98,6 +101,14 @@ pub enum ScanFor {
     Watch,
 }
 
+/// How far the file thread's folder read has got, and the epoch that cancels it.
+#[derive(Default)]
+struct ScanProgress {
+    epoch: AtomicU64,
+    folders: AtomicUsize,
+    photos: AtomicUsize,
+}
+
 /// Disk work that is small but can be slow (a network share, a card): never on the UI
 /// thread.
 pub enum FileJob {
@@ -106,6 +117,9 @@ pub enum FileJob {
         folder: PathBuf,
         purpose: ScanFor,
         depth: u32,
+        /// The [`Loader::scan_epoch`] it was asked in, if it may be cancelled: a
+        /// cancel moves the epoch on, and a read of an older one stops (WP5.8).
+        epoch: Option<u64>,
     },
     Subfolders(PathBuf),
     /// The phone's library of copies: delete these, then read what is left.
@@ -119,6 +133,7 @@ pub struct Loader {
     open_tx: Sender<(PathBuf, u64)>,
     thumb_tx: Sender<PathBuf>,
     file_tx: Sender<FileJob>,
+    scan: Arc<ScanProgress>,
     pub done: Receiver<Done>,
     /// Set on the first frame; lets a worker wake the UI when its result lands, since
     /// the event loop otherwise sleeps until the next input event.
@@ -199,8 +214,9 @@ impl Loader {
         // One thread for the small disk reads: sidecars and sizes as photos are shelved,
         // folders as they are opened or browsed.
         let (file_tx, file_rx) = mpsc::channel::<FileJob>();
+        let scan: Arc<ScanProgress> = Arc::default();
         {
-            let (done_tx, repaint) = (done_tx.clone(), repaint.clone());
+            let (done_tx, repaint, scan) = (done_tx.clone(), repaint.clone(), scan.clone());
             let _ = std::thread::Builder::new()
                 .name("duckfoot-files".into())
                 .spawn(move || {
@@ -211,11 +227,27 @@ impl Loader {
                                 folder,
                                 purpose,
                                 depth,
-                            } => Done::Scanned {
-                                found: crate::dam::FolderTree::scan_tree(&folder, depth),
-                                folder,
-                                purpose,
-                            },
+                                epoch,
+                            } => {
+                                scan.folders.store(0, Ordering::Relaxed);
+                                scan.photos.store(0, Ordering::Relaxed);
+                                let found = crate::dam::FolderTree::scan_tree_with(
+                                    &folder,
+                                    depth,
+                                    |folders, photos| {
+                                        scan.folders.store(folders, Ordering::Relaxed);
+                                        scan.photos.store(photos, Ordering::Relaxed);
+                                        epoch
+                                            .is_none_or(|e| e == scan.epoch.load(Ordering::Relaxed))
+                                    },
+                                );
+                                Done::Scanned {
+                                    cancelled: found.is_none(),
+                                    found: found.unwrap_or_default(),
+                                    folder,
+                                    purpose,
+                                }
+                            }
                             FileJob::Subfolders(dir) => Done::Subfolders {
                                 subs: crate::dam::FolderTree::list_subfolders(&dir),
                                 dir,
@@ -416,6 +448,7 @@ impl Loader {
             open_tx,
             thumb_tx,
             file_tx,
+            scan,
             done,
             repaint,
         }
@@ -423,6 +456,24 @@ impl Loader {
 
     pub fn file_job(&self, job: FileJob) {
         let _ = self.file_tx.send(job);
+    }
+
+    /// What a cancellable folder read asked now is stamped with.
+    pub fn scan_epoch(&self) -> u64 {
+        self.scan.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Stops the folder read under way and every one asked before now.
+    pub fn cancel_scans(&self) {
+        self.scan.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Folders read and photos found by the folder read under way.
+    pub fn scan_progress(&self) -> (usize, usize) {
+        (
+            self.scan.folders.load(Ordering::Relaxed),
+            self.scan.photos.load(Ordering::Relaxed),
+        )
     }
 
     pub fn set_context(&self, ctx: &egui::Context) {
