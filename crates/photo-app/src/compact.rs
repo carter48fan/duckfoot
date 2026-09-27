@@ -102,7 +102,8 @@ pub struct Rects {
     top: Rect,
     nav: Rect,
     sheet: Rect,
-    stage: Rect,
+    /// Where the photo's stage was allocated, margins taken off.
+    pub(crate) stage: Rect,
     /// The Edit sheet's module strip, swiped sideways.
     strip: Rect,
 }
@@ -242,14 +243,8 @@ impl PhotoApp {
             }
         }
         self.compact_status(ui);
+        self.compact_rects.stage = Rect::NOTHING;
         self.workspace(ui);
-        self.compact_rects.stage = Rect::from_min_size(
-            pos2(
-                self.compact_rects.top.left(),
-                self.compact_rects.top.bottom(),
-            ),
-            self.last_panel,
-        );
         self.batch_export_dialog(ui);
         self.tour(ui);
     }
@@ -1904,23 +1899,61 @@ impl PhotoApp {
 
     /// The tour's current step over everything else: the rest of the screen dimmed, the
     /// part it is about outlined, and a card saying how to use it.
+    /// The tour (G-04): coach marks on the real photo, each waiting for its gesture. The
+    /// screen dims around what the step is about, which still takes touches; the card sits
+    /// on the other side of it.
     fn tour(&mut self, ui: &mut egui::Ui) {
         let Some(step) = self.tour_step else { return };
         let Some(s) = TOUR.get(step) else {
             self.end_tour();
             return;
         };
-        if let Some(tab) = s.tab {
-            self.compact_tab = Some(tab);
+        if self.tour_mark.as_ref().is_none_or(|m| m.step != step) {
+            if let Some(tab) = s.tab {
+                self.compact_tab = Some(tab);
+            }
+            if s.goal.on_photo() && crate::knobs::knobs(self.compact_module).is_empty() {
+                self.compact_module = InspectorSectionId::Exposure;
+            }
+            self.tour_mark = Some(TourMark {
+                step,
+                log: self.photo_touch.log,
+                tab: self.compact_tab,
+                module: self.compact_module,
+            });
         }
+        let mark = self.tour_mark.clone().expect("set above");
+        let log = self.photo_touch.log;
+        let done = match s.goal {
+            Goal::Tab => self.compact_tab != mark.tab,
+            Goal::Choose => log.chose > mark.log.chose,
+            Goal::Adjust => log.adjusted > mark.log.adjusted,
+            Goal::Reset => log.reset > mark.log.reset,
+            Goal::Hold => log.held > mark.log.held,
+            Goal::Module => self.compact_module != mark.module,
+            Goal::Photo => log.stepped > mark.log.stepped,
+            Goal::Done => false,
+        };
+        if done {
+            self.tour_step = Some(step + 1);
+            ui.ctx().request_repaint();
+            return;
+        }
+        // Gestures on a photo need one open, and stepping needs two.
+        let possible = match s.goal {
+            Goal::Photo => self.ready_image().is_some() && self.shelf.len() > 1,
+            g if g.on_photo() => self.ready_image().is_some(),
+            _ => true,
+        };
+
         let ctx = ui.ctx().clone();
         let screen = ctx.content_rect();
         let r = self.compact_rects;
         let target = match s.target {
             Target::Nav => r.nav,
-            Target::Sheet => r.sheet,
-            Target::Top => r.top,
             Target::Stage => r.stage,
+            Target::Strip => r.strip,
+            Target::Nothing => Rect::NOTHING,
         }
         .intersect(screen);
         let mut next = false;
@@ -1929,12 +1962,9 @@ impl PhotoApp {
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .show(&ctx, |ui| {
-                // Nothing under the tour takes a touch while it shows.
-                ui.allocate_rect(screen, Sense::click_and_drag());
-                let painter = ui.painter();
-                let dim = Color32::from_black_alpha(190);
-                if target.is_positive() {
-                    for band in [
+                let dim = Color32::from_black_alpha(170);
+                let bands = if target.is_positive() {
+                    vec![
                         Rect::from_min_max(screen.min, pos2(screen.max.x, target.min.y)),
                         Rect::from_min_max(pos2(screen.min.x, target.max.y), screen.max),
                         Rect::from_min_max(
@@ -1945,27 +1975,37 @@ impl PhotoApp {
                             pos2(target.max.x, target.min.y),
                             pos2(screen.max.x, target.max.y),
                         ),
-                    ] {
-                        painter.rect_filled(band, 0, dim);
+                    ]
+                } else {
+                    vec![screen]
+                };
+                // The dim takes the touches around the target; the target keeps its own.
+                for (i, band) in bands.iter().enumerate() {
+                    if band.is_positive() {
+                        ui.painter().rect_filled(*band, 0, dim);
+                        ui.interact(
+                            *band,
+                            egui::Id::new(("tour_dim", i)),
+                            Sense::click_and_drag(),
+                        );
                     }
-                    painter.rect_stroke(
+                }
+                if target.is_positive() {
+                    ui.painter().rect_stroke(
                         target.shrink(1.0),
                         4,
                         Stroke::new(2.0, theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
-                } else {
-                    painter.rect_filled(screen, 0, dim);
                 }
 
                 // The card sits on whichever side of the target has more room.
                 let w = (screen.width() - 32.0).min(360.0);
                 let h_id = egui::Id::new("duckfoot_tour_card_h");
-                let h: f32 = ui.data(|d| d.get_temp(h_id)).unwrap_or(160.0);
-                let above = target.center().y > screen.center().y;
+                let h: f32 = ui.data(|d| d.get_temp(h_id)).unwrap_or(140.0);
                 let y = if !target.is_positive() {
                     screen.center().y - h / 2.0
-                } else if above {
+                } else if target.top() - screen.top() > screen.bottom() - target.bottom() {
                     target.top() - 12.0 - h
                 } else {
                     target.bottom() + 12.0
@@ -1994,44 +2034,53 @@ impl PhotoApp {
                                     .color(theme::TEXT_HI),
                             );
                             ui.label(
-                                RichText::new(crate::i18n::tr(s.text_id))
-                                    .size(13.0)
-                                    .color(theme::TEXT),
+                                RichText::new(crate::i18n::tr(if possible {
+                                    s.text_id
+                                } else {
+                                    s.fallback_id
+                                }))
+                                .size(13.0)
+                                .color(theme::TEXT),
                             );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                let last = step + 1 == TOUR.len();
                                 if widgets::chip(ui, false, crate::i18n::tr("tour-skip")).clicked()
                                 {
                                     skip = true;
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let label = crate::i18n::tr(if last {
-                                            "tour-done"
-                                        } else {
-                                            "tour-next"
-                                        });
-                                        if widgets::button(ui, Kind::Primary, label, 72.0).clicked()
-                                        {
-                                            next = true;
-                                        }
-                                    },
-                                );
+                                // Only a step whose gesture cannot be made here, and the
+                                // last, has a button to go on: the others wait for it.
+                                if s.goal == Goal::Done || !possible {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let label = crate::i18n::tr(if s.goal == Goal::Done {
+                                                "tour-done"
+                                            } else {
+                                                "tour-next"
+                                            });
+                                            if widgets::button(ui, Kind::Primary, label, 72.0)
+                                                .clicked()
+                                            {
+                                                next = true;
+                                            }
+                                        },
+                                    );
+                                }
                             });
                         })
                         .response
                         .rect
-                        .height()
                 });
-                if (shown.inner - h).abs() > 0.5 {
-                    ui.data_mut(|d| d.insert_temp(h_id, shown.inner));
+                let drawn = shown.inner;
+                if (drawn.height() - h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(h_id, drawn.height()));
                     ui.ctx().request_repaint();
                 }
+                self.tour_card = Some((drawn, target));
             });
         if skip {
-            self.end_tour();
+            self.skip_tour();
         } else if next {
             if step + 1 >= TOUR.len() {
                 self.end_tour();
@@ -2049,10 +2098,22 @@ impl PhotoApp {
     /// Close the tour and remember it was seen.
     pub(crate) fn end_tour(&mut self) {
         self.tour_step = None;
-        if !self.settings.tour_done {
+        self.tour_mark = None;
+        self.tour_card = None;
+        if !self.settings.tour_done || self.settings.tour_again {
             self.settings.tour_done = true;
+            self.settings.tour_again = false;
             self.save_settings();
         }
+    }
+
+    /// Skipped: closed, with a notice that offers it once more on the next launch.
+    fn skip_tour(&mut self) {
+        self.end_tour();
+        self.set_status_undoable(
+            crate::i18n::tr("tour-skipped"),
+            crate::NoticeAction::TourAgain,
+        );
     }
 }
 
@@ -2060,56 +2121,119 @@ impl PhotoApp {
 #[derive(Clone, Copy)]
 enum Target {
     Nav,
-    Sheet,
-    Top,
     Stage,
+    /// The Edit sheet's module strip.
+    Strip,
+    Nothing,
+}
+
+/// The gesture a step waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Goal {
+    Tab,
+    Choose,
+    Adjust,
+    Reset,
+    Hold,
+    Module,
+    Photo,
+    /// The last card: a button closes it.
+    Done,
+}
+
+impl Goal {
+    fn on_photo(self) -> bool {
+        matches!(self, Goal::Choose | Goal::Adjust | Goal::Reset | Goal::Hold)
+    }
+}
+
+/// Where the app stood when a step began: what its gesture must change.
+#[derive(Clone)]
+pub(crate) struct TourMark {
+    step: usize,
+    log: crate::on_photo::GestureLog,
+    tab: Option<Tab>,
+    module: InspectorSectionId,
 }
 
 struct TourStep {
     /// Message ids, in `locales/`.
     title_id: &'static str,
     text_id: &'static str,
+    /// Said instead when the gesture cannot be made yet (no photo open, one photo).
+    fallback_id: &'static str,
     target: Target,
-    /// The tab to open for the step, if it is about one.
+    /// The tab to open as the step begins, if it is about one.
     tab: Option<Tab>,
+    goal: Goal,
 }
 
-const TOUR: [TourStep; 6] = [
+pub(crate) const TOUR_LEN: usize = TOUR.len();
+
+const TOUR: [TourStep; 8] = [
     TourStep {
         title_id: "tour-tabs-title",
         text_id: "tour-tabs-text",
+        fallback_id: "tour-tabs-text",
         target: Target::Nav,
         tab: None,
+        goal: Goal::Tab,
     },
     TourStep {
-        title_id: "tour-modules-title",
-        text_id: "tour-modules-text",
-        target: Target::Sheet,
+        title_id: "tour-choose-title",
+        text_id: "tour-choose-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
         tab: Some(Tab::Edit),
+        goal: Goal::Choose,
     },
     TourStep {
-        title_id: "tour-switch-title",
-        text_id: "tour-switch-text",
-        target: Target::Sheet,
+        title_id: "tour-adjust-title",
+        text_id: "tour-adjust-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
         tab: Some(Tab::Edit),
+        goal: Goal::Adjust,
     },
     TourStep {
-        title_id: "tour-fine-title",
-        text_id: "tour-fine-text",
-        target: Target::Top,
-        tab: None,
+        title_id: "tour-reset-title",
+        text_id: "tour-reset-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Reset,
     },
     TourStep {
-        title_id: "tour-presets-title",
-        text_id: "tour-presets-text",
-        target: Target::Sheet,
-        tab: Some(Tab::Presets),
+        title_id: "tour-hold-title",
+        text_id: "tour-hold-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Hold,
+    },
+    TourStep {
+        title_id: "tour-strip-title",
+        text_id: "tour-strip-text",
+        fallback_id: "tour-strip-text",
+        target: Target::Strip,
+        tab: Some(Tab::Edit),
+        goal: Goal::Module,
     },
     TourStep {
         title_id: "tour-photo-title",
         text_id: "tour-photo-text",
+        fallback_id: "tour-photo-one",
         target: Target::Stage,
+        tab: Some(Tab::Library),
+        goal: Goal::Photo,
+    },
+    TourStep {
+        title_id: "tour-end-title",
+        text_id: "tour-end-text",
+        fallback_id: "tour-end-text",
+        target: Target::Nothing,
         tab: None,
+        goal: Goal::Done,
     },
 ];
 

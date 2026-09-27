@@ -676,8 +676,15 @@ pub fn scaled_slider(
         // Wider than the common column only for a label that needs it: painted text is no
         // widget, so nothing else would stop it running under the rail.
         let label_w = label_col.max(text.size().x + 6.0);
-        let (label_rect, mut label_response) =
-            ui.allocate_exact_size(vec2(label_w, row_h), Sense::click());
+        let touch = is_touch(ui.ctx());
+        // On a phone the whole row is the control (G-03): a sideways drag on the label
+        // moves the value as one on the rail does, from where it is.
+        let sense = if touch {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let (label_rect, mut label_response) = ui.allocate_exact_size(vec2(label_w, row_h), sense);
         ui.painter().galley(
             label_rect.left_center() - vec2(0.0, text.size().y * 0.5),
             text,
@@ -702,6 +709,30 @@ pub fn scaled_slider(
         let slid = rail_painted(ui, &mut t, 0.0..=1.0, rail_w, spec);
         if slid.changed() {
             *value = (scale.from_rail)(t).clamp(*range.start(), *range.end());
+        }
+        if touch && label_response.dragged() {
+            let sideways_id = label_response.id.with("sideways");
+            if label_response.drag_started() {
+                let d = label_response.drag_delta();
+                ui.ctx()
+                    .data_mut(|m| m.insert_temp(sideways_id, d.x.abs() >= d.y.abs() * 0.8));
+            }
+            let sideways = ui
+                .ctx()
+                .data(|m| m.get_temp::<bool>(sideways_id))
+                .unwrap_or(true);
+            let d = label_response.drag_delta();
+            if sideways {
+                let fine = if is_fine(ui.ctx()) { 0.1 } else { 1.0 };
+                let t = ((scale.to_rail)(*value) + d.x / rail_w * fine).clamp(0.0, 1.0);
+                let v = (scale.from_rail)(t).clamp(*range.start(), *range.end());
+                if v != *value {
+                    *value = v;
+                    label_response.mark_changed();
+                }
+            } else if d.y != 0.0 {
+                ui.scroll_with_delta(vec2(0.0, d.y));
+            }
         }
         label_response
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));

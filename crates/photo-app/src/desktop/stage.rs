@@ -46,6 +46,7 @@ impl PhotoApp {
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
                 self.last_panel = rect.size();
+                self.compact_rects.stage = rect;
                 if rect.width() < 1.0 || rect.height() < 1.0 {
                     return;
                 }
