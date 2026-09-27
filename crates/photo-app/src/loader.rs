@@ -427,7 +427,8 @@ impl Loader {
 
     pub fn set_context(&self, ctx: &egui::Context) {
         if let Ok(mut slot) = self.repaint.lock() {
-            if slot.is_none() {
+            // Replaced along with the renderer when the surface's format changes.
+            if slot.as_ref() != Some(ctx) {
                 *slot = Some(ctx.clone());
             }
         }

@@ -598,6 +598,20 @@ impl PhotoApp {
 
     /// Give memory back when the system asks (Android's onTrimMemory): the engine's spare
     /// textures, and all but a quarter of the thumbnails.
+    /// The shell has replaced egui's renderer and context (the window's surface changed
+    /// format, L-21): whatever was registered with the old ones is gone, but the app, its
+    /// photo and its roll are not. The photo's texture is registered again on the next
+    /// render and thumbnails are asked for again as they come into view.
+    pub fn renderer_replaced(&mut self) {
+        // Not freed: the renderer that held it has gone.
+        self.texture_id = None;
+        self.thumbs.clear();
+        self.thumbs_requested.clear();
+        self.thumb_used.clear();
+        self.stage_preview = None;
+        self.needs_render = true;
+    }
+
     pub fn release_memory(&mut self) {
         self.engine.release_spares();
         self.evict_thumbs(self.thumb_cap() / 4);
