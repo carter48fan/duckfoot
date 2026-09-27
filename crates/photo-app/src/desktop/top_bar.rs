@@ -2,6 +2,9 @@
 
 use crate::*;
 
+/// The top bar's line: the brand's two lines of text, the tallest thing on it.
+const TOP_BAR_LINE: f32 = 32.0;
+
 impl PhotoApp {
     // ── Top bar ─────────────────────────────────────────────────────────────────────────
 
@@ -12,8 +15,12 @@ impl PhotoApp {
                     .fill(theme::BG_950)
                     .inner_margin(Margin::symmetric(14, 9)),
             )
+            // Exactly its line and margins: grown by the spacing after its last row it
+            // would sit its items above its middle.
+            .exact_size(TOP_BAR_LINE + 18.0)
+            .resizable(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                widgets::bar_line(ui, TOP_BAR_LINE, |ui| {
                     widgets::brand_mark(ui, 26.0);
                     ui.add_space(2.0);
                     ui.vertical(|ui| {

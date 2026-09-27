@@ -753,6 +753,26 @@ pub fn scaled_slider(
     .inner
 }
 
+/// One bar's line (G-01): the full `height` allocated up front and every item centred on
+/// it, left to right. A row that only grows as its items arrive centres the early ones on
+/// the height it had so far, and a bar's chips, buttons and icons each come at their own
+/// height; on one line they share a midline.
+pub fn bar_line<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    // In a sideways scroll the width is unbounded: the line grows as its items arrive.
+    let width = Some(ui.available_width())
+        .filter(|w| w.is_finite())
+        .unwrap_or(0.0);
+    let row = Rect::from_min_size(ui.cursor().min, vec2(width, height));
+    let shown = ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(row)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        add,
+    );
+    ui.advance_cursor_after_rect(row.union(shown.response.rect));
+    shown.inner
+}
+
 /// A full-bleed header band: `BG_925`, a hairline underneath, contents laid out left to right.
 pub fn band<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let inner = Frame::new()

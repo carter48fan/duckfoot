@@ -2967,3 +2967,114 @@ fn the_tour_waits_for_each_gesture_and_keeps_clear_of_what_it_points_at() {
     assert_eq!(app.tour_step(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Where each bar to check is: its name and rect.
+type Bars<'a> = dyn Fn(&egui::Context, &PhotoApp) -> Vec<(&'static str, egui::Rect)> + 'a;
+
+/// Each bar's items off its midline, or of another height than their neighbours'
+/// (G-01): `(bar name, bar rect)` for the bars to check.
+fn misaligned(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, bars: &Bars<'_>) -> Vec<String> {
+    h.ctx.enable_accesskit();
+    for _ in 0..12 {
+        h.frame_sized(app, size, Default::default());
+    }
+    let output = h.frame_sized(app, size, Default::default());
+    let names: HashMap<u64, String> = output
+        .platform_output
+        .accesskit_update
+        .map(|u| {
+            u.nodes
+                .iter()
+                .filter_map(|(id, n)| n.label().map(|l| (id.0, l.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let widgets: Vec<(egui::Id, egui::Rect)> = h.ctx.viewport(|v| {
+        v.prev_pass
+            .widgets
+            .layers()
+            .filter(|(layer, _)| {
+                matches!(layer.order, egui::Order::Background | egui::Order::Middle)
+            })
+            .flat_map(|(_, ws)| ws.iter())
+            .filter(|w| w.sense.senses_click() || w.sense.senses_drag())
+            // Clipped to what shows: a card's widget scrolled under a bar is not in it.
+            .filter(|w| w.interact_rect.is_positive())
+            .map(|w| (w.id, w.rect.intersect(w.interact_rect.expand(0.5))))
+            .collect()
+    });
+    let mut out = Vec::new();
+    for (bar, rect) in bars(&h.ctx, app) {
+        if !rect.is_positive() {
+            continue;
+        }
+        let items: Vec<&(egui::Id, egui::Rect)> = widgets
+            .iter()
+            .filter(|(_, r)| {
+                rect.contains(r.center())
+                    && r.height() < rect.height() - 1.0
+                    && r.width() < rect.width() * 0.6
+            })
+            .collect();
+        for (id, r) in &items {
+            let off = r.center().y - rect.center().y;
+            if off.abs() > 1.0 {
+                let name = names
+                    .get(&id.value())
+                    .cloned()
+                    .unwrap_or_else(|| format!("{id:?}"));
+                out.push(format!(
+                    "{bar}: {name:?} {r:?} is {off:+.1} off the midline"
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn every_bar_sits_on_one_line() {
+    let dir = scratch_dir("bars");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    let panel = |ctx: &egui::Context, id: &str| {
+        egui::containers::panel::PanelState::load(ctx, egui::Id::new(id))
+            .map_or(egui::Rect::NOTHING, |s| s.outer_rect)
+    };
+    let mut found = Vec::new();
+    for size in [egui::vec2(1440.0, 900.0), egui::vec2(1024.0, 768.0)] {
+        found.extend(misaligned(&h, &mut app, size, &|ctx, _| {
+            vec![
+                ("top bar", panel(ctx, "top")),
+                ("stage toolbar", panel(ctx, "stage_toolbar")),
+                ("status bar", panel(ctx, "status")),
+            ]
+        }));
+    }
+    for tab in [Tab::Library, Tab::Edit] {
+        app.compact_tab = Some(tab);
+        for size in [PORTRAIT, egui::vec2(360.0, 740.0)] {
+            found.extend(misaligned(&h, &mut app, size, &|ctx, app| {
+                vec![
+                    ("phone top bar", panel(ctx, "compact_top")),
+                    ("tab bar", panel(ctx, "compact_nav")),
+                    ("module strip", app.strip_rect()),
+                ]
+            }));
+        }
+    }
+    for f in &found {
+        eprintln!("{f}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        found.is_empty(),
+        "{} items off their bar's line",
+        found.len()
+    );
+}

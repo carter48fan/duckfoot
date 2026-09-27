@@ -8,7 +8,24 @@ pub(crate) fn pod<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) ->
         .stroke(Stroke::new(1.0, Color32::from_gray(0x2a)))
         .corner_radius(5)
         .inner_margin(Margin::same(2))
-        .show(ui, |ui| ui.horizontal(add).inner)
+        .show(ui, |ui| {
+            // Centred on the height it is given, not on one that grows as its items arrive,
+            // so a pod sits on its bar's line (G-01); in the direction the bar runs.
+            let dir = match ui.layout().main_dir() {
+                egui::Direction::RightToLeft => egui::Direction::RightToLeft,
+                _ => egui::Direction::LeftToRight,
+            };
+            // No taller than a control: in a wrapping row the height left is the panel's.
+            let h = ui
+                .available_height()
+                .min(crate::widgets::sized(ui, 26.0, 32.0));
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), h),
+                egui::Layout::from_main_dir_and_cross_align(dir, egui::Align::Center),
+                add,
+            )
+            .inner
+        })
         .inner
 }
 

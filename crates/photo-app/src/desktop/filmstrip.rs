@@ -29,54 +29,76 @@ impl PhotoApp {
     }
 
     pub(crate) fn stage_toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("stage_toolbar")
-            .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin::symmetric(14, 7)))
+        // A pod of icons: 26 and its margin and hairline.
+        const STAGE_TOOLBAR_LINE: f32 = 32.0;
+        let panel = egui::Panel::top("stage_toolbar")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_950)
+                    .inner_margin(Margin::symmetric(14, 7)),
+            )
+            .resizable(false);
+        // One line and its margins, exactly, but while framing a crop, which adds a row.
+        let panel = if self.cropping {
+            panel
+        } else {
+            panel.exact_size(STAGE_TOOLBAR_LINE + 14.0)
+        };
+        panel
             .show(ui, |ui| {
                 let loaded = self.ready_image().is_some();
                 let zoom_key = egui::Id::new("stage_zoom_width");
                 let zoom_w = widgets::trailing_width(ui.ctx(), zoom_key);
-                let mut zoom_beside = false;
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(loaded, |ui| {
-                        self.crop_chips(ui);
-                        if widgets::chip(ui, self.split_active, "a / b")
-                            .on_hover_text("Before / after split (\\). Drag the divider; double-click it to centre")
-                            .clicked()
-                        {
-                            self.split_active = !self.split_active;
-                            self.needs_render = true;
-                        }
-                        if widgets::chip(ui, self.clip_overlay, "clip")
-                            .on_hover_text("Show clipping: red where blown, blue where crushed (J)")
-                            .clicked()
-                        {
-                            self.clip_overlay = !self.clip_overlay;
-                        }
-                        self.proof_chips(ui);
+                // One line (G-01): zoom at the right end when it fits beside the rest, as
+                // measured last frame; otherwise after them, the line scrolling sideways.
+                let beside_key = egui::Id::new("stage_zoom_beside");
+                let chips_w = widgets::trailing_width(ui.ctx(), beside_key);
+                let zoom_beside = chips_w + zoom_w + 12.0 <= ui.available_width();
+                let line = |app: &mut Self, ui: &mut egui::Ui| {
+                    ui.scope(|ui| {
+                        ui.add_enabled_ui(loaded, |ui| {
+                            app.crop_chips(ui);
+                            if widgets::chip(ui, app.split_active, "a / b")
+                                .on_hover_text("Before / after split (\\). Drag the divider; double-click it to centre")
+                                .clicked()
+                            {
+                                app.split_active = !app.split_active;
+                                app.needs_render = true;
+                            }
+                            if widgets::chip(ui, app.clip_overlay, "clip")
+                                .on_hover_text("Show clipping: red where blown, blue where crushed (J)")
+                                .clicked()
+                            {
+                                app.clip_overlay = !app.clip_overlay;
+                            }
+                            app.proof_chips(ui);
+                        });
+                        widgets::remember_trailing_width(ui, beside_key);
                     });
-
-                    // Zoom at the right end when it fits beside the rest, as measured last
-                    // frame; otherwise on a row of its own below.
-                    zoom_beside = zoom_w + 12.0 <= ui.available_width();
                     if zoom_beside {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.scope(|ui| {
-                                self.zoom_controls(ui, loaded);
+                                app.zoom_controls(ui, loaded, false);
                                 widgets::remember_trailing_width(ui, zoom_key);
                             });
+                        });
+                    } else {
+                        ui.add_space(12.0);
+                        ui.scope(|ui| {
+                            app.zoom_controls(ui, loaded, true);
+                            widgets::remember_trailing_width(ui, zoom_key);
                         });
                     }
-                });
-                if !zoom_beside {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.scope(|ui| {
-                                self.zoom_controls(ui, loaded);
-                                widgets::remember_trailing_width(ui, zoom_key);
-                            });
+                };
+                if zoom_beside {
+                    widgets::bar_line(ui, STAGE_TOOLBAR_LINE, |ui| line(self, ui));
+                } else {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("stage_toolbar_line")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            widgets::bar_line(ui, STAGE_TOOLBAR_LINE, |ui| line(self, ui));
                         });
-                    });
                 }
                 // Framing a crop: its shapes and guide on a row of their own, which the
                 // row above has no room for.
@@ -87,43 +109,69 @@ impl PhotoApp {
             });
     }
 
-    /// 1:1, FIT and the zoom readout, laid out right to left.
-    fn zoom_controls(&mut self, ui: &mut egui::Ui, loaded: bool) {
+    /// − % + FIT 1:1 as they read: laid out right to left at the end of the line, or left
+    /// to right (`ltr`) after the rest.
+    fn zoom_controls(&mut self, ui: &mut egui::Ui, loaded: bool, ltr: bool) {
         ui.add_enabled_ui(loaded, |ui| {
-            if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
-                .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
-                .clicked()
-            {
-                self.zoom_actual();
-            }
-            if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
-                .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
-                .clicked()
-            {
-                self.view = View::default();
-            }
-            // Right-to-left: + then the readout then −.
-            pod(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                if widgets::icon(ui, "+", false, "Zoom in").clicked() {
-                    self.zoom_by(1.25);
+            let buttons = |app: &mut Self, ui: &mut egui::Ui| {
+                let order: [bool; 2] = if ltr { [false, true] } else { [true, false] };
+                for one_to_one in order {
+                    if one_to_one {
+                        if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
+                            .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
+                            .clicked()
+                        {
+                            app.zoom_actual();
+                        }
+                    } else if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
+                        .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
+                        .clicked()
+                    {
+                        app.view = View::default();
+                    }
                 }
-                let percent = self
-                    .zoom_percent(self.last_panel)
-                    .map_or("—".to_string(), |p| format!("{p:.0}%"));
-                ui.add_sized(
-                    [44.0, 20.0],
-                    egui::Label::new(
-                        RichText::new(percent)
-                            .family(theme::mono_bold())
-                            .size(11.0)
-                            .color(theme::TEXT_HI),
-                    ),
-                );
-                if widgets::icon(ui, "−", false, "Zoom out").clicked() {
-                    self.zoom_by(0.8);
-                }
-            });
+            };
+            let steps = |app: &mut Self, ui: &mut egui::Ui| {
+                pod(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let percent = app
+                        .zoom_percent(app.last_panel)
+                        .map_or("—".to_string(), |p| format!("{p:.0}%"));
+                    let order: [u8; 3] = if ltr { [0, 1, 2] } else { [2, 1, 0] };
+                    for part in order {
+                        match part {
+                            0 => {
+                                if widgets::icon(ui, "−", false, "Zoom out").clicked() {
+                                    app.zoom_by(0.8);
+                                }
+                            }
+                            1 => {
+                                ui.add_sized(
+                                    [44.0, 20.0],
+                                    egui::Label::new(
+                                        RichText::new(percent.clone())
+                                            .family(theme::mono_bold())
+                                            .size(11.0)
+                                            .color(theme::TEXT_HI),
+                                    ),
+                                );
+                            }
+                            _ => {
+                                if widgets::icon(ui, "+", false, "Zoom in").clicked() {
+                                    app.zoom_by(1.25);
+                                }
+                            }
+                        }
+                    }
+                });
+            };
+            if ltr {
+                steps(self, ui);
+                buttons(self, ui);
+            } else {
+                buttons(self, ui);
+                steps(self, ui);
+            }
         });
     }
 

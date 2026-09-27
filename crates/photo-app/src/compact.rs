@@ -2090,6 +2090,11 @@ impl PhotoApp {
         }
     }
 
+    /// Where the Edit sheet's module strip was drawn last frame.
+    pub fn strip_rect(&self) -> Rect {
+        self.compact_rects.strip
+    }
+
     /// Where the phone layout's sheet was drawn last frame (nothing while it is closed).
     pub fn sheet_rect(&self) -> Rect {
         self.compact_rects.sheet
