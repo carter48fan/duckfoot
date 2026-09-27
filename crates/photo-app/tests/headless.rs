@@ -2608,3 +2608,58 @@ fn the_phone_keeps_its_swipe_strips_from_the_system_back_gesture() {
     assert_eq!(platform.0.lock().unwrap().last(), Some(&Vec::new()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The native textures (the photo's) a frame's shapes draw with.
+fn user_textures(output: &egui::FullOutput) -> Vec<egui::TextureId> {
+    let mut ids: Vec<egui::TextureId> = output
+        .shapes
+        .iter()
+        .map(|s| s.shape.texture_id())
+        .filter(|id| matches!(id, egui::TextureId::User(_)))
+        .collect();
+    ids.dedup();
+    ids
+}
+
+#[test]
+fn a_new_surface_format_keeps_the_photo_and_its_edits() {
+    let dir = scratch_dir("renderer-replaced");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 320, 214);
+    let mut h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.edit(|s| s.exposure.params.ev = 0.7);
+    let before = h.frame(&mut app, Default::default());
+    assert!(!user_textures(&before).is_empty(), "the photo is drawn");
+
+    // What the shell does when the window's surface changes format: a renderer and an
+    // egui context of their own, and the app told so.
+    h.renderer = RwLock::new(egui_wgpu::Renderer::new(
+        &h.device,
+        wgpu::TextureFormat::Bgra8Unorm,
+        egui_wgpu::RendererOptions::default(),
+    ));
+    h.ctx = egui::Context::default();
+    photo_app::theme::apply(&h.ctx);
+    app.renderer_replaced();
+    let mut after = h.frame(&mut app, Default::default());
+    for _ in 0..3 {
+        after = h.frame(&mut app, Default::default());
+    }
+    assert_eq!(app.loaded_path(), Some(raw.as_path()));
+    assert_eq!(app.stack().exposure.params.ev, 0.7);
+    let drawn = user_textures(&after);
+    assert!(!drawn.is_empty(), "the photo is drawn again");
+    let renderer = h.renderer.read().unwrap();
+    for id in drawn {
+        assert!(
+            renderer.texture(&id).is_some(),
+            "{id:?} is registered with the new renderer"
+        );
+    }
+    drop(renderer);
+    let _ = std::fs::remove_dir_all(&dir);
+}

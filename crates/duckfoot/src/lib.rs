@@ -233,10 +233,10 @@ impl WindowState {
         textures_delta.clear();
 
         use wgpu::CurrentSurfaceTexture as Acquired;
-        let frame = match self.surface.get_current_texture() {
-            Acquired::Success(f) => f,
-            // Suboptimal still presents; reconfiguring next frame is enough.
-            Acquired::Suboptimal(f) => f,
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
+            Acquired::Success(f) => (f, false),
+            // Suboptimal still presents; the surface is configured again once it has.
+            Acquired::Suboptimal(f) => (f, true),
             Acquired::Outdated | Acquired::Lost => {
                 self.surface.configure(&gpu.device, &self.config);
                 gpu.free_textures(&to_free);
@@ -309,6 +309,9 @@ impl WindowState {
 
         gpu.queue.submit([encoder.finish()]);
         gpu.queue.present(frame);
+        if suboptimal {
+            self.surface.configure(&gpu.device, &self.config);
+        }
 
         if output
             .viewport_output
@@ -414,13 +417,16 @@ impl Shell {
         let format = surface_format(&surface, &gpu.adapter)?;
         if format != gpu.format {
             // The renderer's pipelines are built for one format. Replacing the renderer
-            // also forgets every texture egui uploaded to it, so the context and the app
-            // (whose photo is registered there too) have to go with it.
+            // also forgets every texture egui uploaded to it, so the context goes with it
+            // (a new one uploads its fonts again) and the app lets go of what it had
+            // registered; its photo, edits and roll stay (L-21).
             log::warn!("surface format changed {:?} → {format:?}", gpu.format);
             gpu.renderer = RwLock::new(new_renderer(&gpu.device, format));
             gpu.format = format;
             self.egui_ctx = new_egui_context(self.proxy.clone());
-            self.app = None;
+            if let Some(app) = &mut self.app {
+                app.renderer_replaced();
+            }
         }
 
         let size = window.inner_size();
