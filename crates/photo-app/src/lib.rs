@@ -20,6 +20,7 @@ mod curve_editor;
 mod desktop;
 mod export_flow;
 mod export_ui;
+mod i18n;
 mod icons;
 mod info;
 mod inspector;
