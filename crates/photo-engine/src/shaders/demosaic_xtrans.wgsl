@@ -1,5 +1,5 @@
-// Pass 1, for Fuji's X-Trans: green, then red and blue against it, as for Bayer
-// (demosaic_green.wgsl, demosaic_rb.wgsl), on a 6×6 pattern.
+// Pass 1, for Fuji's X-Trans: green, then red and blue against it, as Bayer did before
+// RCD (directional green, then colour differences), on a 6×6 pattern.
 //
 // X-Trans puts green on 20 of 36 photosites and gives every row and column all three
 // colours, so its greens are dense but irregular, and red and blue never sit at the fixed
@@ -16,7 +16,7 @@
 //   weighted by nearness and by how alike green is there, so colour does not bleed across
 //   an edge green can see.
 //
-// Highlight reconstruction is the Bayer path's (see `reconstruct` in demosaic_rb.wgsl).
+// Highlight reconstruction is the Bayer path's (see `reconstruct` in demosaic_rcd.wgsl).
 //
 // Runs ONCE per image.
 
@@ -154,7 +154,7 @@ fn raw_peak(p: vec2<i32>) -> f32 {
     return peak;
 }
 
-// As demosaic_rb.wgsl's: a saturated photosite carries no colour, so it becomes a neutral
+// As demosaic_rcd.wgsl's: a saturated photosite carries no colour, so it becomes a neutral
 // at green's level, stored in `a` so every mip and filtered sample carries it.
 fn reconstruct(cam: vec3<f32>, p: vec2<i32>) -> vec4<f32> {
     let peak = max(max(cam.r, max(cam.g, cam.b)), raw_peak(p));

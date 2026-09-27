@@ -239,7 +239,7 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
-// The sensor texture holds each pixel in two parts (demosaic_rb.wgsl, `reconstruct`): rgb,
+// The sensor texture holds each pixel in two parts (demosaic_rcd.wgsl, `reconstruct`): rgb,
 // the camera colour still trusted, and a, the neutral standing in for whatever clipped.
 // White balance scales the first and must not touch the second, or a blown highlight takes
 // on the balance's tint.

@@ -32,13 +32,17 @@ pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEEP_OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Linear camera RGB, half float, with the reconstructed-highlight neutral in alpha
-/// (demosaic_rb.wgsl). 16 bits is the point: 8 would quantise the headroom that makes
+/// (demosaic_rcd.wgsl). 16 bits is the point: 8 would quantise the headroom that makes
 /// highlight recovery possible at all.
 const SENSOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The intermediate green plane. Half float is ample — it only has to carry one channel
 /// of a signal that is about to be added back to a colour difference.
 const GREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// RCD's soft directions, vertical-or-horizontal and diagonal: ratios in 0..1.
+const RCD_DIRS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// RCD's red at blue sites and blue at red ones, as the green plane is kept.
+const RCD_OPPOSITE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -373,10 +377,12 @@ fn output_texture_as(
 const NAN_PAINT: u32 = 0x8000_0000;
 
 pub struct Engine {
-    green_pipeline: wgpu::RenderPipeline,
+    /// Bayer demosaic, RCD's four passes (`shaders/demosaic_rcd.wgsl`): directions,
+    /// green, the opposite colour at red and blue sites, and the rest.
+    rcd_pipelines: [wgpu::RenderPipeline; 4],
+    rcd_bgl: wgpu::BindGroupLayout,
     green_bgl: wgpu::BindGroupLayout,
-    rb_pipeline: wgpu::RenderPipeline,
-    /// The same two passes for Fuji's X-Trans (`shaders/demosaic_xtrans.wgsl`).
+    /// Green then red and blue for Fuji's X-Trans (`shaders/demosaic_xtrans.wgsl`).
     xtrans_green_pipeline: wgpu::RenderPipeline,
     xtrans_rb_pipeline: wgpu::RenderPipeline,
     rb_bgl: wgpu::BindGroupLayout,
@@ -647,13 +653,9 @@ pub fn upload_raster(
 
 impl Engine {
     pub fn new(device: &wgpu::Device) -> Self {
-        let green_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("demosaic green"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_green.wgsl").into()),
-        });
-        let rb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("demosaic rb"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_rb.wgsl").into()),
+        let rcd_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("demosaic rcd"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_rcd.wgsl").into()),
         });
         let adjust_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("adjust"),
@@ -847,13 +849,36 @@ impl Engine {
             ..Default::default()
         });
 
-        let green_pipeline = fullscreen_pipeline(
-            device,
-            "demosaic green",
-            &green_shader,
-            &green_bgl,
-            GREEN_FORMAT,
-        );
+        // RCD's passes read the mosaic and what the passes before them wrote.
+        let plane_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let rcd_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("demosaic rcd bgl"),
+            entries: &[
+                mosaic_entry,
+                uniform_entry(1),
+                plane_entry(2),
+                plane_entry(3),
+                plane_entry(4),
+            ],
+        });
+        let rcd_pipelines = [
+            ("fs_dirs", RCD_DIRS_FORMAT),
+            ("fs_green", GREEN_FORMAT),
+            ("fs_opposite", RCD_OPPOSITE_FORMAT),
+            ("fs_final", SENSOR_FORMAT),
+        ]
+        .map(|(entry, format)| {
+            fullscreen_pipeline_at(device, "demosaic rcd", &rcd_shader, entry, &rcd_bgl, format)
+        });
         let xtrans_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("demosaic x-trans"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/demosaic_xtrans.wgsl").into()),
@@ -874,8 +899,6 @@ impl Engine {
             &rb_bgl,
             SENSOR_FORMAT,
         );
-        let rb_pipeline =
-            fullscreen_pipeline(device, "demosaic rb", &rb_shader, &rb_bgl, SENSOR_FORMAT);
         let adjust_pipeline =
             fullscreen_pipeline(device, "adjust", &adjust_shader, &adjust_bgl, OUTPUT_FORMAT);
         let deep_adjust_pipeline = fullscreen_pipeline(
@@ -997,9 +1020,9 @@ impl Engine {
             hist_epoch: 0,
             hist_inflight_epoch: 0,
             hist_owed: None,
-            green_pipeline,
+            rcd_pipelines,
+            rcd_bgl,
             green_bgl,
-            rb_pipeline,
             xtrans_green_pipeline,
             xtrans_rb_pipeline,
             rb_bgl,
@@ -1476,26 +1499,33 @@ impl Engine {
                     ],
                 });
 
-                let (green_pipeline, rb_pipeline) = if cfa.is_bayer() {
-                    (&self.green_pipeline, &self.rb_pipeline)
+                if cfa.is_bayer() {
+                    self.demosaic_rcd(
+                        device,
+                        &mut encoder,
+                        &mosaic_view,
+                        &demosaic_uniforms,
+                        &green_view,
+                        &level_view(0),
+                        extent,
+                    );
                 } else {
-                    (&self.xtrans_green_pipeline, &self.xtrans_rb_pipeline)
-                };
-                // Green first and alone: red and blue are reconstructed relative to it.
-                draw_fullscreen(
-                    &mut encoder,
-                    "demosaic green pass",
-                    green_pipeline,
-                    &green_bind,
-                    &green_view,
-                );
-                draw_fullscreen(
-                    &mut encoder,
-                    "demosaic rb pass",
-                    rb_pipeline,
-                    &rb_bind,
-                    &level_view(0),
-                );
+                    // Green first and alone: red and blue are reconstructed relative to it.
+                    draw_fullscreen(
+                        &mut encoder,
+                        "demosaic x-trans green pass",
+                        &self.xtrans_green_pipeline,
+                        &green_bind,
+                        &green_view,
+                    );
+                    draw_fullscreen(
+                        &mut encoder,
+                        "demosaic x-trans rb pass",
+                        &self.xtrans_rb_pipeline,
+                        &rb_bind,
+                        &level_view(0),
+                    );
+                }
                 // Kept for the next photo's demosaic; the mosaic for its next upload.
                 self.scratch = Some(scratch);
                 spent_mosaic = Some(mosaic);
@@ -2654,6 +2684,86 @@ fn fullscreen_pipeline_at(
         multiview_mask: None,
         cache: None,
     })
+}
+
+impl Engine {
+    /// RCD's four passes over a Bayer mosaic (`shaders/demosaic_rcd.wgsl`), into `target`.
+    /// Its two scratch planes live only for this demosaic: kept, they would hold another
+    /// 6 bytes a photosite for as long as the photo is open.
+    #[allow(clippy::too_many_arguments)]
+    fn demosaic_rcd(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mosaic: &wgpu::TextureView,
+        uniforms: &wgpu::Buffer,
+        green: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        extent: wgpu::Extent3d,
+    ) {
+        let plane = |label, size, format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let dirs = plane("rcd directions", extent, RCD_DIRS_FORMAT);
+        let opposite = plane("rcd opposite colour", extent, RCD_OPPOSITE_FORMAT);
+        // What a pass does not read yet, since a pass may not read what it writes.
+        let unused = plane(
+            "rcd unused",
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            RCD_OPPOSITE_FORMAT,
+        );
+        let passes: [(&str, [&wgpu::TextureView; 3], &wgpu::TextureView); 4] = [
+            ("rcd directions pass", [&unused, &unused, &unused], &dirs),
+            ("rcd green pass", [&dirs, &unused, &unused], green),
+            ("rcd opposite pass", [&dirs, green, &unused], &opposite),
+            ("rcd final pass", [&dirs, green, &opposite], target),
+        ];
+        for (i, (label, reads, writes)) in passes.into_iter().enumerate() {
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.rcd_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(mosaic),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(reads[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(reads[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(reads[2]),
+                    },
+                ],
+            });
+            draw_fullscreen(encoder, label, &self.rcd_pipelines[i], &bind, writes);
+        }
+    }
 }
 
 fn draw_fullscreen(
