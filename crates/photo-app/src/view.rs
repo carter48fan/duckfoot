@@ -192,3 +192,25 @@ impl PhotoApp {
         }
     }
 }
+
+impl PhotoApp {
+    /// The sensor position (0..1) of the point `u`, `v` of the way across the crop.
+    pub(crate) fn crop_point_on_sensor(&self, u: f32, v: f32) -> [f32; 2] {
+        let Some(image) = self.ready_image() else {
+            return [0.5, 0.5];
+        };
+        let sensor = (image.sensor_width, image.sensor_height);
+        let (ow, oh) = self.stack.geometry.output_size(sensor.0, sensor.1);
+        let c = self.stack.geometry.crop.sanitised();
+        let out = (
+            (c.x + u * c.width) * ow as f32,
+            (c.y + v * c.height) * oh as f32,
+        );
+        let plain = photo_engine::PhotoStack {
+            geometry: self.stack.geometry,
+            ..Default::default()
+        };
+        let (x, y) = photo_engine::sensor_point(&plain, None, sensor, out);
+        [x / sensor.0 as f32, y / sensor.1 as f32]
+    }
+}

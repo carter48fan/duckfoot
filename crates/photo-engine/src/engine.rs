@@ -119,6 +119,10 @@ struct AdjustUniforms {
     tca_r: [f32; 4],
     tca_b: [f32; 4],
     warp_vig: [f32; 4],
+    /// Local masks, four vec4 each: see `adjust.wgsl`'s `masks`.
+    masks: [[f32; 4]; 32],
+    /// Masks in use, and 1 + the one shown as an overlay (0 for none).
+    mask_info: [u32; 4],
 }
 
 pub struct LoadedImage {
@@ -276,6 +280,8 @@ pub struct Engine {
     clip_bgl: wgpu::BindGroupLayout,
     /// See [`Engine::set_clip_overlay`].
     clip_overlay: bool,
+    /// See [`Engine::set_mask_overlay`].
+    mask_overlay: Option<usize>,
     mip_bgl: wgpu::BindGroupLayout,
     denoise_pipeline: wgpu::RenderPipeline,
     denoise_bgl: wgpu::BindGroupLayout,
@@ -897,7 +903,14 @@ impl Engine {
             clip_pipeline,
             clip_bgl,
             clip_overlay: false,
+            mask_overlay: None,
         }
+    }
+
+    /// Wash local mask `index` (of the stack's masks) red on the preview, to show where it
+    /// applies. Never in an export.
+    pub fn set_mask_overlay(&mut self, index: Option<usize>) {
+        self.mask_overlay = index;
     }
 
     /// Show clipping on the preview: every pixel at white red, at black blue. Drawn into a
@@ -1740,6 +1753,11 @@ impl Engine {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
         let warp = image.warp_for(stack);
+        let masks = mask_uniforms(
+            stack,
+            (image.sensor_width, image.sensor_height),
+            self.mask_overlay,
+        );
 
         if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
             let lut = build_lut(&stack.tone_curve.params);
@@ -1929,6 +1947,8 @@ impl Engine {
                 warp_vig: warp
                     .and_then(|w| w.vignetting)
                     .map_or([0.0; 4], |(k, unit)| [k[0], k[1], k[2], unit]),
+                masks: masks.0,
+                mask_info: [masks.1, if for_export { 0 } else { masks.2 }, 0, 0],
             }),
         );
     }
@@ -2265,6 +2285,63 @@ pub(crate) fn read_back_level(
     Ok(out)
 }
 
+/// The masks that are on, packed for the shader, how many, and 1 + the shown one's slot.
+fn mask_uniforms(
+    stack: &PhotoStack,
+    sensor: (u32, u32),
+    shown: Option<usize>,
+) -> ([[f32; 4]; 32], u32, u32) {
+    use crate::local::Shape;
+    let mut out = [[0.0f32; 4]; 32];
+    let mut n = 0u32;
+    let mut overlay = 0u32;
+    if !stack.local.enabled {
+        return (out, 0, 0);
+    }
+    let (w, h) = (sensor.0 as f32, sensor.1 as f32);
+    let long = w.max(h);
+    let masks = stack
+        .local
+        .params
+        .masks
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.on);
+    for (i, m) in masks.take(crate::local::MAX_MASKS) {
+        let slot = n as usize * 4;
+        let invert = if m.invert { 2.0 } else { 0.0 };
+        match m.shape {
+            Shape::Linear { from, to } => {
+                out[slot] = [from[0] * w, from[1] * h, to[0] * w, to[1] * h];
+                out[slot + 1] = [0.0, 0.0, 0.0, invert];
+            }
+            Shape::Radial {
+                centre,
+                radius,
+                angle,
+                feather,
+            } => {
+                let (sin, cos) = angle.to_radians().sin_cos();
+                out[slot] = [
+                    centre[0] * w,
+                    centre[1] * h,
+                    (radius[0] * long).max(1.0),
+                    (radius[1] * long).max(1.0),
+                ];
+                out[slot + 1] = [cos, sin, feather.clamp(0.01, 1.0), 1.0 + invert];
+            }
+        }
+        let a = &m.adjust;
+        out[slot + 2] = [a.exposure, a.temperature, a.tint, a.contrast];
+        out[slot + 3] = [a.saturation, a.clarity, a.sharpness, 0.0];
+        if shown == Some(i) {
+            overlay = n + 1;
+        }
+        n += 1;
+    }
+    (out, n, overlay)
+}
+
 /// `denoise.wgsl`'s parameters for `params`, level left for the caller: see its `Params`.
 fn denoise_uniforms(params: &Denoise, mip_levels: u32) -> [f32; 8] {
     let unit = |v: f32| {
@@ -2379,6 +2456,33 @@ fn draw_fullscreen(
 }
 
 #[cfg(test)]
+mod output_point_tests {
+    use super::*;
+
+    #[test]
+    fn output_point_undoes_sensor_point_through_any_framing() {
+        let sensor = (600u32, 400u32);
+        for turns in 0..4 {
+            for (mh, mv) in [(false, false), (true, false), (false, true)] {
+                let mut stack = PhotoStack::default();
+                let g = &mut stack.geometry;
+                g.quarter_turns = turns;
+                g.mirror_h = mh;
+                g.mirror_v = mv;
+                g.straighten_deg = 7.5;
+                let out = (123.0, 77.0);
+                let s = sensor_point(&stack, None, sensor, out);
+                let back = output_point(&stack.geometry, sensor, s);
+                assert!(
+                    (back.0 - out.0).abs() < 1e-3 && (back.1 - out.1).abs() < 1e-3,
+                    "turns {turns} mirror {mh}/{mv}: {back:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2470,6 +2574,29 @@ pub fn sensor_point(
     let ideal = (x + sensor.0 as f32 * 0.5, y + sensor.1 as f32 * 0.5);
     // Green's plane: what the eyedropper's patch is read around.
     warp.map_or(ideal, |w| w.source(1, ideal))
+}
+
+/// Where sensor pixel `sensor_px` lands in the turned, uncropped full-resolution frame:
+/// `sensor_point`'s inverse, for the geometry alone (lens corrections move a point a few
+/// pixels at most, which placing a mask handle does not need).
+pub fn output_point(g: &Geometry, sensor: (u32, u32), sensor_px: (f32, f32)) -> (f32, f32) {
+    let (ow, oh) = g.output_size(sensor.0, sensor.1);
+    let (mut x, mut y) = (
+        sensor_px.0 - sensor.0 as f32 * 0.5,
+        sensor_px.1 - sensor.1 as f32 * 0.5,
+    );
+    for _ in 0..g.quarter_turns {
+        (x, y) = (-y, x);
+    }
+    if g.mirror_h {
+        x = -x;
+    }
+    if g.mirror_v {
+        y = -y;
+    }
+    let (s, c) = g.straighten_deg.to_radians().sin_cos();
+    (x, y) = (x * c - y * s, x * s + y * c);
+    (x + ow as f32 * 0.5, y + oh as f32 * 0.5)
 }
 
 /// What Auto tone chose: exposure and the four tonal controls.

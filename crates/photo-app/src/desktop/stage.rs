@@ -92,8 +92,74 @@ impl PhotoApp {
                         move_divider_to = div.interact_pointer_pos();
                     }
                 }
+                // A chosen local mask's handles take a drag that starts on them, before a pan
+                // or the divider can.
+                let sensor = self
+                    .ready_image()
+                    .map(|i| (i.sensor_width, i.sensor_height));
+                if let (Some(i), Some(sensor), false) = (self.selected_mask, sensor, self.cropping) {
+                    let mapping = crate::mask_tool::Mapping {
+                        geometry: self.stack.geometry,
+                        sensor,
+                        frame: frame_now,
+                    };
+                    let tolerance = if widgets::is_touch(ui.ctx()) { 24.0 } else { 9.0 };
+                    if let Some(mask) = self.stack.local.params.masks.get(i).copied() {
+                        if response.drag_started() {
+                            let origin = ui.input(|i| i.pointer.press_origin());
+                            if let Some(at) = origin.or(response.interact_pointer_pos()) {
+                                if let Some(handle) = mapping.hit(&mask, at, tolerance) {
+                                    self.history.checkpoint(&self.stack);
+                                    self.mask_drag = Some((handle, at, mask));
+                                }
+                            }
+                        }
+                        if let (Some((handle, from, start)), Some(p)) =
+                            (self.mask_drag, response.interact_pointer_pos())
+                        {
+                            let moved = mapping.dragged(&start, handle, from, p);
+                            if self.stack.local.params.masks[i] != moved {
+                                self.stack.local.params.masks[i] = moved;
+                                self.needs_render = true;
+                            }
+                        }
+                        if let Some(p) = response.hover_pos() {
+                            let cursor = match self.mask_drag.map(|d| d.0).or(mapping.hit(&mask, p, tolerance)) {
+                                Some(crate::mask_tool::Handle::Move) => Some(egui::CursorIcon::Grab),
+                                Some(_) => Some(egui::CursorIcon::Crosshair),
+                                None => None,
+                            };
+                            if let Some(c) = cursor {
+                                ui.ctx().set_cursor_icon(c);
+                            }
+                        }
+                    }
+                    // A click on another mask's pin chooses it.
+                    if response.clicked() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            let pins = self.stack.local.params.masks.iter().enumerate();
+                            let hit = pins
+                                .map(|(j, m)| (j, mapping.pin(m).distance(p)))
+                                .filter(|(j, d)| *j != i && *d <= tolerance)
+                                .min_by(|a, b| a.1.total_cmp(&b.1));
+                            if let Some((j, _)) = hit {
+                                self.selected_mask = Some(j);
+                            }
+                        }
+                    }
+                }
+                if response.drag_stopped() {
+                    self.mask_drag = None;
+                }
+                let mask_dragging = self.mask_drag.is_some();
+
                 // With nothing to pan at fit, a drag anywhere on the image moves the divider.
-                if self.split_active && !self.cropping && at_fit && response.dragged() {
+                if self.split_active
+                    && !self.cropping
+                    && at_fit
+                    && response.dragged()
+                    && !mask_dragging
+                {
                     move_divider_to = response.interact_pointer_pos();
                 }
                 self.split_dragging = move_divider_to.is_some();
@@ -264,12 +330,18 @@ impl PhotoApp {
                         };
                         ui.ctx().set_cursor_icon(cursor);
                     }
-                } else if response.dragged() && !at_fit && !self.split_dragging {
+                } else if response.dragged() && !at_fit && !self.split_dragging && !mask_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
                 }
                 // On touch, a sideways swipe at fit — where a drag has nothing to pan — steps
                 // to the next or previous photo, as ← and → do.
-                if widgets::is_touch(ui.ctx()) && at_fit && !self.cropping && !self.split_active {
+                if widgets::is_touch(ui.ctx())
+                    && at_fit
+                    && !self.cropping
+                    && !self.split_active
+                    && !mask_dragging
+                    && self.selected_mask.is_none()
+                {
                     if response.drag_started() {
                         self.swipe_from = response.interact_pointer_pos();
                     }
@@ -423,6 +495,50 @@ impl PhotoApp {
                         pos2(framed_view.center().x, framed_view.top() + 12.0),
                         Align2::CENTER_TOP,
                         "CROP · handles resize · inside moves · outside turns · X swaps · O guides · Enter / Esc",
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+
+                // The chosen local mask: its outline and handles, and a pin on every other.
+                if let (Some(i), Some(sensor), false) = (self.selected_mask, sensor, self.cropping) {
+                    let mapping = crate::mask_tool::Mapping {
+                        geometry: self.stack.geometry,
+                        sensor,
+                        frame,
+                    };
+                    let dark = Stroke::new(3.0, Color32::from_black_alpha(140));
+                    let light = Stroke::new(1.5, theme::TEXT_HI);
+                    for (j, m) in self.stack.local.params.masks.iter().enumerate() {
+                        if j == i {
+                            continue;
+                        }
+                        let at = mapping.pin(m);
+                        painter.circle(at, 5.0, Color32::from_black_alpha(160), light);
+                    }
+                    if let Some(mask) = self.stack.local.params.masks.get(i) {
+                        for (k, line) in mapping.outline(mask).into_iter().enumerate() {
+                            // The inner ring (feather) and a gradient's outer lines, fainter.
+                            let faint = k != 0 && matches!(mask.shape, photo_engine::local::Shape::Radial { .. })
+                                || k != 1 && matches!(mask.shape, photo_engine::local::Shape::Linear { .. });
+                            let stroke = if faint {
+                                Stroke::new(1.0, theme::TEXT_HI.linear_multiply(0.6))
+                            } else {
+                                light
+                            };
+                            painter.add(egui::Shape::line(line.clone(), dark));
+                            painter.add(egui::Shape::line(line, stroke));
+                        }
+                        for (handle, at) in mapping.handles(mask) {
+                            let r = if handle == crate::mask_tool::Handle::Move { 6.0 } else { 5.0 };
+                            painter.circle(at, r, theme::ACCENT, Stroke::new(1.5, Color32::BLACK));
+                        }
+                    }
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "MASK · drag the handles · Esc puts them away",
                         theme::ACCENT,
                         theme::ACCENT,
                     );

@@ -774,6 +774,150 @@ impl PhotoApp {
                     ));
                 }
             }
+            InspectorSectionId::Local => {
+                use photo_engine::local::{Mask, Shape, MAX_MASKS};
+                let n = self.stack.local.params.masks.len();
+                let mut add: Option<Mask> = None;
+                ui.horizontal_wrapped(|ui| {
+                    let room = n < MAX_MASKS && self.ready_image().is_some();
+                    if widgets::chip_enabled(ui, room, false, "+ radial")
+                        .on_hover_text("An ellipse: adjust inside it, or outside when inverted")
+                        .clicked()
+                    {
+                        let c = self.crop_point_on_sensor(0.5, 0.5);
+                        add = Some(Mask::radial(c, 0.15));
+                    }
+                    if widgets::chip_enabled(ui, room, false, "+ gradient")
+                        .on_hover_text("A graduated filter: full at its start, fading to its end")
+                        .clicked()
+                    {
+                        let (a, b) = (
+                            self.crop_point_on_sensor(0.5, 0.0),
+                            self.crop_point_on_sensor(0.5, 0.45),
+                        );
+                        add = Some(Mask::linear(a, b));
+                    }
+                    if n > 0
+                        && widgets::chip(ui, self.mask_overlay, "show mask")
+                            .on_hover_text(
+                                "Wash the chosen mask red on the photo, to see where it applies",
+                            )
+                            .clicked()
+                    {
+                        self.mask_overlay = !self.mask_overlay;
+                    }
+                });
+                if let Some(mask) = add {
+                    self.stack.local.params.masks.push(mask);
+                    self.stack.local.enabled = true;
+                    self.selected_mask = Some(n);
+                    discrete!();
+                }
+                let mut remove = None;
+                for i in 0..self.stack.local.params.masks.len() {
+                    let m = self.stack.local.params.masks[i];
+                    let chosen = self.selected_mask == Some(i);
+                    ui.horizontal(|ui| {
+                        if widgets::chip(ui, chosen, &format!("{} {}", m.kind(), i + 1))
+                            .on_hover_text(if chosen {
+                                "Put its handles away (Esc)"
+                            } else {
+                                "Place it on the photo and adjust it"
+                            })
+                            .clicked()
+                        {
+                            self.selected_mask = if chosen { None } else { Some(i) };
+                        }
+                        let a = m.adjust;
+                        let mut parts = Vec::new();
+                        if a.exposure != 0.0 {
+                            parts.push(format!("{:+.1} EV", a.exposure));
+                        }
+                        for (name, v) in [
+                            ("temp", a.temperature),
+                            ("tint", a.tint),
+                            ("con", a.contrast),
+                            ("sat", a.saturation),
+                            ("clar", a.clarity),
+                            ("sharp", a.sharpness),
+                        ] {
+                            if v != 0.0 {
+                                parts.push(format!("{name} {v:+.0}"));
+                            }
+                        }
+                        let text = if parts.is_empty() {
+                            "no change yet".to_string()
+                        } else {
+                            parts.join(" · ")
+                        };
+                        ui.add(egui::Label::new(theme::dim(text).size(11.5)).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::icon(ui, "×", false, "Delete this mask").clicked() {
+                                remove = Some(i);
+                            }
+                            let mut on = m.on;
+                            if ui
+                                .checkbox(&mut on, "")
+                                .on_hover_text("Apply this mask")
+                                .changed()
+                            {
+                                self.stack.local.params.masks[i].on = on;
+                                discrete!();
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    self.stack.local.params.masks.remove(i);
+                    self.selected_mask = match self.selected_mask {
+                        Some(s) if s == i => None,
+                        Some(s) if s > i => Some(s - 1),
+                        other => other,
+                    };
+                    discrete!();
+                }
+                if let Some(i) = self.selected_mask {
+                    let m = &mut self.stack.local.params.masks[i];
+                    let a = &mut m.adjust;
+                    track!(widgets::param_slider(
+                        ui,
+                        "exposure",
+                        &mut a.exposure,
+                        -4.0..=4.0,
+                        2,
+                        0.0
+                    ));
+                    for (label, value, lo) in [
+                        ("temperature", &mut a.temperature, -100.0),
+                        ("tint", &mut a.tint, -100.0),
+                        ("contrast", &mut a.contrast, -100.0),
+                        ("saturation", &mut a.saturation, -100.0),
+                        ("clarity", &mut a.clarity, -100.0),
+                        ("sharpness", &mut a.sharpness, 0.0),
+                    ] {
+                        track!(widgets::param_slider(ui, label, value, lo..=100.0, 0, 0.0));
+                    }
+                    if let Shape::Radial { feather, .. } = &mut m.shape {
+                        let mut pct = *feather * 100.0;
+                        let r =
+                            widgets::param_slider(ui, "feather", &mut pct, 1.0..=100.0, 0, 50.0);
+                        if r.changed() {
+                            *feather = pct / 100.0;
+                        }
+                        track!(r);
+                    }
+                    let inverted = m.invert;
+                    if widgets::chip(ui, inverted, "invert")
+                        .on_hover_text("Apply outside the shape instead of inside it")
+                        .clicked()
+                    {
+                        self.stack.local.params.masks[i].invert = !inverted;
+                        discrete!();
+                    }
+                } else if n > 0 {
+                    ui.label(theme::dim("Choose a mask to place and adjust it.").size(11.5));
+                }
+            }
             InspectorSectionId::Vignette => {
                 let p = &mut self.stack.vignette.params;
                 let dp = d.vignette.params;

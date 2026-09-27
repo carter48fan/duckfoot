@@ -25,6 +25,7 @@ mod info;
 mod inspector;
 mod keymap;
 mod keys;
+pub mod mask_tool;
 mod modules;
 mod parts;
 pub mod paste;
@@ -80,6 +81,7 @@ pub enum InspectorSectionId {
     Vibrance,
     Sharpen,
     Vignette,
+    Local,
 }
 
 impl InspectorSectionId {
@@ -101,6 +103,7 @@ impl InspectorSectionId {
             Self::Vibrance,
             Self::Sharpen,
             Self::Vignette,
+            Self::Local,
         ]
     }
 }
@@ -431,6 +434,14 @@ pub struct PhotoApp {
     pub paste_set: paste::PasteSet,
     /// The paste picker: a dialog on the desktop, inline on the phone.
     pub paste_picker_open: bool,
+    /// The local mask being placed and adjusted (W-01): its handles are on the stage.
+    pub selected_mask: Option<usize>,
+    /// Show the selected mask as a red wash on the preview.
+    pub mask_overlay: bool,
+    /// A mask handle being dragged: which, from where, and the mask as it was.
+    mask_drag: Option<(mask_tool::Handle, egui::Pos2, photo_engine::local::Mask)>,
+    /// The mask the engine is washing red, to notice a change.
+    shown_mask: Option<usize>,
     /// The user's own presets, as their files say (W-04).
     pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
     /// The name being typed for a preset about to be saved.
@@ -636,6 +647,10 @@ impl PhotoApp {
             clipboard_stack: None,
             paste_set: paste::PasteSet::default(),
             paste_picker_open: false,
+            selected_mask: None,
+            mask_overlay: false,
+            mask_drag: None,
+            shown_mask: None,
             user_presets: Vec::new(),
             preset_draft: None,
             exporting_preset: None,
@@ -910,6 +925,11 @@ impl PhotoApp {
 
     /// Step back one edit — Ctrl+Z, and every Undo button. While a crop is being framed,
     /// undo abandons that framing rather than the step before it.
+    /// Undo steps behind the open photo's current state.
+    pub fn history_len(&self) -> usize {
+        self.history.past.len()
+    }
+
     pub fn undo(&mut self) -> bool {
         if self.cropping {
             self.cancel_crop();
@@ -1063,6 +1083,20 @@ impl PhotoApp {
             self.take_sample(gpu, sample);
         }
         self.constrain_crop();
+
+        // The red wash over the selected mask: a uniform, so a change is a re-render.
+        let masks = &self.stack.local.params.masks;
+        if self.selected_mask.is_some_and(|i| i >= masks.len()) {
+            self.selected_mask = None;
+        }
+        let shown = self
+            .selected_mask
+            .filter(|_| self.mask_overlay && self.stack.local.enabled);
+        if shown != self.shown_mask {
+            self.engine.set_mask_overlay(shown);
+            self.shown_mask = shown;
+            self.needs_render = true;
+        }
 
         // The clipping overlay, toggled or held: a texture of its own, registered in place
         // of the preview's while it is on.

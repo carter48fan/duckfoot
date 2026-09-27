@@ -175,7 +175,11 @@ mod tests {
         assert_eq!(loaded.shelf, vec![PathBuf::from("/photos/a.ARW")]);
         let merged = merge_sections(loaded.compact_sections.unwrap());
         assert_eq!(merged[1].id, saved[1].id);
-        assert_eq!(merged.last().unwrap().id, InspectorSectionId::Vignette);
+        let vignette = merged
+            .iter()
+            .position(|s| s.id == InspectorSectionId::Vignette)
+            .unwrap();
+        assert_eq!(merged[vignette - 1].id, InspectorSectionId::Sharpen);
         assert_eq!(merged.len(), InspectorSectionId::all().len());
         // A module new since the save lands where it belongs, not at the bottom.
         let mut older = default_compact_sections();

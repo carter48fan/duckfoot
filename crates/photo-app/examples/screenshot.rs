@@ -158,6 +158,24 @@ fn main() -> anyhow::Result<()> {
         ));
         app.preset_draft = Some("Portrait".into());
     }
+    // DUCKFOOT_SHOT_MASK=1: a radial mask chosen, with its wash, and a gradient beside it.
+    if std::env::var_os("DUCKFOOT_SHOT_MASK").is_some() {
+        app.edit(|s| {
+            s.local.enabled = true;
+            let mut m = photo_engine::local::Mask::radial([0.35, 0.45], 0.18);
+            m.adjust.exposure = 0.8;
+            m.adjust.temperature = 30.0;
+            s.local.params.masks.push(m);
+            let mut g = photo_engine::local::Mask::linear([0.5, 0.0], [0.5, 0.4]);
+            g.adjust.exposure = -0.7;
+            s.local.params.masks.push(g);
+        });
+        app.selected_mask = Some(0);
+        app.mask_overlay = std::env::var_os("DUCKFOOT_SHOT_WASH").is_some();
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Local;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

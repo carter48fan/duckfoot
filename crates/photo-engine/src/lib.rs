@@ -17,6 +17,7 @@ pub mod histogram;
 pub mod icc;
 pub mod lens;
 pub mod lensfun;
+pub mod local;
 pub mod metadata;
 pub mod opcodes;
 pub mod params;
@@ -32,8 +33,8 @@ pub use decode::{
     RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
 };
 pub use engine::{
-    sensor_point, upload_cfa, upload_raster, AutoTone, Engine, LoadedImage, UploadPool,
-    UploadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT,
+    output_point, sensor_point, upload_cfa, upload_raster, AutoTone, Engine, LoadedImage,
+    UploadPool, UploadedImage, MAX_PREVIEW_LEVEL, OUTPUT_FORMAT,
 };
 pub use exif_out::MetadataPolicy;
 pub use export::{

@@ -457,6 +457,9 @@ impl PhotoApp {
     /// Point every control at `path`: its sidecar's stack, or defaults.
     pub(crate) fn begin_editing(&mut self, path: &Path) {
         self.error = None;
+        // A mask belongs to the photo it was drawn on.
+        self.selected_mask = None;
+        self.mask_drag = None;
         self.sidecar_locked = false;
         self.decode_failed = false;
         let (saved, metadata, snapshots) = match photo_engine::load_sidecar_full(path) {

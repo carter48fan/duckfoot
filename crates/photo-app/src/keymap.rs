@@ -83,6 +83,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Ctrl+Alt+V`",
         "the same edits as the photo open before this one",
     ),
+    s(
+        Editing,
+        "`Esc` with a mask chosen",
+        "put the mask's handles away",
+    ),
     s(Editing, "`C`", "crop tool on / off"),
     s(Editing, "`Enter` / `Esc`", "apply / cancel the crop"),
     s(

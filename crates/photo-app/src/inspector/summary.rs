@@ -204,6 +204,15 @@ pub(crate) fn summarise(
             };
             (text, *p != d.lens.params)
         }
+        S::Local => {
+            let n = s.local.params.masks.len();
+            let text = match n {
+                0 => "none".to_string(),
+                1 => "1 mask".to_string(),
+                n => format!("{n} masks"),
+            };
+            (text, n > 0)
+        }
         S::Vignette => {
             let p = &s.vignette.params;
             (

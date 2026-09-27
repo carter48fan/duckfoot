@@ -565,6 +565,8 @@ pub struct PhotoStack {
     pub lens: Module<Lens>,
     #[serde(default)]
     pub denoise: Module<Denoise>,
+    #[serde(default)]
+    pub local: Module<crate::local::Locals>,
 }
 
 impl Default for PhotoStack {
@@ -608,6 +610,7 @@ impl Default for PhotoStack {
             color_eq: Module::new(false, ColorEq::default()),
             lens: Module::new(false, Lens::default()),
             denoise: Module::new(false, Denoise::default()),
+            local: Module::new(false, crate::local::Locals::default()),
         }
     }
 }
@@ -629,6 +632,7 @@ pub(crate) mod flags {
     /// Not read by the adjust shader: noise reduction is a pre-pass. Here so the bitmask
     /// says everything that is on.
     pub const DENOISE: u32 = 8192;
+    pub const LOCAL: u32 = 16384;
 }
 
 impl PhotoStack {
@@ -676,6 +680,9 @@ impl PhotoStack {
         if self.denoise.enabled {
             m |= flags::DENOISE;
         }
+        if self.local.enabled && self.local.params.masks.iter().any(|m| m.on) {
+            m |= flags::LOCAL;
+        }
         m
     }
 }
@@ -708,6 +715,7 @@ impl PhotoStack {
         if nodes.len() < 2 {
             *nodes = crate::curve::identity_nodes();
         }
+        s.local.params = s.local.params.sanitised();
         s
     }
 }
