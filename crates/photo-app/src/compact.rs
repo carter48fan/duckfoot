@@ -672,11 +672,34 @@ impl PhotoApp {
             }
             (false, None) => {}
         }
-        // What the file says about it, in one line.
+        // What the file says about it, in one line; tapped, everything it says.
         if !many {
-            if let Some(line) = self.open_info().map(crate::info::one_line) {
-                if !line.is_empty() {
-                    ui.label(theme::dim(line).size(11.5));
+            let line = self
+                .open_info()
+                .map(crate::info::one_line)
+                .unwrap_or_default();
+            if let (false, Some(path)) = (line.is_empty(), self.loaded_path.clone()) {
+                let arrow = if self.info_open { "▾" } else { "▸" };
+                let tapped = ui
+                    .add(
+                        egui::Label::new(theme::dim(format!("{arrow} {line}")).size(11.5))
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Everything the file says about this photo")
+                    .clicked();
+                if tapped {
+                    self.info_open = !self.info_open;
+                }
+                if self.info_open {
+                    egui::Frame::new()
+                        .fill(theme::BG_925)
+                        .corner_radius(8)
+                        .inner_margin(Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.info_rows(ui, &path);
+                        });
                 }
             }
         }

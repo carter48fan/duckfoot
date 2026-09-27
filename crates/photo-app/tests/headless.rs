@@ -1832,6 +1832,13 @@ fn no_controls_overlap_on_any_screen() {
             check(&mut app, tab.label(), size);
         }
     }
+    // The Library sheet with the photo's info card open.
+    app.compact_tab = Some(Tab::Library);
+    app.info_open = true;
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "library + info", size);
+    }
+    app.info_open = false;
     // Each module on its own, on the narrowest phone.
     app.compact_tab = Some(Tab::Edit);
     for &id in photo_app::InspectorSectionId::all() {
