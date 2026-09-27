@@ -319,6 +319,44 @@ mod tests {
     use crate::params::{Crop, Geometry, Module, WhiteBalance};
 
     #[test]
+    fn a_mangled_sidecar_is_refused_not_crashed_on() {
+        let mut stack = PhotoStack::default();
+        stack.local.enabled = true;
+        stack
+            .local
+            .params
+            .masks
+            .push(crate::local::Mask::radial([0.5, 0.5], 0.2));
+        let good = serde_json::to_vec(&SidecarData {
+            stack: Some(stack.clone()),
+            history: vec![stack],
+            ..SidecarData::default()
+        })
+        .unwrap();
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..2000 {
+            let mut b = good.clone();
+            for _ in 0..1 + next() % 4 {
+                let at = (next() % b.len() as u64) as usize;
+                b[at] = b"0123456789-.e{}[]\",:tfn\\"[(next() % 20) as usize];
+            }
+            if let Ok(text) = String::from_utf8(b) {
+                if let Ok(data) = parse_sidecar(&text) {
+                    // Whatever parsed is within range.
+                    let s = data.stack.unwrap_or_default();
+                    assert_eq!(s, s.sanitised());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keywords_are_trimmed_split_and_kept_once() {
         let mut m = AssetMetadata::default();
         assert!(m.add_keywords(" Iceland, waterfall;; iceland ,"));

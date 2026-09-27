@@ -27,7 +27,6 @@ memchr = "2"
 # The one JPEG decoder that can scale in the DCT domain: a 45 MP embedded preview decoded
 # at 1/8 skips nearly all of the IDCT, which is most of the cost of a thumbnail.
 jpeg-decoder = { version = "0.3", default-features = false }
-memmap2 = "0.9"
 webp = { version = "0.3", default-features = false }
 kamadak-exif = "0.6"
 

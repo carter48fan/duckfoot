@@ -42,6 +42,11 @@ impl EmbeddedJpeg<'_> {
     }
 }
 
+/// How much of a RAW is read to look for its preview first.
+const HEAD: u64 = 8 << 20;
+/// The most of a file read to find one; every RAW is smaller.
+const MAX_READ: u64 = 256 << 20;
+
 /// The best embedded JPEG for showing at `want` pixels on the long side: the first one
 /// found that is at least that large, otherwise the largest there is.
 ///
@@ -191,15 +196,21 @@ pub fn decode_jpeg_scaled(jpeg: &[u8], want: u32) -> Option<(u32, u32, Vec<u8>)>
 /// The embedded preview of `path` at roughly `want` pixels on the long side, or `None` if
 /// the file has no JPEG preview this can read.
 ///
-/// The file is memory-mapped rather than read, so a preview near the front of a 60 MB RAW
-/// costs only the pages it sits in.
+/// Read, not memory-mapped: a mapped file on a card pulled mid-read faults the whole app
+/// (SIGBUS), where a read just fails. Cameras write their previews ahead of the sensor
+/// data, so the front of the file is read first and the rest only when the preview is
+/// not in it, and never more than [`MAX_READ`].
 pub fn load_embedded_preview(path: &Path, want: u32) -> Option<Preview> {
-    let file = File::open(path).ok()?;
-    // SAFETY: the mapping is read-only and lives only for this call. A file truncated
-    // underneath us can fault, which is the accepted risk of every mmap-based RAW reader
-    // (rawler maps the same files for decoding).
-    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-    let bytes: &[u8] = &map;
+    use std::io::Read;
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    file.by_ref().take(HEAD).read_to_end(&mut bytes).ok()?;
+    let good = |b: &[u8]| find_embedded_jpeg(b, want).is_some_and(|j| j.long_side() >= want);
+    if !good(&bytes) && len > HEAD && len <= MAX_READ {
+        file.read_to_end(&mut bytes).ok()?;
+    }
+    let bytes: &[u8] = &bytes;
     let jpeg = find_embedded_jpeg(bytes, want)?;
     let (width, height, rgb) = decode_jpeg_scaled(jpeg.data, want)?;
     // CR3 and RAF keep their orientation outside any TIFF header; without the fallback

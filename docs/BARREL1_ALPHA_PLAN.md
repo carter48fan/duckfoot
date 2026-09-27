@@ -641,7 +641,13 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 
 ### Phase 5 — Robustness, performance, platforms
 
-**WP5.1 Hostile input** — B6 (second part), L-12
+**WP5.1 Hostile input** — B6 (second part), L-12 — ✅ done: a 250 MP cap checked from the
+header before pixels are allocated (rasters by `image`'s dimensions, TIFF-based RAWs by the
+largest IFD), the TIFF walker on a 64-IFD / 20,000-entry budget with a `HashSet`, previews
+read (an 8 MB head, the rest only when needed, up to 256 MB) instead of mapped, and
+seeded mutation tests of the TIFF walker, JPEG scanner, raster decode, DNG colour and
+sidecar parsing that run with every `cargo test`. Still to come: `cargo fuzz` targets on a
+nightly CI lane (needs a nightly toolchain), and rawler's own mmap on removable media.
 - **Size check first:** read the dimensions from rawler metadata before decoding pixels.
   Reject anything over the pixel cap (default 250 MP) or `max_texture_dimension_2d`, *before*
   allocating. The same applies to rasters (`image::ImageReader::into_dimensions` first).
