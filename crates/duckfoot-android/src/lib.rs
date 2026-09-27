@@ -271,6 +271,18 @@ impl Platform for AndroidPlatform {
                     self.answered.push(Response::ExportPreset(path));
                 }
             }
+            Request::Share { path } => {
+                let Some(path) = path.to_str() else { return };
+                if let Ok(env) = self.bridge.env() {
+                    if let Ok(jpath) = env.new_string(path) {
+                        self.bridge.call_void(
+                            "shareFile",
+                            "(Ljava/lang/String;)V",
+                            &[JValue::Object(&jpath)],
+                        );
+                    }
+                }
+            }
             Request::ImportPreset { .. } => self.answered.push(Response::Status(
                 "Importing presets needs a file picker this build does not have yet".into(),
             )),
@@ -314,6 +326,10 @@ impl Platform for AndroidPlatform {
 
     fn leave(&mut self) {
         self.bridge.call_void("leave", "()V", &[]);
+    }
+
+    fn can_share(&self) -> bool {
+        true
     }
 
     fn export_completed(&mut self, path: &Path) {

@@ -380,6 +380,18 @@ pub(crate) enum NoticeAction {
     PasteToAll,
     Remove,
     DeleteSnapshot,
+    /// Share the photo just exported.
+    Share,
+}
+
+impl NoticeAction {
+    /// What its button says.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            NoticeAction::Share => "share",
+            _ => "undo",
+        }
+    }
 }
 
 /// Where the current edit stands relative to the sidecar on disk.
@@ -1118,6 +1130,12 @@ impl PhotoApp {
             NoticeAction::PasteToAll => self.undo_paste_to_all(),
             NoticeAction::Remove => self.undo_remove_from_shelf(),
             NoticeAction::DeleteSnapshot => self.undo_delete_snapshot(),
+            NoticeAction::Share => {
+                if let Export::Done { path, .. } = &self.export {
+                    let path = path.clone();
+                    self.platform.request(platform::Request::Share { path });
+                }
+            }
         }
     }
 

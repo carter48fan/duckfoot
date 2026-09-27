@@ -104,7 +104,12 @@ impl PhotoApp {
         match outcome {
             Some(Ok(())) => {
                 self.platform.export_completed(&path);
-                self.set_status(format!("Exported {} in {seconds:.1}s", file_name(&path)));
+                let msg = format!("Exported {} in {seconds:.1}s", file_name(&path));
+                if self.platform.can_share() {
+                    self.set_status_undoable(msg, NoticeAction::Share);
+                } else {
+                    self.set_status(msg);
+                }
                 self.export = Export::Done { path, seconds };
             }
             Some(Err(e)) => {
