@@ -22,16 +22,23 @@ android {
         }
     }
 
-    // Android installs an update only over an app signed with the same key. Without a
-    // keystore every machine signs with its own throwaway debug key, so each CI build
-    // would need the last one uninstalled first. Given one (android/README.md), every
-    // build signs with it instead.
-    System.getenv("DUCKFOOT_KEYSTORE")?.let { keystore ->
-        signingConfigs.getByName("debug") {
+    // Android installs an update only over an app signed with the same key. Given a
+    // keystore (android/README.md), every build signs with it. Without one, builds sign
+    // with the testing key checked in beside this file, so every build - CI's on any
+    // branch, or a local one - installs over the last without uninstalling first. It is
+    // a key for testing builds only; anything published gets the repository's own.
+    val keystore = System.getenv("DUCKFOOT_KEYSTORE")
+    signingConfigs.getByName("debug") {
+        if (keystore != null) {
             storeFile = file(keystore)
             storePassword = System.getenv("DUCKFOOT_KEYSTORE_PASSWORD")
             keyAlias = System.getenv("DUCKFOOT_KEY_ALIAS")
             keyPassword = System.getenv("DUCKFOOT_KEY_PASSWORD")
+        } else {
+            storeFile = rootProject.file("testing.jks")
+            storePassword = "duckfoot-testing"
+            keyAlias = "duckfoot"
+            keyPassword = "duckfoot-testing"
         }
     }
 
