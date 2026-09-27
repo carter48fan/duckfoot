@@ -134,6 +134,46 @@ public class DuckfootActivity extends NativeActivity {
     }
 
     /**
+     * Offer an exported photo to other apps through the system share sheet. The file is in
+     * the shared Pictures folder, so the media scanner hands back a content:// URI for it
+     * that any app may be granted, and no FileProvider is needed.
+     */
+    public void shareFile(String path) {
+        try {
+            android.media.MediaScannerConnection.scanFile(
+                    getApplicationContext(),
+                    new String[]{path},
+                    null,
+                    (scannedPath, uri) -> runOnUiThread(() -> {
+                        if (uri == null) {
+                            post("status", "Could not share: the gallery has not indexed the photo");
+                            return;
+                        }
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType(mimeFor(scannedPath));
+                        send.putExtra(Intent.EXTRA_STREAM, uri);
+                        send.setClipData(ClipData.newRawUri("", uri));
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        try {
+                            startActivity(Intent.createChooser(send, null));
+                        } catch (ActivityNotFoundException e) {
+                            post("status", "No app here can take a photo");
+                        }
+                    }));
+        } catch (Exception e) {
+            Log.e(TAG, "share failed for " + path, e);
+        }
+    }
+
+    private static String mimeFor(String path) {
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+        return "image/jpeg";
+    }
+
+    /**
      * Ask the system media scanner to index an exported photo so it appears immediately
      * in the Android Gallery and Google Photos.
      */

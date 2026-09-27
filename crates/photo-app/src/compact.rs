@@ -1509,6 +1509,7 @@ impl PhotoApp {
         }
 
         // Real-time export feedback in the sheet
+        let mut share = None;
         match &self.export {
             Export::Writing { path, started, .. } => {
                 ui.horizontal(|ui| {
@@ -1527,6 +1528,13 @@ impl PhotoApp {
             }
             Export::Done { path, seconds } => {
                 ui.horizontal(|ui| {
+                    if self.platform.can_share()
+                        && widgets::chip(ui, true, "share")
+                            .on_hover_text("Send it to another app")
+                            .clicked()
+                    {
+                        share = Some(path.clone());
+                    }
                     widgets::dot(ui, theme::LIME);
                     ui.label(
                         RichText::new(format!("exported {} in {seconds:.1}s", file_name(path)))
@@ -1548,6 +1556,9 @@ impl PhotoApp {
                 });
             }
             Export::Idle => {}
+        }
+        if let Some(path) = share {
+            self.request(ui.ctx(), crate::platform::Request::Share { path });
         }
 
         let n = self.selection.count();
@@ -1592,7 +1603,7 @@ impl PhotoApp {
                     widgets::dot(ui, colour);
                     if let Some(a) = action {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::chip(ui, true, "undo").clicked() {
+                            if widgets::chip(ui, true, a.label()).clicked() {
                                 run = Some(a);
                             }
                             ui.add(

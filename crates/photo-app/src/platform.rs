@@ -27,6 +27,9 @@ pub enum Request {
     ImportPreset { from: Option<PathBuf> },
     /// Where to write a preset for another machine. `name` is a suggestion.
     ExportPreset { name: String },
+    /// Hand an exported photo to another app (the Android share sheet). Only asked for
+    /// when [`Platform::can_share`] says it can be.
+    Share { path: PathBuf },
 }
 
 /// The user's answer to a [`Request`]. A cancelled picker produces nothing.
@@ -75,6 +78,11 @@ pub trait Platform: Send {
     /// Called when an image has been successfully written to disk. Used on mobile
     /// platforms to request system indexing into the media library/gallery.
     fn export_completed(&mut self, _path: &std::path::Path) {}
+
+    /// Whether [`Request::Share`] does anything here.
+    fn can_share(&self) -> bool {
+        false
+    }
 }
 
 /// Answers nothing. For shells with no pickers, and for tests.
@@ -141,6 +149,8 @@ impl Platform for DesktopPlatform {
                 .set_file_name(name)
                 .save_file()
                 .map(Response::ExportPreset),
+            // A desktop has no share sheet; can_share says so, so this is not asked.
+            Request::Share { .. } => None,
         };
         self.answered.extend(answer);
     }

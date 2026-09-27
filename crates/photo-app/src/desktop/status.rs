@@ -90,7 +90,7 @@ impl PhotoApp {
                                 widgets::dot(ui, theme::ACCENT);
                                 let msg = msg.to_string();
                                 if let Some(action) = undo {
-                                    if widgets::chip(ui, true, "undo").clicked() {
+                                    if widgets::chip(ui, true, action.label()).clicked() {
                                         notice_action = Some(action);
                                     }
                                 }
