@@ -1747,3 +1747,36 @@ fn a_healed_spot_takes_the_ground_around_it_and_clone_copies_its_source() {
         centre(&cloned)
     );
 }
+
+#[test]
+fn a_keystone_takes_each_pixel_from_where_the_cpu_says() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (256u32, 128u32);
+    let mut stack = PhotoStack::default();
+    stack.geometry.perspective_v = 70.0;
+    stack.geometry.perspective_h = -30.0;
+    let target = (230.0, 20.0);
+    let (sx, sy) = photo_engine::sensor_point(&stack, None, (w, h), target);
+    assert!(
+        (sx - target.0).abs() + (sy - target.1).abs() > 8.0,
+        "({sx}, {sy})"
+    );
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let near = (x as f32 + 0.5 - sx).abs() < 3.0 && (y as f32 + 0.5 - sy).abs() < 3.0;
+        [if near { 0.8 } else { 0.02 }; 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let at = ((target.1 as u32 * out.width + target.0 as u32) * 4) as usize;
+    assert!(
+        out.rgba[at] > 200,
+        "the spot is not there: {}",
+        out.rgba[at]
+    );
+    // And the keystone never shows what is off the photo: every corner is photographed.
+    for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+        let i = ((y * out.width + x) * 4) as usize;
+        assert!(out.rgba[i] > 0, "empty corner at ({x}, {y})");
+    }
+}

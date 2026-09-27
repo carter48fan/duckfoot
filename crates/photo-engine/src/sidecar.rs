@@ -253,6 +253,8 @@ mod tests {
                     width: 0.7,
                     height: 0.8,
                 },
+                perspective_v: 12.0,
+                perspective_h: 0.0,
             },
             white_balance: Module::new(
                 true,
