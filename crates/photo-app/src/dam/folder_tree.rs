@@ -64,6 +64,39 @@ impl FolderTree {
         subfolders
     }
 
+    /// `dir` and the folders inside it, `depth` levels down, skipping hidden and system
+    /// folders (WP5.8): each folder that holds photos, with them, the top one first.
+    pub fn scan_tree(dir: &Path, depth: u32) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        let mut out = Vec::new();
+        let mut queue = vec![(dir.to_path_buf(), 0u32)];
+        // A tree of thousands of folders is not a roll of photos: stop well before.
+        while let Some((d, level)) = queue.pop() {
+            if out.len() >= 256 {
+                break;
+            }
+            let images = Self::scan_supported_images(&d);
+            if level < depth {
+                let mut subs = Self::list_subfolders(&d);
+                subs.retain(|s| {
+                    let name = s.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    !matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "system volume information"
+                            | "$recycle.bin"
+                            | "lost+found"
+                            | "node_modules"
+                    ) && !name.ends_with(".app")
+                });
+                // Popped from the end: pushed reversed so they come in order.
+                queue.extend(subs.into_iter().rev().map(|s| (s, level + 1)));
+            }
+            if !images.is_empty() {
+                out.push((d, images));
+            }
+        }
+        out
+    }
+
     /// Scan directory for all supported photo files (RAW + Raster), and the virtual
     /// copies their sidecars record, each copy after its photo.
     pub fn scan_supported_images(dir: &Path) -> Vec<PathBuf> {

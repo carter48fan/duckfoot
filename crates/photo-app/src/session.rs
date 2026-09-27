@@ -114,6 +114,12 @@ impl PhotoApp {
         let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) else {
             return;
         };
+        // Marked before its sidecar was read: read it now, so the marks it already has
+        // are not written over with nothing.
+        if item.pending {
+            item.take(ShelfFacts::read(p));
+            self.shelf_pending.remove(p);
+        }
         change(&mut item.metadata);
         let metadata = item.metadata.clone();
         match photo_engine::update_sidecar(p, |data| data.metadata = metadata.clone()) {
@@ -169,16 +175,86 @@ impl PhotoApp {
         self.set_status(format!("Set {flag_str} on {count} photo(s)"));
     }
 
-    pub fn open_session_folder(&mut self, gpu: &Gpu, folder: PathBuf) {
-        let images = dam::FolderTree::scan_supported_images(&folder);
-        if !images.is_empty() {
-            self.folder_watch.watch(folder.clone(), &images);
-            self.folder_tree.current_folder = Some(folder);
-            self.add_to_shelf(gpu, images);
-            self.folder_browser_open = false;
-        } else {
-            self.set_status("No supported images found in folder");
+    /// Shelve a folder's photos, and its folders' four deep (WP5.8), read on the
+    /// loader's thread; the folders that held photos are watched.
+    pub fn open_session_folder(&mut self, _gpu: &Gpu, folder: PathBuf) {
+        self.scans_pending += 1;
+        self.set_status(format!("Reading {}…", file_name(&folder)));
+        self.loader.file_job(loader::FileJob::Scan {
+            folder,
+            purpose: loader::ScanFor::Open,
+            depth: 4,
+        });
+    }
+
+    /// `dir`'s folders for the browser: the last listing, asked for again off this thread
+    /// when it is for another folder or a few seconds old (WP5.3).
+    pub(crate) fn cached_subfolders(&mut self, dir: &std::path::Path) -> Vec<PathBuf> {
+        let fresh = |t: &Instant| t.elapsed() < Duration::from_secs(3);
+        match &mut self.subfolders {
+            Some((d, subs, asked)) if d == dir => {
+                if !fresh(asked) {
+                    *asked = Instant::now();
+                    self.loader
+                        .file_job(loader::FileJob::Subfolders(dir.to_path_buf()));
+                }
+                subs.clone()
+            }
+            _ => {
+                self.subfolders = Some((dir.to_path_buf(), Vec::new(), Instant::now()));
+                self.loader
+                    .file_job(loader::FileJob::Subfolders(dir.to_path_buf()));
+                Vec::new()
+            }
         }
+    }
+
+    /// A folder read has come back.
+    fn take_scan_result(
+        &mut self,
+        gpu: &Gpu,
+        folder: PathBuf,
+        purpose: loader::ScanFor,
+        found: Vec<(PathBuf, Vec<PathBuf>)>,
+    ) {
+        self.scans_pending = self.scans_pending.saturating_sub(1);
+        if purpose == loader::ScanFor::Watch {
+            let listing = found
+                .iter()
+                .find(|(d, _)| *d == folder)
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default();
+            if folder.is_dir() {
+                self.folder_watch.watch(folder, &listing);
+            }
+            return;
+        }
+        let images: Vec<PathBuf> = found.iter().flat_map(|(_, l)| l.iter().cloned()).collect();
+        let Some(first) = images.first().cloned() else {
+            self.set_status(format!(
+                "No photos in {} or its folders",
+                file_name(&folder)
+            ));
+            return;
+        };
+        let (count, folders) = (images.len(), found.len());
+        if purpose == loader::ScanFor::Open {
+            for (dir, listing) in &found {
+                self.folder_watch.watch(dir.clone(), listing);
+            }
+            self.folder_tree.current_folder = Some(folder);
+            self.folder_browser_open = false;
+        }
+        let open_first = purpose == loader::ScanFor::Drop || self.loaded_path.is_none();
+        self.add_to_shelf(gpu, images);
+        if open_first {
+            self.open_path(gpu, first);
+        }
+        self.set_status(if folders > 1 {
+            format!("Added {count} photos from {folders} folders")
+        } else {
+            format!("Added {count} photos")
+        });
     }
 
     pub fn revert_to_sidecar(&mut self) {
@@ -373,8 +449,11 @@ impl PhotoApp {
                 if open_first && to_open.is_none() {
                     to_open = Some(path.clone());
                 }
-                // Its thumbnail is asked for when its tile is first in view (WP5.2).
-                self.shelf.push(ShelfItem::new(path));
+                // Its thumbnail is asked for when its tile is first in view (WP5.2), its
+                // sidecar and size read off this thread (WP5.3).
+                self.shelf_pending.insert(path.clone());
+                self.loader.file_job(loader::FileJob::Shelf(path.clone()));
+                self.shelf.push(ShelfItem::waiting(path));
             }
         }
         if let Some(first) = to_open {
@@ -648,6 +727,10 @@ impl PhotoApp {
             };
 
         if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+            if item.pending {
+                item.take(ShelfFacts::read(path));
+                self.shelf_pending.remove(path);
+            }
             item.metadata = metadata;
             item.is_edited = false;
         } else {
@@ -784,6 +867,25 @@ impl PhotoApp {
                             ctx.load_texture("stage preview", image, egui::TextureOptions::LINEAR);
                         self.stage_preview = Some((path, texture));
                     }
+                }
+                loader::Done::Shelf(facts) => {
+                    if self.shelf_pending.remove(&facts.path) {
+                        if let Some(item) = self
+                            .shelf
+                            .iter_mut()
+                            .find(|it| it.path == facts.path && it.pending)
+                        {
+                            item.take(facts);
+                        }
+                    }
+                }
+                loader::Done::Scanned {
+                    folder,
+                    purpose,
+                    found,
+                } => self.take_scan_result(gpu, folder, purpose, found),
+                loader::Done::Subfolders { dir, subs } => {
+                    self.subfolders = Some((dir, subs, Instant::now()));
                 }
                 loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_pending.remove(&path);
@@ -961,15 +1063,25 @@ impl PhotoApp {
             return;
         }
         let mut photos = Vec::new();
+        let mut folders = 0;
         for path in std::mem::take(&mut self.pending_drops) {
             if path.is_dir() {
-                photos.extend(dam::FolderTree::scan_supported_images(&path));
+                // Read on the loader's thread, four folders deep.
+                folders += 1;
+                self.scans_pending += 1;
+                self.loader.file_job(loader::FileJob::Scan {
+                    folder: path,
+                    purpose: loader::ScanFor::Drop,
+                    depth: 4,
+                });
             } else if photo_engine::is_supported_path(&path) {
                 photos.push(path);
             }
         }
         let Some(first) = photos.first().cloned() else {
-            self.set_status("Nothing dropped that Duckfoot can open");
+            if folders == 0 {
+                self.set_status("Nothing dropped that Duckfoot can open");
+            }
             return;
         };
         let count = photos.len();

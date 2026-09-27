@@ -225,6 +225,7 @@ impl PhotoApp {
         );
 
         if let Some(cur) = &self.folder_tree.current_folder.clone() {
+            let subs = self.cached_subfolders(cur);
             ui.add_space(8.0);
             let folder_name = cur.file_name().and_then(|n| n.to_str()).unwrap_or("Folder");
             let title = format!("Folder: {folder_name}");
@@ -258,7 +259,6 @@ impl PhotoApp {
 
                     ui.add_space(6.0);
                     ui.label(theme::dim("Subfolders:"));
-                    let subs = dam::FolderTree::list_subfolders(cur);
                     if subs.is_empty() {
                         ui.label(theme::dim("No subdirectories").size(11.0));
                     } else {
