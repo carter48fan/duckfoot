@@ -54,9 +54,9 @@ pub use preview::{
     decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
 };
 pub use sidecar::{
-    find_sidecar, load_sidecar, load_sidecar_full, save_sidecar, save_sidecar_full, sidecar_path,
-    update_sidecar, write_sidecar, AssetMetadata, Flag, SidecarData, Snapshot, SIDECAR_EXT,
-    SIDECAR_VERSION,
+    find_sidecar, load_sidecar, load_sidecar_full, recent_history, save_sidecar, save_sidecar_full,
+    save_sidecar_with_history, sidecar_path, update_sidecar, write_sidecar, AssetMetadata, Flag,
+    SidecarData, Snapshot, SIDECAR_EXT, SIDECAR_VERSION,
 };
 pub use temperature::WhiteScale;
 

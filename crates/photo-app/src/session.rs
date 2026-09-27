@@ -74,7 +74,8 @@ impl PhotoApp {
             .map(|it| it.metadata.clone())
             .unwrap_or_default();
         let stack = self.committed_stack();
-        match photo_engine::save_sidecar_full(&path, Some(&stack), &metadata) {
+        match photo_engine::save_sidecar_with_history(&path, &stack, &metadata, &self.history.past)
+        {
             Ok(_) => {
                 if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                     item.has_sidecar = true;
@@ -466,35 +467,46 @@ impl PhotoApp {
         self.pending_spot = None;
         self.sidecar_locked = false;
         self.decode_failed = false;
-        let (saved, metadata, snapshots) = match photo_engine::load_sidecar_full(path) {
-            Ok(Some(data)) => {
-                if data.is_from_newer_version() {
+        let (saved, metadata, snapshots, saved_history) =
+            match photo_engine::load_sidecar_full(path) {
+                Ok(Some(data)) => {
+                    if data.is_from_newer_version() {
+                        self.sidecar_locked = true;
+                        self.error = Some(format!(
+                            "{}: its sidecar is from a newer Duckfoot. Shown as saved; edits \
+                         here will not be written over it.",
+                            file_name(path)
+                        ));
+                    }
+                    let snapshots = data
+                        .snapshots
+                        .into_iter()
+                        .map(|s| (s.name, s.stack))
+                        .collect();
+                    (data.stack, data.metadata, snapshots, data.history)
+                }
+                Ok(None) => (
+                    None,
+                    photo_engine::AssetMetadata::default(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                Err(e) => {
+                    // Holding edits this build cannot read is not the same as holding none:
+                    // show it, and never write over it.
                     self.sidecar_locked = true;
                     self.error = Some(format!(
-                        "{}: its sidecar is from a newer Duckfoot. Shown as saved; edits \
-                         here will not be written over it.",
+                        "{}: {e:#}. Its edits were not loaded, and the file is left untouched.",
                         file_name(path)
                     ));
+                    (
+                        None,
+                        photo_engine::AssetMetadata::default(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
                 }
-                let snapshots = data
-                    .snapshots
-                    .into_iter()
-                    .map(|s| (s.name, s.stack))
-                    .collect();
-                (data.stack, data.metadata, snapshots)
-            }
-            Ok(None) => (None, photo_engine::AssetMetadata::default(), Vec::new()),
-            Err(e) => {
-                // Holding edits this build cannot read is not the same as holding none:
-                // show it, and never write over it.
-                self.sidecar_locked = true;
-                self.error = Some(format!(
-                    "{}: {e:#}. Its edits were not loaded, and the file is left untouched.",
-                    file_name(path)
-                ));
-                (None, photo_engine::AssetMetadata::default(), Vec::new())
-            }
-        };
+            };
 
         if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
             item.metadata = metadata;
@@ -525,7 +537,12 @@ impl PhotoApp {
             .iter()
             .position(|(p, _)| p == path)
             .map(|i| self.parked_histories.remove(i).1)
-            .unwrap_or_else(History::new);
+            // Else what the sidecar kept, so undo reaches back past a relaunch.
+            .unwrap_or_else(|| History {
+                truncated: saved_history.len() >= photo_engine::sidecar::HISTORY_STEPS,
+                past: saved_history,
+                future: Vec::new(),
+            });
         let left = std::mem::replace(&mut self.history, history);
         if let Some(previous) = self.loaded_path.take() {
             self.previous_photo = Some(previous.clone());

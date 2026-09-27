@@ -2265,3 +2265,31 @@ fn straightening_keeps_the_crop_on_the_photo_unless_told_not_to() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn undo_reaches_back_past_a_restart() {
+    let dir = scratch_dir("persistent-undo");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 320, 214);
+    let h = Headless::new();
+    {
+        let mut app = PhotoApp::new(&h.gpu());
+        h.frame(&mut app, Default::default());
+        app.open_path(&h.gpu(), raw.clone());
+        h.settle(&mut app, Duration::from_secs(30));
+        app.edit(|s| s.exposure.params.ev = 0.5);
+        app.edit(|s| s.exposure.params.ev = 1.0);
+        app.shutdown();
+    }
+    let mut app = PhotoApp::new(&h.gpu());
+    h.frame(&mut app, Default::default());
+    app.open_path(&h.gpu(), raw.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.stack().exposure.params.ev, 1.0);
+    assert!(app.undo(), "the saved history came back");
+    assert_eq!(app.stack().exposure.params.ev, 0.5);
+    assert!(app.undo());
+    assert_eq!(app.stack().exposure.params.ev, 0.0);
+    assert!(!app.undo(), "and no further than the first edit");
+    let _ = std::fs::remove_dir_all(&dir);
+}

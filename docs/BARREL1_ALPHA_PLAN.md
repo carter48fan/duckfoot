@@ -941,7 +941,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 | **W-08** | RCD demosaic; highlight *detail* recovery | RCD replaces Hamilton-Adams (a drop-in point). Clipped channels are reconstructed from the unclipped ones by ratio propagation over mips. | 5 d |
 | **W-07** ✅ | Perspective / keystone (done: vertical and horizontal sliders as an inverse homography before straighten, zoomed to keep every corner on the photo; the CPU mirrors follow it; line-detection auto still to do) | Vertical and horizontal sliders (an inverse homography in the geometry map). Later: auto from line detection. | 3 d |
 | **W-05** | Virtual copies | Sidecar `versions: Vec<{name, stack}>`, with stacked tiles in the shelf. | 3 d |
-| **W-06** | Persistent undo | The last 50 history entries are serialised into the sidecar (after WP2.4). | 1.5 d |
+| **W-06** ✅ | Persistent undo (done: the sidecar keeps the newest 50 undo steps, capped at 256 KB so brush-heavy stacks can't bloat it; a photo opened with no history in memory gets its history back, so undo reaches past a relaunch. Redo stays per-session) | The last 50 history entries are serialised into the sidecar (after WP2.4). | 1.5 d |
 | **W-10** | Soft proofing; print sharpening | Proof against an output ICC with qcms (a preview-only uniform, like the split). Output sharpening is already in F-02. | 3 d |
 | **W-11** | Colour labels, keywords, collections-lite, file watching | UI for the existing `color_label` field (an L-16 dead field comes alive); keywords in the sidecar and searchable; saved filters as "collections"; `notify`-based rescan. | 4 d |
 | **W-12** | Android share sheet | After export, `ACTION_SEND` via a `FileProvider` URI. | 1 d |

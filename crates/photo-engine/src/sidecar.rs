@@ -63,6 +63,10 @@ pub struct SidecarData {
     pub metadata: AssetMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snapshots: Vec<Snapshot>,
+    /// The undo steps behind `stack`, oldest first, so undo reaches back past a relaunch
+    /// (W-06). A recent few, not all: see `HISTORY_BUDGET`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<PhotoStack>,
     /// Fields this build does not know, kept so a save does not drop them.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -75,6 +79,7 @@ impl Default for SidecarData {
             stack: None,
             metadata: AssetMetadata::default(),
             snapshots: Vec::new(),
+            history: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }
@@ -156,6 +161,9 @@ fn parse_sidecar(content: &str) -> Result<SidecarData> {
     for snapshot in &mut data.snapshots {
         snapshot.stack = snapshot.stack.sanitised();
     }
+    for stack in &mut data.history {
+        *stack = stack.sanitised();
+    }
     data.metadata.rating = data.metadata.rating.min(5);
     Ok(data)
 }
@@ -222,6 +230,43 @@ pub fn save_sidecar_full(
     })
 }
 
+/// The most undo steps a sidecar keeps.
+pub const HISTORY_STEPS: usize = 50;
+/// And the most bytes they take: brush strokes make a stack large, and a sidecar is read on
+/// every open.
+pub const HISTORY_BUDGET: usize = 256 * 1024;
+
+/// The newest of `past` (oldest first) that fit [`HISTORY_STEPS`] and [`HISTORY_BUDGET`],
+/// still oldest first.
+pub fn recent_history(past: &[PhotoStack]) -> Vec<PhotoStack> {
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for stack in past.iter().rev().take(HISTORY_STEPS) {
+        bytes += serde_json::to_string(stack).map_or(usize::MAX, |s| s.len());
+        if bytes > HISTORY_BUDGET {
+            break;
+        }
+        kept.push(stack.clone());
+    }
+    kept.reverse();
+    kept
+}
+
+/// [`save_sidecar_full`], with the undo steps behind the stack.
+pub fn save_sidecar_with_history(
+    raw_path: &Path,
+    stack: &PhotoStack,
+    metadata: &AssetMetadata,
+    past: &[PhotoStack],
+) -> Result<PathBuf> {
+    let history = recent_history(past);
+    update_sidecar(raw_path, |data| {
+        data.stack = Some(stack.clone());
+        data.metadata = metadata.clone();
+        data.history = history;
+    })
+}
+
 /// Save a stack, keeping the metadata already in the sidecar.
 pub fn save_sidecar(raw_path: &Path, stack: &PhotoStack) -> Result<PathBuf> {
     update_sidecar(raw_path, |data| data.stack = Some(stack.clone()))
@@ -238,6 +283,40 @@ mod tests {
     use super::*;
     use crate::curve::CurveNode;
     use crate::params::{Crop, Geometry, Module, WhiteBalance};
+
+    #[test]
+    fn history_keeps_the_newest_steps_within_budget() {
+        let past: Vec<PhotoStack> = (0..80)
+            .map(|i| {
+                let mut s = PhotoStack::default();
+                s.exposure.params.ev = i as f32 / 100.0;
+                s
+            })
+            .collect();
+        let kept = recent_history(&past);
+        assert_eq!(kept.len(), HISTORY_STEPS);
+        assert_eq!(kept.first(), past.get(80 - HISTORY_STEPS));
+        assert_eq!(kept.last(), past.last());
+        // One step bigger than the budget keeps nothing rather than a gap.
+        let json = serde_json::to_string(&past[0]).unwrap().len();
+        let many = vec![past[0].clone(); HISTORY_BUDGET / json + 5];
+        assert!(recent_history(&many).len() <= HISTORY_BUDGET / json);
+    }
+
+    #[test]
+    fn history_round_trips_through_a_sidecar() {
+        let dir = std::env::temp_dir().join(format!("df-history-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("a.dng");
+        let mut before = PhotoStack::default();
+        before.exposure.params.ev = 0.25;
+        let now = PhotoStack::default();
+        save_sidecar_with_history(&raw, &now, &AssetMetadata::default(), &[before.clone()])
+            .unwrap();
+        let data = load_sidecar_full(&raw).unwrap().unwrap();
+        assert_eq!(data.history, vec![before.sanitised()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sidecar_roundtrips_through_json() {
