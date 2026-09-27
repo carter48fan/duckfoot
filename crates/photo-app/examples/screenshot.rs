@@ -176,6 +176,32 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Local;
         }
     }
+    // DUCKFOOT_SHOT_BRUSH=1: a painted brush mask, chosen, washed red.
+    if std::env::var_os("DUCKFOOT_SHOT_BRUSH").is_some() {
+        app.edit(|s| {
+            s.local.enabled = true;
+            let dabs = (0..40)
+                .map(|i| {
+                    let t = i as f32 / 39.0;
+                    photo_engine::local::Dab {
+                        at: [0.2 + 0.5 * t, 0.6 - 0.25 * (t * 3.1).sin()],
+                        radius: 0.05,
+                        hardness: 0.4,
+                        erase: false,
+                    }
+                })
+                .collect();
+            let mut m = photo_engine::local::Mask::brush();
+            m.shape = photo_engine::local::Shape::Brush { dabs };
+            m.adjust.exposure = -0.8;
+            s.local.params.masks.push(m);
+        });
+        app.selected_mask = Some(0);
+        app.mask_overlay = true;
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Local;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

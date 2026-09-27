@@ -1619,3 +1619,81 @@ fn the_mask_overlay_shows_on_the_preview_and_never_in_an_export() {
         &shown[i..i + 3]
     );
 }
+
+#[test]
+fn a_brushed_mask_applies_where_it_was_painted_and_erasing_takes_it_back() {
+    use photo_engine::local::{Dab, Mask, Shape};
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 128u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(w, h, 0.1))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    let plain = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let stroke: Vec<Dab> = (0..8)
+        .map(|i| Dab {
+            at: [0.15 + i as f32 * 0.02, 0.5],
+            radius: 0.06,
+            hardness: 0.6,
+            erase: false,
+        })
+        .collect();
+    let mut mask = Mask::brush();
+    mask.shape = Shape::Brush {
+        dabs: stroke.clone(),
+    };
+    mask.adjust.exposure = 1.0;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    let painted = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let (on, off) = ((48, 64), (160, 64));
+    let ratio = grey_at(&painted, on.0, on.1)[1] / grey_at(&plain, on.0, on.1)[1];
+    assert!((ratio - 2.0).abs() < 0.12, "painted: {ratio}");
+    assert_eq!(
+        grey_at(&painted, off.0, off.1),
+        grey_at(&plain, off.0, off.1)
+    );
+
+    // A stroke that grows adds to what is there; an eraser dab takes it away.
+    let Shape::Brush { dabs } = &mut stack.local.params.masks[0].shape else {
+        unreachable!()
+    };
+    dabs.push(Dab {
+        at: [0.25, 0.5],
+        radius: 0.05,
+        hardness: 0.8,
+        erase: true,
+    });
+    let erased = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert_eq!(grey_at(&erased, on.0, on.1), grey_at(&plain, on.0, on.1));
+    assert!(grey_at(&erased, 34, 64)[1] > grey_at(&plain, 34, 64)[1] * 1.6);
+}
+
+#[test]
+fn the_scopes_do_not_measure_the_mask_wash() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(96, 64, 0.2))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    stack.local.enabled = true;
+    stack.local.params.masks.push(Mask::radial([0.5, 0.5], 0.4));
+    let settle = |engine: &mut Engine, stack: &PhotoStack| {
+        engine.render(&gpu.device, &gpu.queue, stack, None);
+        for _ in 0..50 {
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+            engine.poll_histogram(&gpu.device, &gpu.queue);
+            if !engine.histogram_busy() {
+                break;
+            }
+        }
+        engine.histogram().clone()
+    };
+    let before = settle(&mut engine, &stack);
+    engine.set_mask_overlay(Some(0));
+    let washed = settle(&mut engine, &stack);
+    assert_eq!(before, washed, "the red wash reached the scopes");
+}

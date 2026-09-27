@@ -214,3 +214,65 @@ impl PhotoApp {
         [x / sensor.0 as f32, y / sensor.1 as f32]
     }
 }
+
+impl PhotoApp {
+    /// Lay brush dabs on mask `i` from `from` to `to` (sensor, 0..1), a quarter of a radius
+    /// apart, and say where the last one went. `first` lays one at `from` too.
+    pub(crate) fn paint(
+        &mut self,
+        i: usize,
+        from: [f32; 2],
+        to: [f32; 2],
+        first: bool,
+        erase: bool,
+    ) -> [f32; 2] {
+        use photo_engine::local::{Dab, Shape, MAX_DABS};
+        let Some((w, h)) = self
+            .ready_image()
+            .map(|im| (im.sensor_width as f32, im.sensor_height as f32))
+        else {
+            return from;
+        };
+        let long = w.max(h);
+        let radius = (self.brush.size / 100.0).clamp(0.002, 0.5);
+        let hardness = (1.0 - self.brush.feather / 100.0).clamp(0.0, 0.99);
+        let Some(Shape::Brush { dabs }) = self
+            .stack
+            .local
+            .params
+            .masks
+            .get_mut(i)
+            .map(|m| &mut m.shape)
+        else {
+            return from;
+        };
+        let dab = |at: [f32; 2]| Dab {
+            at,
+            radius,
+            hardness,
+            erase,
+        };
+        if first && dabs.len() < MAX_DABS {
+            dabs.push(dab(from));
+            self.needs_render = true;
+        }
+        let d = [(to[0] - from[0]) * w / long, (to[1] - from[1]) * h / long];
+        let dist = d[0].hypot(d[1]);
+        let spacing = radius * 0.25;
+        let steps = (dist / spacing).floor() as usize;
+        let mut last = from;
+        for k in 1..=steps {
+            if dabs.len() >= MAX_DABS {
+                break;
+            }
+            let t = k as f32 * spacing / dist;
+            last = [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ];
+            dabs.push(dab(last));
+            self.needs_render = true;
+        }
+        last
+    }
+}

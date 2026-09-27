@@ -1750,9 +1750,54 @@ fn a_chosen_mask_is_dragged_on_the_stage_in_one_undo_step() {
     // Esc puts the handles away; a drag then pans or does nothing, never moves it.
     h.frame(&mut app, key(egui::Key::Escape));
     assert_eq!(app.selected_mask, None);
-    let before = app.stack().local.params.masks[0];
+    let before = app.stack().local.params.masks[0].clone();
     drag(&h, &mut app, centre, centre + egui::vec2(60.0, 0.0));
     assert_eq!(app.stack().local.params.masks[0], before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_brush_mask_is_painted_by_dragging_and_erased_the_same_way() {
+    use photo_engine::local::{Mask, Shape};
+    let dir = scratch_dir("brush");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.edit(|s| {
+        s.local.enabled = true;
+        s.local.params.masks.push(Mask::brush());
+    });
+    app.selected_mask = Some(0);
+    h.frame(&mut app, Default::default());
+    let frame = app.stage_frame().expect("the stage is drawn");
+    let dabs = |app: &PhotoApp| match &app.stack().local.params.masks[0].shape {
+        Shape::Brush { dabs } => dabs.clone(),
+        _ => panic!("not a brush"),
+    };
+    let depth = app.history_len();
+    let (a, b) = (
+        frame.center() - egui::vec2(80.0, 0.0),
+        frame.center() + egui::vec2(80.0, 0.0),
+    );
+    drag(&h, &mut app, a, b);
+    let painted = dabs(&app);
+    assert!(painted.len() > 5, "{} dabs", painted.len());
+    assert!(painted.iter().all(|d| !d.erase));
+    assert_eq!(app.history_len(), depth + 1, "a stroke is one undo step");
+    // Along the drag, left to right.
+    assert!(painted.first().unwrap().at[0] < painted.last().unwrap().at[0]);
+
+    app.brush.erase = true;
+    drag(&h, &mut app, a, b);
+    let after = dabs(&app);
+    assert!(after.len() > painted.len());
+    assert!(after[painted.len()..].iter().all(|d| d.erase));
+    assert!(app.undo());
+    assert_eq!(dabs(&app), painted);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2002,6 +2047,10 @@ fn no_controls_overlap_on_any_screen() {
             .params
             .masks
             .push(photo_engine::local::Mask::linear([0.5, 0.0], [0.5, 0.4]));
+        s.local
+            .params
+            .masks
+            .push(photo_engine::local::Mask::brush());
     });
     app.selected_mask = Some(0);
     let layout = app.inspector_sections.clone();
@@ -2015,6 +2064,10 @@ fn no_controls_overlap_on_any_screen() {
     app.compact_module = photo_app::InspectorSectionId::Local;
     for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
         check(&mut app, "phone, a mask chosen", size);
+    }
+    app.selected_mask = Some(2);
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "phone, a brush chosen", size);
     }
     app.compact_tab = None;
     app.inspector_sections = layout;

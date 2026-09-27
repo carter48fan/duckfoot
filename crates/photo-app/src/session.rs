@@ -460,6 +460,7 @@ impl PhotoApp {
         // A mask belongs to the photo it was drawn on.
         self.selected_mask = None;
         self.mask_drag = None;
+        self.painting = None;
         self.sidecar_locked = false;
         self.decode_failed = false;
         let (saved, metadata, snapshots) = match photo_engine::load_sidecar_full(path) {

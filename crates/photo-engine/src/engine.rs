@@ -160,10 +160,115 @@ pub struct LoadedImage {
     /// The clipping overlay's texture and the bind group that reads the preview into it,
     /// while the overlay is on. Preview-sized; replaced with the preview.
     overlay: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
+    /// Brush masks' coverage, which every adjust bind group reads.
+    brushes: Brushes,
     /// The denoised copy the preview reads while Denoise is on, and the adjust bind group
     /// that reads it. Made from the preview's level down, so it costs 1/4^level of a
     /// full-resolution copy.
     denoised: Option<(Denoised, wgpu::BindGroup)>,
+}
+
+/// Brush masks' coverage, one texture layer each, rasterised from their dabs (see
+/// `local::rasterise`). Kept with the bytes and the dabs each layer holds, so a stroke in
+/// progress only lays its new dabs and uploads what they touched.
+struct Brushes {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    layers: Vec<(Vec<crate::local::Dab>, Vec<u8>)>,
+}
+
+impl Brushes {
+    fn new(device: &wgpu::Device, sensor: (u32, u32)) -> Self {
+        let size = crate::local::brush_size(sensor);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("brush masks"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: crate::local::MAX_MASKS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let blank = vec![0u8; (size.0 * size.1) as usize];
+        Self {
+            texture,
+            view,
+            size,
+            layers: (0..crate::local::MAX_MASKS)
+                .map(|_| (Vec::new(), blank.clone()))
+                .collect(),
+        }
+    }
+
+    /// Make each layer hold its brush mask's dabs: new dabs laid on top when a stroke has
+    /// only grown, the layer redrawn otherwise; only what changed is uploaded.
+    fn sync(&mut self, queue: &wgpu::Queue, wanted: &[&[crate::local::Dab]]) {
+        let (w, h) = self.size;
+        for (l, (have, buf)) in self.layers.iter_mut().enumerate() {
+            let want: &[crate::local::Dab] = wanted.get(l).copied().unwrap_or(&[]);
+            if want == have.as_slice() {
+                continue;
+            }
+            let dirty = if want.starts_with(have) {
+                crate::local::rasterise(buf, self.size, &want[have.len()..])
+            } else {
+                buf.fill(0);
+                crate::local::rasterise(buf, self.size, want);
+                Some((0, 0, w, h))
+            };
+            *have = want.to_vec();
+            if let Some((x, y, rw, rh)) = dirty {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: l as u32 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    buf,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: (y * w + x) as u64,
+                        bytes_per_row: Some(w),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: rw,
+                        height: rh,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// The dabs of each brush mask that is on, in the order the shader numbers them.
+fn brush_layers(stack: &PhotoStack) -> Vec<&[crate::local::Dab]> {
+    if !stack.local.enabled {
+        return Vec::new();
+    }
+    stack
+        .local
+        .params
+        .masks
+        .iter()
+        .filter(|m| m.on)
+        .take(crate::local::MAX_MASKS)
+        .filter_map(|m| match &m.shape {
+            crate::local::Shape::Brush { dabs } => Some(dabs.as_slice()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A denoised copy of the sensor from level `base` down (see `shaders/denoise.wgsl`): its
@@ -676,6 +781,17 @@ impl Engine {
                     },
                     count: None,
                 },
+                // Brush masks, a layer each.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let denoise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -996,6 +1112,7 @@ impl Engine {
         device: &wgpu::Device,
         sensor_view: &wgpu::TextureView,
         original_view: &wgpu::TextureView,
+        brushes: &wgpu::TextureView,
         uniforms: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1021,6 +1138,10 @@ impl Engine {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(original_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(brushes),
                 },
             ],
         })
@@ -1139,8 +1260,13 @@ impl Engine {
         match self.make_denoised(device, queue, &params, base, reuse) {
             Ok(d) => {
                 let Some(image) = &self.image else { return };
-                let bind =
-                    self.adjust_bind(device, &d.view, &image.sensor_view, &self.adjust_buffer);
+                let bind = self.adjust_bind(
+                    device,
+                    &d.view,
+                    &image.sensor_view,
+                    &image.brushes.view,
+                    &self.adjust_buffer,
+                );
                 if let Some(image) = &mut self.image {
                     image.denoised = Some((d, bind));
                 }
@@ -1401,7 +1527,14 @@ impl Engine {
         let output_texture = output_texture(device, preview_w, preview_h);
         let output_view = output_texture.create_view(&Default::default());
 
-        let adjust_bind = self.adjust_bind(device, &sensor_view, &sensor_view, &self.adjust_buffer);
+        let brushes = Brushes::new(device, (width, height));
+        let adjust_bind = self.adjust_bind(
+            device,
+            &sensor_view,
+            &sensor_view,
+            &brushes.view,
+            &self.adjust_buffer,
+        );
         scopes.pop("loading the image onto the GPU")?;
 
         // Any histogram in flight describes the previous image.
@@ -1430,6 +1563,7 @@ impl Engine {
             output_texture,
             adjust_bind,
             overlay: None,
+            brushes,
             denoised: None,
         });
         self.sync_overlay(device);
@@ -1514,6 +1648,9 @@ impl Engine {
         stack: &PhotoStack,
         deep: bool,
     ) -> Result<(u32, u32, Vec<u8>)> {
+        if let Some(image) = &mut self.image {
+            image.brushes.sync(queue, &brush_layers(stack));
+        }
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
@@ -1547,7 +1684,13 @@ impl Engine {
         let full = scoped(device, "export render", || {
             let full = output_texture_as(device, out_w, out_h, format);
             let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
-            let bind = self.adjust_bind(device, sensor, &image.sensor_view, &self.export_buffer);
+            let bind = self.adjust_bind(
+                device,
+                sensor,
+                &image.sensor_view,
+                &image.brushes.view,
+                &self.export_buffer,
+            );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("export encoder"),
             });
@@ -1664,6 +1807,9 @@ impl Engine {
         split_x: Option<f32>,
     ) {
         self.sync_denoise(device, queue, stack);
+        if let Some(image) = &mut self.image {
+            image.brushes.sync(queue, &brush_layers(stack));
+        }
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
@@ -1715,7 +1861,12 @@ impl Engine {
         // fast drag would pile up map requests against a buffer that is already mapped;
         // the frame is owed a measurement instead, paid by `poll_histogram`.
         let measuring = self.hist_state.is_idle();
-        if measuring {
+        // While a mask is washed red on the preview, the preview is not the photo: the
+        // scopes keep their last true reading until the wash goes.
+        let washed = self.mask_overlay.is_some() && stack.local.enabled;
+        if washed {
+            self.hist_owed = None;
+        } else if measuring {
             self.hist_owed = None;
             self.encode_histogram(device, queue, &mut encoder, region, level);
         } else {
@@ -2307,10 +2458,17 @@ fn mask_uniforms(
         .iter()
         .enumerate()
         .filter(|(_, m)| m.on);
+    let mut brush = 0.0f32;
     for (i, m) in masks.take(crate::local::MAX_MASKS) {
         let slot = n as usize * 4;
-        let invert = if m.invert { 2.0 } else { 0.0 };
+        // Kind (0 gradient, 1 radial, 2 brush), plus 4 when inverted.
+        let invert = if m.invert { 4.0 } else { 0.0 };
         match m.shape {
+            Shape::Brush { .. } => {
+                out[slot] = [brush, 0.0, 0.0, 0.0];
+                out[slot + 1] = [0.0, 0.0, 0.0, 2.0 + invert];
+                brush += 1.0;
+            }
             Shape::Linear { from, to } => {
                 out[slot] = [from[0] * w, from[1] * h, to[0] * w, to[1] * h];
                 out[slot + 1] = [0.0, 0.0, 0.0, invert];
