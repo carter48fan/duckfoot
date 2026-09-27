@@ -118,6 +118,20 @@ pub(crate) fn settings_editor(
         }
     }
 
+    row_label(ui, "Colour space");
+    use photo_engine::gamut::OutputSpace;
+    if let Some(c) = chips(ui, s.color_space, OutputSpace::ALL.map(|c| (c, c.label()))) {
+        s.color_space = c;
+    }
+    if s.color_space != OutputSpace::Srgb {
+        ui.label(
+            theme::tag(
+                "for screens and print that manage colour; the web and most apps assume sRGB",
+            )
+            .color(theme::TEXT_FAINT),
+        );
+    }
+
     row_label(ui, "Size");
     let kind = SizeKind::of(s.sizing);
     if let Some(k) = chips(ui, kind, SizeKind::ALL) {
@@ -225,10 +239,11 @@ pub(crate) fn summary(s: &ExportSettings, source: Option<(u32, u32)>) -> String 
     } else {
         s.format.label().to_string()
     });
-    parts.push(match s.effective_depth() {
-        BitDepth::Eight => "8-bit sRGB".into(),
-        BitDepth::Sixteen => "16-bit sRGB".into(),
-    });
+    let bits = match s.effective_depth() {
+        BitDepth::Eight => "8-bit",
+        BitDepth::Sixteen => "16-bit",
+    };
+    parts.push(format!("{bits} {}", s.color_space.label()));
     if s.sharpen != SharpenFor::Off {
         parts.push(format!(
             "{} sharpening",

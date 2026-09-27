@@ -236,6 +236,9 @@ pub struct ExportSettings {
     /// GPS left out whatever `metadata` says: a photo posted from home says where home is.
     #[serde(default = "yes")]
     pub strip_location: bool,
+    /// The colours it is written in, and the profile it carries to say so (W-09).
+    #[serde(default)]
+    pub color_space: crate::gamut::OutputSpace,
 }
 
 impl ExportSettings {
@@ -249,6 +252,7 @@ impl ExportSettings {
             sharpen_amount: SharpenAmount::Standard,
             metadata: MetadataPolicy::All,
             strip_location: true,
+            color_space: crate::gamut::OutputSpace::Srgb,
         }
     }
 
@@ -562,7 +566,7 @@ fn encode<W: Write + Seek>(
         &exif_out::now(),
     );
     let exif = exif_out::block(&fields);
-    let icc = crate::icc::srgb_profile().to_vec();
+    let icc = settings.color_space.icc().to_vec();
     // JPEG and WebP are 8-bit formats whatever was asked.
     let eight_owned;
     let eight: Option<&[u8]> = match samples {
@@ -1006,9 +1010,12 @@ mod tests {
     #[test]
     fn every_format_carries_the_exif_and_the_colour_profile() {
         let img = noise(40, 30);
-        for format in ExportFormat::ALL {
+        for (i, format) in ExportFormat::ALL.into_iter().enumerate() {
+            // Each format in a different space, so every profile goes out in some file.
+            let space = crate::gamut::OutputSpace::ALL[i % 3];
             let settings = ExportSettings {
                 strip_location: false,
+                color_space: space,
                 ..ExportSettings::new(format)
             };
             let bytes = encoded(&img, &settings);
@@ -1054,11 +1061,7 @@ mod tests {
                     .icc_profile()
                     .unwrap()
             };
-            assert_eq!(
-                icc.as_deref(),
-                Some(crate::icc::srgb_profile()),
-                "{format:?}"
-            );
+            assert_eq!(icc.as_deref(), Some(space.icc()), "{format:?} in {space:?}");
             // And the picture still decodes as it was.
             let back = image::load_from_memory(&bytes).unwrap();
             assert_eq!((back.width(), back.height()), (40, 30), "{format:?}");

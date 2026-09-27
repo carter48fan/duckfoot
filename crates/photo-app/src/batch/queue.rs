@@ -285,7 +285,13 @@ fn process_single_job(
 
     // 2. Full-resolution export from shader pipeline (Invariant 2), at the recipe's depth.
     let settings = &job.recipe.settings;
-    let exported = engine.export_at(device, queue, &job.stack, settings.effective_depth())?;
+    let exported = engine.export_in(
+        device,
+        queue,
+        &job.stack,
+        settings.effective_depth(),
+        settings.color_space,
+    )?;
 
     // 3. Size, sharpen and encode it, through the same path the single export uses.
     if let Some(parent) = job.output_path.parent() {

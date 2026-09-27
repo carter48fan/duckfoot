@@ -44,10 +44,16 @@ impl PasteSet {
     /// `target` with what this set carries taken from `copied`.
     pub fn apply(&self, copied: &PhotoStack, target: &PhotoStack) -> PhotoStack {
         let mut out = target.clone();
+        let mut any = false;
         for &id in PIPELINE_MODULES {
             if self.carries(id) {
                 id.reset(&mut out, copied);
+                any = true;
             }
+        }
+        // A look is made in a working space and looks as it did only in it.
+        if any {
+            out.working_space = copied.working_space;
         }
         if self.geometry {
             out.geometry = copied.geometry;

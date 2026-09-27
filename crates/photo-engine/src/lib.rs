@@ -14,6 +14,7 @@ pub mod engine;
 pub mod exif_out;
 pub mod export;
 pub mod fsio;
+pub mod gamut;
 pub mod heal;
 pub mod histogram;
 pub mod icc;
