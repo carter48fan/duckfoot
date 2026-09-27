@@ -84,32 +84,45 @@ fn finite(v: f32) -> f32 {
     }
 }
 
-/// A DNG's own `WarpRectilinear` (see `opcodes`), in the sensor texture's pixels: where
-/// each colour plane of an ideal image point was recorded. Radial terms only; the
-/// tangential ones, which no phone this was checked against sets, are left out.
+/// A lens correction that comes with the photo rather than from the sliders: a DNG's own
+/// `WarpRectilinear` (see `opcodes`), or a lensfun profile (see `lensfun`). In the sensor
+/// texture's pixels, it says where each colour plane of an ideal image point was
+/// recorded, and how much the lens darkened it there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FileWarp {
     /// The optical centre, in texture pixels.
     pub centre: [f32; 2],
-    /// The radius the polynomial is normalised by: the centre's farthest image corner.
+    /// The radius the polynomials are in units of.
     pub m: f32,
-    /// kr0..kr3 for red, green and blue: f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶.
-    pub planes: [[f32; 4]; 3],
+    /// Per plane (R, G, B): r' = r·f(r), f(r) = Σ cᵢ·rⁱ for i = 0..8.
+    pub planes: [[f32; 8]; 3],
+    /// Lateral colour, after the distortion: red's and blue's r' = r·(v + c·r + b·r²).
+    pub tca: Option<[[f32; 3]; 2]>,
+    /// The fall-off the lens recorded, 1 + k1·r² + k2·r⁴ + k3·r⁶, and the radius (in
+    /// pixels) its r is in units of.
+    pub vignetting: Option<([f32; 3], f32)>,
 }
 
 impl FileWarp {
-    /// `warp`, for a mosaic kept from `area` of the image the opcode describes.
+    /// A DNG's warp, for a mosaic kept from `area` of the image the opcode describes.
+    /// Radial terms only; the tangential ones, which no phone this was checked against
+    /// sets, are left out.
     pub fn new(warp: &crate::opcodes::Warp, area: crate::opcodes::Area) -> Option<Self> {
         let (aw, ah) = (area.size.0 as f64, area.size.1 as f64);
         let (cx, cy) = (warp.centre.0 * aw, warp.centre.1 * ah);
         let m = crate::opcodes::max_corner_distance2(cx, cy, aw, ah).sqrt();
+        // kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶, as powers of r.
         let plane = |i: usize| {
             let k = warp.planes.get(i).or(warp.planes.first())?;
-            Some([k[0] as f32, k[1] as f32, k[2] as f32, k[3] as f32])
+            let k = k.map(|v| v as f32);
+            Some([k[0], 0.0, k[1], 0.0, k[2], 0.0, k[3], 0.0])
         };
         let planes = [plane(0)?, plane(1)?, plane(2)?];
         // A warp that moves nothing is no warp.
-        if planes.iter().all(|k| *k == [1.0, 0.0, 0.0, 0.0]) {
+        if planes
+            .iter()
+            .all(|k| *k == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        {
             return None;
         }
         Some(Self {
@@ -119,23 +132,39 @@ impl FileWarp {
             ],
             m: m as f32,
             planes,
+            tca: None,
+            vignetting: None,
         })
     }
 
     /// Where plane `plane` (0 R, 1 G, 2 B) of the ideal point `p` was recorded, both in
-    /// texture pixels. The shader's `file_warp`.
+    /// texture pixels. The shader's `file_warp`, then its `tca`.
     pub fn source(&self, plane: usize, p: (f32, f32)) -> (f32, f32) {
-        let k = self.planes[plane];
-        let (dx, dy) = (
-            (p.0 - self.centre[0]) / self.m,
-            (p.1 - self.centre[1]) / self.m,
-        );
-        let r2 = dx * dx + dy * dy;
-        let f = k[0] + r2 * (k[1] + r2 * (k[2] + r2 * k[3]));
-        (
-            self.centre[0] + dx * f * self.m,
-            self.centre[1] + dy * f * self.m,
-        )
+        let scale = |d: (f32, f32), f: &dyn Fn(f32) -> f32| {
+            let r = d.0.hypot(d.1) / self.m;
+            let k = f(r);
+            (d.0 * k, d.1 * k)
+        };
+        let c = self.planes[plane];
+        let mut d = (p.0 - self.centre[0], p.1 - self.centre[1]);
+        d = scale(d, &|r| {
+            c[0] + r
+                * (c[1] + r * (c[2] + r * (c[3] + r * (c[4] + r * (c[5] + r * (c[6] + r * c[7]))))))
+        });
+        if let (Some(tca), true) = (self.tca, plane != 1) {
+            let [v, c1, b] = tca[plane / 2];
+            d = scale(d, &|r| v + r * (c1 + r * b));
+        }
+        (self.centre[0] + d.0, self.centre[1] + d.1)
+    }
+
+    /// The gain that undoes the recorded fall-off at sensor position `p`.
+    pub fn gain(&self, p: (f32, f32)) -> f32 {
+        let Some((k, unit)) = self.vignetting else {
+            return 1.0;
+        };
+        let r2 = ((p.0 - self.centre[0]).powi(2) + (p.1 - self.centre[1]).powi(2)) / (unit * unit);
+        1.0 / (1.0 + r2 * (k[0] + r2 * (k[1] + r2 * k[2]))).max(0.05)
     }
 }
 
@@ -222,6 +251,7 @@ mod tests {
             ca_red: f32::INFINITY,
             ca_blue: f32::NEG_INFINITY,
             vignetting: f32::NAN,
+            profile: true,
         });
         assert_eq!(m, LensModel::IDENTITY);
     }

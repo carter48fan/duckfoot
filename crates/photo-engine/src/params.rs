@@ -397,9 +397,9 @@ impl Denoise {
     }
 }
 
-/// Manual lens corrections, for a lens without a profile. Each slider is -100..=100 and
-/// 0 is none; see `lens::LensModel` for what they become.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// Lens corrections: the lens's profile when one is known, and manual ones on top of it.
+/// Each slider is -100..=100 and 0 is none; see `lens::LensModel` for what they become.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Lens {
     /// Positive straightens barrel distortion (lines bowing out), negative pincushion.
     pub distortion: f32,
@@ -410,6 +410,26 @@ pub struct Lens {
     pub ca_blue: f32,
     /// Positive brightens the corners a lens darkened; negative darkens them.
     pub vignetting: f32,
+    /// Whether the lens's profile (from the lensfun database, when one matches) is
+    /// applied under the sliders. A file that corrects its own lens ignores this.
+    #[serde(default = "yes")]
+    pub profile: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Self {
+            distortion: 0.0,
+            ca_red: 0.0,
+            ca_blue: 0.0,
+            vignetting: 0.0,
+            profile: true,
+        }
+    }
 }
 
 /// Single color band adjustments for 8-band Color EQ.

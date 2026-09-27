@@ -47,10 +47,12 @@ struct Adjust {
     frame:      vec4<f32>,   // the crop in the oriented frame: x, y, width, height (0..1)
     lens:       vec4<f32>,   // x = radial distortion k, y = fill zoom, z/w = red/blue CA scale
     lens_b:     vec4<f32>,   // x = vignetting correction, stops at the corner
-    warp_r:     vec4<f32>,   // the file's own warp (a DNG's WarpRectilinear): kr0..kr3
-    warp_g:     vec4<f32>,   //   per colour plane,
-    warp_b:     vec4<f32>,
-    warp_c:     vec4<f32>,   //   and xy = optical centre (px), z = radius, w = 1 when on
+    // The photo's own lens correction (a DNG's WarpRectilinear, or a lensfun profile):
+    warp:       array<vec4<f32>, 6>,  // per plane, r' = r·Σ cᵢ·rⁱ, i = 0..8, in two halves
+    warp_c:     vec4<f32>,   // xy = optical centre (px), z = radius unit, w = 1 when on
+    tca_r:      vec4<f32>,   // red after the distortion: r' = r·(x + y·r + z·r²), w = 1 when on
+    tca_b:      vec4<f32>,
+    warp_vig:   vec4<f32>,   // recorded fall-off 1 + x·r² + y·r⁴ + z·r⁶, w = its radius unit
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -288,11 +290,33 @@ fn lens_gain_at(src: vec2<f32>) -> f32 {
 // `p` was recorded at centre + d·f(r), f(r) = kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶, with d and
 // r measured from the optical centre in units of its farthest corner. It comes after the
 // manual correction, nearest the sensor, since the manual one corrects what it left.
-fn file_warp(p: vec2<f32>, k: vec4<f32>) -> vec2<f32> {
+fn file_warp(p: vec2<f32>, plane: u32) -> vec2<f32> {
     let d = (p - u.warp_c.xy) / u.warp_c.z;
+    let r = length(d);
+    let lo = u.warp[plane * 2u];
+    let hi = u.warp[plane * 2u + 1u];
+    let f = lo.x + r * (lo.y + r * (lo.z + r * (lo.w + r * (hi.x + r * (hi.y + r * (hi.z + r * hi.w))))));
+    var q = d * f;
+    // A profile's lateral colour, on the distorted position, for red and blue.
+    if (plane != 1u) {
+        let t = select(u.tca_b, u.tca_r, plane == 0u);
+        if (t.w > 0.5) {
+            let rq = length(q);
+            q = q * (t.x + rq * (t.y + rq * t.z));
+        }
+    }
+    return u.warp_c.xy + q * u.warp_c.z;
+}
+
+// What undoes a profile's recorded fall-off at sensor position `src`.
+fn file_gain(src: vec2<f32>) -> f32 {
+    if (u.warp_vig.w <= 0.0) {
+        return 1.0;
+    }
+    let d = (src - u.warp_c.xy) / u.warp_vig.w;
     let r2 = dot(d, d);
-    let f = k.x + r2 * (k.y + r2 * (k.z + r2 * k.w));
-    return u.warp_c.xy + d * f * u.warp_c.z;
+    let k = u.warp_vig.xyz;
+    return 1.0 / max(1.0 + r2 * (k.x + r2 * (k.y + r2 * k.z)), 0.05);
 }
 
 fn file_warp_on() -> bool {
@@ -311,8 +335,8 @@ fn lens_ca(s: vec4<f32>, ideal: vec2<f32>, lod: f32) -> vec4<f32> {
         at_b = (ideal - half) * u.lens.w + half;
     }
     if (file_warp_on()) {
-        at_r = file_warp(at_r, u.warp_r);
-        at_b = file_warp(at_b, u.warp_b);
+        at_r = file_warp(at_r, 0u);
+        at_b = file_warp(at_b, 2u);
     }
     let red = tap(at_r / u.sizes.zw, lod).r;
     let blue = tap(at_b / u.sizes.zw, lod).b;
@@ -558,7 +582,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let ideal = sensor_coords(out_px);
     var src = ideal;
     if (file_warp_on()) {
-        src = file_warp(ideal, u.warp_g);
+        src = file_warp(ideal, 1u);
     }
 
     // Straightening rotates the corners outside the sensor. Those pixels were never
@@ -612,9 +636,13 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // After sharpening, whose kernel is a pixel across and would otherwise see the gain as
     // an edge; all four channels, since the neutral in `a` is this pixel's light too.
+    var gain = file_gain(src);
     if (enabled(FLAG_LENS) && u.lens_b.x != 0.0) {
-        lens_gain = lens_gain_at(src);
-        s = s * lens_gain;
+        gain = gain * lens_gain_at(src);
+    }
+    if (gain != 1.0) {
+        lens_gain = gain;
+        s = s * gain;
     }
 
     // White balance is applied in camera space, BEFORE the primaries conversion.

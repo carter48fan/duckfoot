@@ -111,11 +111,14 @@ struct AdjustUniforms {
     lens: [f32; 4],
     /// x = vignetting correction, stops at the corner.
     lens_b: [f32; 4],
-    /// The file's own warp: kr0..kr3 per plane, then centre xy, radius, 1 when on.
-    warp_r: [f32; 4],
-    warp_g: [f32; 4],
-    warp_b: [f32; 4],
+    /// The photo's own lens correction (see `lens::FileWarp`): each plane's polynomial
+    /// in two halves, then centre xy, radius and 1 when on, then red's and blue's
+    /// lateral colour (v, c, b, 1 when on), then the fall-off (k1..k3, its radius).
+    warp: [[f32; 4]; 6],
     warp_c: [f32; 4],
+    tca_r: [f32; 4],
+    tca_b: [f32; 4],
+    warp_vig: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -135,6 +138,8 @@ pub struct LoadedImage {
     white_scale: WhiteScale,
     /// The file's own distortion correction, if it carries one.
     warp: Option<FileWarp>,
+    /// The lens's profile, if one was found; applied while Lens is on and asks for it.
+    lens_profile: Option<(String, FileWarp)>,
     /// Levels in the sensor texture's mip chain; level 0 is full resolution.
     mip_levels: u32,
     /// Kept so its memory can be recycled when this image is replaced by one the same size.
@@ -167,6 +172,28 @@ struct Denoised {
 }
 
 impl LoadedImage {
+    /// The lens correction this photo is drawn with under `stack`: its own, if the file
+    /// carries one, else its lens's profile while Lens is on and asks for it.
+    pub fn warp_for(&self, stack: &PhotoStack) -> Option<FileWarp> {
+        self.warp.or_else(|| {
+            let wanted = stack.lens.enabled && stack.lens.params.profile;
+            self.lens_profile
+                .as_ref()
+                .filter(|_| wanted)
+                .map(|(_, w)| *w)
+        })
+    }
+
+    /// Whether the file corrects its own lens (a DNG's opcodes), making a profile moot.
+    pub fn corrects_its_own_lens(&self) -> bool {
+        self.warp.is_some()
+    }
+
+    /// The name of the lens profile found for this photo.
+    pub fn lens_profile_name(&self) -> Option<&str> {
+        self.lens_profile.as_ref().map(|(name, _)| name.as_str())
+    }
+
     pub fn megapixels(&self) -> f32 {
         (self.width as f32 * self.height as f32) / 1_000_000.0
     }
@@ -326,6 +353,8 @@ pub struct UploadedImage {
     cam_to_srgb: [[f32; 3]; 3],
     white_scale: WhiteScale,
     warp: Option<FileWarp>,
+    /// The lens's profile, by name, if the loader found one (see `lensfun::for_photo`).
+    pub lens_profile: Option<(String, FileWarp)>,
     pub make: String,
     pub model: String,
 }
@@ -436,6 +465,7 @@ pub fn upload_cfa(
         cam_to_srgb: cfa.cam_to_srgb,
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
+        lens_profile: None,
         make: cfa.make,
         model: cfa.model,
     })
@@ -491,6 +521,7 @@ pub fn upload_raster(
         cam_to_srgb: raster.cam_to_srgb,
         white_scale: WhiteScale::srgb(),
         warp: None,
+        lens_profile: None,
         make: raster.make,
         model: raster.model,
     })
@@ -1176,6 +1207,7 @@ impl Engine {
             cam_to_srgb,
             white_scale,
             warp,
+            lens_profile,
             make,
             model,
         } = uploaded;
@@ -1375,6 +1407,7 @@ impl Engine {
             cam_to_srgb,
             white_scale,
             warp,
+            lens_profile,
             mip_levels,
             preview_level,
             sensor_extent: extent,
@@ -1706,7 +1739,7 @@ impl Engine {
     ) {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
-        let warp = image.warp;
+        let warp = image.warp_for(stack);
 
         if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
             let lut = build_lut(&stack.tone_curve.params);
@@ -1868,12 +1901,34 @@ impl Engine {
                 },
                 lens: [lens.k, lens.zoom, lens.ca_red, lens.ca_blue],
                 lens_b: [lens.vignetting_stops, 0.0, 0.0, 0.0],
-                warp_r: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[0]),
-                warp_g: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[1]),
-                warp_b: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[2]),
+                warp: {
+                    let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+                    let planes = warp.map_or([identity; 3], |w| w.planes);
+                    let half = |p: usize, h: usize| {
+                        let c = planes[p];
+                        [c[h * 4], c[h * 4 + 1], c[h * 4 + 2], c[h * 4 + 3]]
+                    };
+                    [
+                        half(0, 0),
+                        half(0, 1),
+                        half(1, 0),
+                        half(1, 1),
+                        half(2, 0),
+                        half(2, 1),
+                    ]
+                },
                 warp_c: warp.map_or([0.0, 0.0, 1.0, 0.0], |w| {
                     [w.centre[0], w.centre[1], w.m, 1.0]
                 }),
+                tca_r: warp
+                    .and_then(|w| w.tca)
+                    .map_or([1.0, 0.0, 0.0, 0.0], |t| [t[0][0], t[0][1], t[0][2], 1.0]),
+                tca_b: warp
+                    .and_then(|w| w.tca)
+                    .map_or([1.0, 0.0, 0.0, 0.0], |t| [t[1][0], t[1][1], t[1][2], 1.0]),
+                warp_vig: warp
+                    .and_then(|w| w.vignetting)
+                    .map_or([0.0; 4], |(k, unit)| [k[0], k[1], k[2], unit]),
             }),
         );
     }
@@ -2490,9 +2545,10 @@ impl Engine {
         };
         let sensor = (image.sensor_width, image.sensor_height);
         let (ow, oh) = geometry.output_size(sensor.0, sensor.1);
+        let warp = image.warp_for(stack);
         let (sx, sy) = sensor_point(
             stack,
-            image.warp.as_ref(),
+            warp.as_ref(),
             sensor,
             (point.0 * ow as f32, point.1 * oh as f32),
         );

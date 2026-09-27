@@ -16,6 +16,7 @@ pub mod fsio;
 pub mod histogram;
 pub mod icc;
 pub mod lens;
+pub mod lensfun;
 pub mod metadata;
 pub mod opcodes;
 pub mod params;
