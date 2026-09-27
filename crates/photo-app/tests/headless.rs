@@ -1712,6 +1712,51 @@ fn a_saved_preset_applies_elsewhere_survives_a_restart_and_can_go() {
 }
 
 #[test]
+fn a_chosen_mask_is_dragged_on_the_stage_in_one_undo_step() {
+    use photo_engine::local::{Mask, Shape};
+    let dir = scratch_dir("masks");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.edit(|s| {
+        s.local.enabled = true;
+        let mut m = Mask::radial([0.5, 0.5], 0.1);
+        m.adjust.exposure = 1.0;
+        s.local.params.masks.push(m);
+    });
+    app.selected_mask = Some(0);
+    h.frame(&mut app, Default::default());
+    let frame = app.stage_frame().expect("the stage is drawn");
+    let centre = frame.center();
+    let undo_depth = app.history_len();
+    drag(&h, &mut app, centre, centre + egui::vec2(60.0, 0.0));
+    let Shape::Radial { centre: c, .. } = app.stack().local.params.masks[0].shape else {
+        panic!("not radial")
+    };
+    let want = 0.5 + 60.0 / frame.width();
+    assert!(
+        (c[0] - want).abs() < 0.02 && (c[1] - 0.5).abs() < 0.02,
+        "moved to {c:?}"
+    );
+    assert_eq!(
+        app.history_len(),
+        undo_depth + 1,
+        "one undo step for the drag"
+    );
+    // Esc puts the handles away; a drag then pans or does nothing, never moves it.
+    h.frame(&mut app, key(egui::Key::Escape));
+    assert_eq!(app.selected_mask, None);
+    let before = app.stack().local.params.masks[0];
+    drag(&h, &mut app, centre, centre + egui::vec2(60.0, 0.0));
+    assert_eq!(app.stack().local.params.masks[0], before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
     use photo_app::crop_tool::Aspect;
     let dir = scratch_dir("cropaspect");
@@ -1946,6 +1991,34 @@ fn no_controls_overlap_on_any_screen() {
     app.preset_draft = None;
     app.looks_open = false;
     app.info_open = false;
+    // A local mask chosen, its card open, and its handles on the stage.
+    app.edit(|s| {
+        s.local.enabled = true;
+        s.local
+            .params
+            .masks
+            .push(photo_engine::local::Mask::radial([0.5, 0.5], 0.15));
+        s.local
+            .params
+            .masks
+            .push(photo_engine::local::Mask::linear([0.5, 0.0], [0.5, 0.4]));
+    });
+    app.selected_mask = Some(0);
+    let layout = app.inspector_sections.clone();
+    for s in &mut app.inspector_sections {
+        s.collapsed = s.id != photo_app::InspectorSectionId::Local;
+    }
+    for size in desktops {
+        check(&mut app, "a mask chosen", size);
+    }
+    app.compact_tab = Some(Tab::Edit);
+    app.compact_module = photo_app::InspectorSectionId::Local;
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "phone, a mask chosen", size);
+    }
+    app.compact_tab = None;
+    app.inspector_sections = layout;
+    app.selected_mask = None;
     // Every card open at once, scrolled through by the detector's clip.
     let layout = app.inspector_sections.clone();
     for s in &mut app.inspector_sections {

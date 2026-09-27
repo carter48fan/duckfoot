@@ -160,6 +160,7 @@ You can also **drag a RAW file onto the window**.
 | `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
 | `Ctrl+Shift+V` | choose what paste carries |
 | `Ctrl+Alt+V` | the same edits as the photo open before this one |
+| `Esc` with a mask chosen | put the mask's handles away |
 | `C` | crop tool on / off |
 | `Enter` / `Esc` | apply / cancel the crop |
 | `X` / `O` while cropping | turn the crop's shape / next guide |

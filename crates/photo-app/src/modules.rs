@@ -112,6 +112,7 @@ module_table! {
     Vibrance => vibrance, "vibrance", "vibrance";
     Sharpen => sharpen, "sharpen", "sharpen";
     Vignette => vignette, "vignette", "vignette";
+    Local => local, "local adjustments", "local";
 }
 
 /// What changed between two adjacent undo states, for the History list.

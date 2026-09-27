@@ -1485,3 +1485,137 @@ fn a_lens_profile_applies_only_while_lens_asks_for_it() {
     stack.lens.params.profile = false;
     assert!((spread(&mut engine, &stack) - off).abs() < 1.0);
 }
+
+fn grey_at(out: &photo_engine::ExportedImage, x: u32, y: u32) -> [f32; 3] {
+    let i = ((y * out.width + x) * 4) as usize;
+    [0, 1, 2].map(|c| testkit::srgb_to_linear(out.rgba[i + c]))
+}
+
+#[test]
+fn a_radial_mask_lifts_its_middle_by_the_stops_it_asks_for() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 128u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(w, h, 0.1))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    let plain = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let mut mask = Mask::radial([0.25, 0.5], 0.15);
+    mask.adjust.exposure = 1.0;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    let lit = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let (inside, outside) = ((48, 64), (170, 64));
+    let ratio = grey_at(&lit, inside.0, inside.1)[1] / grey_at(&plain, inside.0, inside.1)[1];
+    assert!(
+        (ratio - 2.0).abs() < 0.1,
+        "one stop is twice the light, got {ratio}"
+    );
+    assert_eq!(
+        grey_at(&lit, outside.0, outside.1),
+        grey_at(&plain, outside.0, outside.1)
+    );
+    // Inverted, it is the other way round.
+    stack.local.params.masks[0].invert = true;
+    let inv = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert_eq!(
+        grey_at(&inv, inside.0, inside.1),
+        grey_at(&plain, inside.0, inside.1)
+    );
+    assert!(
+        grey_at(&inv, outside.0, outside.1)[1] > grey_at(&plain, outside.0, outside.1)[1] * 1.8
+    );
+}
+
+#[test]
+fn a_mask_stays_on_what_it_was_drawn_over_when_the_photo_turns() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 128u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(w, h, 0.1))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    let mut mask = Mask::radial([0.25, 0.5], 0.1);
+    mask.adjust.exposure = 2.0;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    stack.geometry.rotate_right();
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    // The middle of what was lifted maps back to the mask's centre on the sensor.
+    let base = grey_at(&out, 2, 2)[1];
+    let (mut sx, mut sy, mut n) = (0.0f32, 0.0f32, 0.0f32);
+    for y in 0..out.height {
+        for x in 0..out.width {
+            if grey_at(&out, x, y)[1] > base * 2.0 {
+                let (px, py) = photo_engine::sensor_point(
+                    &stack,
+                    None,
+                    (w, h),
+                    (x as f32 + 0.5, y as f32 + 0.5),
+                );
+                sx += px;
+                sy += py;
+                n += 1.0;
+            }
+        }
+    }
+    assert!(n > 50.0, "nothing was lifted");
+    let (sx, sy) = (sx / n, sy / n);
+    assert!(
+        (sx - 48.0).abs() < 1.5 && (sy - 64.0).abs() < 1.5,
+        "lifted around sensor ({sx}, {sy})"
+    );
+}
+
+#[test]
+fn a_warm_gradient_warms_only_where_it_applies() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let (w, h) = (128u32, 128u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(w, h, 0.2))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    let mut mask = Mask::linear([0.5, 0.0], [0.5, 0.5]);
+    mask.adjust.temperature = 100.0;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let top = grey_at(&out, 64, 2);
+    let bottom = grey_at(&out, 64, 120);
+    assert!(top[0] > top[2] * 1.3, "not warm at the top: {top:?}");
+    assert!(
+        (bottom[0] - bottom[2]).abs() < 0.01,
+        "warm at the bottom: {bottom:?}"
+    );
+}
+
+#[test]
+fn the_mask_overlay_shows_on_the_preview_and_never_in_an_export() {
+    use photo_engine::local::Mask;
+    let gpu = gpu_or_skip!();
+    let (w, h) = (96u32, 64u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load(&gpu.device, &gpu.queue, testkit::flat(w, h, 0.2))
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    stack.local.enabled = true;
+    stack.local.params.masks.push(Mask::radial([0.5, 0.5], 0.2));
+    let plain = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    engine.set_mask_overlay(Some(0));
+    let exported = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert_eq!(plain.rgba, exported.rgba, "the overlay reached an export");
+    let (pw, _, shown) = preview(gpu, &mut engine, &stack, 0);
+    let i = (((h / 2) * pw + w / 2) * 4) as usize;
+    assert!(
+        shown[i] > shown[i + 1] + 60,
+        "no red wash: {:?}",
+        &shown[i..i + 3]
+    );
+}

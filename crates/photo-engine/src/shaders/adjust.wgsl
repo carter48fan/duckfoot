@@ -53,6 +53,13 @@ struct Adjust {
     tca_r:      vec4<f32>,   // red after the distortion: r' = r·(x + y·r + z·r²), w = 1 when on
     tca_b:      vec4<f32>,
     warp_vig:   vec4<f32>,   // recorded fall-off 1 + x·r² + y·r⁴ + z·r⁶, w = its radius unit
+    // Local adjustments (W-01): per mask, geometry (two vec4) then its adjustments (two):
+    //   linear: xy = full-effect end, zw = no-effect end (sensor px)
+    //   radial: xy = centre, zw = radii (px); then cos/sin of its turn, feather
+    //   the second's w = kind (0 linear, 1 radial) + 2 if inverted
+    //   exposure (EV), temperature, tint, contrast; saturation, clarity, sharpness, 0
+    masks:      array<vec4<f32>, 32>,
+    mask_info:  vec4<u32>,   // x = masks in use, y = 1 + the mask shown as an overlay, or 0
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -68,6 +75,7 @@ const FLAG_CLARITY:  u32 = 512u;
 const FLAG_DEHAZE:   u32 = 1024u;
 const FLAG_COLOR_EQ: u32 = 2048u;
 const FLAG_LENS:     u32 = 4096u;
+const FLAG_LOCAL:    u32 = 16384u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -399,7 +407,7 @@ fn blurred(uv: vec2<f32>, level: f32) -> vec4<f32> {
 // Texture is the fine band: the pixel against ~4 px around it. Clarity is the coarse one:
 // ~4 px against ~40 px, weighted to the midtones the way the eye reads "punch". Negative
 // amounts flatten the band instead, which is the soft-skin / glow direction.
-fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>) -> f32 {
+fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>, clarity: f32, texture: f32) -> f32 {
     // Stops, floored so that noise in the deep shadows is not read as detail.
     let floor_y = 0.002;
     // Clarity's bands are absolute levels (~4 px against ~32 px), the same at every zoom,
@@ -427,9 +435,68 @@ fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>) -> f32 {
     let mid = mix(0.35, 1.0, 1.0 - (2.0 * l - 1.0) * (2.0 * l - 1.0));
 
     // -100 removes 90% of a band; +100 roughly doubles it.
-    let k_clarity = u.detail.x * select(0.009, 0.011, u.detail.x > 0.0) * mid;
-    let k_texture = u.detail.y * select(0.009, 0.011, u.detail.y > 0.0);
+    let k_clarity = clarity * select(0.009, 0.011, clarity > 0.0) * mid;
+    let k_texture = texture * select(0.009, 0.011, texture > 0.0);
     return exp2(k_clarity * d_clarity + k_texture * d_texture);
+}
+
+// How much of local mask `i` applies at sensor position `p` (pixels): `local::Mask::weight`.
+fn mask_weight(i: u32, p: vec2<f32>) -> f32 {
+    let g0 = u.masks[i * 4u];
+    let g1 = u.masks[i * 4u + 1u];
+    let code = u32(g1.w + 0.5);
+    var inside: f32;
+    if ((code & 1u) == 0u) {
+        let d = g0.zw - g0.xy;
+        let t = clamp(dot(p - g0.xy, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
+        inside = 1.0 - smoothstep(0.0, 1.0, t);
+    } else {
+        let q = p - g0.xy;
+        let x = q.x * g1.x + q.y * g1.y;
+        let y = -q.x * g1.y + q.y * g1.x;
+        let d = length(vec2<f32>(x / g0.z, y / g0.w));
+        inside = 1.0 - smoothstep(1.0 - g1.z, 1.0, d);
+    }
+    if ((code & 2u) != 0u) {
+        inside = 1.0 - inside;
+    }
+    return inside;
+}
+
+// The sum of every mask's adjustments at a pixel, each by its weight there.
+struct Local {
+    exposure: f32,
+    temperature: f32,
+    tint: f32,
+    contrast: f32,
+    saturation: f32,
+    clarity: f32,
+    sharpness: f32,
+    // The overlay mask's weight, while one is shown.
+    shown: f32,
+}
+
+fn local_at(p: vec2<f32>) -> Local {
+    var l = Local(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    if (!enabled(FLAG_LOCAL)) {
+        return l;
+    }
+    for (var i = 0u; i < min(u.mask_info.x, 8u); i = i + 1u) {
+        let w = mask_weight(i, p);
+        let a = u.masks[i * 4u + 2u];
+        let b = u.masks[i * 4u + 3u];
+        l.exposure += w * a.x;
+        l.temperature += w * a.y;
+        l.tint += w * a.z;
+        l.contrast += w * a.w;
+        l.saturation += w * b.x;
+        l.clarity += w * b.y;
+        l.sharpness += w * b.z;
+        if (u.mask_info.y == i + 1u) {
+            l.shown = w;
+        }
+    }
+    return l;
 }
 
 // Dehaze, by the atmospheric model: what reached the camera is the scene attenuated by the
@@ -617,7 +684,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    // Local masks, read once for the pixel: where they are is in sensor space, so they
+    // follow the photo through every turn and flip.
+    let local = local_at(ideal);
+    var sharpen = local.sharpness * 0.01;
     if (enabled(FLAG_SHARPEN)) {
+        sharpen += u.sharpen.x;
+    }
+
+    if (sharpen > 0.0) {
         // Sharpening is a one-pixel kernel at full resolution. A reduced preview has to
         // show what that export looks like once shrunk to the screen — and a Laplacian
         // averages to almost nothing under a shrink: the Laplacian of a level-L texel is
@@ -631,7 +706,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s_lf = tap(uv - vec2<f32>(step.x, 0.0), lod);
         let s_rt = tap(uv + vec2<f32>(step.x, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
-        s = clamp(s + laplacian * u.sharpen.x, vec4<f32>(0.0), vec4<f32>(2.0));
+        s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
     }
 
     // After sharpening, whose kernel is a pixel across and would otherwise see the gain as
@@ -657,8 +732,22 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // end, because a later `max(0, NaN)` quietly launders one into a black speck.
     var bad = not_finite(c);
 
+    // A mask's light and colour: stops of exposure, and warmer or cooler, greener or
+    // more magenta, as gains on linear light before the tone stages see it.
+    if (enabled(FLAG_LOCAL)) {
+        let warm = local.temperature * 0.005;
+        let magenta = local.tint * 0.004;
+        c = c * exp2(local.exposure) * exp2(vec3<f32>(warm, -magenta, -warm));
+    }
+
+    var clarity = local.clarity;
+    var texture = 0.0;
     if (enabled(FLAG_CLARITY)) {
-        c = c * local_contrast(s, uv, lod, wb);
+        clarity += u.detail.x;
+        texture = u.detail.y;
+    }
+    if (clarity != 0.0 || texture != 0.0) {
+        c = c * local_contrast(s, uv, lod, wb, clarity, texture);
         bad = bad || not_finite(c);
     }
 
@@ -669,6 +758,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     if (enabled(FLAG_DEHAZE)) {
         c = dehaze(c, uv, wb);
+        bad = bad || not_finite(c);
+    }
+
+    // A mask's contrast: brightness pushed away from (or toward) mid grey, as a power on
+    // its ratio to 0.18, applied to all three channels so hue holds.
+    if (local.contrast != 0.0) {
+        let y = max(luma(c), 1e-4);
+        let k = local.contrast * 0.006;
+        c = c * clamp(pow(y / 0.18, k), 0.25, 4.0);
         bad = bad || not_finite(c);
     }
 
@@ -716,6 +814,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         c = mix(vec3<f32>(luma), c, sat_factor);
         bad = bad || not_finite(c);
     }
+    if (local.saturation != 0.0) {
+        c = mix(vec3<f32>(luma(c)), c, max(1.0 + local.saturation * 0.01, 0.0));
+    }
 
     // Colour balance grades what saturation left: after it, so a photo taken to black and
     // white can still be toned (sepia, selenium, cyanotype) instead of the tint being
@@ -737,6 +838,11 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let rad = max(u.vignette.y, 0.05);
         let v_falloff = smoothstep(rad * 0.4, rad, dist);
         c = c * max(1.0 + u.vignette.x * v_falloff, 0.0);
+    }
+
+    // The shown mask, as a red wash where it applies (preview only: export sends 0).
+    if (u.mask_info.y > 0u) {
+        c = mix(c, vec3<f32>(0.9, 0.02, 0.01), local.shown * 0.5);
     }
 
     if (enabled(FLAG_NAN_PAINT) && (bad || not_finite(c))) {

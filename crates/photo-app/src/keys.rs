@@ -22,6 +22,8 @@ impl PhotoApp {
                 self.export_dialog_open = false;
             } else if self.paste_picker_open {
                 self.paste_picker_open = false;
+            } else if self.selected_mask.is_some() {
+                self.selected_mask = None;
             } else if self.customize_open {
                 self.customize_open = false;
             } else if self.select_mode {
@@ -76,6 +78,13 @@ impl PhotoApp {
             return;
         }
         if self.batch_dialog_open {
+            return;
+        }
+        if self.selected_mask.is_some()
+            && !self.cropping
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.selected_mask = None;
             return;
         }
         if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::V)) {
