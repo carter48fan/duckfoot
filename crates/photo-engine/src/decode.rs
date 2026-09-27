@@ -48,6 +48,9 @@ pub struct CfaImage {
     pub orientation: Geometry,
     pub make: String,
     pub model: String,
+    /// The distortion (and colour fringing) correction the file carries for itself, as a
+    /// DNG's WarpRectilinear: applied as the photo is drawn, like its colour matrix.
+    pub warp: Option<crate::lens::FileWarp>,
 }
 
 /// A colour filter array's repeating tile: a 2×2 Bayer tile, or Fuji's 6×6 X-Trans.
@@ -289,7 +292,34 @@ impl RawDecoder for RawlerBackend {
 }
 
 fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
-    Ok(with_dng_colour(decode_reader_rawler(source)?, source.buf()))
+    let mut img = decode_reader_rawler(source)?;
+    with_dng_opcodes(&mut img, source.buf());
+    Ok(with_dng_colour(img, source.buf()))
+}
+
+/// A DNG's own lens corrections: its gain maps and radial vignette applied to the mosaic
+/// now, its warp kept for the adjust pass.
+fn with_dng_opcodes(img: &mut Decoded, bytes: &[u8]) {
+    let Some(area) = img.area else { return };
+    let (list2, list3) = dng::opcodes(bytes);
+    if list2.is_empty() && list3.is_empty() {
+        return;
+    }
+    let cfa = &mut img.cfa;
+    let (pattern, black) = (cfa.cfa, cfa.black);
+    let gains: Vec<_> = list2
+        .iter()
+        .chain(&list3)
+        .filter(|o| !matches!(o, crate::opcodes::Opcode::Warp(_)))
+        .cloned()
+        .collect();
+    crate::opcodes::apply_gains(&gains, &mut cfa.data, cfa.width as usize, area, |r, c| {
+        black[pattern.colour_at(r, c) as usize]
+    });
+    cfa.warp = list3.iter().find_map(|o| match o {
+        crate::opcodes::Opcode::Warp(w) => crate::lens::FileWarp::new(w, area),
+        _ => None,
+    });
 }
 
 /// A decode that found no as-shot white balance of its own takes the DNG's colour tags
@@ -357,6 +387,9 @@ impl RawDecoder for RawloaderBackend {
 struct Decoded {
     cfa: CfaImage,
     wb_missing: bool,
+    /// Where the kept mosaic sits in the active area, which DNG opcodes are relative to.
+    /// Only the rawler path knows it.
+    area: Option<crate::opcodes::Area>,
 }
 
 fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
@@ -455,8 +488,10 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             orientation: orientation_geometry(raw.orientation),
             make: raw.make.clone(),
             model: raw.model.clone(),
+            warp: None,
         },
         wb_missing,
+        area: None,
     })
 }
 
@@ -612,6 +647,17 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
         bail!("empty sensor dimensions after crop: {width}x{height}");
     }
 
+    // DNG opcodes are in active-area coordinates, and the kept window may be a crop of it.
+    let area = {
+        let (ax, ay, aw, ah) = match raw.active_area {
+            Some(a) if !a.is_empty() => (a.p.x, a.p.y, a.d.w, a.d.h),
+            _ => (0, 0, src_w, src_h),
+        };
+        crate::opcodes::Area {
+            offset: (cl as i64 - ax as i64, ct as i64 - ay as i64),
+            size: (aw as u32, ah as u32),
+        }
+    };
     let data = crop_in_place(samples, src_w, cl, ct, width, height);
 
     let raw_cfa = match &raw.photometric {
@@ -680,8 +726,10 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             orientation: orientation_geometry_rawler(raw.orientation),
             make,
             model,
+            warp: None,
         },
         wb_missing,
+        area: Some(area),
     })
 }
 
@@ -977,6 +1025,23 @@ mod dng {
     const CALIBRATION_ILLUMINANT_2: u16 = 0xC65B;
     const SUB_IFDS: u16 = 0x014A;
 
+    const OPCODE_LIST_2: u16 = 51009;
+    const OPCODE_LIST_3: u16 = 51022;
+
+    /// The lens opcodes a DNG carries: OpcodeList2's (applied to the mosaic) and
+    /// OpcodeList3's (after demosaic), as far as `opcodes` understands them.
+    pub fn opcodes(bytes: &[u8]) -> (Vec<crate::opcodes::Opcode>, Vec<crate::opcodes::Opcode>) {
+        let Some(tiff) = Tiff::new(bytes) else {
+            return (Vec::new(), Vec::new());
+        };
+        let list = |tag| {
+            tiff.find_bytes(tag)
+                .map(crate::opcodes::parse_list)
+                .unwrap_or_default()
+        };
+        (list(OPCODE_LIST_2), list(OPCODE_LIST_3))
+    }
+
     /// The first value of a numeric tag in any TIFF-structured file, DNG or not.
     pub fn tag(bytes: &[u8], tag: u16) -> Option<f64> {
         Tiff::new(bytes)?.find(tag)?.first().copied()
@@ -1121,16 +1186,35 @@ mod dng {
 
         fn find(&self, tag: u16) -> Option<Vec<f64>> {
             let mut seen = Vec::new();
-            self.search(self.u32(4)? as usize, tag, &mut seen, 0)
+            let values = |e: usize, kind: u16, count: usize| self.values(e, kind, count);
+            self.search(self.u32(4)? as usize, tag, &mut seen, 0, &values)
         }
 
-        fn search(
+        /// A tag's bytes as they are, for the byte and undefined types (opcode lists).
+        fn find_bytes(&self, tag: u16) -> Option<&'a [u8]> {
+            let mut seen = Vec::new();
+            let bytes = |e: usize, kind: u16, count: usize| {
+                if !matches!(kind, 1 | 7) {
+                    return None;
+                }
+                let at = if count <= 4 {
+                    e + 8
+                } else {
+                    self.u32(e + 8)? as usize
+                };
+                self.b.get(at..at.checked_add(count)?)
+            };
+            self.search(self.u32(4)? as usize, tag, &mut seen, 0, &bytes)
+        }
+
+        fn search<T>(
             &self,
             ifd: usize,
             tag: u16,
             seen: &mut Vec<usize>,
             depth: u32,
-        ) -> Option<Vec<f64>> {
+            read: &dyn Fn(usize, u16, usize) -> Option<T>,
+        ) -> Option<T> {
             // Malformed files can loop an IFD chain back on itself.
             if ifd == 0 || depth > 8 || seen.contains(&ifd) {
                 return None;
@@ -1142,19 +1226,19 @@ mod dng {
                 let e = ifd + 2 + 12 * i;
                 let (t, kind, count) = (self.u16(e)?, self.u16(e + 2)?, self.u32(e + 4)? as usize);
                 if t == tag {
-                    return self.values(e, kind, count);
+                    return read(e, kind, count);
                 }
                 if t == SUB_IFDS {
                     subs = self.values(e, kind, count).unwrap_or_default();
                 }
             }
             for sub in subs {
-                if let Some(v) = self.search(sub as usize, tag, seen, depth + 1) {
+                if let Some(v) = self.search(sub as usize, tag, seen, depth + 1, read) {
                     return Some(v);
                 }
             }
             let next = self.u32(ifd + 2 + 12 * n)? as usize;
-            self.search(next, tag, seen, depth + 1)
+            self.search(next, tag, seen, depth + 1, read)
         }
 
         fn values(&self, entry: usize, kind: u16, count: usize) -> Option<Vec<f64>> {
@@ -1498,6 +1582,40 @@ mod tests {
             .map(|t| [t[0], t[1]])
             .collect();
         assert!(reds.len() > 700, "{} levels", reds.len());
+    }
+
+    #[test]
+    fn a_dngs_own_lens_opcodes_are_applied() {
+        use crate::opcodes::tests::{f64s, gain_map_params, list};
+        let (w, h) = (64, 48);
+        let plain = DefaultRawDecoder
+            .decode_bytes(&crate::testkit::synth_dng(w, h, false).unwrap())
+            .unwrap();
+        assert!(plain.warp.is_none());
+        // Every photosite's light doubled, and a barrel correction.
+        let list2 = list(&[(9, gain_map_params((0, 0, 1), (2, 2), &[2.0; 4]))]);
+        let warp = [
+            &1u32.to_be_bytes()[..],
+            &f64s(&[1.0, -0.08, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5]),
+        ]
+        .concat();
+        let list3 = list(&[(1, warp)]);
+        let bytes =
+            crate::testkit::synth_dng_with(w, h, false, &[(51009, list2), (51022, list3)]).unwrap();
+        let fixed = DefaultRawDecoder.decode_bytes(&bytes).unwrap();
+        let black = plain.black[1];
+        let (a, b) = (
+            plain.data[w * 20 + 21] as f32,
+            fixed.data[w * 20 + 21] as f32,
+        );
+        assert!(((b - black) - 2.0 * (a - black)).abs() <= 1.0, "{a} -> {b}");
+        let warp = fixed.warp.expect("the warp was not kept");
+        assert_eq!(warp.planes[1], [1.0, -0.08, 0.0, 0.0]);
+        assert!(
+            (warp.centre[0] - w as f32 * 0.5).abs() < 1.0,
+            "{:?}",
+            warp.centre
+        );
     }
 
     #[test]

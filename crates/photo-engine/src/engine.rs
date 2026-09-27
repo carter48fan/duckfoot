@@ -13,7 +13,7 @@ use crate::curve::{build_lut, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, CfaPattern, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
-use crate::lens::LensModel;
+use crate::lens::{FileWarp, LensModel};
 use crate::params::{Denoise, Geometry, PhotoStack, WhiteBalance};
 use crate::temperature::WhiteScale;
 
@@ -111,6 +111,11 @@ struct AdjustUniforms {
     lens: [f32; 4],
     /// x = vignetting correction, stops at the corner.
     lens_b: [f32; 4],
+    /// The file's own warp: kr0..kr3 per plane, then centre xy, radius, 1 when on.
+    warp_r: [f32; 4],
+    warp_g: [f32; 4],
+    warp_b: [f32; 4],
+    warp_c: [f32; 4],
 }
 
 pub struct LoadedImage {
@@ -128,6 +133,8 @@ pub struct LoadedImage {
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
     white_scale: WhiteScale,
+    /// The file's own distortion correction, if it carries one.
+    warp: Option<FileWarp>,
     /// Levels in the sensor texture's mip chain; level 0 is full resolution.
     mip_levels: u32,
     /// Kept so its memory can be recycled when this image is replaced by one the same size.
@@ -318,6 +325,7 @@ pub struct UploadedImage {
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
     white_scale: WhiteScale,
+    warp: Option<FileWarp>,
     pub make: String,
     pub model: String,
 }
@@ -427,6 +435,7 @@ pub fn upload_cfa(
         wb: cfa.wb,
         cam_to_srgb: cfa.cam_to_srgb,
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
+        warp: cfa.warp,
         make: cfa.make,
         model: cfa.model,
     })
@@ -481,6 +490,7 @@ pub fn upload_raster(
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: raster.cam_to_srgb,
         white_scale: WhiteScale::srgb(),
+        warp: None,
         make: raster.make,
         model: raster.model,
     })
@@ -1165,6 +1175,7 @@ impl Engine {
             wb,
             cam_to_srgb,
             white_scale,
+            warp,
             make,
             model,
         } = uploaded;
@@ -1363,6 +1374,7 @@ impl Engine {
             wb,
             cam_to_srgb,
             white_scale,
+            warp,
             mip_levels,
             preview_level,
             sensor_extent: extent,
@@ -1694,6 +1706,7 @@ impl Engine {
     ) {
         let Some(image) = &self.image else { return };
         let lens = LensModel::new(&stack.lens.params);
+        let warp = image.warp;
 
         if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
             let lut = build_lut(&stack.tone_curve.params);
@@ -1855,6 +1868,12 @@ impl Engine {
                 },
                 lens: [lens.k, lens.zoom, lens.ca_red, lens.ca_blue],
                 lens_b: [lens.vignetting_stops, 0.0, 0.0, 0.0],
+                warp_r: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[0]),
+                warp_g: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[1]),
+                warp_b: warp.map_or([1.0, 0.0, 0.0, 0.0], |w| w.planes[2]),
+                warp_c: warp.map_or([0.0, 0.0, 1.0, 0.0], |w| {
+                    [w.centre[0], w.centre[1], w.m, 1.0]
+                }),
             }),
         );
     }
@@ -2370,7 +2389,12 @@ mod tests {
 
 /// Where full-resolution output pixel `out_px` (in the turned, uncropped frame) came from
 /// on the sensor: the shader's `sensor_coords`, on the CPU.
-pub fn sensor_point(stack: &PhotoStack, sensor: (u32, u32), out_px: (f32, f32)) -> (f32, f32) {
+pub fn sensor_point(
+    stack: &PhotoStack,
+    warp: Option<&FileWarp>,
+    sensor: (u32, u32),
+    out_px: (f32, f32),
+) -> (f32, f32) {
     let g = &stack.geometry;
     let (ow, oh) = g.output_size(sensor.0, sensor.1);
     let (mut x, mut y) = (out_px.0 - ow as f32 * 0.5, out_px.1 - oh as f32 * 0.5);
@@ -2388,7 +2412,9 @@ pub fn sensor_point(stack: &PhotoStack, sensor: (u32, u32), out_px: (f32, f32)) 
     if stack.lens.enabled {
         (x, y) = LensModel::new(&stack.lens.params).distorted((x, y), sensor);
     }
-    (x + sensor.0 as f32 * 0.5, y + sensor.1 as f32 * 0.5)
+    let ideal = (x + sensor.0 as f32 * 0.5, y + sensor.1 as f32 * 0.5);
+    // Green's plane: what the eyedropper's patch is read around.
+    warp.map_or(ideal, |w| w.source(1, ideal))
 }
 
 /// What Auto tone chose: exposure and the four tonal controls.
@@ -2464,7 +2490,12 @@ impl Engine {
         };
         let sensor = (image.sensor_width, image.sensor_height);
         let (ow, oh) = geometry.output_size(sensor.0, sensor.1);
-        let (sx, sy) = sensor_point(stack, sensor, (point.0 * ow as f32, point.1 * oh as f32));
+        let (sx, sy) = sensor_point(
+            stack,
+            image.warp.as_ref(),
+            sensor,
+            (point.0 * ow as f32, point.1 * oh as f32),
+        );
         if !(0.0..sensor.0 as f32).contains(&sx) || !(0.0..sensor.1 as f32).contains(&sy) {
             return Ok(None);
         }

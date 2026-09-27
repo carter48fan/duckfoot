@@ -839,7 +839,11 @@ most 1 s of work; Android LMK kills lose nothing that settled.
   6 dB; the edge MTF50 drop is at most 10% at defaults; preview matches export (WP2.1).
 
 **F-04 Lens correction** (DEC-8)
-- **Status:** manual corrections and constrained crop are done, under GPU tests: distortion (a pincushion correction zooms to fill), red and blue fringes, vignetting. Profiles and DNG opcodes are next.
+- **Status:** done except the lensfun profiles, all under tests.
+  - **Constrained crop.**
+  - **Manual corrections:** distortion (a pincushion correction zooms to fill), red and blue fringes, vignetting.
+  - **DNG opcodes:** `GainMap` (OpcodeList2) and `FixVignetteRadial` are applied to the mosaic at decode. `WarpRectilinear` is folded into the shader's inverse mapping, one polynomial per plane, and the eyedropper's CPU mirror follows it. Its tangential terms are not applied.
+  - **Next:** the lensfun profiles.
 - **Module "Lens":**
   - **Profile:** automatic from EXIF `LensModel` against the bundled lensfun XML (parsed
     with `quick-xml`). It gives distortion (ptlens/poly3), TCA and vignetting. A manual
