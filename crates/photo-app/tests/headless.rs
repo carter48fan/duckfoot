@@ -2547,3 +2547,52 @@ fn the_library_lists_its_copies_and_deletes_them_but_not_the_open_one() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records the gesture exclusions the app asks for.
+#[derive(Clone, Default)]
+struct GesturePlatform(std::sync::Arc<std::sync::Mutex<Vec<Vec<[i32; 4]>>>>);
+
+impl Platform for GesturePlatform {
+    fn request(&mut self, _request: Request) {}
+    fn poll(&mut self) -> Vec<Response> {
+        Vec::new()
+    }
+    fn exclude_gestures(&mut self, rects: &[[i32; 4]]) {
+        self.0.lock().unwrap().push(rects.to_vec());
+    }
+}
+
+#[test]
+fn the_phone_keeps_its_swipe_strips_from_the_system_back_gesture() {
+    let dir = scratch_dir("gestures");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 320, 214);
+    let h = Headless::new();
+    let platform = GesturePlatform::default();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+    let phone = egui::vec2(412.0, 892.0);
+    h.frame_sized(&mut app, phone, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.compact_tab = Some(Tab::Edit);
+    for _ in 0..6 {
+        h.frame_sized(&mut app, phone, Default::default());
+    }
+    let last = platform.0.lock().unwrap().last().cloned().expect("asked once");
+    let ppp = h.ctx.pixels_per_point();
+    let height = (phone.y * ppp).round() as i32;
+    // The tab bar along the bottom, full width, and the module strip above it.
+    assert_eq!(last.len(), 2, "{last:?}");
+    assert!(last.iter().any(|r| r[3] >= height - 1 && r[0] <= 0), "{last:?}");
+    assert!(last.iter().all(|r| (r[3] - r[1]) as f32 <= 200.0 * ppp), "{last:?}");
+    // Asked only when they change.
+    let asks = platform.0.lock().unwrap().len();
+    h.frame_sized(&mut app, phone, Default::default());
+    assert_eq!(platform.0.lock().unwrap().len(), asks);
+    // A desktop-sized window takes nothing from the system.
+    for _ in 0..3 {
+        h.frame_sized(&mut app, egui::vec2(1280.0, 720.0), Default::default());
+    }
+    assert_eq!(platform.0.lock().unwrap().last(), Some(&Vec::new()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

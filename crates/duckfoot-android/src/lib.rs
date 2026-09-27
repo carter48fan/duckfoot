@@ -373,6 +373,21 @@ impl Platform for AndroidPlatform {
         true
     }
 
+    fn exclude_gestures(&mut self, rects: &[[i32; 4]]) {
+        let flat: Vec<i32> = rects.iter().flatten().copied().collect();
+        self.bridge.with_env("setGestureExclusion", |env| {
+            let array = env.new_int_array(flat.len() as i32)?;
+            env.set_int_array_region(&array, 0, &flat)?;
+            env.call_method(
+                self.bridge.activity.as_obj(),
+                "setGestureExclusion",
+                "([I)V",
+                &[JValue::Object(&array)],
+            )
+            .map(|_| ())
+        });
+    }
+
     fn export_completed(&mut self, path: &Path) {
         if let Some(path) = path.to_str() {
             self.bridge.call_with_string("scanMediaFile", path);

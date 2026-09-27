@@ -86,6 +86,11 @@ pub trait Platform: Send {
         None
     }
 
+    /// Screen areas, in physical pixels as `[left, top, right, bottom]`, where a swipe from
+    /// the edge is the app's rather than the system's Back gesture. Called when they
+    /// change.
+    fn exclude_gestures(&mut self, _rects: &[[i32; 4]]) {}
+
     /// Called when an image has been successfully written to disk. Used on mobile
     /// platforms to request system indexing into the media library/gallery.
     fn export_completed(&mut self, _path: &std::path::Path) {}

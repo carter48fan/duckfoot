@@ -740,6 +740,8 @@ pub struct PhotoApp {
     tour_step: Option<usize>,
     /// Where the phone layout's parts were last frame, for the tour to point at.
     compact_rects: compact::Rects,
+    /// The gesture exclusions last given the platform, in physical pixels.
+    gestures_excluded: Vec<[i32; 4]>,
 }
 
 impl PhotoApp {
@@ -914,6 +916,7 @@ impl PhotoApp {
             preset: None,
             tour_step: None,
             compact_rects: compact::Rects::default(),
+            gestures_excluded: Vec::new(),
         };
         if unclean {
             app.set_status("Duckfoot did not close cleanly last time; edits up to then were saved");
@@ -1467,6 +1470,23 @@ impl PhotoApp {
             self.export_dialog(&ctx);
             self.paste_picker(&ctx);
             self.shortcuts_overlay(&ctx);
+        }
+        let ppp = ctx.pixels_per_point();
+        let excluded: Vec<[i32; 4]> = self
+            .gesture_strips()
+            .iter()
+            .map(|r| {
+                [
+                    (r.left() * ppp).floor() as i32,
+                    (r.top() * ppp).floor() as i32,
+                    (r.right() * ppp).ceil() as i32,
+                    (r.bottom() * ppp).ceil() as i32,
+                ]
+            })
+            .collect();
+        if excluded != self.gestures_excluded {
+            self.platform.exclude_gestures(&excluded);
+            self.gestures_excluded = excluded;
         }
         if let Some(dir) = self.pending_step.take() {
             self.step_photo(gpu, dir);
