@@ -195,11 +195,92 @@ impl PhotoApp {
                         }
                     }
                 }
+                // Healing: a tap heals a spot there; a spot's circle, or its source's, drags.
+                if let (true, Some(sensor), false) = (self.healing, sensor, self.cropping) {
+                    let mapping = crate::mask_tool::Mapping {
+                        geometry: self.stack.geometry,
+                        sensor,
+                        frame: frame_now,
+                    };
+                    let (ow, _) = self.stack.geometry.output_size(sensor.0, sensor.1);
+                    let per_px = frame_now.width() / ow as f32;
+                    let long = sensor.0.max(sensor.1) as f32;
+                    let slack = if widgets::is_touch(ui.ctx()) { 12.0 } else { 4.0 };
+                    let spots = self.stack.heal.params.spots.clone();
+                    let selected = self.selected_spot;
+                    // The circle under a point: the chosen spot's source first, then any spot.
+                    let hit = |p: egui::Pos2| -> Option<(usize, bool)> {
+                        let within = |at: [f32; 2], r: f32| {
+                            mapping.to_screen(at).distance(p) <= r * long * per_px + slack
+                        };
+                        if let Some(i) = selected {
+                            if let Some(s) = spots.get(i) {
+                                if within(s.src, s.radius) {
+                                    return Some((i, true));
+                                }
+                            }
+                        }
+                        spots
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, s)| within(s.dst, s.radius))
+                            .map(|(i, _)| (i, false))
+                    };
+                    if response.drag_started() {
+                        let origin = ui.input(|i| i.pointer.press_origin());
+                        if let Some(at) = origin.or(response.interact_pointer_pos()) {
+                            if let Some((i, is_src)) = hit(at) {
+                                self.history.checkpoint(&self.stack);
+                                self.selected_spot = Some(i);
+                                self.spot_drag = Some((is_src, at, spots[i]));
+                            }
+                        }
+                    }
+                    if let (Some((is_src, from, start)), Some(p), Some(i)) =
+                        (self.spot_drag, response.interact_pointer_pos(), self.selected_spot)
+                    {
+                        let (a, b) = (mapping.to_sensor(from), mapping.to_sensor(p));
+                        let d = [b[0] - a[0], b[1] - a[1]];
+                        let mut moved = start;
+                        let target = if is_src { &mut moved.src } else { &mut moved.dst };
+                        *target = [target[0] + d[0], target[1] + d[1]];
+                        if let Some(spot) = self.stack.heal.params.spots.get_mut(i) {
+                            if *spot != moved {
+                                *spot = moved;
+                                self.needs_render = true;
+                            }
+                        }
+                    }
+                    if response.clicked() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            match hit(p) {
+                                Some((i, _)) => self.selected_spot = Some(i),
+                                None if frame_now.contains(p)
+                                    && spots.len() < photo_engine::heal::MAX_SPOTS =>
+                                {
+                                    self.pending_spot =
+                                        Some((mapping.to_sensor(p), self.spot_size / 100.0));
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    if let Some(p) = response.hover_pos() {
+                        ui.ctx().set_cursor_icon(if hit(p).is_some() {
+                            egui::CursorIcon::Grab
+                        } else {
+                            egui::CursorIcon::Crosshair
+                        });
+                    }
+                }
                 if response.drag_stopped() {
                     self.mask_drag = None;
                     self.painting = None;
+                    self.spot_drag = None;
                 }
-                let mask_dragging = self.mask_drag.is_some() || self.painting.is_some();
+                let mask_dragging =
+                    self.mask_drag.is_some() || self.painting.is_some() || self.spot_drag.is_some();
 
                 // With nothing to pan at fit, a drag anywhere on the image moves the divider.
                 if self.split_active
@@ -389,6 +470,7 @@ impl PhotoApp {
                     && !self.split_active
                     && !mask_dragging
                     && self.selected_mask.is_none()
+                    && !self.healing
                 {
                     if response.drag_started() {
                         self.swipe_from = response.interact_pointer_pos();
@@ -610,6 +692,46 @@ impl PhotoApp {
                         } else {
                             "MASK · drag the handles · Esc puts them away"
                         },
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+
+                // Heal spots: every spot's circle, and the chosen one's source joined to it.
+                if let (true, Some(sensor), false) = (self.healing, sensor, self.cropping) {
+                    let mapping = crate::mask_tool::Mapping {
+                        geometry: self.stack.geometry,
+                        sensor,
+                        frame,
+                    };
+                    let (ow, _) = self.stack.geometry.output_size(sensor.0, sensor.1);
+                    let per_px = frame.width() / ow as f32;
+                    let long = sensor.0.max(sensor.1) as f32;
+                    let dark = Stroke::new(3.0, Color32::from_black_alpha(140));
+                    for (i, spot) in self.stack.heal.params.spots.iter().enumerate() {
+                        let r = spot.radius * long * per_px;
+                        let dst = mapping.to_screen(spot.dst);
+                        let chosen = self.selected_spot == Some(i);
+                        let colour = if chosen { theme::ACCENT } else { theme::TEXT_HI };
+                        painter.circle_stroke(dst, r, dark);
+                        painter.circle_stroke(dst, r, Stroke::new(1.5, colour));
+                        if chosen {
+                            let src = mapping.to_screen(spot.src);
+                            let soft = Stroke::new(1.2, colour.linear_multiply(0.7));
+                            painter.circle_stroke(src, r, dark);
+                            painter.circle_stroke(src, r, soft);
+                            let d = dst - src;
+                            if d.length() > 2.0 * r {
+                                let n = d.normalized();
+                                painter.line_segment([src + n * r, dst - n * r], soft);
+                            }
+                        }
+                    }
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "HEAL · tap a spot · drag a circle or its source · Esc stops",
                         theme::ACCENT,
                         theme::ACCENT,
                     );

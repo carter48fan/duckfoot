@@ -204,6 +204,15 @@ pub(crate) fn summarise(
             };
             (text, *p != d.lens.params)
         }
+        S::Heal => {
+            let n = s.heal.params.spots.len();
+            let text = match n {
+                0 => "none".to_string(),
+                1 => "1 spot".to_string(),
+                n => format!("{n} spots"),
+            };
+            (text, n > 0)
+        }
         S::Local => {
             let n = s.local.params.masks.len();
             let text = match n {

@@ -461,6 +461,9 @@ impl PhotoApp {
         self.selected_mask = None;
         self.mask_drag = None;
         self.painting = None;
+        self.selected_spot = None;
+        self.spot_drag = None;
+        self.pending_spot = None;
         self.sidecar_locked = false;
         self.decode_failed = false;
         let (saved, metadata, snapshots) = match photo_engine::load_sidecar_full(path) {

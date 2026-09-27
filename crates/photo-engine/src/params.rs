@@ -567,6 +567,8 @@ pub struct PhotoStack {
     pub denoise: Module<Denoise>,
     #[serde(default)]
     pub local: Module<crate::local::Locals>,
+    #[serde(default)]
+    pub heal: Module<crate::heal::Spots>,
 }
 
 impl Default for PhotoStack {
@@ -611,6 +613,7 @@ impl Default for PhotoStack {
             lens: Module::new(false, Lens::default()),
             denoise: Module::new(false, Denoise::default()),
             local: Module::new(false, crate::local::Locals::default()),
+            heal: Module::new(false, crate::heal::Spots::default()),
         }
     }
 }
@@ -633,6 +636,7 @@ pub(crate) mod flags {
     /// says everything that is on.
     pub const DENOISE: u32 = 8192;
     pub const LOCAL: u32 = 16384;
+    pub const HEAL: u32 = 32768;
 }
 
 impl PhotoStack {
@@ -683,6 +687,9 @@ impl PhotoStack {
         if self.local.enabled && self.local.params.masks.iter().any(|m| m.on) {
             m |= flags::LOCAL;
         }
+        if self.heal.enabled && !self.heal.params.spots.is_empty() {
+            m |= flags::HEAL;
+        }
         m
     }
 }
@@ -716,6 +723,7 @@ impl PhotoStack {
             *nodes = crate::curve::identity_nodes();
         }
         s.local.params = s.local.params.sanitised();
+        s.heal.params = s.heal.params.sanitised();
         s
     }
 }

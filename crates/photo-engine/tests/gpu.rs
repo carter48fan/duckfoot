@@ -1697,3 +1697,53 @@ fn the_scopes_do_not_measure_the_mask_wash() {
     let washed = settle(&mut engine, &stack);
     assert_eq!(before, washed, "the red wash reached the scopes");
 }
+
+#[test]
+fn a_healed_spot_takes_the_ground_around_it_and_clone_copies_its_source() {
+    use photo_engine::heal::{Mode, Spot};
+    let gpu = gpu_or_skip!();
+    // A smooth gradient with a dark speck of dust on it.
+    let (w, h) = (192u32, 128u32);
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let ground = 0.1 + 0.3 * x as f32 / w as f32;
+        let speck = ((x as f32 - 96.0).powi(2) + (y as f32 - 64.0).powi(2)).sqrt() < 4.0;
+        [if speck { 0.01 } else { ground }; 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    let dirty = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let centre = |out: &photo_engine::ExportedImage| grey_at(out, 96, 64)[1];
+    assert!(centre(&dirty) < 0.02);
+
+    let dst = [96.5 / w as f32, 64.5 / h as f32];
+    let radius = 7.0 / w as f32;
+    let src = engine
+        .heal_source(&gpu.device, &gpu.queue, dst, radius)
+        .unwrap();
+    // Up or down the gradient's line, where the ground matches.
+    assert!((src[0] - dst[0]).abs() * (w as f32) < 6.0, "source {src:?}");
+    stack.heal.enabled = true;
+    stack.heal.params.spots.push(Spot::new(dst, src, radius));
+    let healed = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let ground = 0.1 + 0.3 * 96.0 / w as f32;
+    assert!(
+        (centre(&healed) - ground).abs() < 0.02,
+        "healed to {}",
+        centre(&healed)
+    );
+
+    // Clone, from the dark end, copies what is there without matching it.
+    stack.heal.params.spots[0] = Spot {
+        src: [30.0 / w as f32, dst[1]],
+        mode: Mode::Clone,
+        ..stack.heal.params.spots[0]
+    };
+    let cloned = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let there = 0.1 + 0.3 * 30.0 / w as f32;
+    assert!(
+        (centre(&cloned) - there).abs() < 0.02,
+        "cloned {}",
+        centre(&cloned)
+    );
+}

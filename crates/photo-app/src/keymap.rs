@@ -85,8 +85,8 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(
         Editing,
-        "`Esc` with a mask chosen",
-        "put the mask's handles away",
+        "`Esc` with a mask chosen or healing",
+        "put the mask's handles away / stop healing",
     ),
     s(Editing, "`C`", "crop tool on / off"),
     s(Editing, "`Enter` / `Esc`", "apply / cancel the crop"),

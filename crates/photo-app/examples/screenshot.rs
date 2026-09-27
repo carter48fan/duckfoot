@@ -202,6 +202,29 @@ fn main() -> anyhow::Result<()> {
             s.collapsed = s.id != photo_app::InspectorSectionId::Local;
         }
     }
+    // DUCKFOOT_SHOT_HEAL=1: healing, three spots, one chosen; DUCKFOOT_SHOT_DUST=1 too for
+    // the dust view.
+    if std::env::var_os("DUCKFOOT_SHOT_HEAL").is_some() {
+        app.edit(|s| {
+            s.heal.enabled = true;
+            for (d, src) in [
+                ([0.3, 0.4], [0.3, 0.55]),
+                ([0.55, 0.3], [0.62, 0.36]),
+                ([0.7, 0.7], [0.6, 0.72]),
+            ] {
+                s.heal
+                    .params
+                    .spots
+                    .push(photo_engine::heal::Spot::new(d, src, 0.025));
+            }
+        });
+        app.healing = true;
+        app.selected_spot = Some(0);
+        app.dust_view = std::env::var_os("DUCKFOOT_SHOT_DUST").is_some();
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Heal;
+        }
+    }
     // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
     if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
         app.begin_crop();

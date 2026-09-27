@@ -1802,6 +1802,54 @@ fn a_brush_mask_is_painted_by_dragging_and_erased_the_same_way() {
 }
 
 #[test]
+fn a_tap_heals_a_spot_and_its_source_can_be_dragged() {
+    let dir = scratch_dir("heal");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    app.healing = true;
+    h.frame(&mut app, Default::default());
+    let frame = app.stage_frame().expect("the stage is drawn");
+    let at = frame.center() + egui::vec2(-40.0, 10.0);
+    let depth = app.history_len();
+    tap(&h, &mut app, egui::vec2(1440.0, 900.0), at);
+    h.frame(&mut app, Default::default());
+    let spots = &app.stack().heal.params.spots;
+    assert_eq!(spots.len(), 1, "the tap healed nothing");
+    assert!(app.stack().heal.enabled);
+    assert_eq!(app.selected_spot, Some(0));
+    assert_eq!(app.history_len(), depth + 1);
+    let spot = spots[0];
+    let want = [
+        (at.x - frame.left()) / frame.width(),
+        (at.y - frame.top()) / frame.height(),
+    ];
+    assert!((spot.dst[0] - want[0]).abs() < 0.01 && (spot.dst[1] - want[1]).abs() < 0.01);
+
+    // Its source, dragged, moves; the spot stays.
+    let src = egui::pos2(
+        frame.left() + spot.src[0] * frame.width(),
+        frame.top() + spot.src[1] * frame.height(),
+    );
+    drag(&h, &mut app, src, src + egui::vec2(0.0, 30.0));
+    let moved = app.stack().heal.params.spots[0];
+    assert_eq!(moved.dst, spot.dst);
+    assert!(
+        moved.src[1] > spot.src[1] + 0.02,
+        "{:?} -> {:?}",
+        spot.src,
+        moved.src
+    );
+    h.frame(&mut app, key(egui::Key::Escape));
+    assert!(!app.healing);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_fixed_aspect_holds_through_handles_and_a_drag_outside_straightens() {
     use photo_app::crop_tool::Aspect;
     let dir = scratch_dir("cropaspect");
@@ -2070,8 +2118,32 @@ fn no_controls_overlap_on_any_screen() {
         check(&mut app, "phone, a brush chosen", size);
     }
     app.compact_tab = None;
-    app.inspector_sections = layout;
     app.selected_mask = None;
+    // Healing, with a spot chosen.
+    app.edit(|s| {
+        s.heal.enabled = true;
+        s.heal
+            .params
+            .spots
+            .push(photo_engine::heal::Spot::new([0.4, 0.5], [0.6, 0.5], 0.02));
+    });
+    app.healing = true;
+    app.selected_spot = Some(0);
+    for s in &mut app.inspector_sections {
+        s.collapsed = s.id != photo_app::InspectorSectionId::Heal;
+    }
+    for size in desktops {
+        check(&mut app, "healing", size);
+    }
+    app.compact_tab = Some(Tab::Edit);
+    app.compact_module = photo_app::InspectorSectionId::Heal;
+    for size in [egui::vec2(412.0, 892.0), egui::vec2(360.0, 740.0)] {
+        check(&mut app, "phone, healing", size);
+    }
+    app.compact_tab = None;
+    app.healing = false;
+    app.selected_spot = None;
+    app.inspector_sections = layout;
     // Every card open at once, scrolled through by the detector's clip.
     let layout = app.inspector_sections.clone();
     for s in &mut app.inspector_sections {
