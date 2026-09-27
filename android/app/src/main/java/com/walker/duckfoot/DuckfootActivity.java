@@ -54,6 +54,7 @@ public class DuckfootActivity extends NativeActivity {
     private static final int PICK_OPEN = 0;
     private static final int PICK_ADD = 1;
     private static final int PICK_FOLDER = 2;
+    private static final int PICK_PRESET = 3;
 
     /** Enough of a file to tell two photos of the same name and size apart. */
     private static final int HEAD_BYTES = 64 * 1024;
@@ -239,6 +240,13 @@ public class DuckfootActivity extends NativeActivity {
             }
             return;
         }
+        if (requestCode == PICK_PRESET) {
+            Uri preset = data.getData();
+            if (preset != null) {
+                importer.execute(() -> importPreset(preset));
+            }
+            return;
+        }
         List<Uri> uris = new ArrayList<>();
         ClipData clip = data.getClipData();
         if (clip != null) {
@@ -301,6 +309,29 @@ public class DuckfootActivity extends NativeActivity {
         }
         if (event.size() > 1) {
             post(event.toArray(new String[0]));
+        }
+    }
+
+    /**
+     * A preset file, copied where Rust can read it; Rust checks it is one and adds it to
+     * its presets folder.
+     */
+    private void importPreset(Uri uri) {
+        if (!awaitNative()) {
+            return;
+        }
+        File dir = new File(getCacheDir(), "presets");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            post("status", "Could not create a folder for the preset.");
+            return;
+        }
+        try {
+            Doc doc = describe(uri);
+            File copy = copyInto(dir, doc, uri);
+            post("preset", copy.getAbsolutePath());
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "preset import failed: " + uri, e);
+            post("status", "Could not read the preset: " + e.getMessage());
         }
     }
 

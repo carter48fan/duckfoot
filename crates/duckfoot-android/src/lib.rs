@@ -35,6 +35,7 @@ static PROXY: OnceLock<Mutex<EventLoopProxy<UserEvent>>> = OnceLock::new();
 const PICK_OPEN: i32 = 0;
 const PICK_ADD: i32 = 1;
 const PICK_FOLDER: i32 = 2;
+const PICK_PRESET: i32 = 3;
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
@@ -283,9 +284,7 @@ impl Platform for AndroidPlatform {
                     }
                 }
             }
-            Request::ImportPreset { .. } => self.answered.push(Response::Status(
-                "Importing presets needs a file picker this build does not have yet".into(),
-            )),
+            Request::ImportPreset { .. } => self.pick(PICK_PRESET),
         }
     }
 
@@ -300,6 +299,7 @@ impl Platform for AndroidPlatform {
                 "open" => out.extend(paths.next().map(Response::OpenImage)),
                 "add" if !args.is_empty() => out.push(Response::AddImages(paths.collect())),
                 "folder" => out.extend(paths.next().map(Response::BrowseFolder)),
+                "preset" => out.extend(paths.next().map(Response::ImportPreset)),
                 // Progress and problems alike go to the status bar.
                 "status" => out.extend(args.into_iter().next().map(Response::Status)),
                 other => log::warn!("unknown event from the activity: {other}"),
