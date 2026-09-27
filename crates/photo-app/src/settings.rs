@@ -36,6 +36,8 @@ pub struct Settings {
     pub batch_output_dir: Option<PathBuf>,
     /// The shelf's filter and sort (the search is not kept).
     pub filter: Option<crate::dam::FilterState>,
+    /// Keep a straightened photo's crop on photographed pixels (no empty corners).
+    pub constrain_crop: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +59,7 @@ impl Default for Settings {
             export: None,
             batch_output_dir: None,
             filter: None,
+            constrain_crop: true,
         }
     }
 }

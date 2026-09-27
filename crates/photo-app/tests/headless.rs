@@ -1852,3 +1852,36 @@ fn no_controls_overlap_on_any_screen() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(found.is_empty(), "{} overlaps", found.len());
 }
+
+#[test]
+fn straightening_keeps_the_crop_on_the_photo_unless_told_not_to() {
+    use photo_app::crop_tool::covered;
+    let dir = scratch_dir("constrain");
+    let raw = dir.join("a.dng");
+    write_dng(&raw, 640, 426);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+
+    app.edit(|s| s.geometry.straighten_deg = 8.0);
+    h.frame(&mut app, Default::default());
+    let c = app.stack().geometry.crop;
+    assert!(!c.is_full_frame(), "the corners would show");
+    assert!(covered(c, 8.0, (640.0, 426.0)), "{c:?}");
+    // One edit: undo takes back the turn and the crop it caused together.
+    assert!(app.undo());
+    h.frame(&mut app, Default::default());
+    assert!(app.stack().geometry.crop.is_full_frame());
+    assert_eq!(app.stack().geometry.straighten_deg, 0.0);
+
+    app.set_constrain_crop(false);
+    app.edit(|s| s.geometry.straighten_deg = 8.0);
+    h.frame(&mut app, Default::default());
+    assert!(
+        app.stack().geometry.crop.is_full_frame(),
+        "left as it is when off"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
