@@ -107,54 +107,124 @@ impl PhotoApp {
                 }
 
                 if self.cropping {
-                    // In crop mode a drag frames the picture instead of moving it: from
-                    // outside the crop it draws a new one, from inside it slides this one.
-                    // Nothing is checkpointed per drag — Apply makes the session one step.
-                    let to_norm = |p: egui::Pos2| {
+                    // In crop mode a drag frames the picture instead of moving it: on a
+                    // handle it moves that edge or corner, inside the crop it slides it,
+                    // outside it turns the photo, and on an uncropped frame it draws one.
+                    // Nothing is checkpointed per drag - Apply makes the session one step
+                    // - except a turn, which is its own step as a quarter turn is.
+                    let unclamped = |p: egui::Pos2| {
                         egui::pos2(
-                            ((p.x - frame_now.left()) / frame_now.width()).clamp(0.0, 1.0),
-                            ((p.y - frame_now.top()) / frame_now.height()).clamp(0.0, 1.0),
+                            (p.x - frame_now.left()) / frame_now.width(),
+                            (p.y - frame_now.top()) / frame_now.height(),
                         )
                     };
+                    let to_norm = |p: egui::Pos2| {
+                        let n = unclamped(p);
+                        egui::pos2(n.x.clamp(0.0, 1.0), n.y.clamp(0.0, 1.0))
+                    };
+                    let frame_size = (frame_now.width(), frame_now.height());
+                    let tolerance = if widgets::is_touch(ui.ctx()) { 22.0 } else { 10.0 };
                     let current = self.stack.geometry.crop.sanitised();
-                    let inside = |p: egui::Pos2| {
-                        !current.is_full_frame()
-                            && (current.x..=current.x + current.width).contains(&p.x)
-                            && (current.y..=current.y + current.height).contains(&p.y)
+                    let framed_now = egui::Rect::from_min_size(
+                        frame_now.min
+                            + egui::vec2(current.x * frame_now.width(), current.y * frame_now.height()),
+                        egui::vec2(
+                            current.width * frame_now.width(),
+                            current.height * frame_now.height(),
+                        ),
+                    );
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let ratio_now = |c: Crop| {
+                        self.crop_aspect.pixel_ratio(frame_size).or_else(|| {
+                            shift.then(|| (c.width * frame_size.0) / (c.height * frame_size.1))
+                        })
+                    };
+                    let grip_under = |p: egui::Pos2| {
+                        crop_tool::grip_at(current, unclamped(p), frame_size, tolerance)
                     };
                     if response.drag_started() {
-                        self.crop_drag = response.interact_pointer_pos().map(to_norm).map(|p| {
-                            if inside(p) {
-                                CropDrag::Move {
-                                    grab: p,
-                                    start: current,
+                        self.crop_drag = response.interact_pointer_pos().map(|p| {
+                            let on_frame = frame_now.contains(p);
+                            match grip_under(p) {
+                                // An uncropped frame is all "inside": a drag across it
+                                // draws, and only its edges and corners are handles.
+                                Some(crop_tool::Grip::Move) if current.is_full_frame() => {
+                                    CropDrag::Draw { anchor: to_norm(p) }
                                 }
-                            } else {
-                                CropDrag::Draw { anchor: p }
+                                Some(grip) => CropDrag::Grip {
+                                    grip,
+                                    grab: unclamped(p),
+                                    start: current,
+                                    ratio: ratio_now(current),
+                                },
+                                None if current.is_full_frame() && on_frame => {
+                                    CropDrag::Draw { anchor: to_norm(p) }
+                                }
+                                None => {
+                                    self.history.checkpoint(&self.stack);
+                                    let v = p - framed_now.center();
+                                    CropDrag::Rotate {
+                                        centre: framed_now.center(),
+                                        from_angle: v.y.atan2(v.x),
+                                        from_deg: self.stack.geometry.straighten_deg,
+                                    }
+                                }
                             }
                         });
                     }
-                    if let (Some(drag), Some(now)) =
-                        (self.crop_drag, response.interact_pointer_pos().map(to_norm))
+                    if let (Some(drag), Some(pointer)) =
+                        (self.crop_drag, response.interact_pointer_pos())
                     {
                         if response.dragged() || response.drag_stopped() {
-                            let crop = match drag {
-                                CropDrag::Draw { anchor } => Crop {
-                                    x: anchor.x.min(now.x),
-                                    y: anchor.y.min(now.y),
-                                    width: (now.x - anchor.x).abs(),
-                                    height: (now.y - anchor.y).abs(),
-                                },
-                                CropDrag::Move { grab, start } => Crop {
-                                    x: start.x + now.x - grab.x,
-                                    y: start.y + now.y - grab.y,
-                                    ..start
-                                },
-                            }
-                            .sanitised();
-                            if crop != self.stack.geometry.crop {
-                                self.stack.geometry.crop = crop;
-                                self.needs_render = true;
+                            match drag {
+                                CropDrag::Rotate {
+                                    centre,
+                                    from_angle,
+                                    from_deg,
+                                } => {
+                                    let v = pointer - centre;
+                                    let turned = (v.y.atan2(v.x) - from_angle).to_degrees();
+                                    // Positive straighten turns the picture clockwise on
+                                    // screen, so it follows the hand that turns it.
+                                    let deg = (from_deg + turned).clamp(-45.0, 45.0);
+                                    if (deg - self.stack.geometry.straighten_deg).abs() > 1e-3 {
+                                        self.stack.geometry.straighten_deg = deg;
+                                        self.needs_render = true;
+                                    }
+                                }
+                                CropDrag::Draw { anchor } => {
+                                    let crop = crop_tool::drawn(
+                                        anchor,
+                                        to_norm(pointer),
+                                        ratio_now(current),
+                                        frame_size,
+                                    )
+                                    .sanitised();
+                                    if crop != self.stack.geometry.crop {
+                                        self.stack.geometry.crop = crop;
+                                        self.needs_render = true;
+                                    }
+                                }
+                                CropDrag::Grip {
+                                    grip,
+                                    grab,
+                                    start,
+                                    ratio,
+                                } => {
+                                    let crop = crop_tool::dragged(
+                                        start,
+                                        grip,
+                                        grab,
+                                        unclamped(pointer),
+                                        ratio,
+                                        frame_size,
+                                    )
+                                    .sanitised();
+                                    if crop != self.stack.geometry.crop {
+                                        self.stack.geometry.crop = crop;
+                                        self.needs_render = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -162,10 +232,22 @@ impl PhotoApp {
                         self.crop_drag = None;
                     }
                     if let Some(p) = response.hover_pos() {
-                        let moving = matches!(self.crop_drag, Some(CropDrag::Move { .. }));
-                        if moving || (self.crop_drag.is_none() && inside(to_norm(p))) {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
-                        }
+                        let cursor = match self.crop_drag {
+                            Some(CropDrag::Grip { grip, .. }) => grip.cursor(),
+                            Some(CropDrag::Rotate { .. }) => egui::CursorIcon::Grabbing,
+                            Some(CropDrag::Draw { .. }) => egui::CursorIcon::Crosshair,
+                            None => match grip_under(p) {
+                                Some(crop_tool::Grip::Move) if current.is_full_frame() => {
+                                    egui::CursorIcon::Crosshair
+                                }
+                                Some(grip) => grip.cursor(),
+                                None if current.is_full_frame() && frame_now.contains(p) => {
+                                    egui::CursorIcon::Crosshair
+                                }
+                                None => egui::CursorIcon::Grab,
+                            },
+                        };
+                        ui.ctx().set_cursor_icon(cursor);
                     }
                 } else if response.dragged() && !at_fit && !self.split_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
@@ -223,6 +305,7 @@ impl PhotoApp {
                     img * scale,
                 );
                 let frame = frame_of(dest);
+                self.stage_frame = Some(frame);
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.image(
                     id,
@@ -288,24 +371,43 @@ impl PhotoApp {
                         egui::StrokeKind::Inside,
                     );
                     let thin = egui::Stroke::new(1.0, theme::TEXT.linear_multiply(0.25));
-                    for i in 1..3 {
-                        let t = i as f32 / 3.0;
-                        let x = framed.left() + framed.width() * t;
-                        let y = framed.top() + framed.height() * t;
-                        painter.line_segment(
-                            [egui::pos2(x, framed.top()), egui::pos2(x, framed.bottom())],
-                            thin,
-                        );
-                        painter.line_segment(
-                            [egui::pos2(framed.left(), y), egui::pos2(framed.right(), y)],
-                            thin,
-                        );
+                    let at = |(u, v): (f32, f32)| {
+                        framed.min + egui::vec2(u * framed.width(), v * framed.height())
+                    };
+                    for [a, b] in self.crop_guide.lines() {
+                        painter.line_segment([at(a), at(b)], thin);
+                    }
+                    // Handles: an L at each corner and a bar at each edge's middle.
+                    let handle = egui::Stroke::new(3.0, theme::ACCENT);
+                    let arm = (framed.width().min(framed.height()) * 0.2).clamp(6.0, 18.0);
+                    for (corner, dx, dy) in [
+                        (framed.left_top(), 1.0, 1.0),
+                        (framed.right_top(), -1.0, 1.0),
+                        (framed.left_bottom(), 1.0, -1.0),
+                        (framed.right_bottom(), -1.0, -1.0),
+                    ] {
+                        painter.line_segment([corner, corner + egui::vec2(dx * arm, 0.0)], handle);
+                        painter.line_segment([corner, corner + egui::vec2(0.0, dy * arm)], handle);
+                    }
+                    let half = arm * 0.6;
+                    for (mid, horizontal) in [
+                        (framed.center_top(), true),
+                        (framed.center_bottom(), true),
+                        (framed.left_center(), false),
+                        (framed.right_center(), false),
+                    ] {
+                        let d = if horizontal {
+                            egui::vec2(half, 0.0)
+                        } else {
+                            egui::vec2(0.0, half)
+                        };
+                        painter.line_segment([mid - d, mid + d], handle);
                     }
                     hud_badge(
                         &painter,
                         pos2(framed_view.center().x, framed_view.top() + 12.0),
                         Align2::CENTER_TOP,
-                        "CROP · drag to frame · drag inside to move · Enter apply · Esc cancel",
+                        "CROP · handles resize · inside moves · outside turns · X swaps · O guides · Enter / Esc",
                         theme::ACCENT,
                         theme::ACCENT,
                     );

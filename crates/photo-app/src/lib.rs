@@ -15,6 +15,7 @@ pub mod theme;
 pub mod tonemap_3d;
 pub mod widgets;
 
+pub mod crop_tool;
 mod curve_editor;
 mod desktop;
 mod export_flow;
@@ -180,10 +181,22 @@ pub struct Gpu<'a> {
 /// A drag in crop mode, in normalised coordinates of the full frame.
 #[derive(Debug, Clone, Copy)]
 enum CropDrag {
-    /// Started outside the crop: draws a new one from this corner.
+    /// Started on an uncropped frame: draws a crop from this corner.
     Draw { anchor: egui::Pos2 },
-    /// Started inside it: slides the whole crop, keeping its size.
-    Move { grab: egui::Pos2, start: Crop },
+    /// Started on the crop: moves it (inside) or one edge or corner (on a handle).
+    Grip {
+        grip: crop_tool::Grip,
+        grab: egui::Pos2,
+        start: Crop,
+        /// Pixel width over height to keep, if the aspect is fixed or Shift held.
+        ratio: Option<f32>,
+    },
+    /// Started outside the crop: turns the photo (straighten) about the crop's centre.
+    Rotate {
+        centre: egui::Pos2,
+        from_angle: f32,
+        from_deg: f32,
+    },
 }
 
 /// Zoom and pan over the image.
@@ -386,6 +399,11 @@ pub struct PhotoApp {
     crop_before: Crop,
     /// The crop drag in progress.
     crop_drag: Option<CropDrag>,
+    /// The crop's fixed shape, if any, and the guide drawn over it.
+    pub crop_aspect: crop_tool::Aspect,
+    pub crop_guide: crop_tool::Guide,
+    /// Where the whole frame was drawn on the stage last frame.
+    stage_frame: Option<egui::Rect>,
     /// The Shelf: assets in the project/session.
     pub shelf: Vec<ShelfItem>,
     pub shelf_open: bool,
@@ -580,6 +598,9 @@ impl PhotoApp {
             cropping: false,
             crop_before: Crop::default(),
             crop_drag: None,
+            crop_aspect: crop_tool::Aspect::Free,
+            crop_guide: crop_tool::Guide::default(),
+            stage_frame: None,
             shelf: Vec::new(),
             shelf_open: true,
             split_active: false,
@@ -731,6 +752,11 @@ impl PhotoApp {
     pub fn set_ui_scale(&mut self, scale: f32) {
         self.settings.ui_scale = scale.clamp(0.85, 1.5);
         self.save_settings();
+    }
+
+    /// Where the whole frame (uncropped while framing a crop) was on the stage last frame.
+    pub fn stage_frame(&self) -> Option<egui::Rect> {
+        self.stage_frame
     }
 
     pub fn is_stack_edited(&self) -> bool {
