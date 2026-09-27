@@ -38,6 +38,8 @@ pub struct Settings {
     pub filter: Option<crate::dam::FilterState>,
     /// Keep a straightened photo's crop on photographed pixels (no empty corners).
     pub constrain_crop: bool,
+    /// What paste carries (W-03).
+    pub paste: Option<crate::paste::PasteSet>,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             batch_output_dir: None,
             filter: None,
             constrain_crop: true,
+            paste: None,
         }
     }
 }

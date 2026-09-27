@@ -1304,7 +1304,20 @@ impl PhotoApp {
                     self.paste_to_all_in_shelf();
                 }
             }
+            if widgets::chip(ui, self.paste_picker_open, "what pastes").clicked() {
+                self.paste_picker_open = !self.paste_picker_open;
+            }
         });
+        if self.paste_picker_open {
+            egui::Frame::new()
+                .fill(theme::BG_925)
+                .corner_radius(8)
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.paste_set_editor(ui);
+                });
+        }
     }
 
     /// A quarter turn from the Edit strip, as one undo step.
