@@ -640,7 +640,9 @@ pub fn scaled_slider(
     scale: SliderScale,
 ) -> Response {
     ui.horizontal(|ui| {
-        const LABEL_W: f32 = 74.0;
+        // Room for the longest label in the stack ("smoothness") at either size, so a
+        // module's rails start in one column.
+        let label_col = sized(ui, 74.0, 82.0);
         // The value box is sized from its widest possible text, not a guess. In a side panel,
         // a row that overflows by even a few pixels is read as content asking for a wider
         // panel — and it asks again every frame.
@@ -670,7 +672,7 @@ pub fn scaled_slider(
         );
         // Wider than the common column only for a label that needs it: painted text is no
         // widget, so nothing else would stop it running under the rail.
-        let label_w = LABEL_W.max(text.size().x + 6.0);
+        let label_w = label_col.max(text.size().x + 6.0);
         let (label_rect, mut label_response) =
             ui.allocate_exact_size(vec2(label_w, row_h), Sense::click());
         ui.painter().galley(

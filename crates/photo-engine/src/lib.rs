@@ -42,9 +42,9 @@ pub use histogram::Histogram;
 pub use lens::LensModel;
 pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{
-    Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Exposure, ExposureMode,
-    Filmic, Geometry, Lens, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance, Vignette,
-    WhiteBalance,
+    Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Denoise, Exposure,
+    ExposureMode, Filmic, Geometry, Lens, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance,
+    Vignette, WhiteBalance,
 };
 pub use preview::{
     decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
@@ -159,6 +159,8 @@ mod tests {
             ("demosaic_rb.wgsl", include_str!("shaders/demosaic_rb.wgsl")),
             ("downsample.wgsl", include_str!("shaders/downsample.wgsl")),
             ("histogram.wgsl", include_str!("shaders/histogram.wgsl")),
+            ("denoise.wgsl", include_str!("shaders/denoise.wgsl")),
+            ("clip_mask.wgsl", include_str!("shaders/clip_mask.wgsl")),
         ];
 
         let mut validator = wgpu::naga::valid::Validator::new(

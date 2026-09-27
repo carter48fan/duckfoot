@@ -825,6 +825,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
   16-bit TIFF preserves more than 256 levels; dither produces no mean shift.
 
 **F-03 Noise reduction**
+- **Status:** done, under GPU tests. Luminance and colour both run in one cached pre-pass (colour moved there from the fused pass, since it reads coarser levels anyway). There is a "match ISO" starting point. On an 8-bit step target the PSNR gain is 7.9 dB, the edge keeps its width, and false colour drops 5×.
 - **Module "Denoise":** Luminance, Luminance detail, Chroma, Chroma smoothness. The default
   strength scales with ISO from the metadata (F-10).
 - **Chroma:** runs **inline in the fused pass**, as an edge-aware (bilateral) average of

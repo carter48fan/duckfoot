@@ -697,6 +697,38 @@ impl PhotoApp {
                     dp.amount
                 ));
             }
+            InspectorSectionId::Denoise => {
+                let iso = self.open_info().and_then(|i| i.iso);
+                if let Some(iso) = iso {
+                    let suggested = photo_engine::params::Denoise::for_iso(iso);
+                    let lit = self.stack.denoise.enabled && self.stack.denoise.params == suggested;
+                    if widgets::chip(ui, lit, &format!("match ISO {iso}"))
+                        .on_hover_text("A starting strength for how much noise this ISO leaves")
+                        .clicked()
+                    {
+                        self.stack.denoise.params = suggested;
+                        self.stack.denoise.enabled = true;
+                        discrete!();
+                    }
+                }
+                let p = &mut self.stack.denoise.params;
+                let dp = d.denoise.params;
+                for (label, value, default) in [
+                    ("luminance", &mut p.luminance, dp.luminance),
+                    ("detail", &mut p.detail, dp.detail),
+                    ("colour", &mut p.color, dp.color),
+                    ("smoothness", &mut p.smoothness, dp.smoothness),
+                ] {
+                    track!(widgets::param_slider(
+                        ui,
+                        label,
+                        value,
+                        0.0..=100.0,
+                        0,
+                        default
+                    ));
+                }
+            }
             InspectorSectionId::Lens => {
                 let p = &mut self.stack.lens.params;
                 let dp = d.lens.params;
