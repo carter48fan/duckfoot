@@ -179,11 +179,13 @@ impl PhotoApp {
     /// loader's thread; the folders that held photos are watched.
     pub fn open_session_folder(&mut self, _gpu: &Gpu, folder: PathBuf) {
         self.scans_pending += 1;
-        self.set_status(format!("Reading {}…", file_name(&folder)));
+        self.reading = Some(file_name(&folder));
+        self.reads += 1;
         self.loader.file_job(loader::FileJob::Scan {
             folder,
             purpose: loader::ScanFor::Open,
             depth: 4,
+            epoch: Some(self.loader.scan_epoch()),
         });
     }
 
@@ -206,6 +208,26 @@ impl PhotoApp {
                     .file_job(loader::FileJob::Subfolders(dir.to_path_buf()));
                 Vec::new()
             }
+        }
+    }
+
+    /// While a folder is read: how far it has got, with a button that stops it (WP5.8).
+    pub(crate) fn show_reading(&mut self) {
+        let Some(name) = &self.reading else { return };
+        let (folders, photos) = self.loader.scan_progress();
+        let msg = match (folders, photos) {
+            (0, _) => format!("Reading {name}…"),
+            (1, p) => format!("Reading {name}… {p} photos"),
+            (f, p) => format!("Reading {name}… {p} photos in {f} folders"),
+        };
+        self.set_status_undoable(msg, NoticeAction::CancelScan);
+    }
+
+    /// Stops the folder reads under way; nothing they found is shelved.
+    pub fn cancel_reading(&mut self) {
+        if self.reading.take().is_some() {
+            self.loader.cancel_scans();
+            self.set_status("Stopped reading the folder");
         }
     }
 
@@ -896,7 +918,20 @@ impl PhotoApp {
                     folder,
                     purpose,
                     found,
-                } => self.take_scan_result(gpu, folder, purpose, found),
+                    cancelled,
+                } => {
+                    if purpose != loader::ScanFor::Watch {
+                        self.reads = self.reads.saturating_sub(1);
+                        if self.reads == 0 {
+                            self.reading = None;
+                        }
+                    }
+                    if cancelled {
+                        self.scans_pending = self.scans_pending.saturating_sub(1);
+                    } else {
+                        self.take_scan_result(gpu, folder, purpose, found);
+                    }
+                }
                 loader::Done::Subfolders { dir, subs } => {
                     self.subfolders = Some((dir, subs, Instant::now()));
                 }
@@ -1087,10 +1122,13 @@ impl PhotoApp {
                 // Read on the loader's thread, four folders deep.
                 folders += 1;
                 self.scans_pending += 1;
+                self.reading = Some(file_name(&path));
+                self.reads += 1;
                 self.loader.file_job(loader::FileJob::Scan {
                     folder: path,
                     purpose: loader::ScanFor::Drop,
                     depth: 4,
+                    epoch: Some(self.loader.scan_epoch()),
                 });
             } else if photo_engine::is_supported_path(&path) {
                 photos.push(path);

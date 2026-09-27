@@ -453,6 +453,8 @@ pub(crate) enum NoticeAction {
     DeleteSnapshot,
     /// Share the photo just exported.
     Share,
+    /// Stop reading the folder being opened.
+    CancelScan,
 }
 
 impl NoticeAction {
@@ -460,6 +462,7 @@ impl NoticeAction {
     pub(crate) fn label(self) -> &'static str {
         match self {
             NoticeAction::Share => "share",
+            NoticeAction::CancelScan => "cancel",
             _ => "undo",
         }
     }
@@ -650,6 +653,10 @@ pub struct PhotoApp {
     /// Shelved photos whose facts the loader has not sent yet, and folder reads out.
     shelf_pending: HashSet<PathBuf>,
     scans_pending: usize,
+    /// The folder being opened or dropped, while it is read, and how many such reads
+    /// are under way.
+    reading: Option<String>,
+    reads: usize,
     /// The folder browser's last listing, and when it was asked for.
     subfolders: Option<(PathBuf, Vec<PathBuf>, Instant)>,
     /// When each thumbnail was last drawn (a frame count), to evict the stalest (WP5.2).
@@ -866,6 +873,8 @@ impl PhotoApp {
             thumbs_pending: HashSet::new(),
             shelf_pending: HashSet::new(),
             scans_pending: 0,
+            reading: None,
+            reads: 0,
             subfolders: None,
             thumb_used: HashMap::new(),
             frame_no: 0,
@@ -972,6 +981,7 @@ impl PhotoApp {
                 folder: dir,
                 purpose: loader::ScanFor::Watch,
                 depth: 0,
+                epoch: None,
             });
         }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
@@ -1263,6 +1273,7 @@ impl PhotoApp {
             NoticeAction::PasteToAll => self.undo_paste_to_all(),
             NoticeAction::Remove => self.undo_remove_from_shelf(),
             NoticeAction::DeleteSnapshot => self.undo_delete_snapshot(),
+            NoticeAction::CancelScan => self.cancel_reading(),
             NoticeAction::Share => {
                 if let Export::Done { path, .. } = &self.export {
                     let path = path.clone();
@@ -1437,6 +1448,7 @@ impl PhotoApp {
         self.loader.set_context(&ctx);
         self.clip_held = widgets::take_clip_hold(&ctx);
         self.poll_platform(gpu);
+        self.show_reading();
         // A dialog's answer arrives by polling; keep polling while one is open.
         if self.platform.busy() {
             ctx.request_repaint_after(Duration::from_millis(100));

@@ -2663,3 +2663,48 @@ fn a_new_surface_format_keeps_the_photo_and_its_edits() {
     drop(renderer);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_long_folder_read_shows_its_progress_and_can_be_cancelled() {
+    let dir = scratch_dir("cancel-read");
+    let _ = std::fs::remove_dir_all(&dir);
+    // Hundreds of folders: the file thread asks whether to go on before each one, so a
+    // cancel sent straight after the request lands long before the read is through.
+    let png = {
+        let mut bytes = Vec::new();
+        image::RgbImage::new(4, 4)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    };
+    for i in 0..300 {
+        let sub = dir.join(format!("roll {i:03}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.png"), &png).unwrap();
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.open_session_folder(&h.gpu(), dir.clone());
+    h.frame(&mut app, Default::default());
+    let said = app.status_notification.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        said.as_deref().is_some_and(|m| m.starts_with("Reading ")),
+        "{said:?}"
+    );
+    app.cancel_reading();
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.shelf.is_empty(), "a cancelled read shelves nothing");
+    let said = app.status_notification.as_ref().map(|(m, _)| m.as_str());
+    assert_eq!(said, Some("Stopped reading the folder"));
+
+    // Asked again and left alone, it finishes.
+    app.open_session_folder(&h.gpu(), dir.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.shelf.len(),
+        256,
+        "the first 256 folders that hold photos"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

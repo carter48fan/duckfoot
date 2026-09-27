@@ -743,7 +743,7 @@ test.
 - **Manual smoke test:** open, edit, export, then close with the edits kept.
 - **README:** "experimental" labels until the smoke tests pass.
 
-**WP5.8 Recursive import** — L-24 — ✅ done: folders opened or dropped are read four levels deep on the file thread, hidden and system folders skipped, at most 256 folders; each folder that held photos is watched. (Cancelling a long read is still to come.)
+**WP5.8 Recursive import** — L-24 — ✅ done: folders opened or dropped are read four levels deep on the file thread, hidden and system folders skipped, at most 256 folders; each folder that held photos is watched; while a folder opened or dropped is read, the status line counts the photos and folders found so far with a **cancel** button, which stops the read at the next folder and shelves nothing (restored watches are not cancelled).
 - **Implementation:** a folder import on Android and desktop recurses with a depth limit
   (default 4), skipping hidden and system folders. It is cancellable and shows progress,
   and runs on the loader thread (WP5.3).
