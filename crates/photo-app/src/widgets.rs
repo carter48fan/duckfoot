@@ -111,6 +111,20 @@ pub fn allocate_control(ui: &mut Ui, size: Vec2, sense: Sense) -> (Rect, Respons
 
 /// A toggle chip: small bold monospace caps. The barrel switcher, scope modes, the stage
 /// toolbar's CROP and A / B.
+/// How wide a row's trailing controls were last frame, so the next can tell whether they
+/// fit at the right end of the row beside what it already holds. `ui.with_layout(right to
+/// left)` alone does not check: on a narrow window it draws them over the row's left side.
+pub fn trailing_width(ctx: &egui::Context, key: egui::Id) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(key))
+        .unwrap_or(f32::INFINITY)
+}
+
+/// Record how wide `ui`'s contents came out, for [`trailing_width`].
+pub fn remember_trailing_width(ui: &Ui, key: egui::Id) {
+    let w = ui.min_rect().width();
+    ui.ctx().data_mut(|d| d.insert_temp(key, w));
+}
+
 /// What a painter-drawn control is, for screen readers (AccessKit), and a ring round it
 /// while it has keyboard focus, so Tab shows where it is. The ring is outside `rect`, so
 /// the control's own painting, done after, never covers it.
@@ -776,8 +790,10 @@ pub fn module_header(
     let mut active = true;
     let mut x = row.left();
     if let Some(on) = enabled {
+        // Its hit area is 3 px larger all round; set in by that much so it stays inside the
+        // row rather than reaching over the card's edge.
         let box_rect =
-            Rect::from_center_size(pos2(row.left() + 7.0, row.center().y), Vec2::splat(14.0));
+            Rect::from_center_size(pos2(row.left() + 10.0, row.center().y), Vec2::splat(14.0));
         let box_response =
             ui.interact(box_rect.expand(3.0), response.id.with("on"), Sense::click());
         if box_response.clicked() {

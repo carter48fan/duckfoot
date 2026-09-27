@@ -32,8 +32,11 @@ impl PhotoApp {
         egui::Panel::top("stage_toolbar")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin::symmetric(14, 7)))
             .show(ui, |ui| {
+                let loaded = self.ready_image().is_some();
+                let zoom_key = egui::Id::new("stage_zoom_width");
+                let zoom_w = widgets::trailing_width(ui.ctx(), zoom_key);
+                let mut zoom_beside = false;
                 ui.horizontal(|ui| {
-                    let loaded = self.ready_image().is_some();
                     ui.add_enabled_ui(loaded, |ui| {
                         self.crop_chips(ui);
                         if widgets::chip(ui, self.split_active, "a / b")
@@ -51,45 +54,29 @@ impl PhotoApp {
                         }
                     });
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled_ui(loaded, |ui| {
-                            if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
-                                .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
-                                .clicked()
-                            {
-                                self.zoom_actual();
-                            }
-                            if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
-                                .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
-                                .clicked()
-                            {
-                                self.view = View::default();
-                            }
-                            // Right-to-left: + then the readout then −.
-                            pod(ui, |ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                if widgets::icon(ui, "+", false, "Zoom in").clicked() {
-                                    self.zoom_by(1.25);
-                                }
-                                let percent = self
-                                    .zoom_percent(self.last_panel)
-                                    .map_or("—".to_string(), |p| format!("{p:.0}%"));
-                                ui.add_sized(
-                                    [44.0, 20.0],
-                                    egui::Label::new(
-                                        RichText::new(percent)
-                                            .family(theme::mono_bold())
-                                            .size(11.0)
-                                            .color(theme::TEXT_HI),
-                                    ),
-                                );
-                                if widgets::icon(ui, "−", false, "Zoom out").clicked() {
-                                    self.zoom_by(0.8);
-                                }
+                    // Zoom at the right end when it fits beside the rest, as measured last
+                    // frame; otherwise on a row of its own below.
+                    zoom_beside = zoom_w + 12.0 <= ui.available_width();
+                    if zoom_beside {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.scope(|ui| {
+                                self.zoom_controls(ui, loaded);
+                                widgets::remember_trailing_width(ui, zoom_key);
+                            });
+                        });
+                    }
+                });
+                if !zoom_beside {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.scope(|ui| {
+                                self.zoom_controls(ui, loaded);
+                                widgets::remember_trailing_width(ui, zoom_key);
                             });
                         });
                     });
-                });
+                }
                 // Framing a crop: its shapes and guide on a row of their own, which the
                 // row above has no room for.
                 if self.cropping {
@@ -97,6 +84,46 @@ impl PhotoApp {
                     ui.horizontal_wrapped(|ui| self.crop_shape_chips(ui));
                 }
             });
+    }
+
+    /// 1:1, FIT and the zoom readout, laid out right to left.
+    fn zoom_controls(&mut self, ui: &mut egui::Ui, loaded: bool) {
+        ui.add_enabled_ui(loaded, |ui| {
+            if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
+                .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
+                .clicked()
+            {
+                self.zoom_actual();
+            }
+            if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
+                .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
+                .clicked()
+            {
+                self.view = View::default();
+            }
+            // Right-to-left: + then the readout then −.
+            pod(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if widgets::icon(ui, "+", false, "Zoom in").clicked() {
+                    self.zoom_by(1.25);
+                }
+                let percent = self
+                    .zoom_percent(self.last_panel)
+                    .map_or("—".to_string(), |p| format!("{p:.0}%"));
+                ui.add_sized(
+                    [44.0, 20.0],
+                    egui::Label::new(
+                        RichText::new(percent)
+                            .family(theme::mono_bold())
+                            .size(11.0)
+                            .color(theme::TEXT_HI),
+                    ),
+                );
+                if widgets::icon(ui, "−", false, "Zoom out").clicked() {
+                    self.zoom_by(0.8);
+                }
+            });
+        });
     }
 
     /// The shelf as the filter and sort leave it: indices into `self.shelf`, not copies of
@@ -153,7 +180,9 @@ impl PhotoApp {
                 bottom: 10,
             }))
             .show(ui, |ui| {
-                let compact = ui.available_width() < 700.0;
+                let actions_key = egui::Id::new("filmstrip_actions_width");
+                let actions_w = widgets::trailing_width(ui.ctx(), actions_key);
+                let mut beside = false;
                 ui.horizontal(|ui| {
                     ui.label(theme::head("Filmstrip").color(theme::ACCENT));
                     let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
@@ -166,15 +195,23 @@ impl PhotoApp {
                         .size(11.0)
                         .color(Color32::from_gray(0xcc)),
                     );
-                    if !compact {
+                    // Beside the title when they fit there, as last frame measured them.
+                    beside = actions_w + 12.0 <= ui.available_width();
+                    if beside {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            self.filmstrip_actions(ui, true);
+                            ui.scope(|ui| {
+                                self.filmstrip_actions(ui, true);
+                                widgets::remember_trailing_width(ui, actions_key);
+                            });
                         });
                     }
                 });
-                if compact {
+                if !beside {
                     ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| self.filmstrip_actions(ui, false));
+                    ui.horizontal_wrapped(|ui| {
+                        self.filmstrip_actions(ui, false);
+                        widgets::remember_trailing_width(ui, actions_key);
+                    });
                 }
                 ui.add_space(6.0);
 
@@ -188,29 +225,47 @@ impl PhotoApp {
                     self.flag_filter(ui);
                 });
                 ui.add_space(4.0);
+                let selected_key = egui::Id::new("filmstrip_selection_width");
+                let selected_w = widgets::trailing_width(ui.ctx(), selected_key);
+                let mut selection_beside = false;
+                let count = self.selection.count();
+                let selection_actions = |ui: &mut egui::Ui, export: &mut bool, clear: &mut bool| {
+                    if widgets::button(ui, Kind::Primary, &format!("Export Batch ({count})"), 0.0)
+                        .clicked()
+                    {
+                        *export = true;
+                    }
+                    if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
+                        *clear = true;
+                    }
+                };
+                let mut clear = false;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     self.search_field(ui, 140.0);
                     ui.separator();
                     self.sort_controls(ui, false);
-                    if !self.selection.is_empty() {
+                    if count > 0 && selected_w + 12.0 <= ui.available_width() {
+                        selection_beside = true;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::button(
-                                ui,
-                                Kind::Primary,
-                                &format!("Export Batch ({})", self.selection.count()),
-                                0.0,
-                            )
-                            .clicked()
-                            {
-                                action_export = true;
-                            }
-                            if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
-                                self.selection.clear();
-                            }
+                            ui.scope(|ui| {
+                                selection_actions(ui, &mut action_export, &mut clear);
+                                widgets::remember_trailing_width(ui, selected_key);
+                            });
                         });
                     }
                 });
+                if count > 0 && !selection_beside {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        selection_actions(ui, &mut action_export, &mut clear);
+                        widgets::remember_trailing_width(ui, selected_key);
+                    });
+                }
+                if clear {
+                    self.selection.clear();
+                }
                 ui.add_space(6.0);
 
                 self.film_tiles(ui, gpu, &displayed);

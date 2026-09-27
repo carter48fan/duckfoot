@@ -73,7 +73,7 @@ if [[ -x "${signer[-1]}" ]]; then
         echo "$certs" >&2
         exit 1
     fi
-    grep -m1 "Signer #1 certificate DN" <<<"$certs" || true
+    grep -m1 "certificate DN" <<<"$certs" || true
 else
     echo "apksigner not found; skipping the signature check" >&2
 fi
