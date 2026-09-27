@@ -48,6 +48,36 @@ pub struct FilterState {
     pub sort_descending: bool,
 }
 
+/// A filter kept under a name (W-11's collections-lite): what it shows, how it is sorted
+/// and what it searches for.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SavedFilter {
+    pub name: String,
+    pub filter: FilterState,
+    pub search: String,
+}
+
+impl SavedFilter {
+    pub fn new(name: &str, filter: &FilterState) -> Self {
+        let mut filter = filter.clone();
+        let search = std::mem::take(&mut filter.search_query);
+        Self {
+            name: name.trim().to_string(),
+            filter,
+            search,
+        }
+    }
+
+    /// The filter it keeps, search included.
+    pub fn filter(&self) -> FilterState {
+        FilterState {
+            search_query: self.search.clone(),
+            ..self.filter.clone()
+        }
+    }
+}
+
 impl FilterState {
     /// Determines whether an item matches all active filter criteria.
     pub fn matches(
@@ -163,6 +193,20 @@ mod tests {
         // Filter: Min 5 stars
         filter.rating = RatingFilter::MinStars(5);
         assert!(!filter.matches(path, &meta_good, false, false));
+    }
+
+    #[test]
+    fn a_saved_filter_keeps_its_search() {
+        let filter = FilterState {
+            rating: RatingFilter::MinStars(3),
+            search_query: "iceland".into(),
+            ..Default::default()
+        };
+        let saved = SavedFilter::new(" Best of Iceland ", &filter);
+        assert_eq!(saved.name, "Best of Iceland");
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: SavedFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.filter(), filter);
     }
 
     #[test]

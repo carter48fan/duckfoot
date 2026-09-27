@@ -279,6 +279,16 @@ impl PhotoApp {
                         widgets::remember_trailing_width(ui, label_key);
                     });
                 }
+                if !self.saved_filters.is_empty()
+                    || self.filtering()
+                    || self.saved_filter_draft.is_some()
+                {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        self.saved_filters_row(ui);
+                    });
+                }
                 if count > 0 && !selection_beside {
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
@@ -297,6 +307,88 @@ impl PhotoApp {
 
         if action_export {
             self.batch_dialog_open = true;
+        }
+    }
+
+    /// Whether anything hides photos: sorting is not filtering.
+    pub(crate) fn filtering(&self) -> bool {
+        self.filter
+            != dam::FilterState {
+                sort_by: self.filter.sort_by,
+                sort_descending: self.filter.sort_descending,
+                ..Default::default()
+            }
+    }
+
+    /// Saved filters as chips (a tap shows one; right-click or a long press deletes it),
+    /// and "+ save" to keep the filter showing under a name.
+    pub(crate) fn saved_filters_row(&mut self, ui: &mut egui::Ui) {
+        ui.label(theme::dim("Saved:"));
+        let mut apply = None;
+        let mut delete = None;
+        for (i, saved) in self.saved_filters.iter().enumerate() {
+            let on = saved.filter() == self.filter;
+            let r = widgets::chip(ui, on, &saved.name)
+                .on_hover_text("Show this filter; right-click to delete it");
+            if r.clicked() {
+                apply = Some(i);
+            }
+            r.context_menu(|ui| {
+                if ui.button("Delete").clicked() {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        let mut save = None;
+        match &mut self.saved_filter_draft {
+            None => {
+                if self.filtering()
+                    && widgets::chip(ui, false, "+ save")
+                        .on_hover_text("Keep this filter under a name")
+                        .clicked()
+                {
+                    self.saved_filter_draft = Some(String::new());
+                }
+            }
+            Some(name) => {
+                let field = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("name, then Enter")
+                        .desired_width(130.0),
+                );
+                if field.lost_focus() {
+                    let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if entered && !name.trim().is_empty() {
+                        save = Some(name.clone());
+                    }
+                    if entered
+                        || name.trim().is_empty()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        self.saved_filter_draft = None;
+                    }
+                } else if name.is_empty() && !field.has_focus() {
+                    field.request_focus();
+                }
+            }
+        }
+        if let Some(name) = save {
+            let saved = dam::SavedFilter::new(&name, &self.filter);
+            self.set_status(format!("Saved the filter as “{}”", saved.name));
+            match self.saved_filters.iter_mut().find(|s| s.name == saved.name) {
+                Some(old) => *old = saved,
+                None => self.saved_filters.push(saved),
+            }
+            self.persist_session();
+        }
+        if let Some(i) = apply {
+            self.filter = self.saved_filters[i].filter();
+        }
+        if let Some(i) = delete {
+            let gone = self.saved_filters.remove(i);
+            self.set_status(format!("Deleted the saved filter “{}”", gone.name));
+            self.persist_session();
         }
     }
 
