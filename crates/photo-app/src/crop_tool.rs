@@ -276,6 +276,63 @@ pub fn fitted(crop: Crop, ratio: f32, frame: (f32, f32)) -> Crop {
     }
 }
 
+/// Whether every corner of `crop` shows photographed pixels once the photo is turned
+/// `deg` inside a frame of `frame` pixels: the photo is the frame's own size, rotated about
+/// its centre, so straightening swings its corners out and the frame's corners go empty.
+pub fn covered(crop: Crop, deg: f32, frame: (f32, f32)) -> bool {
+    let (s, c) = deg.to_radians().sin_cos();
+    let (w, h) = frame;
+    let corners = [
+        (crop.x, crop.y),
+        (crop.x + crop.width, crop.y),
+        (crop.x, crop.y + crop.height),
+        (crop.x + crop.width, crop.y + crop.height),
+    ];
+    corners.iter().all(|&(u, v)| {
+        // The corner in pixels about the centre, turned back into the photo's own axes.
+        let (x, y) = ((u - 0.5) * w, (v - 0.5) * h);
+        let (px, py) = (x * c + y * s, -x * s + y * c);
+        px.abs() <= w * 0.5 + 1e-3 && py.abs() <= h * 0.5 + 1e-3
+    })
+}
+
+/// `crop` made to show only photographed pixels after a turn of `deg`: kept if it already
+/// does, otherwise moved toward the centre and, only if that is not enough, shrunk about
+/// its own shape until every corner is on the photo.
+pub fn constrained(crop: Crop, deg: f32, frame: (f32, f32)) -> Crop {
+    if deg == 0.0 || covered(crop, deg, frame) {
+        return crop;
+    }
+    let (s, c) = (deg.to_radians().sin().abs(), deg.to_radians().cos().abs());
+    let (w, h) = frame;
+    // The largest centred crop of this shape: its half-diagonal's projections must fit.
+    let aspect = (crop.width * w) / (crop.height * h).max(1e-6);
+    let max_h = (w / (aspect * c + s)).min(h / (aspect * s + c));
+    let (fit_w, fit_h) = ((max_h * aspect / w).min(1.0), (max_h / h).min(1.0));
+    let (cw, ch) = (crop.width.min(fit_w), crop.height.min(fit_h));
+    let (cx, cy) = (crop.x + crop.width / 2.0, crop.y + crop.height / 2.0);
+    let at = |t: f32| Crop {
+        x: cx + (0.5 - cx) * t - cw / 2.0,
+        y: cy + (0.5 - cy) * t - ch / 2.0,
+        width: cw,
+        height: ch,
+    };
+    // Slide from where it is to the centre, stopping as soon as it is covered.
+    if covered(at(0.0), deg, frame) {
+        return at(0.0);
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if covered(at(mid), deg, frame) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    at(hi)
+}
+
 /// Composition guides drawn over the crop, cycled with `O`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Guide {
@@ -445,6 +502,35 @@ mod tests {
             assert!((pixel_ratio(c) - 16.0 / 9.0).abs() < 1e-3, "{now:?}");
             assert!(inside(c));
         }
+    }
+
+    #[test]
+    fn a_straightened_photo_is_cropped_to_what_was_photographed() {
+        let full = crop(0.0, 0.0, 1.0, 1.0);
+        assert!(covered(full, 0.0, FRAME));
+        for deg in [2.0, -5.0, 12.0, 45.0] {
+            assert!(!covered(full, deg, FRAME), "{deg}");
+            let c = constrained(full, deg, FRAME);
+            assert!(covered(c, deg, FRAME), "{deg}: {c:?}");
+            // The shape is kept, and it is still as large as it can be (a hair larger
+            // would show a corner).
+            assert!((pixel_ratio(c) - 1.5).abs() < 1e-3, "{deg}: {c:?}");
+            let grown = Crop {
+                x: c.x - 0.002,
+                y: c.y - 0.002,
+                width: c.width + 0.004,
+                height: c.height + 0.004,
+            };
+            assert!(!covered(grown, deg, FRAME), "{deg}: not the largest");
+        }
+        // A small crop off to one side slides in rather than shrinking.
+        let small = crop(0.0, 0.0, 0.3, 0.3);
+        let c = constrained(small, 8.0, FRAME);
+        assert!(covered(c, 8.0, FRAME));
+        assert!((c.width - 0.3).abs() < 1e-6 && (c.height - 0.3).abs() < 1e-6);
+        // One already on the photo is left alone.
+        let inner = crop(0.3, 0.3, 0.4, 0.4);
+        assert_eq!(constrained(inner, 8.0, FRAME), inner);
     }
 
     #[test]
