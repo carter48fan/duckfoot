@@ -18,6 +18,7 @@ pub mod gamut;
 pub mod heal;
 pub mod histogram;
 pub mod icc;
+pub mod keystone;
 pub mod lens;
 pub mod lensfun;
 pub mod local;

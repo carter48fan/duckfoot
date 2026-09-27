@@ -173,6 +173,35 @@ impl PhotoApp {
                     0.0,
                 )
                 .on_hover_text("Square up a wall shot from one side"));
+                // Auto upright: from the straight lines the photo has.
+                if self.ready_image().is_some() {
+                    use photo_engine::keystone::Upright;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                        ui.label(theme::tag("auto").color(theme::TEXT_DIM));
+                        for (mode, label, tip) in [
+                            (
+                                Upright::Level,
+                                "level",
+                                "Straighten by the horizon and the verticals",
+                            ),
+                            (
+                                Upright::Vertical,
+                                "vertical",
+                                "Straighten, and stand leaning verticals up",
+                            ),
+                            (
+                                Upright::Full,
+                                "full",
+                                "Both keystones and straighten, from every line",
+                            ),
+                        ] {
+                            if widgets::chip(ui, false, label).on_hover_text(tip).clicked() {
+                                self.pending_sample = Some(crate::Sample::Upright(mode));
+                            }
+                        }
+                    });
+                }
             }
             InspectorSectionId::WhiteBalance if self.ready_image().is_none() => {
                 // Kelvin and tint are this camera's; until the decode says which camera,

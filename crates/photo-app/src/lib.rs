@@ -374,6 +374,7 @@ pub(crate) enum Sample {
     Pick(egui::Pos2),
     AutoWb,
     AutoTone,
+    Upright(photo_engine::keystone::Upright),
 }
 
 /// What a notice's Undo button takes back.
@@ -988,6 +989,20 @@ impl PhotoApp {
                         Ok("Auto tone")
                     }
                     None => Err("Not enough of the photo to judge its tones by"),
+                }),
+            Sample::Upright(mode) => self
+                .engine
+                .auto_upright(device, queue, &self.stack, mode)
+                .map(|g| match g {
+                    Some(g) => {
+                        self.stack.geometry = g;
+                        Ok(match mode {
+                            photo_engine::keystone::Upright::Level => "Levelled",
+                            photo_engine::keystone::Upright::Vertical => "Verticals stood up",
+                            photo_engine::keystone::Upright::Full => "Upright",
+                        })
+                    }
+                    None => Err("Not enough straight lines in the photo to go by"),
                 }),
         };
         match outcome {
