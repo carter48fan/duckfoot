@@ -170,6 +170,9 @@ pub struct LoadedImage {
     /// As-shot neutral multipliers, before any user tint.
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
+    /// Camera → linear sRGB for the wide working space: the DNG's own profile where it
+    /// has one (W-09), else `cam_to_srgb`.
+    cam_profiled: [[f32; 3]; 3],
     white_scale: WhiteScale,
     /// The file's own distortion correction, if it carries one.
     warp: Option<FileWarp>,
@@ -501,6 +504,9 @@ pub struct UploadedImage {
     pub orientation: Geometry,
     wb: [f32; 3],
     cam_to_srgb: [[f32; 3]; 3],
+    /// Camera → linear sRGB for the wide working space: the DNG's own profile where it
+    /// has one (W-09), else `cam_to_srgb`.
+    cam_profiled: [[f32; 3]; 3],
     white_scale: WhiteScale,
     warp: Option<FileWarp>,
     /// The lens's profile, by name, if the loader found one (see `lensfun::for_photo`).
@@ -613,6 +619,7 @@ pub fn upload_cfa(
         orientation: cfa.orientation,
         wb: cfa.wb,
         cam_to_srgb: cfa.cam_to_srgb,
+        cam_profiled: cfa.cam_profiled.unwrap_or(cfa.cam_to_srgb),
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
         lens_profile: None,
@@ -669,6 +676,7 @@ pub fn upload_raster(
         orientation: raster.orientation,
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: raster.cam_to_srgb,
+        cam_profiled: raster.cam_to_srgb,
         white_scale: WhiteScale::srgb(),
         warp: None,
         lens_profile: None,
@@ -1446,6 +1454,7 @@ impl Engine {
             orientation: _,
             wb,
             cam_to_srgb,
+            cam_profiled,
             white_scale,
             warp,
             lens_profile,
@@ -1660,6 +1669,7 @@ impl Engine {
             model,
             wb,
             cam_to_srgb,
+            cam_profiled,
             white_scale,
             warp,
             lens_profile,
@@ -2099,7 +2109,7 @@ impl Engine {
             crate::gamut::WorkingSpace::Srgb => image.cam_to_srgb,
             crate::gamut::WorkingSpace::Rec2020 => crate::gamut::compose(
                 &crate::gamut::convert(&crate::gamut::SRGB, &working),
-                &image.cam_to_srgb,
+                &image.cam_profiled,
             ),
         };
         // Working → the proof's space if there is one, else the output's; then, proofing,
