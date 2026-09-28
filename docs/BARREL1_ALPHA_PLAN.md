@@ -13,33 +13,38 @@ findings, and a few the audit agents found that did not make the report's summar
 tracked only by prose. Features are `F-xx` (alpha floor) and `W-xx` (worth considering).
 Refactors are `D-xx`.
 
-Each work package (WP) is sized as roughly one PR. Estimates are single-developer days and
-are deliberately rough.
+Each work package (WP) is sized as roughly one PR. The plan tracks tasks, not time: there
+are no estimates, only what is done and what is next.
+
+**Owner's direction (2026-09):** the repository is private and not yet open source. The
+goal is to finish the product first; release candidates and licensing are decided after.
+Licensing work (DEC-1, Phase 6's licence items) is **deferred**, not dropped. DEC-2 is
+**confirmed** as recommended. Keys, zooms, controls, local adjustments and spot heal are
+left to the implementer's judgement, so the recommendations for DEC-3 onwards are adopted.
 
 ---
 
 ## 1. Shape of the plan
 
-| Phase | Goal | Est. | Gate to leave the phase |
+| Phase | Goal | Status | Gate to leave the phase |
 |---|---|---|---|
-| **0** | Stop the bleeding | 3 d | No public binaries; no known crash from a bad file; X-Trans refused loudly |
-| **1** | Never lose work (includes **U-01**) | 7 d | Kill -9 / Android LMK / quit / photo switch never lose an edit; headless tests prove it |
-| **2** | Foundation: test harness + refactor | 10 d | Real-GPU pixel tests in CI; module registry; `Command` enum; `lib.rs` split |
-| **3** | Correct pixels | 9 d | Filmic, export geometry, banded export, NaN, preview≈export at every zoom — all under GPU tests |
-| **4** | Interaction, batch, design | 10 d | Batch and renamer correct; drags cancel; accessibility floor; layout parity |
-| **5** | Robustness, performance, platforms | 12 d | Fuzzed decoders; memory-bounded on a 4 GB phone; Windows/macOS built *and tested* |
-| **6** | Release engineering and licensing | 5 d | Licence notices; hardened CI signing; versioned and changelogged |
-| **7** | Alpha feature floor (F-01 … F-10) | 30 d | Feature checklist in [§9](#9-alpha-release-gate) |
+| **0** | Stop the bleeding | done | No public binaries; no known crash from a bad file; X-Trans refused loudly |
+| **1** | Never lose work (includes **U-01**) | done | Kill -9 / Android LMK / quit / photo switch never lose an edit; headless tests prove it |
+| **2** | Foundation: test harness + refactor | done | Real-GPU pixel tests in CI; module registry; `Command` enum; `lib.rs` split |
+| **3** | Correct pixels | done | Filmic, export geometry, banded export, NaN, preview≈export at every zoom — all under GPU tests |
+| **4** | Interaction, batch, design | done (recipe editor with F-02) | Batch and renamer correct; drags cancel; accessibility floor; layout parity |
+| **5** | Robustness, performance, platforms | next | Fuzzed decoders; memory-bounded on a 4 GB phone; Windows/macOS built *and tested* |
+| **6** | Release engineering and licensing | licensing deferred; CI hardening partly done | Licence notices; hardened CI signing; versioned and changelogged |
+| **7** | Alpha feature floor (F-01 … F-10) | done | Feature checklist in [§9](#9-alpha-release-gate) |
 | — | **Alpha release** | | [§9](#9-alpha-release-gate) all green |
-| **8** | Worth considering (W-01 … W-14) | 40 d+ | Post-alpha roadmap |
+| **8** | Worth considering (W-01 … W-14) | after alpha | Post-alpha roadmap |
+| **9** | Gesture-first traversal and aligned bars (G-01 … G-05) | after every feature | Owner's direction, 27 Sep: Snapseed-like, swipe anywhere; every bar on one line; a tutorial that teaches it |
 
 **Critical path:** 0 → 1 → 2 → 3 → 7.
 
 **Parallel tracks:**
 - Phase 6 can start any time after Phase 0.
 - Phases 4 and 5 can interleave with 3 once Phase 2's refactor has landed.
-
-About **86 dev-days to alpha** for one person, less with two tracks running at once.
 
 **Ordering rule:** the refactor (Phase 2) comes *before* the feature floor on purpose. Every
 new module today touches about nine parallel tables (audit §7). Local adjustments,
@@ -54,8 +59,8 @@ Each has a recommendation. The plan assumes the recommendation unless you say ot
 
 | # | Decision | Recommendation |
 |---|---|---|
-| **DEC-1** | **LGPL route** for rawler (B5) | **Ship with the source.** Duckfoot is itself open source, so LGPL-2.1 §6's relink requirement can be met by shipping the complete corresponding source. Attach `duckfoot-<ver>-source.tar.gz` (with `cargo vendor` output) to every release, include the LGPL text, and add a "Source & licences" entry in About. This takes a day, versus weeks for a C-ABI decoder `cdylib`. *Not legal advice — confirm with whoever advises you.* |
-| **DEC-2** | Where do sliders land on navigation (U-01)? | On the **incoming photo's own saved edits** if it has a sidecar, otherwise **defaults** plus the camera's orientation. Resetting a previously edited photo to defaults would look like data loss. If you literally want defaults every time, say so; it is a one-line change in WP1.2. |
+| **DEC-1** | **LGPL route** for rawler (B5) | **Deferred** by the owner until release candidates are chosen; the analysis stands. **Ship with the source.** Duckfoot is itself open source, so LGPL-2.1 §6's relink requirement can be met by shipping the complete corresponding source. Attach `duckfoot-<ver>-source.tar.gz` (with `cargo vendor` output) to every release, include the LGPL text, and add a "Source & licences" entry in About. This takes a day, versus weeks for a C-ABI decoder `cdylib`. *Not legal advice — confirm with whoever advises you.* |
+| **DEC-2** | Where do sliders land on navigation (U-01)? | **Confirmed by the owner, and shipped.** On the **incoming photo's own saved edits** if it has a sidecar, otherwise **defaults** plus the camera's orientation. Resetting a previously edited photo to defaults would look like data loss. If you literally want defaults every time, say so; it is a one-line change in WP1.2. |
 | **DEC-3** | Keys `0`–`5` (H5) | **Plain `0`–`5` = rating** (the Lightroom and darktable convention). **Cmd/Ctrl+`0` = fit, Cmd/Ctrl+`1` = 100%.** Fix the README and tooltips to match. |
 | **DEC-4** | Departures from the look-and-feel rules (M-32) | **Conform the code** for the look tiles' gradients, the glow ring, the permanent HUD pills, the decorative lime, and red for non-destructive warnings. **Amend DESIGN.md** for three things: the WB rail gradient (it is information, not decoration), clipping-overlay colours (F-06), and the tour, which becomes an opt-in "Show me around" chip instead of starting automatically. |
 | **DEC-5** | Do local adjustments (W-01) and spot heal (W-02) fit the thesis? | **Yes, as a fixed set:** at most 8 masks, three mask types, one fixed parameter block; heal as a list of spots. No layers, no blend modes, no mask arithmetic. This keeps the fixed-order, fused-pass design intact. |
@@ -181,7 +186,7 @@ one-click way to carry a look along a roll.
 Each WP lists its **items**, its **implementation** notes (files verified at `0ab2f42`), and
 its **done when** criteria. "Test" means an automated test lands in the same PR.
 
-### Phase 0 — Stop the bleeding (≈3 d)
+### Phase 0 — Stop the bleeding
 
 **WP0.1 Release visibility** — B4, L-28 (stray tag)
 - **Implementation:**
@@ -229,7 +234,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
   `lib.rs:~2628/2634` to "Cmd+1" / "Cmd+0". Fix README:162 and add the missing keys (P, X,
   U, 0–5, Z, Ctrl+A, Ctrl+Shift+E, Enter). WP4.8 later generates this table from code.
 
-### Phase 1 — Never lose work (≈7 d)
+### Phase 1 — Never lose work
 
 **WP1.1 `flush()` and autosave** — B1, M-01
 - **Implementation:**
@@ -334,7 +339,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
     exists, but Revert (back to the saved sidecar) is not.
   - A **Reset all** that is a checkpointed command.
 
-### Phase 2 — Foundation (≈10 d)
+### Phase 2 — Foundation
 
 **WP2.1 Real-GPU test harness** — test gap
 - **CI:** install `mesa-vulkan-drivers` (lavapipe) on `ubuntu-latest` and set
@@ -436,7 +441,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
   `ExportSettings` grows into F-02's option set.
 - **Test:** the same settings produce identical bytes from the single and batch paths.
 
-### Phase 3 — Correct pixels (≈9 d). Each WP lands with its GPU test from WP2.1.
+### Phase 3 — Correct pixels. Each WP lands with its GPU test from WP2.1.
 
 **WP3.1 Filmic transfer** — B9 (DEC-7)
 - **Implementation:**
@@ -529,7 +534,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
     without input.
 - **Test:** the last frame of a drag is always measured.
 
-### Phase 4 — Interaction, batch, design (≈10 d)
+### Phase 4 — Interaction, batch, design
 
 **WP4.1 Batch export correctness** — H2, H6, M-07, M-38, L-04 (DEC-6)
 - **Renamer:**
@@ -634,9 +639,27 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **On launch:** reopen the shelf. Missing files are shown greyed with "missing", not
   dropped. Reopen the last photo.
 
-### Phase 5 — Robustness, performance, platforms (≈12 d)
+### Phase 5 — Robustness, performance, platforms
 
-**WP5.1 Hostile input** — B6 (second part), L-12
+**WP5.1 Hostile input** — B6 (second part), L-12 — ✅ done: a 250 MP cap checked from the
+header before pixels are allocated (rasters by `image`'s dimensions, TIFF-based RAWs by the
+largest IFD), the TIFF walker on a 64-IFD / 20,000-entry budget with a `HashSet`, previews
+read (an 8 MB head, the rest only when needed, up to 256 MB) instead of mapped, and
+seeded mutation tests of the TIFF walker, JPEG scanner, raster decode, DNG colour and
+sidecar parsing that run with every `cargo test`. `fuzz/` holds cargo-fuzz targets for the
+TIFF walker, the embedded-JPEG scanner, raster decode, RAW decode, sidecars, presets and ICC
+profiles, run ten minutes each every week and on demand (`.github/workflows/fuzz.yml`) from seeds the
+code writes (`write_fuzz_seeds`). Its first runs found, each now fixed and a regression
+test: an offset overflow in the TIFF walker (SubIFD values taken as offsets unchecked); a
+TIFF entry counting four billion values, which rawler allocates before reading (13 GB),
+now refused when any entry claims more than the file holds, including in an MRW's TTW
+block; an IFD chain that points back at itself, which rawler follows until memory runs
+out; an MRW block length that wraps rawler's step to zero (a hang); a file starting like
+a JPEG whose APP1 rawler cannot read, which loops rawler's JFIF parser for ever (four bytes
+did it); and a QuickTake file, reached by content whatever its name, whose decoder sizes
+its pixels from the header. rawler now only sees the families the RAW extensions name.
+Panics inside rawler stay contained, as in the app, and are for reporting upstream. Still to
+come: rawler's own mmap on removable media, and reporting the rawler findings upstream.
 - **Size check first:** read the dimensions from rawler metadata before decoding pixels.
   Reject anything over the pixel cap (default 250 MP) or `max_texture_dimension_2d`, *before*
   allocating. The same applies to rasters (`image::ImageReader::into_dimensions` first).
@@ -648,7 +671,13 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **Fuzzing:** `cargo fuzz` targets for the TIFF walker, the embedded-JPEG scanner,
   `decode_bytes`, sidecar parsing and preset import. Run them nightly for 10 minutes in CI.
 
-**WP5.2 Memory discipline** — M-23, M-29, M-30
+**WP5.2 Memory discipline** — M-23, M-29, M-30 — ✅ done in code: thumbnails are asked for
+as their tiles come within 24 of the view (and the open photo's always, for its Info),
+kept under an LRU cap of 1,500 on the desktop and 400 on the phone, and evicted on remove;
+one mosaic-fallback thumbnail decodes at a time; Android's onTrimMemory releases the
+engine's spare textures and all but a quarter of the thumbnails; the batch engine unloads
+and drops its spares after every job. The 2,000-photo PSS measurement waits on the device
+test.
 - **Low memory:** `memory_warning` and Android `onTrimMemory` release the engine's spare
   textures (scratch green, pooled mosaic, `retired_sensor`) and evict thumbnails to 25%.
 - **Thumbnails:**
@@ -661,14 +690,14 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **Done when:** a 2,000-photo roll on a 4 GB phone stays below a measured ceiling
   (target: 1.2 GB PSS). This is part of the device test in §8.
 
-**WP5.3 I/O off the UI thread** — M-31
+**WP5.3 I/O off the UI thread** — M-31 — ✅ done: shelving is a name only, its sidecar and size read on the loader's file thread (a mark set before they arrive reads them first, so it never writes over what the sidecar held); folder opens, drops and restored watches read on that thread; the folder browser's subfolders come from a listing refreshed off-thread every few seconds. Tested by a folder that opens with the shelf still empty and fills in with its marks.
 - **Implementation:** `ShelfItem::new`'s sidecar parse and stat, `scan_supported_images`,
   and `FolderTree::list_subfolders` (read every frame at `lib.rs:2243`) all move to the
   loader, with cached results and a refresh on a timer or on navigation.
 - **Test:** adding 2,000 files returns within one frame, and items fill in as they are
   parsed.
 
-**WP5.4 Per-frame waste** — L-13
+**WP5.4 Per-frame waste** — L-13 — ✅ done: the History list's labels are cached against a revision every history mutation bumps (only the two beside the live stack are described each frame; each was a whole-stack comparison, brush strokes included); the stack is cloned per frame only while it changes; the histogram's bind group is made once per preview texture, not per frame; the curve editor keeps its plotted samples until a node moves instead of building a 1,024-entry LUT every frame (the engine already uploaded its LUT only on a change); names are lowercased once when shelved and the search query once per frame, not per photo; the 3D histogram's ribbons reuse their rows and hold each quad in an array, not two `Vec`s. Invariant 6 is held by `tests/drag.rs`: every bind group, texture and buffer the engine makes is counted, and sixty frames of a drag (exposure, vibrance, a curve node) must make none and leave wgpu's live counts where they were; it fails against the old per-frame histogram bind group. It counts GPU objects, not heap bytes: wgpu's own command encoding allocates on the heap every frame, which no test of ours could hold at zero.
 - **Implementation:**
   - Cache the histogram bind group per output view.
   - Upload the curve LUT only on a node change, without cloning the `Vec`.
@@ -680,7 +709,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **Done when:** invariant 6 holds exactly, checked by a counting allocator in a bench test
   over 60 slider frames.
 
-**WP5.5 Android hardening** — H11, H12, M-20, M-21, M-22, M-24, L-17, L-23
+**WP5.5 Android hardening** — H11, H12, M-20, M-21, M-22, M-24, L-17, L-23 — 🟡 in part: a copy into the library needs its size plus 500 MB free; once the app stops (edits flushed) the process ends, so the next launch is cold (H12); a failed JNI call's Java exception is described and cleared; export names are claimed with `create_new` (L-23); backups leave the library of copies out and keep the settings (M-22); `versionCode` is `(major·10⁴ + minor·10² + patch)·10⁴ + CI run` everywhere (L-17); the Library sheet's **storage** screen lists every copy, largest first, with its size (sidecars and virtual copies included) and whether it is on the shelf, with multi-select delete and **clear unused**, each asking a second tap, and select mode gains **remove + delete copy**; deletes run on the file thread, and the open photo is never deleted under itself (H11). Every JNI call runs in a local frame of its own (M-20): sharing and every export had each leaked a string on the event-loop thread, which is attached for good, so a long session of exports would have filled the 512-entry local table and aborted. The tab bar and the Edit sheet's module strip, both swiped sideways, are excluded from the system Back gesture through `setSystemGestureExclusionRects`, sent only when they move and never on the desktop layout (M-24; the photo keeps the system's edges, since Android allows 200 dp per edge). Still to come, on a device: CheckJNI in a device lane, and checking the exclusions by hand.
 - **Library (H11):**
   - Check `StatFs` before copying and refuse when free space is below
     `size + 500 MB`.
@@ -703,7 +732,7 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **Versioning (L-17):** `versionCode` comes from a monotonic scheme
   (`major*1e6 + minor*1e4 + patch*100 + build`) that is the same locally and in CI.
 
-**WP5.6 Desktop shell hardening** — M-25, L-01, L-02, L-20, L-21, L-22, L-26
+**WP5.6 Desktop shell hardening** — M-25, L-01, L-02, L-20, L-21, L-22, L-26 — ✅ done: no GPU shows a native message and writes `duckfoot.log` beside the settings; `args_os`, every argument shelved; the desktop entry lists DNG, ORF, PEF, SRW, WebP and more; dialogs on a thread (macOS keeps its main-thread dialogs) with the app polling while one is open; bookmarks from USERPROFILE on Windows; the layout measured before the text-size zoom; a surface-format change replaces egui's renderer and context but keeps the app, which lets go of what it had registered (the photo's texture, thumbnails, the stage preview) and registers it again, so the photo, its edits and the roll stay (L-21); a Suboptimal frame is presented and the surface configured again after it.
 - **No adapter:** show a native message box via `rfd::MessageDialog` ("No Vulkan/Metal/DX12
   GPU found — see README Troubleshooting"), and write a log file to the state directory
   (`dirs::state_dir()` / `%LOCALAPPDATA%`).
@@ -726,12 +755,12 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **Manual smoke test:** open, edit, export, then close with the edits kept.
 - **README:** "experimental" labels until the smoke tests pass.
 
-**WP5.8 Recursive import** — L-24
+**WP5.8 Recursive import** — L-24 — ✅ done: folders opened or dropped are read four levels deep on the file thread, hidden and system folders skipped, at most 256 folders; each folder that held photos is watched; while a folder opened or dropped is read, the status line counts the photos and folders found so far with a **cancel** button, which stops the read at the next folder and shelves nothing (restored watches are not cancelled).
 - **Implementation:** a folder import on Android and desktop recurses with a depth limit
   (default 4), skipping hidden and system folders. It is cancellable and shows progress,
   and runs on the loader thread (WP5.3).
 
-### Phase 6 — Release engineering and licensing (≈5 d, parallel)
+### Phase 6 — Release engineering and licensing (parallel)
 
 **WP6.1 Licence compliance** — B5 (DEC-1)
 - **Notices:** `cargo about generate` produces `THIRD_PARTY_LICENSES.html` in every
@@ -783,13 +812,13 @@ its **done when** criteria. "Test" means an automated test lands in the same PR.
 - **DESIGN.md:** the §3 amendments.
 - **Code comments:** the uniform size (`engine.rs:66`) and the curve comment.
 
-### Phase 7 — Alpha feature floor (≈30 d)
+### Phase 7 — Alpha feature floor
 
 **F-01 Autosave and crash recovery.** Delivered by WP1.1: debounced autosave, flush on every
 lifecycle exit, and the unclean-exit notice. **Done when:** `kill -9` during an edit loses at
 most 1 s of work; Android LMK kills lose nothing that settled.
 
-**F-02 Export options, metadata, 16-bit** (≈6 d)
+**F-02 Export options, metadata, 16-bit**
 - **`ExportSettings`:**
   - **Format:** JPEG, PNG-8, PNG-16, TIFF-8, TIFF-16, WebP.
   - **Quality.**
@@ -820,7 +849,8 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** round-trip the EXIF fields through the `image` decoder; the ICC is present;
   16-bit TIFF preserves more than 256 levels; dither produces no mean shift.
 
-**F-03 Noise reduction** (≈6 d)
+**F-03 Noise reduction**
+- **Status:** done, under GPU tests. Luminance and colour both run in one cached pre-pass (colour moved there from the fused pass, since it reads coarser levels anyway). There is a "match ISO" starting point. On an 8-bit step target the PSNR gain is 7.9 dB, the edge keeps its width, and false colour drops 5×.
 - **Module "Denoise":** Luminance, Luminance detail, Chroma, Chroma smoothness. The default
   strength scales with ISO from the metadata (F-10).
 - **Chroma:** runs **inline in the fused pass**, as an edge-aware (bilateral) average of
@@ -833,7 +863,15 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** PSNR on a synthetic noisy flat field plus edge target improves by at least
   6 dB; the edge MTF50 drop is at most 10% at defaults; preview matches export (WP2.1).
 
-**F-04 Lens correction** (≈6 d; DEC-8)
+**F-04 Lens correction** (DEC-8)
+- **Status:** done, all under tests.
+  - **Constrained crop.**
+  - **Manual corrections:** distortion (a pincushion correction zooms to fill), red and blue fringes, vignetting.
+  - **DNG opcodes:** `GainMap` (OpcodeList2) and `FixVignetteRadial` are applied to the mosaic at decode. `WarpRectilinear` is folded into the shader's inverse mapping, one polynomial per plane, and the eyedropper's CPU mirror follows it. Its tangential terms are not applied.
+  - **Profiles:** the lensfun database (CC BY-SA 3.0, `data/LENSFUN-NOTICE.md`) is distilled by `tools/lensfun_extract.py` into a 280 KB table: 1,000+ cameras and the rectilinear lenses.
+    - The lens is matched by the file's LensModel. The numbers must be exact (focal range, aperture) and most of the words must match; the mount and the calibration's sensor size break ties.
+    - Distortion (ptlens/poly3/poly5), TCA (linear/poly3) and vignetting ("pa", interpolated in stops) are taken at the shot's focal length and aperture, carried over between sensor sizes in millimetres, and applied by the shader as the DNG warp is.
+    - They are on while Lens is on, with a "profile" switch. A file that corrects itself skips them.
 - **Module "Lens":**
   - **Profile:** automatic from EXIF `LensModel` against the bundled lensfun XML (parsed
     with `quick-xml`). It gives distortion (ptlens/poly3), TCA and vignetting. A manual
@@ -852,7 +890,7 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** a synthetic barrel-distorted grid is straightened to within 0.5 px RMS; a CA
   target is fixed to within 0.3 px; the lensfun parser has tests.
 
-**F-05 WB eyedropper, Auto WB, Auto tone** (≈4 d; DESIGN §3.2)
+**F-05 WB eyedropper, Auto WB, Auto tone** (DESIGN §3.2)
 - **Eyedropper:** click the stage and read back a 5×5 patch of the **sensor** (pre-WB
   camera RGB) at the inverse-mapped coordinate. Multipliers that neutralise it become a
   `Command::SetWb`. Hotkey `W`; a chip on phone.
@@ -868,14 +906,14 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** a grey card at 3200 K is neutralised within ΔE 2; auto tone on synthetic
   under- and over-exposures converges.
 
-**F-06 On-image clipping overlay** (≈1.5 d)
+**F-06 On-image clipping overlay**
 - **Implementation:** a preview-only uniform flag, like the split, so export never sees it.
   Pixels with any channel ≥ 1.0 after the chain show one colour and pixels ≤ 0 another
   (DEC-4 amends the semantic colours). Hotkey `J`; press-and-hold on the clip % badge; a
   toggle chip on phone.
 - **Test:** export with the flag set is byte-identical to export without it.
 
-**F-07 Crop handles and aspect lock** (≈3 d)
+**F-07 Crop handles and aspect lock**
 - **Handles:** 8 handles (edges and corners), move by dragging inside, and **rotate by
   dragging outside** (drives straighten).
 - **Aspect:** Original, 1:1, 4:5, 5:4, 3:2, 2:3, 16:9, 9:16, Free, Custom W:H. `X` swaps the
@@ -886,7 +924,11 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Tests:** the aspect is preserved while dragging corners; the crop is clamped inside the
   constrained region (F-04).
 
-**F-08 X-Trans and raster fidelity** (≈5 d)
+**F-08 X-Trans and raster fidelity**
+- **Status:** done, under GPU tests.
+  - **X-Trans** demosaics through the whole 6×6 pattern. Green is a directional blend in four directions and red/blue come from colour differences over the 5×5, with the Bayer path's highlight reconstruction. On the grey test scene its false colour is 1.1 levels against Bayer's 0.6.
+  - **Rasters:** 16-bit PNG/TIFF keeps 16 bits and float TIFF is read as linear. An embedded matrix/TRC profile (Display P3, Adobe RGB, ProPhoto, grey) is read by a small parser here instead of qcms, and the pixels stay in the file's primaries, converted in the shader as for RAW. A P3 JPEG's patches land within 2.5 levels of the published P3→sRGB matrix.
+  - **Left out:** a LUT-based (CMYK/printer) profile is read as sRGB.
 - **X-Trans:** a Markesteijn one-pass demosaic in WGSL, with the 6×6 CFA passed as a
   uniform array. It replaces WP0.3's refusal. Highlight reconstruction is reused.
 - **Raster (M-16):**
@@ -899,7 +941,8 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 
 **F-09 Session persistence.** Delivered by WP4.9.
 
-**F-10 Metadata panel** (≈2 d)
+**F-10 Metadata panel**
+- **Status:** done. The desktop Info band, the phone Library sheet's one-line summary opens the same card, and filmstrip tooltips.
 - **`photo_engine::metadata::PhotoInfo`:** camera, lens, shutter, aperture, ISO, focal
   length (and 35 mm equivalent), date and time with offset, dimensions, file size, GPS (as
   text — no map, local-first), copyright and artist. It comes from rawler `Exif` for RAWs
@@ -910,24 +953,48 @@ most 1 s of work; Android LMK kills lose nothing that settled.
 - **Used by:** the renamer's `{date}` and `{camera}` (WP4.1), the ISO-scaled Denoise
   defaults (F-03), lens matching (F-04) and EXIF out (F-02).
 
-### Phase 8 — Worth considering, post-alpha (≈40 d+), in priority order
+### Phase 8 — Worth considering, post-alpha, in priority order
 
 | ID | Feature | Shape | Est. |
 |---|---|---|---|
-| **W-03** | Selective paste / sync; **Same as previous** | A per-module checkbox picker driven by the module registry, geometry off by default. Cmd/Ctrl+Alt+V pastes from the previous photo (pairs with U-01). | 2 d |
-| **W-04** | User presets: save, import, export | `.duckfoot-preset` JSON (versioned, sanitised through the registry on import, with an included-modules mask); a Presets panel on both layouts. | 2 d |
-| **W-01** | Local adjustments (DEC-5) | ≤8 masks, each **linear gradient**, **radial** or **brush**, with a fixed parameter block: exposure, temperature, tint, contrast, saturation, clarity, sharpness, denoise. Gradient and radial masks are evaluated analytically in the fused shader; brush masks are rasterised into an R8 texture array at preview and full resolution. Mask overlay UI, feather and invert. | 10 d |
-| **W-02** | Spot heal / clone (DEC-5) | ≤32 circular spots `{dst, src, radius, feather, mode}`, evaluated in the sampling stage: clone samples the source; heal matches the source's mean to the destination's ring via mips. Automatic source search, plus a "visualise dust" high-pass view. | 5 d |
-| **W-09** | Wide-gamut working space | Camera → XYZ → linear Rec.2020 working space (DESIGN §Colour as written), with DNG ForwardMatrix and dual-illuminant interpolation always. A gamut-mapped output transform to sRGB, Display P3 or Adobe RGB, with the matching ICC embedded. It fixes the saturated-colour clamps and hue shifts, and re-enables the Adobe RGB recipe honestly. | 6 d |
-| **W-08** | RCD demosaic; highlight *detail* recovery | RCD replaces Hamilton-Adams (a drop-in point). Clipped channels are reconstructed from the unclipped ones by ratio propagation over mips. | 5 d |
-| **W-07** | Perspective / keystone | Vertical and horizontal sliders (an inverse homography in the geometry map). Later: auto from line detection. | 3 d |
-| **W-05** | Virtual copies | Sidecar `versions: Vec<{name, stack}>`, with stacked tiles in the shelf. | 3 d |
-| **W-06** | Persistent undo | The last 50 history entries are serialised into the sidecar (after WP2.4). | 1.5 d |
-| **W-10** | Soft proofing; print sharpening | Proof against an output ICC with qcms (a preview-only uniform, like the split). Output sharpening is already in F-02. | 3 d |
-| **W-11** | Colour labels, keywords, collections-lite, file watching | UI for the existing `color_label` field (an L-16 dead field comes alive); keywords in the sidecar and searchable; saved filters as "collections"; `notify`-based rescan. | 4 d |
-| **W-12** | Android share sheet | After export, `ACTION_SEND` via a `FileProvider` URI. | 1 d |
-| **W-13** | Localisation scaffolding | `fluent` bundles with the strings extracted; English only at first. Doing it early is cheap; late is expensive. | 2 d |
-| **W-14** | Display colour management | Desktop monitor ICC (colord / Windows / macOS APIs) applied as a final preview-only transform. It closes the README's "display profiles are ignored". | 3 d |
+| **W-03** ✅ | Selective paste / sync; **Same as previous** (done: a remembered module set — crop & rotate off by default — that Paste, Previous and Paste to all follow; a dialog on the desktop via Modules… or Ctrl+Shift+V, inline on the phone's Export sheet) | A per-module checkbox picker driven by the module registry, geometry off by default. Cmd/Ctrl+Alt+V pastes from the previous photo (pairs with U-01). | 2 d |
+| **W-04** ✅ | User presets: save, import, export (done: one versioned `.duckfoot-preset` file each in the settings folder, carrying the modules the paste set names; tiles after the built-in looks on both layouts, right-click or hold to export or delete; import on the desktop, and on Android through the system picker, which copies the file into the app cache for the same import) | `.duckfoot-preset` JSON (versioned, sanitised through the registry on import, with an included-modules mask); a Presets panel on both layouts. | 2 d |
+| **W-01** ✅ | Local adjustments (DEC-5) — linear and radial done (sensor-space masks that follow turns and flips; exposure, temperature, tint, contrast, saturation, clarity, sharpness; invert, feather, a red wash to see a mask; handles on the stage on both layouts); brush masks done too (dabs in sensor space, rasterised into an R8 layer each that preview and export share, painted and erased on the stage, one undo step a stroke); local noise reduction done too: the denoise pre-pass works in sensor space, as masks do, so it evaluates the masks that ask for it (brushes included) and raises its own strength there to at least the mask's amount; one cached copy still carries global and local, re-made when those masks or their strokes change, and made for local alone when the module is off | ≤8 masks, each **linear gradient**, **radial** or **brush**, with a fixed parameter block: exposure, temperature, tint, contrast, saturation, clarity, sharpness, denoise. Gradient and radial masks are evaluated analytically in the fused shader; brush masks are rasterised into an R8 texture array at preview and full resolution. Mask overlay UI, feather and invert. | 10 d |
+| **W-02** ✅ | Spot heal / clone (DEC-5) — done: ≤32 spots in sensor space, heal matched to a ring around the destination via mips, or clone; applied as the sensor is sampled (sharpening sees the healed pixels); a one-shot search picks each source from matching ground; tap to heal, drag a spot or its source; a preview-only dust view | ≤32 circular spots `{dst, src, radius, feather, mode}`, evaluated in the sampling stage: clone samples the source; heal matches the source's mean to the destination's ring via mips. Automatic source search, plus a "visualise dust" high-pass view. | 5 d |
+| **W-09** ✅ | Wide-gamut working space (done: every new edit works in linear Rec.2020, the camera matrix composed onto it; a sidecar without the field keeps linear sRGB and its look, and a chip in white balance moves between them (History names it; paste carries it). Luminance weights follow the space; the colour EQ picks bands by the hue sRGB would name and turns and scales chroma about the grey axis with nothing clamped. The output transform converts to the export's space and brings out-of-gamut colour in along the line to its own luminance's grey, so hue holds where a channel clip shifted it; exports can be sRGB, Display P3 or Adobe RGB (1998)-compatible, each with its ICC profile, from the Export dialog and recipes. Tests: matrices against the published ones, a P3 green surviving to a P3 export and not through the sRGB space, the P3 JPEG test on the new mapping, every format carrying its profile. DNGs now use their own profile in the wide space: ForwardMatrix (to XYZ D50, Bradford to D65) where present, else the two colour matrices interpolated for the as-shot white, which an `AsShotNeutral` file's is found by iterating temperature and matrix until they agree; an edit in the older sRGB space keeps its old matrix) | Camera → XYZ → linear Rec.2020 working space (DESIGN §Colour as written), with DNG ForwardMatrix and dual-illuminant interpolation always. A gamut-mapped output transform to sRGB, Display P3 or Adobe RGB, with the matching ICC embedded. It fixes the saturated-colour clamps and hue shifts, and re-enables the Adobe RGB recipe honestly. | 6 d |
+| **W-08** ✅ | RCD demosaic; highlight *detail* recovery (RCD done: four passes in `demosaic_rcd.wgsl`, soft vertical/horizontal and diagonal directions, low-pass-ratio green and gradient-weighted colour differences; its two scratch planes live only for the demosaic. On a grey zone plate with a hard edge, false colour 3.49 → 3.13 and PSNR against the undemosaiced scene 35.96 → 36.63 dB, held by a test. Hamilton-Adams is gone; X-Trans keeps its own passes. Highlight detail: a pyramid of trusted colour ratios, one sample a Bayer quad straight from the mosaic and box-averaged down to one texel, gives each pixel whose channels partly clipped the red/green and blue/green of what is unclipped nearby; its clipped channels are rebuilt from the least clipped one, so a blown sunset keeps its colour and texture, and only where every channel clipped, or nothing unclipped is near, does it fall back to the neutral. Two tests: a sky where red clips keeps its ratio and stripes, and a blown light under a strong white balance stays white to its rim. X-Trans keeps the neutral-only reconstruction) | RCD replaces Hamilton-Adams (a drop-in point). Clipped channels are reconstructed from the unclipped ones by ratio propagation over mips. | 5 d |
+| **W-07** ✅ | Perspective / keystone (done: vertical and horizontal sliders as an inverse homography before straighten, zoomed to keep every corner on the photo; the CPU mirrors follow it. Auto upright done too: keystone.rs finds the photo's straight edges on a 512 px overview (a Hough transform steered by each edge's gradient and split by its polarity, each peak refitted by least squares to its own edge pixels), and solves straighten and keystones so they stand upright and level, through the same `output_point` mirror, with a small pull to no keystone; level / vertical / full, as Lightroom's Upright, in the crop & rotate card) | Vertical and horizontal sliders (an inverse homography in the geometry map). Later: auto from line detection. | 3 d |
+| **W-05** ✅ | Virtual copies (done, as darktable does duplicates rather than one sidecar holding versions: a copy is `IMG_0001 (v2).dng`, a name with no file behind it and a sidecar of its own beside the photo, so each copy has its own edits, marks, undo history and snapshots and exports under its own name; reads go to the photo's file. Shelved right after its photo and its other copies, name sort keeps them together, and reading the folder again finds them from their sidecars. Ctrl+', the tile's right-click menu, or the phone's + copy chip. Removing one from the shelf keeps its sidecar; deleting a copy outright is not offered yet) | Sidecar `versions: Vec<{name, stack}>`, with stacked tiles in the shelf. | 3 d |
+| **W-06** ✅ | Persistent undo (done: the sidecar keeps the newest 50 undo steps, capped at 256 KB so brush-heavy stacks can't bloat it; a photo opened with no history in memory gets its history back, so undo reaches past a relaunch. Redo stays per-session) | The last 50 history entries are serialised into the sidecar (after WP2.4). | 1.5 d |
+| **W-10** 🟡 | Soft proofing; print sharpening (done for RGB spaces: S or the stage toolbar's proof chip shows the preview as the export's colour space will have it, brought in as the export brings it and then shown on the screen; its gamut chip greys what that space cannot hold. LUT print profiles need a CMM such as lcms2, still to come) | Proof against an output ICC with qcms (a preview-only uniform, like the split). Output sharpening is already in F-02. | 3 d |
+| **W-11** ✅ | Colour labels, keywords, collections-lite, file watching (labels and keywords done: red / yellow / green / blue / purple, `6`–`9` toggling the first four, swatches in the tile menu, the Info band and the phone's Library row, a band along the tile's top, and a label filter; keywords kept in the sidecar, trimmed and once each, added from the Info band or the phone's info card (to the whole selection when several are chosen) and found by the shelf's search. Saved filters: the filter showing, search and sort included, kept under a name as a chip that brings it back (right-click or long-press deletes it), remembered across launches. A folder opened whole is watched, by polling every 2 s off the UI thread rather than `notify`, so network shares and card readers behave the same: a photo that arrives joins the shelf, one taken off the shelf stays off, and a shelved photo whose file goes is marked missing until it is back) | UI for the existing `color_label` field (an L-16 dead field comes alive); keywords in the sidecar and searchable; saved filters as "collections"; `notify`-based rescan. | 4 d |
+| **W-12** ✅ | Android share sheet (done: the export's notice and the Export sheet offer share, which hands the file to `ACTION_SEND` through a chooser; exports are in the shared Pictures folder, so the media scanner's own content:// URI is granted instead of a FileProvider, which would have needed androidx. Platforms say whether they can share; the desktop shows nothing) | After export, `ACTION_SEND` via a `FileProvider` URI. | 1 d |
+| **W-13** ✅ | Localisation scaffolding (done: `fluent-bundle` with `crates/photo-app/locales/en-US/duckfoot.ftl` embedded; `i18n::tr(id)` returns a `&'static str` so it stands where names already were, `tr_args` fills `{ $values }`; a language is picked from `DUCKFOOT_LANG` or `LANG` and falls back to English message by message. Moved so far: the phone's tabs and tour, every module's card and strip name, the Info rows, and two notices. A test reads the sources and fails on any id the English file lacks. The rest of the strings move as their code is touched) | `fluent` bundles with the strings extracted; English only at first. Doing it early is cheap; late is expensive. | 2 d |
+| **W-14** 🟡 | Display colour management (done as a setting: Customize → Screen takes sRGB, Display P3, Adobe RGB or the monitor's own matrix/TRC ICC file, a table curve fitted to its nearest power; the preview's last step encodes for it and exports are untouched. Reading the profile from the OS (colord, Windows, ColorSync) is still to come, and the phone draws in sRGB) | Desktop monitor ICC (colord / Windows / macOS APIs) applied as a final preview-only transform. It closes the README's "display profiles are ignored". | 3 d |
+
+### Phase 9 — Gesture-first traversal and aligned bars (after every feature)
+
+**Owner's direction (27 Sep 2026):**
+- Align the top and bottom menu content; every button and control on the top two bars is misaligned.
+- Swipes are not exact enough. Swiping left or right anywhere should traverse, even on the image.
+- Everything is too small to move through quickly without tapping, especially the tight sliders in big panels.
+- Traversal should be simple and gesture-based, like Snapseed, and there must still be a good tutorial.
+
+This phase comes after all features, so it works on the finished set of controls and does not have to be done twice.
+
+**What is wrong today** (screenshots at 1280×800 and 412×892):
+- **Desktop top bar:** the controls have four heights (the Photo/Audio/Video switch, the camera box, the layout group, the buttons). The right-hand groups sit on different centre lines. `?` is a bare glyph beside boxed buttons.
+- **Desktop stage toolbar:** CROP, A/B and CLIP are bare text sitting a few pixels above the boxed zoom group (− 19% +), FIT and 1:1. The panel headers (SHELF BIN, SCOPE and its HIST/RIBBON/SURFACE chips) each keep their own baseline.
+- **Phone top bar:** text items (13%, CLIP, FINE) and icons (reset, compare, undo, redo) have different sizes and uneven gaps, and only the compare icon is boxed.
+- **Phone bottom bars:** the module strip marks the chosen module with a line under its label, while the navigation bar marks the chosen tab with a line above its icon. The strip's undo/redo glyphs sit off its text baseline.
+
+| ID | Item | Shape |
+|---|---|---|
+| **G-01** 🟡 (midlines done and tested on every bar and size; one height per group and even gaps still to come) | One line per bar | Every bar item goes through one `bar_item` widget: one height per bar (32 px desktop, 44 px touch), centred on the bar's midline, with a fixed gap and group padding. Glyphs get a fixed square, so an icon and a word are the same size. Within a group, items are either all boxed or all bare; `?` becomes a boxed icon like its neighbours. The selected state is marked the same way on every bar: one underline at the same distance below. The zoom group's numbers are centred between its ± buttons. **Test:** an *alignment detector* beside the overlap test reads egui's widget rects per bar. It fails if an item's vertical centre is more than 1 px off the bar's midline, if heights in a group differ, or if gaps are uneven. It runs on every desktop and phone size the overlap test covers. |
+| **G-02** ✅ (in code; device checklist in G-05) | Swipe anywhere, exactly | One gesture recogniser for the whole app. It locks the direction after 10 px, so a swipe is never misread as a scroll or a slider drag. A flick is decided by velocity as well as distance, so a short fast swipe counts. There is a dead zone at the screen edges for the system back gesture. A **horizontal swipe anywhere** traverses: on the photo, on the sheet, even across a slider row (a drag that starts on a slider's thumb still moves that slider). In the Library and with no sheet open, a swipe moves between photos. In Edit it moves between tools (G-03). While zoomed in, one finger pans and a two-finger swipe traverses. |
+| **G-03** ✅ (in code; row-relative sheet sliders and ticks still to come) | Snapseed-style editing on the photo | In Edit, the photo itself is the control. **Swipe up or down** to choose a parameter of the current tool: a large, readable list floats over the photo and follows the finger. **Swipe left or right** to change its value, with a large readout ("Exposure +0.35") over the photo, like a toast. Slow drags are finer and flicks coarser; a light tick marks each step, zero and each end. A **double-tap** puts the parameter back. **Hold** shows the original (the before view without the split). **Pinch** zooms, and two fingers pan. The module strip remains for jumping straight to a tool, and a sideways flick on it moves one tool at a time. The sheet's sliders stay, as big rows: a drag anywhere on a row adjusts it relative to where it was, instead of needing to hit a thin rail. On desktop the same engine runs from a right-button or Alt drag on the photo, and ↑/↓ choose and ←/→ adjust for the keyboard and screen readers. |
+| **G-04** ✅ | A tutorial that teaches the gestures | The tour is rewritten as interactive coach marks on the real photo. Each step waits for the user to do the gesture before moving on: swipe up or down to choose, left or right to adjust, double-tap to reset, hold to compare, swipe the strip to change tool, and swipe in the Library to change photo. It can be skipped at any step, replayed from `?` and the phone's menu, and shown again on the next launch after a skip if the user asks. Each step's text stays short enough to sit clear of the controls it points at, and the overlap test covers every step. Headless tests drive each step with synthetic touches and check that it advances. |
+| **G-05** | Proof on a phone | Everything above, checked on real Android hardware in both orientations. Swipe accuracy is measured with a checklist of 20 swipes: none misread, none missed. The APK must still build on every commit. |
 
 ---
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 10 and 11's backup: everything the app keeps (settings, presets) except the
+     library, which holds copies of photos already on the phone or its cloud: gigabytes a
+     backup has no business carrying (M-22). -->
+<full-backup-content>
+    <exclude domain="file" path="library/" />
+</full-backup-content>

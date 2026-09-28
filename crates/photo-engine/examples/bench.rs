@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{Crop, Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{DefaultRawDecoder, Engine, PhotoStack, RawDecoder};
 
 /// Read back a square from the middle of the image. 256 px keeps `bytes_per_row` at
 /// 1024 — already a multiple of wgpu's 256-byte copy alignment, so no padding dance.
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let t = Instant::now();
-    let cfa = RawloaderBackend.decode_file(std::path::Path::new(&path))?;
+    let cfa = DefaultRawDecoder.decode_file(std::path::Path::new(&path))?;
     let (w, h) = (cfa.width, cfa.height);
     println!(
         "decode       {:.0} ms   {w}×{h} ({:.1} MP)",
@@ -196,7 +196,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- export the full frame and read it back off disk --------------------------------
     let t = Instant::now();
-    let exported = engine.export(&device, &queue, &stack, Crop::default())?;
+    let exported = engine.export(&device, &queue, &stack)?;
     println!(
         "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -208,7 +208,7 @@ fn main() -> anyhow::Result<()> {
 
     let out = std::env::temp_dir().join("duckfoot-bench-export.png");
     let t = Instant::now();
-    exported.write(&out)?;
+    exported.write(&out, &photo_engine::ExportSettings::for_path(&out)?, None)?;
     println!(
         "png encode+write {:.0} ms   {}",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -305,7 +305,8 @@ fn main() -> anyhow::Result<()> {
         data,
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [white as f32; 4],
         wb: [2.03, 1.0, 1.80],
@@ -315,6 +316,7 @@ fn main() -> anyhow::Result<()> {
             [-0.5488, 2.4177, -0.8689],
             [0.0203, -0.2783, 1.2581],
         ],
+        cam_profiled: None,
         daylight_wb: [2.03, 1.0, 1.80],
         orientation: Default::default(),
         make: "synthetic".into(),
@@ -323,7 +325,7 @@ fn main() -> anyhow::Result<()> {
     engine.load(&device, &queue, clipped)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let blown = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+    let blown = engine.export(&device, &queue, &PhotoStack::default())?;
     // Sample away from the border so the demosaic has full neighbourhoods.
     let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
     let px = &blown.rgba[mid..mid + 3];
@@ -359,11 +361,13 @@ fn main() -> anyhow::Result<()> {
         data,
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [white as f32; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        cam_profiled: None,
         daylight_wb: [1.0, 1.0, 1.0],
         orientation: Default::default(),
         make: "synthetic".into(),
@@ -372,7 +376,7 @@ fn main() -> anyhow::Result<()> {
     engine.load(&device, &queue, stripes)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let out = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+    let out = engine.export(&device, &queue, &PhotoStack::default())?;
 
     // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
     let mut worst = 0i32;
@@ -410,11 +414,13 @@ fn main() -> anyhow::Result<()> {
         data: vec![level; (sw * sh) as usize],
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [4095.0; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        cam_profiled: None,
         daylight_wb: [1.0, 1.0, 1.0],
         orientation: Default::default(),
         make: "synthetic".into(),
@@ -424,17 +430,17 @@ fn main() -> anyhow::Result<()> {
     // The readback is asynchronous by design, so drive frames rather than blocking. The
     // first poll discards whatever was in flight for the previous image.
     for _ in 0..64 {
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         engine.render(&device, &queue, &PhotoStack::default(), None);
         wait(&device)?;
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         if engine.histogram().peak > 0 {
             break;
         }
     }
     let hist = engine.histogram().clone();
     let expected = {
-        let flat_px = engine.export(&device, &queue, &PhotoStack::default(), Crop::default())?;
+        let flat_px = engine.export(&device, &queue, &PhotoStack::default())?;
         flat_px.rgba[1] as usize
     };
     let populated: Vec<usize> = hist

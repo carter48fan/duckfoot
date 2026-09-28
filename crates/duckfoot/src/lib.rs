@@ -26,15 +26,48 @@ pub enum UserEvent {
     Repaint(Duration),
     /// Something outside egui changed (a picker answered, say); draw a frame.
     Wake,
+    /// A screen reader asked for the interface, or to act on part of it.
+    #[cfg(not(target_os = "android"))]
+    AccessKit(egui_winit::accesskit_winit::Event),
+}
+
+#[cfg(not(target_os = "android"))]
+impl From<egui_winit::accesskit_winit::Event> for UserEvent {
+    fn from(event: egui_winit::accesskit_winit::Event) -> Self {
+        UserEvent::AccessKit(event)
+    }
 }
 
 /// What a bootstrap hands to [`run`].
 pub struct Options {
-    /// Opened once the first window exists.
-    pub pending_open: Option<PathBuf>,
+    /// Shelved once the first window exists, the first opened.
+    pub pending_open: Vec<PathBuf>,
     /// Builds the platform for the app. Called once per app, which is normally once per
     /// run (see [`Shell::resumed`] for the exception).
     pub platform: Box<dyn FnMut() -> Box<dyn Platform>>,
+}
+
+/// Starting failed for want of a GPU (or a window): say so where the user will see it, a
+/// dialog and a log file beside the settings, rather than just exiting (WP5.6).
+fn fatal(detail: &str) {
+    #[cfg(not(target_os = "android"))]
+    {
+        let text = format!(
+            "Duckfoot needs a GPU with Vulkan, Metal or DirectX 12, and could not start one.\n\n\
+             {detail}\n\nSee Troubleshooting in the README."
+        );
+        if let Some(dir) = photo_app::platform::desktop_settings_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("duckfoot.log"), format!("{text}\n"));
+        }
+        let _ = rfd::MessageDialog::new()
+            .set_title("Duckfoot could not start")
+            .set_description(&text)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
+    #[cfg(target_os = "android")]
+    let _ = detail;
 }
 
 /// Create the event loop type [`run`] expects.
@@ -200,10 +233,10 @@ impl WindowState {
         textures_delta.clear();
 
         use wgpu::CurrentSurfaceTexture as Acquired;
-        let frame = match self.surface.get_current_texture() {
-            Acquired::Success(f) => f,
-            // Suboptimal still presents; reconfiguring next frame is enough.
-            Acquired::Suboptimal(f) => f,
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
+            Acquired::Success(f) => (f, false),
+            // Suboptimal still presents; the surface is configured again once it has.
+            Acquired::Suboptimal(f) => (f, true),
             Acquired::Outdated | Acquired::Lost => {
                 self.surface.configure(&gpu.device, &self.config);
                 gpu.free_textures(&to_free);
@@ -276,6 +309,9 @@ impl WindowState {
 
         gpu.queue.submit([encoder.finish()]);
         gpu.queue.present(frame);
+        if suboptimal {
+            self.surface.configure(&gpu.device, &self.config);
+        }
 
         if output
             .viewport_output
@@ -358,7 +394,9 @@ impl Shell {
                 Window::default_attributes()
                     .with_title("Duckfoot — Photo")
                     .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
-                    .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0)),
+                    .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0))
+                    // Shown once AccessKit is attached, which must happen before.
+                    .with_visible(false),
             )?,
         );
         let surface = self.instance.create_surface(window.clone())?;
@@ -379,13 +417,16 @@ impl Shell {
         let format = surface_format(&surface, &gpu.adapter)?;
         if format != gpu.format {
             // The renderer's pipelines are built for one format. Replacing the renderer
-            // also forgets every texture egui uploaded to it, so the context and the app
-            // (whose photo is registered there too) have to go with it.
+            // also forgets every texture egui uploaded to it, so the context goes with it
+            // (a new one uploads its fonts again) and the app lets go of what it had
+            // registered; its photo, edits and roll stay (L-21).
             log::warn!("surface format changed {:?} → {format:?}", gpu.format);
             gpu.renderer = RwLock::new(new_renderer(&gpu.device, format));
             gpu.format = format;
             self.egui_ctx = new_egui_context(self.proxy.clone());
-            self.app = None;
+            if let Some(app) = &mut self.app {
+                app.renderer_replaced();
+            }
         }
 
         let size = window.inner_size();
@@ -396,7 +437,8 @@ impl Shell {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
 
-        let egui_winit = egui_winit::State::new(
+        #[allow(unused_mut)]
+        let mut egui_winit = egui_winit::State::new(
             self.egui_ctx.clone(),
             self.egui_ctx.viewport_id(),
             &window,
@@ -406,11 +448,17 @@ impl Shell {
             // full-size embedded RAW preview, say), whatever the GPU can actually hold.
             Some(gpu.device.limits().max_texture_dimension_2d as usize),
         );
+        // Screen readers see egui's widget tree through AccessKit. egui builds the tree
+        // only once one asks (InitialTreeRequested), so it costs nothing otherwise.
+        #[cfg(not(target_os = "android"))]
+        egui_winit.init_accesskit(event_loop, &window, self.proxy.clone());
+        window.set_visible(true);
 
         if self.app.is_none() {
             let mut app = PhotoApp::with_platform(&gpu.gpu(), (self.options.platform)());
-            if let Some(path) = self.options.pending_open.take() {
-                app.open_path(&gpu.gpu(), path);
+            let paths = std::mem::take(&mut self.options.pending_open);
+            if !paths.is_empty() {
+                app.add_to_shelf(&gpu.gpu(), paths);
             }
             self.app = Some(app);
         }
@@ -447,6 +495,20 @@ impl ApplicationHandler<UserEvent> for Shell {
         match event {
             UserEvent::Repaint(delay) => self.schedule_repaint(event_loop, delay),
             UserEvent::Wake => self.request_redraw(),
+            #[cfg(not(target_os = "android"))]
+            UserEvent::AccessKit(event) => {
+                use egui_winit::accesskit_winit::WindowEvent as A;
+                match event.window_event {
+                    A::InitialTreeRequested => self.egui_ctx.enable_accesskit(),
+                    A::ActionRequested(request) => {
+                        if let Some(w) = self.window.as_mut() {
+                            w.egui_winit.on_accesskit_action_request(request);
+                        }
+                    }
+                    A::AccessibilityDeactivated => self.egui_ctx.disable_accesskit(),
+                }
+                self.request_redraw();
+            }
         }
     }
 
@@ -456,6 +518,7 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
         if let Err(e) = self.open_window(event_loop) {
             log::error!("could not create a window or GPU device: {e:#}");
+            fatal(&format!("{e:#}"));
             event_loop.exit();
         }
     }
@@ -513,7 +576,8 @@ impl ApplicationHandler<UserEvent> for Shell {
                 window.window.request_redraw();
             }
             WindowEvent::DroppedFile(path) => {
-                app.open_path(&gpu.gpu(), path);
+                // One event per file; the app shelves a drop of several together.
+                app.drop_file(path);
                 window.window.request_redraw();
             }
             WindowEvent::RedrawRequested => window.redraw(gpu, &self.egui_ctx, app),

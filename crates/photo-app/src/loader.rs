@@ -19,6 +19,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -55,22 +56,84 @@ pub enum Done {
         /// How the camera meant the photo to be viewed, known long before the decode.
         orientation: Geometry,
     },
+    /// What a shelved photo's sidecar and file say, read off the UI thread (WP5.3).
+    Shelf(crate::ShelfFacts),
+    /// The photos a folder (and its folders, to `depth`) holds, for `purpose`.
+    Scanned {
+        folder: PathBuf,
+        purpose: ScanFor,
+        found: Vec<(PathBuf, Vec<PathBuf>)>,
+        /// Stopped by a cancel: `found` is empty and nothing is to be shelved.
+        cancelled: bool,
+    },
+    /// A folder's folders, for the folder browser.
+    Subfolders { dir: PathBuf, subs: Vec<PathBuf> },
+    /// The library's photos once `deleted` are gone, and what could not be deleted.
+    Library {
+        entries: Vec<crate::dam::storage::LibraryEntry>,
+        deleted: usize,
+        failed: Vec<String>,
+    },
     Thumbnail {
         path: PathBuf,
         /// `None` if nothing could be built; the request is still answered, so the UI
         /// knows it is no longer outstanding.
         image: Option<egui::ColorImage>,
+        /// Camera, lens, exposure and the rest, read from the header on the same trip.
+        info: Option<photo_engine::PhotoInfo>,
     },
 }
 
 enum Decoded {
-    Raw(CfaImage),
+    /// Boxed: a mosaic's header (pattern, levels, matrix, lens warp) outweighs a raster's.
+    Raw(Box<CfaImage>),
     Raster(RasterImage),
+}
+
+/// Why a folder is being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanFor {
+    /// Opened whole: shelved, watched, the first photo opened.
+    Open,
+    /// Dropped on the window: shelved, the first photo opened.
+    Drop,
+    /// Watched since the last launch: only its listing is wanted.
+    Watch,
+}
+
+/// How far the file thread's folder read has got, and the epoch that cancels it.
+#[derive(Default)]
+struct ScanProgress {
+    epoch: AtomicU64,
+    folders: AtomicUsize,
+    photos: AtomicUsize,
+}
+
+/// Disk work that is small but can be slow (a network share, a card): never on the UI
+/// thread.
+pub enum FileJob {
+    Shelf(PathBuf),
+    Scan {
+        folder: PathBuf,
+        purpose: ScanFor,
+        depth: u32,
+        /// The [`Loader::scan_epoch`] it was asked in, if it may be cancelled: a
+        /// cancel moves the epoch on, and a read of an older one stops (WP5.8).
+        epoch: Option<u64>,
+    },
+    Subfolders(PathBuf),
+    /// The phone's library of copies: delete these, then read what is left.
+    Library {
+        dir: PathBuf,
+        delete: Vec<PathBuf>,
+    },
 }
 
 pub struct Loader {
     open_tx: Sender<(PathBuf, u64)>,
     thumb_tx: Sender<PathBuf>,
+    file_tx: Sender<FileJob>,
+    scan: Arc<ScanProgress>,
     pub done: Receiver<Done>,
     /// Set on the first frame; lets a worker wake the UI when its result lands, since
     /// the event loop otherwise sleeps until the next input event.
@@ -148,6 +211,84 @@ impl Loader {
         let repaint: Arc<Mutex<Option<egui::Context>>> = Arc::default();
         let gate = Arc::new(Gate::default());
 
+        // One thread for the small disk reads: sidecars and sizes as photos are shelved,
+        // folders as they are opened or browsed.
+        let (file_tx, file_rx) = mpsc::channel::<FileJob>();
+        let scan: Arc<ScanProgress> = Arc::default();
+        {
+            let (done_tx, repaint, scan) = (done_tx.clone(), repaint.clone(), scan.clone());
+            let _ = std::thread::Builder::new()
+                .name("duckfoot-files".into())
+                .spawn(move || {
+                    while let Ok(job) = file_rx.recv() {
+                        let done = match job {
+                            FileJob::Shelf(path) => Done::Shelf(crate::ShelfFacts::read(&path)),
+                            FileJob::Scan {
+                                folder,
+                                purpose,
+                                depth,
+                                epoch,
+                            } => {
+                                scan.folders.store(0, Ordering::Relaxed);
+                                scan.photos.store(0, Ordering::Relaxed);
+                                let found = crate::dam::FolderTree::scan_tree_with(
+                                    &folder,
+                                    depth,
+                                    |folders, photos| {
+                                        scan.folders.store(folders, Ordering::Relaxed);
+                                        scan.photos.store(photos, Ordering::Relaxed);
+                                        epoch
+                                            .is_none_or(|e| e == scan.epoch.load(Ordering::Relaxed))
+                                    },
+                                );
+                                Done::Scanned {
+                                    cancelled: found.is_none(),
+                                    found: found.unwrap_or_default(),
+                                    folder,
+                                    purpose,
+                                }
+                            }
+                            FileJob::Subfolders(dir) => Done::Subfolders {
+                                subs: crate::dam::FolderTree::list_subfolders(&dir),
+                                dir,
+                            },
+                            FileJob::Library { dir, delete } => {
+                                let mut failed = Vec::new();
+                                let mut deleted = 0;
+                                let before = if delete.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    crate::dam::storage::list(&dir)
+                                };
+                                for entry in before.iter().filter(|e| delete.contains(&e.path)) {
+                                    match crate::dam::storage::delete(entry) {
+                                        Ok(()) => deleted += 1,
+                                        Err(e) => {
+                                            failed.push(format!("{}: {e}", entry.path.display()))
+                                        }
+                                    }
+                                }
+                                Done::Library {
+                                    entries: crate::dam::storage::list(&dir),
+                                    deleted,
+                                    failed,
+                                }
+                            }
+                        };
+                        let _ = done_tx.send(done);
+                        wake(&repaint);
+                    }
+                });
+        }
+
+        // The lens database is inflated on first use; do that now, while nothing is open,
+        // rather than in the first photo's decode.
+        let _ = std::thread::Builder::new()
+            .name("duckfoot-lensfun".into())
+            .spawn(|| {
+                photo_engine::lensfun::database();
+            });
+
         let (open_tx, open_rx) = mpsc::channel::<(PathBuf, u64)>();
         {
             let done_tx = done_tx.clone();
@@ -163,6 +304,8 @@ impl Loader {
                             job = newer;
                         }
                         let (path, generation) = job;
+                        // A virtual copy's bytes are its photo's.
+                        let file = photo_engine::copies::source_file(&path).into_owned();
                         let _opening = gate.opening();
                         let started = Instant::now();
 
@@ -170,10 +313,11 @@ impl Loader {
                             // The stand-in, alongside the decode rather than ahead of it:
                             // it is only worth showing if it beats the real thing.
                             if !is_raster_path(&path) {
-                                let (path, done_tx, repaint) = (&path, &done_tx, &repaint);
+                                let (path, file, done_tx, repaint) =
+                                    (&path, &file, &done_tx, &repaint);
                                 scope.spawn(move || {
                                     let preview = guarded(path, || {
-                                        Ok(load_embedded_preview(path, STAGE_PREVIEW_SIDE))
+                                        Ok(load_embedded_preview(file, STAGE_PREVIEW_SIDE))
                                     });
                                     if let Ok(Some(preview)) = preview {
                                         let orientation = preview.orientation;
@@ -190,12 +334,12 @@ impl Loader {
 
                             let decoded = guarded(&path, || {
                                 if is_raster_path(&path) {
-                                    fs::read(&path)
+                                    fs::read(&file)
                                         .map_err(anyhow::Error::from)
                                         .and_then(|bytes| decode_raster(&bytes))
                                         .map(Decoded::Raster)
                                 } else {
-                                    decode_raw(&path).map(Decoded::Raw)
+                                    decode_raw(&file).map(|cfa| Decoded::Raw(Box::new(cfa)))
                                 }
                                 .map_err(|e| format!("{e:#}"))
                             });
@@ -209,7 +353,27 @@ impl Loader {
                                     guarded(&path, || {
                                         match decoded {
                                             Decoded::Raw(cfa) => {
-                                                upload_cfa(&device, &queue, &pool, cfa)
+                                                // A lens profile, unless the file corrects
+                                                // its own lens: looked up here, off the UI
+                                                // thread, from the EXIF it was shot with.
+                                                let profile = if cfa.warp.is_none() {
+                                                    photo_engine::read_info(&file).and_then(
+                                                        |info| {
+                                                            photo_engine::lensfun::for_photo(
+                                                                &info,
+                                                                (cfa.width, cfa.height),
+                                                            )
+                                                        },
+                                                    )
+                                                } else {
+                                                    None
+                                                };
+                                                upload_cfa(&device, &queue, &pool, *cfa).map(
+                                                    |mut up| {
+                                                        up.lens_profile = profile;
+                                                        up
+                                                    },
+                                                )
                                             }
                                             Decoded::Raster(raster) => {
                                                 upload_raster(&device, &queue, raster)
@@ -267,10 +431,14 @@ impl Loader {
                     let Ok(path) = job else { return };
                     // An open may have started while this worker sat waiting for a job.
                     gate.wait_until_idle();
-                    let image = guarded(&path, || Ok(generate_thumbnail(&path)))
+                    let file = photo_engine::copies::source_file(&path).into_owned();
+                    let image = guarded(&path, || Ok(generate_thumbnail(&file)))
                         .ok()
                         .flatten();
-                    let _ = done_tx.send(Done::Thumbnail { path, image });
+                    let info = guarded(&path, || Ok(photo_engine::read_info(&file)))
+                        .ok()
+                        .flatten();
+                    let _ = done_tx.send(Done::Thumbnail { path, image, info });
                     wake(&repaint);
                 })
                 .expect("could not start a thumbnail thread");
@@ -279,14 +447,39 @@ impl Loader {
         Self {
             open_tx,
             thumb_tx,
+            file_tx,
+            scan,
             done,
             repaint,
         }
     }
 
+    pub fn file_job(&self, job: FileJob) {
+        let _ = self.file_tx.send(job);
+    }
+
+    /// What a cancellable folder read asked now is stamped with.
+    pub fn scan_epoch(&self) -> u64 {
+        self.scan.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Stops the folder read under way and every one asked before now.
+    pub fn cancel_scans(&self) {
+        self.scan.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Folders read and photos found by the folder read under way.
+    pub fn scan_progress(&self) -> (usize, usize) {
+        (
+            self.scan.folders.load(Ordering::Relaxed),
+            self.scan.photos.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn set_context(&self, ctx: &egui::Context) {
         if let Ok(mut slot) = self.repaint.lock() {
-            if slot.is_none() {
+            // Replaced along with the renderer when the surface's format changes.
+            if slot.as_ref() != Some(ctx) {
                 *slot = Some(ctx.clone());
             }
         }
@@ -332,7 +525,11 @@ fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
     if let Some(preview) = load_embedded_preview(path, THUMB_SIDE as u32) {
         return Some(preview_image(preview, Some(THUMB_SIDE)));
     }
-    // No preview this can read: build one from the mosaic.
+    // No preview this can read: build one from the mosaic. A whole-sensor decode each, so
+    // one at a time however many workers there are, or a roll of such files would hold
+    // several full mosaics in memory at once (WP5.2).
+    static ONE_MOSAIC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_MOSAIC.lock().unwrap_or_else(|e| e.into_inner());
     decode_raw(path).ok().map(|cfa| thumbnail(&cfa))
 }
 
@@ -401,7 +598,7 @@ fn thumbnail(cfa: &CfaImage) -> egui::ColorImage {
                 let mut x = tx * cell;
                 while x + 1 < ((tx + 1) * cell).min(w) {
                     for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                        let c = cfa.cfa2x2[dy * 2 + dx] as usize;
+                        let c = cfa.cfa.colour_at(y + dy, x + dx) as usize;
                         sum[c] += cfa.data[(y + dy) * w + x + dx] as f32;
                         n[c] += 1;
                     }

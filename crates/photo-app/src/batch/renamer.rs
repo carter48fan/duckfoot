@@ -3,6 +3,7 @@
 //! Supports flexible pattern strings like `{date}_{camera}_{seq:3}`,
 //! regex or literal find/replace, and collision resolution policies.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +21,8 @@ pub struct RenameContext<'a> {
     pub rating: u8,
     pub custom_text: &'a str,
     pub target_extension: &'a str,
-    pub date_override: Option<&'a str>, // YYYYMMDD or None for current/source
+    /// The capture date, `YYYYMMDD`: from the photo's metadata, else the file's own date.
+    pub date: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,36 @@ impl Default for Renamer {
     }
 }
 
+/// Widest `{seq:N}` honoured. Beyond this a typo would allocate a gigabyte of zeros.
+const MAX_SEQ_WIDTH: usize = 9;
+
+/// One path component made safe to create on every platform: no separators, nothing a
+/// Windows or Android filesystem refuses, no `..`, no Windows device names.
+pub fn sanitize_component(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    while out.contains("..") {
+        out = out.replace("..", ".");
+    }
+    let out = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    match (out.is_empty(), reserved) {
+        (true, _) => "untitled".to_string(),
+        (false, true) => format!("_{out}"),
+        (false, false) => out.to_string(),
+    }
+}
+
 impl Renamer {
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
@@ -48,7 +80,9 @@ impl Renamer {
         }
     }
 
-    /// Evaluates the pattern template against the given context and returns the destination filename.
+    /// Evaluates the pattern template against the given context and returns the
+    /// destination filename: one component, never a path, whatever the pattern and the
+    /// photo's metadata contain.
     pub fn format_filename(&self, ctx: &RenameContext) -> String {
         let stem = ctx
             .source_path
@@ -84,7 +118,7 @@ impl Renamer {
                     seq_num.to_string()
                 } else if token.starts_with("{seq:") {
                     let digits_str = &token[5..token.len() - 1];
-                    let width = digits_str.parse::<usize>().unwrap_or(3);
+                    let width = digits_str.parse::<usize>().unwrap_or(3).min(MAX_SEQ_WIDTH);
                     format!("{:0width$}", seq_num, width = width)
                 } else {
                     seq_num.to_string()
@@ -96,20 +130,20 @@ impl Renamer {
         }
 
         // 4. {date}, {year}, {month}, {day}
-        let date_str = ctx.date_override.unwrap_or("20260924");
+        let date_str = ctx.date.unwrap_or("undated");
         out = out.replace("{date}", date_str);
-        if date_str.len() >= 8 {
-            out = out.replace("{year}", &date_str[0..4]);
-            out = out.replace("{month}", &date_str[4..6]);
-            out = out.replace("{day}", &date_str[6..8]);
-        }
+        let dated = date_str.len() == 8 && date_str.bytes().all(|b| b.is_ascii_digit());
+        out = out.replace("{year}", if dated { &date_str[0..4] } else { "undated" });
+        out = out.replace("{month}", if dated { &date_str[4..6] } else { "undated" });
+        out = out.replace("{day}", if dated { &date_str[6..8] } else { "undated" });
 
         // 5. {camera}
         let camera_clean = ctx
             .camera_model
-            .unwrap_or("Camera")
-            .replace(' ', "_")
-            .replace('/', "-");
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or("unknown-camera")
+            .trim()
+            .replace(' ', "_");
         out = out.replace("{camera}", &camera_clean);
 
         // 6. {rating}
@@ -129,43 +163,51 @@ impl Renamer {
             out.push_str(ext);
         }
 
-        out
+        sanitize_component(&out)
     }
 
-    /// Resolves target path and checks for collisions based on policy.
-    pub fn resolve_target_path(&self, output_dir: &Path, ctx: &RenameContext) -> Option<PathBuf> {
-        let base_name = self.format_filename(ctx);
-        let target = output_dir.join(&base_name);
+    /// Where this photo's export goes. Collisions are checked against the disk *and*
+    /// against `claimed` — the names earlier jobs in the same batch will write — so two
+    /// sources that format to one name never overwrite each other, whatever the policy.
+    pub fn resolve_target_path(
+        &self,
+        output_dir: &Path,
+        ctx: &RenameContext,
+        claimed: &mut HashSet<PathBuf>,
+    ) -> Option<PathBuf> {
+        let target = output_dir.join(self.format_filename(ctx));
+        let taken = |p: &Path, claimed: &HashSet<PathBuf>| {
+            claimed.contains(p)
+                || (p.exists() && self.collision_policy != CollisionPolicy::Overwrite)
+        };
 
-        if !target.exists() {
-            return Some(target);
-        }
-
-        match self.collision_policy {
-            CollisionPolicy::Overwrite => Some(target),
-            CollisionPolicy::Skip => None,
-            CollisionPolicy::AutoIncrementSuffix => {
-                let stem = target
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("file");
-                let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-                let mut counter = 1;
-                loop {
-                    let candidate_name = if ext.is_empty() {
+        let chosen = if !taken(&target, claimed) {
+            target
+        } else if self.collision_policy == CollisionPolicy::Skip && !claimed.contains(&target) {
+            return None;
+        } else {
+            let stem = target
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+            (1..)
+                .map(|counter| {
+                    output_dir.join(if ext.is_empty() {
                         format!("{stem}_{counter}")
                     } else {
                         format!("{stem}_{counter}.{ext}")
-                    };
-                    let candidate = output_dir.join(&candidate_name);
-                    if !candidate.exists() {
-                        return Some(candidate);
-                    }
-                    counter += 1;
-                }
-            }
-        }
+                    })
+                })
+                .find(|candidate| !taken(candidate, claimed))?
+        };
+        claimed.insert(chosen.clone());
+        Some(chosen)
     }
 }
 
@@ -189,7 +231,7 @@ mod tests {
             rating: 5,
             custom_text: "ClientA",
             target_extension: "jpg",
-            date_override: Some("20260924"),
+            date: Some("20260924"),
         };
 
         let result = renamer.format_filename(&ctx);
@@ -213,10 +255,81 @@ mod tests {
             rating: 4,
             custom_text: "",
             target_extension: "png",
-            date_override: Some("20260924"),
+            date: Some("20260924"),
         };
 
         let result = renamer.format_filename(&ctx);
         assert_eq!(result, "20260924_Canon_EOS_R5_0010_4star.png");
+    }
+
+    fn ctx(source: &Path) -> RenameContext<'_> {
+        RenameContext {
+            source_path: source,
+            sequence_index: 0,
+            camera_model: None,
+            rating: 0,
+            custom_text: "",
+            target_extension: "jpg",
+            date: None,
+        }
+    }
+
+    #[test]
+    fn two_sources_with_one_name_never_overwrite_each_other() {
+        let dir = std::env::temp_dir().join(format!("duckfoot-rename-{}", std::process::id()));
+        let renamer = Renamer::new("{filename}");
+        let mut claimed = HashSet::new();
+        let (a, b) = (Path::new("/one/DSC1.ARW"), Path::new("/two/DSC1.ARW"));
+        let first = renamer
+            .resolve_target_path(&dir, &ctx(a), &mut claimed)
+            .unwrap();
+        let second = renamer
+            .resolve_target_path(&dir, &ctx(b), &mut claimed)
+            .unwrap();
+        assert_eq!(first, dir.join("DSC1.jpg"));
+        assert_eq!(second, dir.join("DSC1_1.jpg"));
+        // Even told to overwrite, a batch does not overwrite its own output.
+        let overwrite = Renamer {
+            collision_policy: CollisionPolicy::Overwrite,
+            ..Renamer::new("{filename}")
+        };
+        let mut claimed = HashSet::new();
+        let first = overwrite
+            .resolve_target_path(&dir, &ctx(a), &mut claimed)
+            .unwrap();
+        let second = overwrite
+            .resolve_target_path(&dir, &ctx(b), &mut claimed)
+            .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn names_stay_one_safe_component() {
+        let renamer = Renamer::new("{camera}_{custom}");
+        let src = Path::new("/p/a.ARW");
+        let c = RenameContext {
+            camera_model: Some("../../etc\\passwd:x"),
+            custom_text: "a/b",
+            ..ctx(src)
+        };
+        let name = renamer.format_filename(&c);
+        assert!(
+            !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+            "{name}"
+        );
+        assert_eq!(sanitize_component("CON.jpg"), "_CON.jpg");
+        assert_eq!(sanitize_component(" .. "), "untitled");
+        assert_eq!(
+            Renamer::new("{seq:999999999}")
+                .format_filename(&ctx(src))
+                .len(),
+            "000000001.jpg".len()
+        );
+    }
+
+    #[test]
+    fn an_undated_photo_says_so_rather_than_inventing_a_date() {
+        let name = Renamer::new("{date}_{camera}").format_filename(&ctx(Path::new("/p/a.ARW")));
+        assert_eq!(name, "undated_unknown-camera.jpg");
     }
 }

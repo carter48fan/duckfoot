@@ -215,6 +215,7 @@ pub fn apply(base: &PhotoStack, look: &Look, strength: f32) -> PhotoStack {
     let mut target = base.clone();
     target.tonal = d.tonal.clone();
     target.tone_curve = d.tone_curve.clone();
+    target.curve_domain = d.curve_domain;
     target.clarity = d.clarity.clone();
     target.dehaze = d.dehaze.clone();
     target.color_eq = d.color_eq.clone();
@@ -242,6 +243,10 @@ pub fn apply(base: &PhotoStack, look: &Look, strength: f32) -> PhotoStack {
     }
     blend!(tonal, lerp_tonal);
     blend!(tone_curve, lerp_curve);
+    // Looks draw their curves on display values, quarter tones at 0.25 and 0.75.
+    if target.tone_curve.enabled {
+        out.curve_domain = target.curve_domain;
+    }
     blend!(clarity, |a: &photo_engine::params::Clarity,
                      b: &photo_engine::params::Clarity,
                      t| {

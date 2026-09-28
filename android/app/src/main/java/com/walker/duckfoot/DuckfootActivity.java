@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -54,6 +55,7 @@ public class DuckfootActivity extends NativeActivity {
     private static final int PICK_OPEN = 0;
     private static final int PICK_ADD = 1;
     private static final int PICK_FOLDER = 2;
+    private static final int PICK_PRESET = 3;
 
     /** Enough of a file to tell two photos of the same name and size apart. */
     private static final int HEAD_BYTES = 64 * 1024;
@@ -86,6 +88,15 @@ public class DuckfootActivity extends NativeActivity {
         // The bars come back after a picker or a swipe; hide them again on return.
         if (hasFocus) {
             hideSystemBars();
+        }
+    }
+
+    /** The system is short of memory: Rust lets go of what it can make again. */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            post("trim");
         }
     }
 
@@ -134,6 +145,46 @@ public class DuckfootActivity extends NativeActivity {
     }
 
     /**
+     * Offer an exported photo to other apps through the system share sheet. The file is in
+     * the shared Pictures folder, so the media scanner hands back a content:// URI for it
+     * that any app may be granted, and no FileProvider is needed.
+     */
+    public void shareFile(String path) {
+        try {
+            android.media.MediaScannerConnection.scanFile(
+                    getApplicationContext(),
+                    new String[]{path},
+                    null,
+                    (scannedPath, uri) -> runOnUiThread(() -> {
+                        if (uri == null) {
+                            post("status", "Could not share: the gallery has not indexed the photo");
+                            return;
+                        }
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType(mimeFor(scannedPath));
+                        send.putExtra(Intent.EXTRA_STREAM, uri);
+                        send.setClipData(ClipData.newRawUri("", uri));
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        try {
+                            startActivity(Intent.createChooser(send, null));
+                        } catch (ActivityNotFoundException e) {
+                            post("status", "No app here can take a photo");
+                        }
+                    }));
+        } catch (Exception e) {
+            Log.e(TAG, "share failed for " + path, e);
+        }
+    }
+
+    private static String mimeFor(String path) {
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+        return "image/jpeg";
+    }
+
+    /**
      * Ask the system media scanner to index an exported photo so it appears immediately
      * in the Android Gallery and Google Photos.
      */
@@ -158,6 +209,31 @@ public class DuckfootActivity extends NativeActivity {
 
     public void requestPick(int kind) {
         runOnUiThread(() -> startPicker(kind));
+    }
+
+    /**
+     * The Rust side has stopped for good (its edits are flushed): end the task and the
+     * process, so the next launch starts cold rather than in a process whose native half
+     * has already run once.
+     */
+    public void die() {
+        runOnUiThread(() -> {
+            finishAndRemoveTask();
+            android.os.Process.killProcess(android.os.Process.myPid());
+        });
+    }
+
+    /**
+     * Where an edge swipe is the app's (the tab bar, the module strip) rather than the
+     * system's Back: {@code left, top, right, bottom} in window pixels, four ints each.
+     * Android honours up to 200 dp of each edge.
+     */
+    public void setGestureExclusion(int[] flat) {
+        List<Rect> rects = new ArrayList<>();
+        for (int i = 0; i + 3 < flat.length; i += 4) {
+            rects.add(new Rect(flat[i], flat[i + 1], flat[i + 2], flat[i + 3]));
+        }
+        runOnUiThread(() -> getWindow().getDecorView().setSystemGestureExclusionRects(rects));
     }
 
     /** Back with nothing left to close: background the app, keeping its state. */
@@ -196,6 +272,13 @@ public class DuckfootActivity extends NativeActivity {
             Uri tree = data.getData();
             if (tree != null) {
                 importer.execute(() -> importTree(tree));
+            }
+            return;
+        }
+        if (requestCode == PICK_PRESET) {
+            Uri preset = data.getData();
+            if (preset != null) {
+                importer.execute(() -> importPreset(preset));
             }
             return;
         }
@@ -261,6 +344,29 @@ public class DuckfootActivity extends NativeActivity {
         }
         if (event.size() > 1) {
             post(event.toArray(new String[0]));
+        }
+    }
+
+    /**
+     * A preset file, copied where Rust can read it; Rust checks it is one and adds it to
+     * its presets folder.
+     */
+    private void importPreset(Uri uri) {
+        if (!awaitNative()) {
+            return;
+        }
+        File dir = new File(getCacheDir(), "presets");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            post("status", "Could not create a folder for the preset.");
+            return;
+        }
+        try {
+            Doc doc = describe(uri);
+            File copy = copyInto(dir, doc, uri);
+            post("preset", copy.getAbsolutePath());
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "preset import failed: " + uri, e);
+            post("status", "Could not read the preset: " + e.getMessage());
         }
     }
 
@@ -348,7 +454,13 @@ public class DuckfootActivity extends NativeActivity {
      * so picking a photo again brings back its sidecar. A different photo with the same
      * name gets "name (2).ext".
      */
+    /** What a copy must leave free, beyond itself, so the phone is not filled to the brim. */
+    private static final long SPARE_BYTES = 500L << 20;
+
     private File copyInto(File dir, Doc doc, Uri uri) throws IOException {
+        if (doc.size >= 0 && dir.getUsableSpace() < doc.size + SPARE_BYTES) {
+            throw new IOException("not enough free space to copy it in");
+        }
         File dest = new File(dir, doc.name);
         if (dest.isFile()) {
             if (doc.size >= 0 && dest.length() == doc.size && sameHead(uri, dest)) {

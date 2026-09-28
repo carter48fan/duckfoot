@@ -1,10 +1,10 @@
 //! Interactive 3D tonemap visualization and manipulation for Barrel 1.
 //!
 //! Visualizes the logarithmic dynamic range transfer function (filmic tonemap) in 3D space:
-//! - Surface mode: 3D transfer surface over scene dynamic range (EV) and color spectrum,
+//! - Surface mode: 3D transfer surface over scene dynamic range (EV) and exposure (±1 EV),
 //!   with interactive 3D control handles for White EV, Black EV, Latitude, and Contrast.
-//! - RGB Gamut Cube mode: 3D color cube deformation showing how camera gamut is mapped
-//!   into the display-referred color space.
+//! - RGB Cube mode: a lattice of scene-linear colours, placed where filmic sends them on
+//!   the display — brightness compressed, ratios (and so hues) kept.
 //!
 //! Interactive orbit camera (drag to rotate, wheel to zoom, double-click to reset) with
 //! zero latency and depth-sorted immediate-mode rendering.
@@ -181,17 +181,10 @@ pub fn render_filmic_2d(ui: &mut egui::Ui, filmic: &Filmic) {
 }
 
 /// Evaluates the filmic sigmoid transfer function for a linear value `v`.
+/// Filmic's output for a scene-linear value, as a display value (0..=1): the engine's own
+/// curve (`Filmic::display_value`), so what is drawn here is what the shader does.
 pub fn eval_filmic(v: f32, f: &Filmic) -> f32 {
-    if v <= 0.0 {
-        return 0.0;
-    }
-    let white = 2.0_f32.powf(f.white_ev);
-    let black = 2.0_f32.powf(f.black_ev);
-    let lat = (f.latitude / 100.0).max(0.01);
-    let log_range = (white / black).log2().max(0.001);
-    let norm = ((v / black).log2() / log_range - 0.5) * f.contrast;
-    let exp_term = (-norm / lat).exp();
-    (1.0 / (1.0 + exp_term)).clamp(0.0, 1.0)
+    f.display_value(v)
 }
 
 /// Perspective projection of a 3D point (X, Y, Z) to 2D screen coordinates.
@@ -523,7 +516,7 @@ pub fn render_tonemap_3d(
             y,
             egui::Align2::LEFT_CENTER,
             if state.mode == Tonemap3DMode::Surface {
-                "Spectrum"
+                "Exposure ±1 EV"
             } else {
                 "Green"
             },
@@ -607,20 +600,17 @@ fn render_surface_mode(
             let v_norm = j as f32 / (NY - 1) as f32;
             let y = (v_norm - 0.5) * 1.6;
 
-            // Chromatic shift across spectrum for 3D visualization
-            let channel_gain = 1.0 + (v_norm - 0.5) * 0.4;
-            let mapped = eval_filmic(v_lin * channel_gain, filmic);
+            // Depth is exposure, −1 EV to +1 EV: the same curve met by a darker or brighter
+            // version of the scene, which is what an exposure change does to it.
+            let exposure_gain = 2.0_f32.powf((v_norm - 0.5) * 2.0);
+            let mapped = eval_filmic(v_lin * exposure_gain, filmic);
             let z = (mapped - 0.5) * 2.0;
 
             if let Some((sp, depth)) =
                 project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom)
             {
-                // Vertex color based on height/output luminance and spectrum
-                let lum_byte = (mapped * 240.0) as u8;
-                let r_tint = ((lum_byte as f32 * (1.1 - v_norm * 0.3)).clamp(0.0, 255.0)) as u8;
-                let g_tint = ((lum_byte as f32 * 0.95).clamp(0.0, 255.0)) as u8;
-                let b_tint = ((lum_byte as f32 * (0.8 + v_norm * 0.4)).clamp(0.0, 255.0)) as u8;
-                let col = Color32::from_rgb(r_tint, g_tint, b_tint);
+                // Coloured by the display value it maps to: grey, as the output is.
+                let col = Color32::from_gray((mapped * 240.0) as u8);
 
                 *pt = (sp, depth, col);
                 valid[i][j] = true;
@@ -713,8 +703,10 @@ fn render_surface_mode(
         };
         let node_radius = if is_hovered { 6.0 } else { 4.5 };
 
-        // Outer glow/ring
-        painter.circle_filled(*pos, node_radius + 2.0, theme::ACCENT.linear_multiply(0.35));
+        // A plain ring when it is the one under the pointer: no glow (DESIGN.md).
+        if is_hovered {
+            painter.circle_stroke(*pos, node_radius + 2.5, Stroke::new(1.0, theme::ACCENT));
+        }
         painter.circle_filled(*pos, node_radius, node_color);
         painter.circle_stroke(*pos, node_radius, Stroke::new(1.0, theme::BG_950));
 
@@ -763,10 +755,18 @@ fn render_rgb_cube_mode(
             for b in 0..STEPS {
                 let fb = b as f32 / (STEPS - 1) as f32;
 
-                // Scene linear input
-                let r_mapped = eval_filmic(fr * 4.0, filmic);
-                let g_mapped = eval_filmic(fg * 4.0, filmic);
-                let b_mapped = eval_filmic(fb * 4.0, filmic);
+                // Scene-linear input, through filmic as the shader applies it: the curve on
+                // the brightest channel, and every channel scaled by the same ratio.
+                let (r_in, g_in, b_in) = (fr * 4.0, fg * 4.0, fb * 4.0);
+                let norm = r_in.max(g_in).max(b_in);
+                let ratio = if norm > 0.0 {
+                    srgb_to_linear(eval_filmic(norm, filmic)) / norm
+                } else {
+                    0.0
+                };
+                let r_mapped = linear_to_srgb(r_in * ratio);
+                let g_mapped = linear_to_srgb(g_in * ratio);
+                let b_mapped = linear_to_srgb(b_in * ratio);
 
                 // Center in [-1, 1]
                 let x = (r_mapped - 0.5) * 2.0;
@@ -806,5 +806,22 @@ fn render_rgb_cube_mode(
     for (sp, _, col, _) in lattice {
         painter.circle_filled(sp, 3.5, col);
         painter.circle_stroke(sp, 3.5, Stroke::new(0.5, theme::BG_950));
+    }
+}
+
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }

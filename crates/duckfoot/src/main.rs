@@ -9,7 +9,9 @@ fn main() -> anyhow::Result<()> {
     duckfoot::run(
         duckfoot::event_loop()?,
         duckfoot::Options {
-            pending_open: std::env::args().nth(1).map(Into::into),
+            // Every argument (a file manager's %F passes several), and paths that are
+            // not UTF-8 too.
+            pending_open: std::env::args_os().skip(1).map(Into::into).collect(),
             platform: Box::new(photo_app::platform::default_platform),
         },
     )

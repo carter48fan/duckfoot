@@ -35,6 +35,7 @@ static PROXY: OnceLock<Mutex<EventLoopProxy<UserEvent>>> = OnceLock::new();
 const PICK_OPEN: i32 = 0;
 const PICK_ADD: i32 = 1;
 const PICK_FOLDER: i32 = 2;
+const PICK_PRESET: i32 = 3;
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
@@ -66,10 +67,14 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
         pictures.display()
     );
 
+    // Once the app has stopped (its edits flushed on the way out), the process goes too:
+    // a second android_main in the same process came up to a black screen (H12), so the
+    // next launch is a clean cold start instead.
+    let exit_bridge = bridge.clone();
     duckfoot::run(
         event_loop,
         duckfoot::Options {
-            pending_open: None,
+            pending_open: Vec::new(),
             platform: Box::new(move || {
                 Box::new(AndroidPlatform {
                     bridge: bridge.clone(),
@@ -79,7 +84,9 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
                 })
             }),
         },
-    )
+    )?;
+    exit_bridge.call_void("die", "()V", &[]);
+    Ok(())
 }
 
 /// `DuckfootActivity.nativeWake()`: an import finished, so draw a frame to pick it up.
@@ -108,30 +115,33 @@ impl Bridge {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
             let activity = env.new_global_ref(activity)?;
 
-            // Registered here rather than resolved by name, because NativeActivity
-            // dlopen()s this library itself and JNI would not search it.
-            let class = env.get_object_class(activity.as_obj())?;
-            env.register_native_methods(
-                &class,
-                &[NativeMethod {
-                    name: "nativeWake".into(),
-                    sig: "()V".into(),
-                    fn_ptr: native_wake as *mut c_void,
-                }],
-            )?;
+            env.with_local_frame(8, |env| -> jni::errors::Result<()> {
+                // Registered here rather than resolved by name, because NativeActivity
+                // dlopen()s this library itself and JNI would not search it.
+                let class = env.get_object_class(activity.as_obj())?;
+                env.register_native_methods(
+                    &class,
+                    &[NativeMethod {
+                        name: "nativeWake".into(),
+                        sig: "()V".into(),
+                        fn_ptr: native_wake as *mut c_void,
+                    }],
+                )?;
 
-            // Tell the activity which files are photos, and that it may now wake us.
-            let extensions: Vec<String> = photo_engine::all_image_dialog_extensions()
-                .into_iter()
-                .map(|e| e.to_lowercase())
-                .collect();
-            let array = string_array(&mut env, &extensions)?;
-            env.call_method(
-                activity.as_obj(),
-                "onNativeReady",
-                "([Ljava/lang/String;)V",
-                &[JValue::Object(&array)],
-            )?;
+                // Tell the activity which files are photos, and that it may now wake us.
+                let extensions: Vec<String> = photo_engine::all_image_dialog_extensions()
+                    .into_iter()
+                    .map(|e| e.to_lowercase())
+                    .collect();
+                let array = string_array(env, &extensions)?;
+                env.call_method(
+                    activity.as_obj(),
+                    "onNativeReady",
+                    "([Ljava/lang/String;)V",
+                    &[JValue::Object(&array)],
+                )?;
+                Ok(())
+            })?;
             activity
         };
         Ok(Self {
@@ -146,32 +156,70 @@ impl Bridge {
 
     /// A directory the activity reports through a `String name()` method.
     fn dir(&self, method: &str) -> anyhow::Result<PathBuf> {
-        let mut env = self.env()?;
-        let path = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
-            let s = env
-                .call_method(self.activity.as_obj(), method, "()Ljava/lang/String;", &[])?
-                .l()?;
-            Ok(env.get_string(&JString::from(s))?.into())
-        })?;
+        let path = self
+            .with_env(method, |env| {
+                let s = env
+                    .call_method(self.activity.as_obj(), method, "()Ljava/lang/String;", &[])?
+                    .l()?;
+                Ok(String::from(env.get_string(&JString::from(s))?))
+            })
+            .ok_or_else(|| anyhow::anyhow!("DuckfootActivity.{method} gave no directory"))?;
         let path = PathBuf::from(path);
         std::fs::create_dir_all(&path)?;
         Ok(path)
     }
 
-    fn call_void(&self, method: &str, sig: &str, args: &[JValue]) {
+    /// Runs `f` in a local frame of its own, so every local reference it makes is freed
+    /// when it returns: this thread is attached for good and never returns to Java, so
+    /// nothing else would free them, and the table they fill holds 512 (M-20). A Java
+    /// exception left pending makes every later JNI call fail: it is reported to logcat
+    /// and cleared. `None` if the call failed.
+    fn with_env<T>(
+        &self,
+        what: &str,
+        f: impl FnOnce(&mut JNIEnv) -> jni::errors::Result<T>,
+    ) -> Option<T> {
         let outcome = self.env().and_then(|mut env| {
+            let r = env.with_local_frame(16, f);
+            if r.is_err() && env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            r
+        });
+        match outcome {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::error!("DuckfootActivity.{what} failed: {e}");
+                None
+            }
+        }
+    }
+
+    fn call_void(&self, method: &str, sig: &str, args: &[JValue]) {
+        self.with_env(method, |env| {
             env.call_method(self.activity.as_obj(), method, sig, args)
                 .map(|_| ())
         });
-        if let Err(e) = outcome {
-            log::error!("DuckfootActivity.{method} failed: {e}");
-        }
+    }
+
+    /// `void method(String)`, the string made inside the call's frame.
+    fn call_with_string(&self, method: &str, arg: &str) {
+        self.with_env(method, |env| {
+            let s = env.new_string(arg)?;
+            env.call_method(
+                self.activity.as_obj(),
+                method,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&s)],
+            )
+            .map(|_| ())
+        });
     }
 
     /// The next finished import, as `[kind, args…]`, or `None` once the queue is empty.
     fn poll_event(&self) -> Option<Vec<String>> {
-        let mut env = self.env().ok()?;
-        let event = env.with_local_frame(8, |env| -> jni::errors::Result<Option<Vec<String>>> {
+        self.with_env("pollEvent", |env| {
             let array = env
                 .call_method(
                     self.activity.as_obj(),
@@ -192,14 +240,8 @@ impl Bridge {
                 env.delete_local_ref(item)?;
             }
             Ok(Some(items))
-        });
-        match event {
-            Ok(event) => event,
-            Err(e) => {
-                log::error!("DuckfootActivity.pollEvent failed: {e}");
-                None
-            }
-        }
+        })
+        .flatten()
     }
 }
 
@@ -249,11 +291,11 @@ impl AndroidPlatform {
 impl Platform for AndroidPlatform {
     fn request(&mut self, request: Request) {
         match request {
-            Request::OpenImage => self.pick(PICK_OPEN),
-            Request::AddImages => self.pick(PICK_ADD),
-            Request::BrowseFolder => self.pick(PICK_FOLDER),
+            Request::OpenImage { .. } => self.pick(PICK_OPEN),
+            Request::AddImages { .. } => self.pick(PICK_ADD),
+            Request::BrowseFolder { .. } => self.pick(PICK_FOLDER),
             // No save dialog: exports go where the gallery finds them.
-            Request::BatchOutputDir => {
+            Request::BatchOutputDir { .. } => {
                 if let Some(dir) = self.exports_dir() {
                     self.answered.push(Response::BatchOutputDir(dir));
                 }
@@ -264,6 +306,21 @@ impl Platform for AndroidPlatform {
                     self.answered.push(Response::ExportImage(path));
                 }
             }
+            // Beside the exports, where a file manager or the share sheet finds it.
+            Request::ExportPreset { name } => {
+                if let Some(dir) = self.exports_dir() {
+                    let path = unused_name(&dir, &name);
+                    self.answered.push(Response::ExportPreset(path));
+                }
+            }
+            Request::Share { path } => {
+                if let Some(path) = path.to_str() {
+                    self.bridge.call_with_string("shareFile", path);
+                }
+            }
+            Request::ImportPreset { .. } => self.pick(PICK_PRESET),
+            // The phone's screen is drawn as sRGB; there is no profile to choose.
+            Request::DisplayProfile { .. } => {}
         }
     }
 
@@ -278,6 +335,8 @@ impl Platform for AndroidPlatform {
                 "open" => out.extend(paths.next().map(Response::OpenImage)),
                 "add" if !args.is_empty() => out.push(Response::AddImages(paths.collect())),
                 "folder" => out.extend(paths.next().map(Response::BrowseFolder)),
+                "preset" => out.extend(paths.next().map(Response::ImportPreset)),
+                "trim" => out.push(Response::LowMemory),
                 // Progress and problems alike go to the status bar.
                 "status" => out.extend(args.into_iter().next().map(Response::Status)),
                 other => log::warn!("unknown event from the activity: {other}"),
@@ -297,6 +356,10 @@ impl Platform for AndroidPlatform {
         Some(self.pictures.clone())
     }
 
+    fn library_dir(&self) -> Option<PathBuf> {
+        Some(self.library.clone())
+    }
+
     fn settings_dir(&self) -> Option<PathBuf> {
         // Private to the app, like the library it sits beside.
         self.library.parent().map(|p| p.join("settings"))
@@ -306,17 +369,28 @@ impl Platform for AndroidPlatform {
         self.bridge.call_void("leave", "()V", &[]);
     }
 
+    fn can_share(&self) -> bool {
+        true
+    }
+
+    fn exclude_gestures(&mut self, rects: &[[i32; 4]]) {
+        let flat: Vec<i32> = rects.iter().flatten().copied().collect();
+        self.bridge.with_env("setGestureExclusion", |env| {
+            let array = env.new_int_array(flat.len() as i32)?;
+            env.set_int_array_region(&array, 0, &flat)?;
+            env.call_method(
+                self.bridge.activity.as_obj(),
+                "setGestureExclusion",
+                "([I)V",
+                &[JValue::Object(&array)],
+            )
+            .map(|_| ())
+        });
+    }
+
     fn export_completed(&mut self, path: &Path) {
-        if let Some(path_str) = path.to_str() {
-            if let Ok(env) = self.bridge.env() {
-                if let Ok(jpath) = env.new_string(path_str) {
-                    self.bridge.call_void(
-                        "scanMediaFile",
-                        "(Ljava/lang/String;)V",
-                        &[JValue::Object(&jpath)],
-                    );
-                }
-            }
+        if let Some(path) = path.to_str() {
+            self.bridge.call_with_string("scanMediaFile", path);
         }
     }
 }
@@ -324,8 +398,18 @@ impl Platform for AndroidPlatform {
 /// `name` in `dir`, or `stem (2).ext`, `stem (3).ext`… if that is taken. Exporting the
 /// same photo twice must not silently replace the first file in someone's gallery.
 fn unused_name(dir: &Path, name: &str) -> PathBuf {
+    // Claimed by creating it, not by checking it is absent: two exports at once (a single
+    // and a batch) cannot both be handed the same name (L-23). The export writes over the
+    // empty file.
+    let claim = |p: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+            .is_ok()
+    };
     let first = dir.join(name);
-    if !first.exists() {
+    if claim(&first) {
         return first;
     }
     let name = Path::new(name);
@@ -334,8 +418,8 @@ fn unused_name(dir: &Path, name: &str) -> PathBuf {
         .and_then(|s| s.to_str())
         .unwrap_or("export");
     let ext = name.extension().and_then(|s| s.to_str()).unwrap_or("png");
-    (2..)
+    (2..10_000)
         .map(|n| dir.join(format!("{stem} ({n}).{ext}")))
-        .find(|p| !p.exists())
-        .expect("an unbounded range always finds a free name")
+        .find(|p| claim(p))
+        .unwrap_or(first)
 }

@@ -10,7 +10,7 @@
 //!
 //! | Tab | Holds |
 //! |---|---|
-//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, filters, select mode and the tour |
+//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
 //! | Presets | one-tap looks — sepia, mono, film… — and how strongly to apply them |
 //! | Edit | the chosen module's controls over a one-line strip: turn, every module by name, and the list that chooses them |
 //! | Export | the single export and batch export |
@@ -33,12 +33,12 @@ use egui::{
 use crate::presets::{self, LOOKS};
 use crate::widgets::{self, Kind};
 use crate::Gpu;
-use crate::{
-    file_name, module_enabled, module_on, summarise, theme, Export, InspectorSectionId, PhotoApp,
-    View,
-};
+use crate::{file_name, summarise, theme, Export, InspectorSectionId, PhotoApp, View};
 use photo_engine::PhotoStack;
 use std::path::PathBuf;
+
+/// The side sheet's resize grip, along its left edge; its content starts after it.
+const GRIP_W: f32 = 12.0;
 
 /// Which sheet is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +54,10 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Library => "library",
-            Tab::Presets => "presets",
-            Tab::Edit => "edit",
-            Tab::Export => "export",
+            Tab::Library => crate::i18n::tr("tab-library"),
+            Tab::Presets => crate::i18n::tr("tab-presets"),
+            Tab::Edit => crate::i18n::tr("tab-edit"),
+            Tab::Export => crate::i18n::tr("tab-export"),
         }
     }
 
@@ -68,6 +68,16 @@ impl Tab {
     }
 }
 
+/// What the Presets sheet lists: the built-in looks, this photo's snapshots, or its
+/// history. Snapshots and history are saved looks of one photo, so they live here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresetsView {
+    #[default]
+    Looks,
+    Snapshots,
+    History,
+}
+
 /// The look last applied from Presets. `applied` is the stack it produced: while the
 /// photo's stack still equals it, the look is live and its strength can be changed; once
 /// anything else is edited the look is simply part of the photo.
@@ -76,7 +86,14 @@ pub struct PresetState {
     look: usize,
     strength: f32,
     base: PhotoStack,
-    applied: PhotoStack,
+    pub(crate) applied: PhotoStack,
+}
+
+impl PresetState {
+    /// Which of [`LOOKS`] it is.
+    pub(crate) fn look(&self) -> usize {
+        self.look
+    }
 }
 
 /// Where the phone layout's parts were last frame.
@@ -85,7 +102,10 @@ pub struct Rects {
     top: Rect,
     nav: Rect,
     sheet: Rect,
-    stage: Rect,
+    /// Where the photo's stage was allocated, margins taken off.
+    pub(crate) stage: Rect,
+    /// The Edit sheet's module strip, swiped sideways.
+    strip: Rect,
 }
 
 impl Default for Rects {
@@ -95,6 +115,7 @@ impl Default for Rects {
             nav: Rect::NOTHING,
             sheet: Rect::NOTHING,
             stage: Rect::NOTHING,
+            strip: Rect::NOTHING,
         }
     }
 }
@@ -147,11 +168,6 @@ impl PhotoApp {
         let landscape = self.layout == Layout::Landscape;
         let frame = |margin: Margin| egui::Frame::new().fill(theme::BG_950).inner_margin(margin);
 
-        // First run, where it can be remembered: show the tour once.
-        if self.tour_step.is_none() && !self.settings.tour_done && self.settings_dir.is_some() {
-            self.tour_step = Some(0);
-        }
-
         // Panel order is layout order: the top bar, then the navigation, then the sheet
         // against it, then the status line, and the stage takes what is left.
         self.compact_rects.top = self.compact_top_bar(ui);
@@ -173,6 +189,7 @@ impl PhotoApp {
                 .rect
         };
         self.compact_rects.sheet = Rect::NOTHING;
+        self.compact_rects.strip = Rect::NOTHING;
         if let Some(tab) = self.compact_tab {
             let sheet = frame(Margin::same(0));
             if landscape {
@@ -189,8 +206,12 @@ impl PhotoApp {
                     .exact_size(w)
                     .show(ui, |ui| {
                         self.compact_sheet_handle(ui, default_w, min_w, max_w);
-                        let cap = ui.available_height();
-                        self.compact_sheet(ui, gpu, tab, cap);
+                        // The content starts where the grip ends, not under it.
+                        let content = ui.max_rect().with_min_x(ui.max_rect().left() + GRIP_W);
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                            let cap = ui.available_height();
+                            self.compact_sheet(ui, gpu, tab, cap);
+                        });
                     })
                     .response
                     .rect;
@@ -222,16 +243,27 @@ impl PhotoApp {
             }
         }
         self.compact_status(ui);
+        self.compact_rects.stage = Rect::NOTHING;
         self.workspace(ui);
-        self.compact_rects.stage = Rect::from_min_size(
-            pos2(
-                self.compact_rects.top.left(),
-                self.compact_rects.top.bottom(),
-            ),
-            self.last_panel,
-        );
         self.batch_export_dialog(ui);
         self.tour(ui);
+    }
+
+    /// Where a sideways swipe is the app's and not the system's Back (M-24): the bars
+    /// swiped along to change tab or module. Android caps what an app may take from each
+    /// edge at 200 dp of height, so the photo itself, swiped for the next photo, keeps
+    /// the system's gesture at its edges.
+    pub(crate) fn gesture_strips(&self) -> Vec<Rect> {
+        if !self.layout.is_compact() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if self.layout == Layout::Portrait {
+            out.push(self.compact_rects.nav);
+        }
+        out.push(self.compact_rects.strip);
+        out.retain(|r| r.is_positive() && r.height() <= 200.0);
+        out
     }
 
     /// A thin grip down the side sheet's inner edge: drag to widen or narrow the sheet,
@@ -244,7 +276,10 @@ impl PhotoApp {
         max_size: f32,
     ) {
         let panel = ui.max_rect();
-        let rect = Rect::from_min_max(panel.left_top(), pos2(panel.left() + 12.0, panel.bottom()));
+        let rect = Rect::from_min_max(
+            panel.left_top(),
+            pos2(panel.left() + GRIP_W, panel.bottom()),
+        );
         let response = ui.interact(rect, ui.id().with("sheet_grip"), Sense::click_and_drag());
         let hot = response.hovered() || response.dragged();
         let pill =
@@ -304,9 +339,8 @@ impl PhotoApp {
                             })
                             .inner
                             .clicked()
-                            && self.history.redo(&mut self.stack)
                         {
-                            self.needs_render = true;
+                            self.redo();
                         }
                         if ui
                             .add_enabled_ui(can_undo, |ui| {
@@ -314,9 +348,8 @@ impl PhotoApp {
                             })
                             .inner
                             .clicked()
-                            && self.history.undo(&mut self.stack)
                         {
-                            self.needs_render = true;
+                            self.undo();
                         }
                         let loaded = self.ready_image().is_some();
                         ui.add_enabled_ui(loaded, |ui| {
@@ -339,6 +372,12 @@ impl PhotoApp {
                             .clicked()
                         {
                             self.fine_adjust = !self.fine_adjust;
+                        }
+                        if widgets::chip(ui, self.clip_overlay, "clip")
+                            .on_hover_text("Show clipping: red where blown, blue where crushed")
+                            .clicked()
+                        {
+                            self.clip_overlay = !self.clip_overlay;
                         }
                         ui.add_enabled_ui(loaded, |ui| {
                             // One control for zoom: it reads the zoom, and flips fit ↔ 1:1.
@@ -490,7 +529,9 @@ impl PhotoApp {
     /// The roll, then one row of actions under it. Filters, select mode and the folder
     /// tree are chips in that row, and take room only while they are on.
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        if self.folder_browser_open {
+        if self.storage.is_some() {
+            self.storage_panel(ui);
+        } else if self.folder_browser_open {
             self.shelf_folders(ui, gpu);
         } else {
             let displayed = self.displayed_indices();
@@ -499,12 +540,8 @@ impl PhotoApp {
         }
 
         // Sorting is not filtering: only something that hides photos lights the chip.
-        let filtering = self.filter
-            != crate::dam::FilterState {
-                sort_by: self.filter.sort_by,
-                sort_descending: self.filter.sort_descending,
-                ..Default::default()
-            };
+        let filtering = self.filtering();
+        let mut make_copy = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
@@ -515,11 +552,31 @@ impl PhotoApp {
                 self.pick_and_shelve(ui.ctx());
             }
             if widgets::chip(ui, false, "folder…").clicked() {
-                self.request(ui.ctx(), crate::platform::Request::BrowseFolder);
+                self.request(
+                    ui.ctx(),
+                    crate::platform::Request::BrowseFolder {
+                        from: self.settings.import_dir.clone(),
+                    },
+                );
             }
             divider(ui, 28.0);
             if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
                 self.folder_browser_open = !self.folder_browser_open;
+                self.storage = None;
+            }
+            if self.platform.library_dir().is_some()
+                && widgets::chip(ui, self.storage.is_some(), "storage")
+                    .on_hover_text(
+                        "The copies in Duckfoot's library, their sizes, and deleting them",
+                    )
+                    .clicked()
+            {
+                if self.storage.is_some() {
+                    self.storage = None;
+                } else {
+                    self.folder_browser_open = false;
+                    self.open_storage();
+                }
             }
             if !self.shelf.is_empty() {
                 let label = if filtering { "filter •" } else { "filter" };
@@ -530,13 +587,25 @@ impl PhotoApp {
                     self.select_mode = !self.select_mode;
                 }
             }
-            if widgets::chip(ui, false, "? tour")
+            if let Some(path) = self.loaded_path.clone() {
+                if widgets::chip(ui, false, "+ copy")
+                    .on_hover_text("A virtual copy: another edit of the same photo")
+                    .clicked()
+                {
+                    make_copy = Some(path);
+                }
+            }
+            // Offered, not imposed (DESIGN.md: no onboarding): lit until it has been seen.
+            if widgets::chip(ui, !self.settings.tour_done, "? tour")
                 .on_hover_text("How to get around on a phone")
                 .clicked()
             {
                 self.start_tour();
             }
         });
+        if let Some(path) = make_copy {
+            self.make_virtual_copy(gpu, &path);
+        }
         if self.library_filters_open && !self.shelf.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -551,9 +620,219 @@ impl PhotoApp {
                 self.search_field(ui, 120.0);
                 self.sort_controls(ui, false);
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.label_filter(ui);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.saved_filters_row(ui);
+            });
         }
         if self.select_mode {
             self.selection_bar(ui);
+        }
+    }
+
+    /// The Library screen (H11): every copy Duckfoot made from the picker, largest first,
+    /// with what it costs, which are on the shelf, and deleting them.
+    fn storage_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::dam::storage::Confirm;
+        let Some(view) = &self.storage else { return };
+        let Some(entries) = &view.entries else {
+            ui.label(theme::tag("Reading the library…").color(theme::TEXT_DIM));
+            return;
+        };
+        let shelved: std::collections::HashSet<PathBuf> = self
+            .shelf
+            .iter()
+            .map(|it| photo_engine::copies::source_file(&it.path).into_owned())
+            .collect();
+        let total: u64 = entries.iter().map(|e| e.bytes).sum();
+        let unused: Vec<PathBuf> = entries
+            .iter()
+            .filter(|e| !shelved.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        let unused_bytes: u64 = entries
+            .iter()
+            .filter(|e| !shelved.contains(&e.path))
+            .map(|e| e.bytes)
+            .sum();
+        let chosen: Vec<PathBuf> = entries
+            .iter()
+            .filter(|e| view.selected.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        let confirming = view.confirming;
+        let count = entries.len();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                theme::tag(format!(
+                    "{count} {} · {}",
+                    if count == 1 { "copy" } else { "copies" },
+                    crate::parts::format_bytes(total)
+                ))
+                .color(theme::TEXT),
+            );
+        });
+        let mut toggle = None;
+        let mut select_all = None;
+        let mut delete = None;
+        let mut arm = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if count > 0 {
+                if widgets::chip(ui, false, "all").clicked() {
+                    select_all = Some(true);
+                }
+                if widgets::chip(ui, false, "none").clicked() {
+                    select_all = Some(false);
+                }
+            }
+            if !chosen.is_empty() {
+                let armed = confirming == Some(Confirm::Selected);
+                let label = if armed {
+                    format!("delete {}? tap again", chosen.len())
+                } else {
+                    format!("delete {}", chosen.len())
+                };
+                if widgets::chip(ui, armed, &label).clicked() {
+                    if armed {
+                        delete = Some(chosen.clone());
+                    } else {
+                        arm = Some(Some(Confirm::Selected));
+                    }
+                }
+            }
+            if !unused.is_empty() {
+                let armed = confirming == Some(Confirm::Unused);
+                let label = if armed {
+                    format!("delete {}? tap again", unused.len())
+                } else {
+                    format!(
+                        "clear unused · {}",
+                        crate::parts::format_bytes(unused_bytes)
+                    )
+                };
+                if widgets::chip(ui, armed, &label)
+                    .on_hover_text("Delete every copy that is not on the shelf")
+                    .clicked()
+                {
+                    if armed {
+                        delete = Some(unused.clone());
+                    } else {
+                        arm = Some(Some(Confirm::Unused));
+                    }
+                }
+            }
+        });
+
+        let row_h = widgets::sized(ui, 26.0, 40.0);
+        egui::ScrollArea::vertical()
+            .id_salt("library storage")
+            .max_height(row_h * 4.5)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if entries.is_empty() {
+                    ui.label(
+                        theme::tag(
+                            "Nothing copied in yet: photos opened from the phone are copied here.",
+                        )
+                        .color(theme::TEXT_DIM),
+                    );
+                }
+                for entry in entries {
+                    let on = view.selected.contains(&entry.path);
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                    let painter = ui.painter();
+                    if on {
+                        painter.rect_filled(rect, 3.0, Color32::from_gray(0x1c));
+                    }
+                    let side = 14.0;
+                    let check = Rect::from_center_size(
+                        pos2(rect.left() + 4.0 + side / 2.0, rect.center().y),
+                        vec2(side, side),
+                    );
+                    widgets::paint_checkbox(painter, check, on, response.hovered());
+                    let size = crate::parts::format_bytes(entry.bytes);
+                    let size_galley =
+                        painter.layout_no_wrap(size, FontId::monospace(11.0), theme::TEXT_DIM);
+                    let size_w = size_galley.size().x;
+                    painter.galley(
+                        pos2(
+                            rect.right() - 4.0 - size_w,
+                            rect.center().y - size_galley.size().y / 2.0,
+                        ),
+                        size_galley,
+                        theme::TEXT_DIM,
+                    );
+                    let mut name = file_name(&entry.path);
+                    if shelved.contains(&entry.path) {
+                        name.push_str("  · on shelf");
+                    }
+                    let name_left = check.right() + 8.0;
+                    let name_w = (rect.right() - 12.0 - size_w - name_left).max(0.0);
+                    let galley = painter.layout(
+                        name,
+                        FontId::new(12.0, theme::sans_strong()),
+                        theme::TEXT,
+                        f32::INFINITY,
+                    );
+                    let clip = Rect::from_min_max(
+                        pos2(name_left, rect.top()),
+                        pos2(name_left + name_w, rect.bottom()),
+                    );
+                    painter.with_clip_rect(clip).galley(
+                        pos2(name_left, rect.center().y - galley.size().y / 2.0),
+                        galley,
+                        theme::TEXT,
+                    );
+                    widgets::describe(ui, &response, rect, || {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            true,
+                            on,
+                            file_name(&entry.path),
+                        )
+                    });
+                    if response.clicked() {
+                        toggle = Some(entry.path.clone());
+                    }
+                }
+            });
+
+        if let Some(paths) = delete {
+            self.delete_copies(&paths);
+            return;
+        }
+        let Some(view) = &mut self.storage else {
+            return;
+        };
+        if let Some(a) = arm {
+            view.confirming = a;
+        }
+        if let Some(path) = toggle {
+            view.confirming = None;
+            if !view.selected.remove(&path) {
+                view.selected.insert(path);
+            }
+        }
+        match select_all {
+            Some(true) => {
+                view.confirming = None;
+                if let Some(entries) = &view.entries {
+                    view.selected = entries.iter().map(|e| e.path.clone()).collect();
+                }
+            }
+            Some(false) => {
+                view.confirming = None;
+                view.selected.clear();
+            }
+            None => {}
         }
     }
 
@@ -573,9 +852,37 @@ impl PhotoApp {
             if n > 0 {
                 ui.label(theme::tag(format!("{n} selected")).color(theme::ACCENT));
                 if widgets::chip(ui, false, "remove").clicked() {
-                    let selection = &self.selection;
-                    self.shelf.retain(|it| !selection.is_selected(&it.path));
-                    self.selection.clear();
+                    let paths: Vec<PathBuf> = self.selection.selected.iter().cloned().collect();
+                    self.remove_from_shelf(&paths);
+                }
+                // Removing leaves the library's copy taking up the phone's space; this
+                // deletes it too. Asked twice: there is no undo.
+                let copies: Vec<PathBuf> = self
+                    .selection
+                    .selected
+                    .iter()
+                    .filter(|p| self.is_library_copy(p))
+                    .map(|p| photo_engine::copies::source_file(p).into_owned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !copies.is_empty() {
+                    let id = ui.id().with("delete copies");
+                    let armed = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+                    let label = if armed {
+                        format!("delete {}? tap again", copies.len())
+                    } else {
+                        "remove + delete copy".to_string()
+                    };
+                    let response = widgets::chip(ui, armed, &label).on_hover_text(
+                        "Take off the shelf and delete Duckfoot's copy, edits and all",
+                    );
+                    if response.clicked() {
+                        if armed {
+                            self.delete_copies(&copies);
+                        }
+                        ui.data_mut(|d| d.insert_temp(id, !armed));
+                    }
                 }
             }
         });
@@ -644,6 +951,51 @@ impl PhotoApp {
             }
             (false, None) => {}
         }
+        // Its colour label, then what the file says about it in one line; tapped,
+        // everything it says.
+        let line = if many {
+            String::new()
+        } else {
+            self.open_info()
+                .map(crate::info::one_line)
+                .unwrap_or_default()
+        };
+        let mut tapped = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            self.label_picker(ui);
+            if !line.is_empty() {
+                ui.add_space(8.0);
+                let arrow = if self.info_open { "▾" } else { "▸" };
+                tapped = ui
+                    .add(
+                        egui::Label::new(theme::dim(format!("{arrow} {line}")).size(11.5))
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Everything the file says about this photo")
+                    .clicked();
+            }
+        });
+        if tapped {
+            self.info_open = !self.info_open;
+        }
+        if !many {
+            if let (false, Some(path)) = (line.is_empty(), self.loaded_path.clone()) {
+                if self.info_open {
+                    egui::Frame::new()
+                        .fill(theme::BG_925)
+                        .corner_radius(8)
+                        .inner_margin(Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.info_rows(ui, &path);
+                            ui.add_space(6.0);
+                            self.keywords_editor(ui);
+                        });
+                }
+            }
+        }
     }
 
     // ── Presets ─────────────────────────────────────────────────────────────────────────
@@ -654,6 +1006,27 @@ impl PhotoApp {
             ui.label(theme::dim("Open a photo to try a look on it.").size(12.0));
             return;
         }
+        ui.horizontal(|ui| {
+            for (view, label) in [
+                (PresetsView::Looks, "looks"),
+                (PresetsView::Snapshots, "snapshots"),
+                (PresetsView::History, "history"),
+            ] {
+                if widgets::chip(ui, self.presets_view == view, label).clicked() {
+                    self.presets_view = view;
+                }
+            }
+        });
+        match self.presets_view {
+            PresetsView::Looks => self.looks_body(ui, false),
+            PresetsView::Snapshots => self.phone_snapshots(ui),
+            PresetsView::History => self.history_rows(ui),
+        }
+    }
+
+    /// The looks as tiles, and the live look's strength. `wrap` lays the tiles out in
+    /// rows (the desktop inspector); otherwise they are one row to swipe (the phone).
+    pub(crate) fn looks_body(&mut self, ui: &mut egui::Ui, wrap: bool) {
         // A look is live while nothing else has been edited since it was applied.
         let live = self
             .preset
@@ -661,35 +1034,87 @@ impl PhotoApp {
             .filter(|p| p.applied == self.stack)
             .map(|p| (p.look, p.strength));
         let mut pick: Option<Option<usize>> = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("compact_looks")
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .scroll_source(ScrollSource {
-                drag: DragScroll::Always,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let original = [Color32::from_gray(0x55), Color32::from_gray(0x22)];
-                    if look_tile(ui, "original", original, live.is_none())
-                        .on_hover_text("Without a look")
-                        .clicked()
-                    {
-                        pick = Some(None);
+        // The user's own presets follow the built-in looks: (apply, export, delete).
+        let mut mine: (Option<usize>, Option<usize>, Option<usize>) = (None, None, None);
+        let user: Vec<String> = self
+            .user_presets
+            .iter()
+            .map(|(_, p)| p.name.clone())
+            .collect();
+        let tiles = |ui: &mut egui::Ui,
+                     pick: &mut Option<Option<usize>>,
+                     mine: &mut (Option<usize>, Option<usize>, Option<usize>)| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            let original = [Color32::from_gray(0x55), Color32::from_gray(0x22)];
+            if look_tile(ui, "original", original, live.is_none())
+                .on_hover_text("Without a look")
+                .clicked()
+            {
+                *pick = Some(None);
+            }
+            for (i, look) in LOOKS.iter().enumerate() {
+                let chosen = live.is_some_and(|(l, _)| l == i);
+                if look_tile(ui, look.name, look.swatch, chosen)
+                    .on_hover_text(look.tip)
+                    .clicked()
+                {
+                    *pick = Some(Some(i));
+                }
+            }
+            let swatch = [
+                Color32::from_rgb(0x5c, 0x4b, 0x2e),
+                Color32::from_gray(0x26),
+            ];
+            for (i, name) in user.iter().enumerate() {
+                // Eleven letters fit under a tile.
+                let short: String = if name.chars().count() > 11 {
+                    name.chars().take(10).chain(std::iter::once('…')).collect()
+                } else {
+                    name.clone()
+                };
+                let tile = look_tile(ui, &short, swatch, false).on_hover_text(format!(
+                    "{name}: your preset. Right-click or hold for more."
+                ));
+                if tile.clicked() {
+                    mine.0 = Some(i);
+                }
+                tile.context_menu(|ui| {
+                    if ui.button("Export…").clicked() {
+                        mine.1 = Some(i);
+                        ui.close();
                     }
-                    for (i, look) in LOOKS.iter().enumerate() {
-                        let chosen = live.is_some_and(|(l, _)| l == i);
-                        if look_tile(ui, look.name, look.swatch, chosen)
-                            .on_hover_text(look.tip)
-                            .clicked()
-                        {
-                            pick = Some(Some(i));
-                        }
+                    if ui.button("Delete").clicked() {
+                        mine.2 = Some(i);
+                        ui.close();
                     }
                 });
-            });
+            }
+        };
+        if wrap {
+            ui.horizontal_wrapped(|ui| tiles(ui, &mut pick, &mut mine));
+        } else {
+            egui::ScrollArea::horizontal()
+                .id_salt("compact_looks")
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .scroll_source(ScrollSource {
+                    drag: DragScroll::Always,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| tiles(ui, &mut pick, &mut mine));
+                });
+        }
+        if let Some(i) = mine.0 {
+            self.preset = None;
+            self.apply_user_preset(i);
+        }
+        if let Some(i) = mine.1 {
+            self.export_user_preset(ui.ctx(), i);
+        }
+        if let Some(i) = mine.2 {
+            self.delete_user_preset(i);
+        }
 
         match pick {
             Some(Some(i)) if live.map(|(l, _)| l) != Some(i) => {
@@ -726,8 +1151,121 @@ impl PhotoApp {
                 ))
                 .size(11.5),
             );
+        } else if wrap {
+            ui.label(theme::dim("Click a look to try it; its strength appears here.").size(11.5));
         } else {
             ui.label(theme::dim("Tap a look to try it. Swipe the row for more.").size(11.5));
+        }
+        self.preset_saver(ui);
+    }
+
+    /// Save this photo's look as a preset, or bring one in from a file.
+    fn preset_saver(&mut self, ui: &mut egui::Ui) {
+        let editable = self.can_edit();
+        match self.preset_draft.take() {
+            None => {
+                ui.horizontal_wrapped(|ui| {
+                    if widgets::chip_enabled(ui, editable, false, "save as preset")
+                        .on_hover_text("Keep this photo's look to use again")
+                        .clicked()
+                    {
+                        self.preset_draft = Some(String::new());
+                    }
+                    if widgets::chip(ui, false, "import…")
+                        .on_hover_text("Add a .duckfoot-preset file")
+                        .clicked()
+                    {
+                        let from = self.settings.import_dir.clone();
+                        self.request(ui.ctx(), crate::platform::Request::ImportPreset { from });
+                    }
+                });
+            }
+            Some(mut name) => {
+                let mut done = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .hint_text("preset name")
+                            .desired_width((ui.available_width() - 150.0).max(80.0)),
+                    );
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if widgets::button_enabled(
+                        ui,
+                        !name.trim().is_empty(),
+                        Kind::Primary,
+                        "Save",
+                        0.0,
+                    )
+                    .clicked()
+                        || (enter && !name.trim().is_empty())
+                    {
+                        done = true;
+                    }
+                    if widgets::button(ui, Kind::Secondary, "Cancel", 0.0).clicked() {
+                        cancel = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        theme::dim(format!("It carries {}.", self.paste_set.describe())).size(11.5),
+                    );
+                    if widgets::chip(ui, self.paste_picker_open, "what it carries").clicked() {
+                        self.paste_picker_open = !self.paste_picker_open;
+                    }
+                });
+                if self.paste_picker_open && self.layout.is_compact() {
+                    self.paste_set_editor(ui);
+                }
+                if done {
+                    self.save_user_preset(&name);
+                } else if !cancel {
+                    self.preset_draft = Some(name);
+                }
+            }
+        }
+    }
+
+    /// This photo's snapshots: tap one to go back to it, hold it to delete it.
+    fn phone_snapshots(&mut self, ui: &mut egui::Ui) {
+        use crate::parts::{list_row, RowStyle};
+        let mut recall = None;
+        let mut delete = None;
+        for (i, (name, stack)) in self.snapshots.iter().enumerate() {
+            let style = if *stack == self.stack {
+                RowStyle::Match
+            } else {
+                RowStyle::Normal
+            };
+            let row = list_row(ui, name, style, None);
+            if row.clicked() {
+                recall = Some(i);
+            }
+            row.context_menu(|ui| {
+                if ui.button("Delete snapshot").clicked() {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        if self.snapshots.is_empty() {
+            ui.label(
+                theme::dim("None yet. A snapshot keeps this photo's edits as they are now.")
+                    .size(11.5),
+            );
+        } else {
+            ui.label(theme::dim("Tap to go back to one; hold to delete it.").size(11.5));
+        }
+        let ready = self.ready_image().is_some();
+        let width = ui.available_width();
+        if widgets::button_enabled(ui, ready, Kind::Secondary, "+ snapshot", width).clicked() {
+            self.take_snapshot("");
+        }
+        if let Some(i) = recall {
+            self.recall_snapshot(i);
+        }
+        if let Some(i) = delete {
+            self.delete_snapshot(i);
         }
     }
 
@@ -770,10 +1308,20 @@ impl PhotoApp {
         // How much more the controls want than they were given this frame.
         let mut hidden = 0.0;
         if body_open {
+            // Under the cap with the strip and the gap before it, or at the cap the sheet
+            // would be that gap taller than its panel and run under the photo.
+            let gap = if loaded {
+                ui.spacing().item_spacing.y
+            } else {
+                0.0
+            };
+            // The panel can be shorter than the cap on a small screen.
+            let room = cap.min(ui.available_height());
+            let body_h = (room - STRIP_H - 1.0 - gap).max(80.0);
             let body = egui::ScrollArea::vertical()
                 .id_salt("compact_edit")
                 .auto_shrink([false, true])
-                .max_height((cap - STRIP_H - 1.0).max(80.0))
+                .max_height(body_h)
                 .scroll_source(ScrollSource {
                     drag: DragScroll::Always,
                     ..Default::default()
@@ -781,7 +1329,10 @@ impl PhotoApp {
                 .show(ui, |ui| {
                     // A sideways flick on anything that is not a control moves module.
                     if loaded && !self.customize_open {
-                        let area = ui.clip_rect();
+                        // No lower than the body is given: the clip rect can reach past
+                        // it, over the strip below, once the controls scroll.
+                        let mut area = ui.clip_rect();
+                        area.max.y = area.max.y.min(area.min.y + body_h);
                         if let Some(step) = swipe(ui, area, ui.id().with("module_swipe"), false) {
                             self.step_module(step);
                         }
@@ -817,7 +1368,10 @@ impl PhotoApp {
                 ui.painter()
                     .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
             }
+            let before = ui.cursor().top();
             self.module_strip(ui);
+            self.compact_rects.strip =
+                Rect::from_x_y_ranges(ui.max_rect().x_range(), before..=ui.cursor().top());
         }
         ui.cursor().top() - top + hidden
     }
@@ -832,7 +1386,7 @@ impl PhotoApp {
     }
 
     /// Move to the next (`+1`) or previous (`-1`) module, stopping at the ends.
-    fn step_module(&mut self, step: i32) {
+    pub(crate) fn step_module(&mut self, step: i32) {
         let ids = self.compact_ids();
         let Some(i) = ids.iter().position(|id| *id == self.compact_module) else {
             return;
@@ -872,11 +1426,22 @@ impl PhotoApp {
                     ui.add_space(4.0);
                     // Framing a crop: finishing it comes before anything else.
                     if self.cropping {
-                        if strip_tab(ui, "✓ apply", true, true, None).clicked() {
+                        if strip_tab(ui, "apply", true, true, None).clicked() {
                             self.apply_crop();
                         }
-                        if strip_tab(ui, "✕ cancel", false, false, None).clicked() {
+                        if strip_tab(ui, "× cancel", false, false, None).clicked() {
                             self.cancel_crop();
+                        }
+                        divider(ui, STRIP_H);
+                        for (aspect, label) in crate::crop_tool::Aspect::CHOICES {
+                            if strip_tab(ui, label, self.crop_aspect == aspect, false, None)
+                                .clicked()
+                            {
+                                self.set_crop_aspect(aspect);
+                            }
+                        }
+                        if strip_icon(ui, "⇄", "Turn the crop's shape a quarter").clicked() {
+                            self.swap_crop_aspect();
                         }
                         divider(ui, STRIP_H);
                     }
@@ -889,10 +1454,10 @@ impl PhotoApp {
                     divider(ui, STRIP_H);
                     for id in ids {
                         let (_, modified) = summarise(id, &self.stack, &defaults, &white);
-                        let dot = (module_on(&self.stack, id) && modified).then_some(theme::ACCENT);
+                        let dot = (id.is_on(&self.stack) && modified).then_some(theme::ACCENT);
                         let chosen = self.compact_module == id && !self.customize_open;
                         let open = chosen && self.compact_controls_open;
-                        let response = strip_tab(ui, module_short_name(id), chosen, open, dot)
+                        let response = strip_tab(ui, id.short_name(), chosen, open, dot)
                             .on_hover_text(id.title());
                         if chosen && self.reveal_section == Some(id) {
                             response.scroll_to_me(Some(egui::Align::Center));
@@ -930,6 +1495,8 @@ impl PhotoApp {
     /// Every module with a switch for whether the strip shows it, and arrows to reorder.
     /// The scope and filmic start off here: flat on a phone, and a switch away.
     fn compact_modules_list(&mut self, ui: &mut egui::Ui) {
+        self.ui_scale_row(ui);
+        ui.add_space(4.0);
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label(theme::tag("modules in the strip").color(theme::TEXT_DIM));
@@ -1000,7 +1567,7 @@ impl PhotoApp {
         self.module_body(ui, id, &mut body_changed, &mut started);
         if body_changed {
             // As on the desktop: touching a control turns its module on.
-            if let Some(on) = module_enabled(&mut self.stack, id) {
+            if let Some(on) = id.enabled_mut(&mut self.stack) {
                 *on = true;
             }
         }
@@ -1021,14 +1588,14 @@ impl PhotoApp {
         let defaults = self.baseline.clone();
         let white = self.white_scale();
         let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
-        let on = module_on(&self.stack, id);
+        let on = id.is_on(&self.stack);
         let ids = self.compact_ids();
         let at = ids.iter().position(|i| *i == id);
         let mut changed = false;
         let mut step = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if let Some(enabled) = module_enabled(&mut self.stack, id) {
+            if let Some(enabled) = id.enabled_mut(&mut self.stack) {
                 if widgets::switch(ui, enabled).changed() {
                     changed = true;
                 }
@@ -1083,26 +1650,9 @@ impl PhotoApp {
     /// Put one module back as the photo opened. Crop & rotate returns to the camera's
     /// orientation, uncropped.
     fn reset_module(&mut self, id: InspectorSectionId) {
-        let b = &self.baseline;
-        let s = &mut self.stack;
-        match id {
-            InspectorSectionId::Scope => {}
-            InspectorSectionId::Geometry => {
-                s.geometry = b.geometry;
-                self.cropping = false;
-            }
-            InspectorSectionId::WhiteBalance => s.white_balance = b.white_balance.clone(),
-            InspectorSectionId::Exposure => s.exposure = b.exposure.clone(),
-            InspectorSectionId::Tonal => s.tonal = b.tonal.clone(),
-            InspectorSectionId::ToneCurve => s.tone_curve = b.tone_curve.clone(),
-            InspectorSectionId::Clarity => s.clarity = b.clarity.clone(),
-            InspectorSectionId::Dehaze => s.dehaze = b.dehaze.clone(),
-            InspectorSectionId::ColorEq => s.color_eq = b.color_eq.clone(),
-            InspectorSectionId::Filmic3D => s.filmic = b.filmic.clone(),
-            InspectorSectionId::ColorBalance => s.color_balance = b.color_balance.clone(),
-            InspectorSectionId::Vibrance => s.vibrance = b.vibrance.clone(),
-            InspectorSectionId::Sharpen => s.sharpen = b.sharpen.clone(),
-            InspectorSectionId::Vignette => s.vignette = b.vignette.clone(),
+        id.reset(&mut self.stack, &self.baseline);
+        if id == InspectorSectionId::Geometry {
+            self.cropping = false;
         }
     }
 
@@ -1142,6 +1692,17 @@ impl PhotoApp {
             if button(ui, editable && has_clip, Kind::Secondary, "Paste", 0.0).clicked() {
                 self.paste_adjustments();
             }
+            if button(
+                ui,
+                self.can_same_as_previous(),
+                Kind::Secondary,
+                "Same as previous",
+                0.0,
+            )
+            .clicked()
+            {
+                self.same_as_previous();
+            }
             if self.can_undo_paste_to_all() {
                 if button(ui, true, Kind::Secondary, "Undo paste", 0.0).clicked() {
                     self.undo_paste_to_all();
@@ -1160,7 +1721,20 @@ impl PhotoApp {
                     self.paste_to_all_in_shelf();
                 }
             }
+            if widgets::chip(ui, self.paste_picker_open, "what pastes").clicked() {
+                self.paste_picker_open = !self.paste_picker_open;
+            }
         });
+        if self.paste_picker_open {
+            egui::Frame::new()
+                .fill(theme::BG_925)
+                .corner_radius(8)
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.paste_set_editor(ui);
+                });
+        }
     }
 
     /// A quarter turn from the Edit strip, as one undo step.
@@ -1177,7 +1751,24 @@ impl PhotoApp {
     fn export_sheet(&mut self, ui: &mut egui::Ui) {
         self.edits_block(ui);
         ui.add_space(8.0);
-        self.export_format_line(ui);
+        // What the export will be, and the settings behind it a tap away.
+        let source = self.export_source_size();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(crate::export_ui::summary(&self.export_settings, source))
+                    .family(theme::mono_bold())
+                    .size(11.0)
+                    .color(theme::ACCENT),
+            );
+            if widgets::chip(ui, self.export_options_open, "options").clicked() {
+                self.export_options_open = !self.export_options_open;
+            }
+        });
+        if self.export_options_open {
+            let mut settings = self.export_settings;
+            crate::export_ui::settings_editor(ui, &mut settings, source);
+            self.export_settings = settings;
+        }
         let busy = matches!(self.export, Export::Writing { .. });
         let ready = self.ready_image().is_some() && !busy;
         let width = ui.available_width();
@@ -1191,6 +1782,7 @@ impl PhotoApp {
         }
 
         // Real-time export feedback in the sheet
+        let mut share = None;
         match &self.export {
             Export::Writing { path, started, .. } => {
                 ui.horizontal(|ui| {
@@ -1209,6 +1801,13 @@ impl PhotoApp {
             }
             Export::Done { path, seconds } => {
                 ui.horizontal(|ui| {
+                    if self.platform.can_share()
+                        && widgets::chip(ui, true, "share")
+                            .on_hover_text("Send it to another app")
+                            .clicked()
+                    {
+                        share = Some(path.clone());
+                    }
                     widgets::dot(ui, theme::LIME);
                     ui.label(
                         RichText::new(format!("exported {} in {seconds:.1}s", file_name(path)))
@@ -1231,6 +1830,9 @@ impl PhotoApp {
             }
             Export::Idle => {}
         }
+        if let Some(path) = share {
+            self.request(ui.ctx(), crate::platform::Request::Share { path });
+        }
 
         let n = self.selection.count();
         let label = if n > 1 {
@@ -1247,25 +1849,22 @@ impl PhotoApp {
     /// One line over the stage when there is something to say: an error, a notice, or an
     /// export being written / completed. The desktop's status bar has no room here.
     fn compact_status(&mut self, ui: &mut egui::Ui) {
-        let notice = self
-            .status_notification
-            .as_ref()
-            .filter(|(_, when)| when.elapsed().as_secs_f32() < 4.0);
+        let mut action = None;
         let (text, colour) = if let Some(err) = &self.error {
             (err.clone(), theme::DANGER)
         } else if let Export::Writing { path, .. } = &self.export {
             (format!("writing {}", file_name(path)), theme::ACCENT)
-        } else if let Some((msg, when)) = notice {
+        } else if let Some((msg, undo, left)) = self.live_notice() {
             // A finished export arrives here as a notice, so it comes down with the rest
             // rather than holding the line until the next export.
             // Wake to take the notice down when its time is up.
-            let left = 4.0 - when.elapsed().as_secs_f32();
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f32(left.max(0.0)));
-            (msg.clone(), theme::ACCENT)
+            ui.ctx().request_repaint_after(left);
+            action = undo;
+            (msg.to_string(), theme::ACCENT)
         } else {
             return;
         };
+        let mut run = None;
         egui::Panel::bottom("compact_status")
             .frame(
                 egui::Frame::new()
@@ -1275,31 +1874,86 @@ impl PhotoApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     widgets::dot(ui, colour);
-                    ui.add(egui::Label::new(theme::num(text).size(11.5).color(colour)).truncate());
+                    if let Some(a) = action {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::chip(ui, true, a.label()).clicked() {
+                                run = Some(a);
+                            }
+                            ui.add(
+                                egui::Label::new(theme::num(&text).size(11.5).color(colour))
+                                    .truncate(),
+                            );
+                        });
+                    } else {
+                        ui.add(
+                            egui::Label::new(theme::num(text).size(11.5).color(colour)).truncate(),
+                        );
+                    }
                 });
             });
+        if let Some(a) = run {
+            self.run_notice_action(a);
+        }
     }
     // ── Tour ────────────────────────────────────────────────────────────────────────────
 
     /// The tour's current step over everything else: the rest of the screen dimmed, the
     /// part it is about outlined, and a card saying how to use it.
+    /// The tour (G-04): coach marks on the real photo, each waiting for its gesture. The
+    /// screen dims around what the step is about, which still takes touches; the card sits
+    /// on the other side of it.
     fn tour(&mut self, ui: &mut egui::Ui) {
         let Some(step) = self.tour_step else { return };
         let Some(s) = TOUR.get(step) else {
             self.end_tour();
             return;
         };
-        if let Some(tab) = s.tab {
-            self.compact_tab = Some(tab);
+        if self.tour_mark.as_ref().is_none_or(|m| m.step != step) {
+            if let Some(tab) = s.tab {
+                self.compact_tab = Some(tab);
+            }
+            if s.goal.on_photo() && crate::knobs::knobs(self.compact_module).is_empty() {
+                self.compact_module = InspectorSectionId::Exposure;
+            }
+            self.tour_mark = Some(TourMark {
+                step,
+                log: self.photo_touch.log,
+                tab: self.compact_tab,
+                module: self.compact_module,
+            });
         }
+        let mark = self.tour_mark.clone().expect("set above");
+        let log = self.photo_touch.log;
+        let done = match s.goal {
+            Goal::Tab => self.compact_tab != mark.tab,
+            Goal::Choose => log.chose > mark.log.chose,
+            Goal::Adjust => log.adjusted > mark.log.adjusted,
+            Goal::Reset => log.reset > mark.log.reset,
+            Goal::Hold => log.held > mark.log.held,
+            Goal::Module => self.compact_module != mark.module,
+            Goal::Photo => log.stepped > mark.log.stepped,
+            Goal::Done => false,
+        };
+        if done {
+            self.tour_step = Some(step + 1);
+            ui.ctx().request_repaint();
+            return;
+        }
+        // Gestures on a photo need one open, and stepping needs two.
+        let possible = match s.goal {
+            Goal::Photo => self.ready_image().is_some() && self.shelf.len() > 1,
+            g if g.on_photo() => self.ready_image().is_some(),
+            _ => true,
+        };
+
         let ctx = ui.ctx().clone();
         let screen = ctx.content_rect();
         let r = self.compact_rects;
         let target = match s.target {
             Target::Nav => r.nav,
-            Target::Sheet => r.sheet,
-            Target::Top => r.top,
             Target::Stage => r.stage,
+            Target::Strip => r.strip,
+            Target::Nothing => Rect::NOTHING,
         }
         .intersect(screen);
         let mut next = false;
@@ -1308,12 +1962,9 @@ impl PhotoApp {
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .show(&ctx, |ui| {
-                // Nothing under the tour takes a touch while it shows.
-                ui.allocate_rect(screen, Sense::click_and_drag());
-                let painter = ui.painter();
-                let dim = Color32::from_black_alpha(190);
-                if target.is_positive() {
-                    for band in [
+                let dim = Color32::from_black_alpha(170);
+                let bands = if target.is_positive() {
+                    vec![
                         Rect::from_min_max(screen.min, pos2(screen.max.x, target.min.y)),
                         Rect::from_min_max(pos2(screen.min.x, target.max.y), screen.max),
                         Rect::from_min_max(
@@ -1324,27 +1975,37 @@ impl PhotoApp {
                             pos2(target.max.x, target.min.y),
                             pos2(screen.max.x, target.max.y),
                         ),
-                    ] {
-                        painter.rect_filled(band, 0, dim);
+                    ]
+                } else {
+                    vec![screen]
+                };
+                // The dim takes the touches around the target; the target keeps its own.
+                for (i, band) in bands.iter().enumerate() {
+                    if band.is_positive() {
+                        ui.painter().rect_filled(*band, 0, dim);
+                        ui.interact(
+                            *band,
+                            egui::Id::new(("tour_dim", i)),
+                            Sense::click_and_drag(),
+                        );
                     }
-                    painter.rect_stroke(
+                }
+                if target.is_positive() {
+                    ui.painter().rect_stroke(
                         target.shrink(1.0),
                         4,
                         Stroke::new(2.0, theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
-                } else {
-                    painter.rect_filled(screen, 0, dim);
                 }
 
                 // The card sits on whichever side of the target has more room.
                 let w = (screen.width() - 32.0).min(360.0);
                 let h_id = egui::Id::new("duckfoot_tour_card_h");
-                let h: f32 = ui.data(|d| d.get_temp(h_id)).unwrap_or(160.0);
-                let above = target.center().y > screen.center().y;
+                let h: f32 = ui.data(|d| d.get_temp(h_id)).unwrap_or(140.0);
                 let y = if !target.is_positive() {
                     screen.center().y - h / 2.0
-                } else if above {
+                } else if target.top() - screen.top() > screen.bottom() - target.bottom() {
                     target.top() - 12.0 - h
                 } else {
                     target.bottom() + 12.0
@@ -1367,41 +2028,59 @@ impl PhotoApp {
                                     .color(theme::TEXT_FAINT),
                             );
                             ui.label(
-                                RichText::new(s.title)
+                                RichText::new(crate::i18n::tr(s.title_id))
                                     .family(theme::sans_strong())
                                     .size(16.0)
                                     .color(theme::TEXT_HI),
                             );
-                            ui.label(RichText::new(s.text).size(13.0).color(theme::TEXT));
+                            ui.label(
+                                RichText::new(crate::i18n::tr(if possible {
+                                    s.text_id
+                                } else {
+                                    s.fallback_id
+                                }))
+                                .size(13.0)
+                                .color(theme::TEXT),
+                            );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                let last = step + 1 == TOUR.len();
-                                if widgets::chip(ui, false, "skip").clicked() {
+                                if widgets::chip(ui, false, crate::i18n::tr("tour-skip")).clicked()
+                                {
                                     skip = true;
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let label = if last { "Done" } else { "Next" };
-                                        if widgets::button(ui, Kind::Primary, label, 72.0).clicked()
-                                        {
-                                            next = true;
-                                        }
-                                    },
-                                );
+                                // Only a step whose gesture cannot be made here, and the
+                                // last, has a button to go on: the others wait for it.
+                                if s.goal == Goal::Done || !possible {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let label = crate::i18n::tr(if s.goal == Goal::Done {
+                                                "tour-done"
+                                            } else {
+                                                "tour-next"
+                                            });
+                                            if widgets::button(ui, Kind::Primary, label, 72.0)
+                                                .clicked()
+                                            {
+                                                next = true;
+                                            }
+                                        },
+                                    );
+                                }
                             });
                         })
                         .response
                         .rect
-                        .height()
                 });
-                if (shown.inner - h).abs() > 0.5 {
-                    ui.data_mut(|d| d.insert_temp(h_id, shown.inner));
+                let drawn = shown.inner;
+                if (drawn.height() - h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(h_id, drawn.height()));
                     ui.ctx().request_repaint();
                 }
+                self.tour_card = Some((drawn, target));
             });
         if skip {
-            self.end_tour();
+            self.skip_tour();
         } else if next {
             if step + 1 >= TOUR.len() {
                 self.end_tour();
@@ -1409,6 +2088,11 @@ impl PhotoApp {
                 self.tour_step = Some(step + 1);
             }
         }
+    }
+
+    /// Where the Edit sheet's module strip was drawn last frame.
+    pub fn strip_rect(&self) -> Rect {
+        self.compact_rects.strip
     }
 
     /// Where the phone layout's sheet was drawn last frame (nothing while it is closed).
@@ -1419,10 +2103,22 @@ impl PhotoApp {
     /// Close the tour and remember it was seen.
     pub(crate) fn end_tour(&mut self) {
         self.tour_step = None;
-        if !self.settings.tour_done {
+        self.tour_mark = None;
+        self.tour_card = None;
+        if !self.settings.tour_done || self.settings.tour_again {
             self.settings.tour_done = true;
+            self.settings.tour_again = false;
             self.save_settings();
         }
+    }
+
+    /// Skipped: closed, with a notice that offers it once more on the next launch.
+    fn skip_tour(&mut self) {
+        self.end_tour();
+        self.set_status_undoable(
+            crate::i18n::tr("tour-skipped"),
+            crate::NoticeAction::TourAgain,
+        );
     }
 }
 
@@ -1430,62 +2126,119 @@ impl PhotoApp {
 #[derive(Clone, Copy)]
 enum Target {
     Nav,
-    Sheet,
-    Top,
     Stage,
+    /// The Edit sheet's module strip.
+    Strip,
+    Nothing,
+}
+
+/// The gesture a step waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Goal {
+    Tab,
+    Choose,
+    Adjust,
+    Reset,
+    Hold,
+    Module,
+    Photo,
+    /// The last card: a button closes it.
+    Done,
+}
+
+impl Goal {
+    fn on_photo(self) -> bool {
+        matches!(self, Goal::Choose | Goal::Adjust | Goal::Reset | Goal::Hold)
+    }
+}
+
+/// Where the app stood when a step began: what its gesture must change.
+#[derive(Clone)]
+pub(crate) struct TourMark {
+    step: usize,
+    log: crate::on_photo::GestureLog,
+    tab: Option<Tab>,
+    module: InspectorSectionId,
 }
 
 struct TourStep {
-    title: &'static str,
-    text: &'static str,
+    /// Message ids, in `locales/`.
+    title_id: &'static str,
+    text_id: &'static str,
+    /// Said instead when the gesture cannot be made yet (no photo open, one photo).
+    fallback_id: &'static str,
     target: Target,
-    /// The tab to open for the step, if it is about one.
+    /// The tab to open as the step begins, if it is about one.
     tab: Option<Tab>,
+    goal: Goal,
 }
 
-const TOUR: [TourStep; 6] = [
+pub(crate) const TOUR_LEN: usize = TOUR.len();
+
+const TOUR: [TourStep; 8] = [
     TourStep {
-        title: "Four tabs",
-        text: "Library, Presets, Edit and Export. Swipe along this bar to move between them, \
-               or tap one. Tap the open tab again to hide its sheet and see the whole photo.",
+        title_id: "tour-tabs-title",
+        text_id: "tour-tabs-text",
+        fallback_id: "tour-tabs-text",
         target: Target::Nav,
         tab: None,
+        goal: Goal::Tab,
     },
     TourStep {
-        title: "Edit, one module at a time",
-        text: "Swipe the controls sideways — or tap ‹ › — for the next module. Tap a name in \
-               the strip to jump straight to it; tap it again to fold the controls away.",
-        target: Target::Sheet,
-        tab: Some(Tab::Edit),
-    },
-    TourStep {
-        title: "On, off, back",
-        text: "The switch turns a module on or off, and ⟲ beside ‹ › puts just that module \
-               back. ＋ modules at the end of the strip chooses which show: the scope and \
-               filmic are in there, off to start.",
-        target: Target::Sheet,
-        tab: Some(Tab::Edit),
-    },
-    TourStep {
-        title: "Fine and reset, on every tab",
-        text: "FINE makes every slider ten times finer. ⟲ up here resets the whole photo, \
-               and undo and redo sit beside it. Double-tap any slider to reset just that one.",
-        target: Target::Top,
-        tab: None,
-    },
-    TourStep {
-        title: "Presets",
-        text: "One tap for sepia, mono, film and more, with a strength slider. A look is an \
-               ordinary edit, so you can keep refining it in Edit.",
-        target: Target::Sheet,
-        tab: Some(Tab::Presets),
-    },
-    TourStep {
-        title: "The photo",
-        text: "Pinch to zoom, and swipe across the photo for the next one. This tour is \
-               under Library → ? tour whenever you want it again.",
+        title_id: "tour-choose-title",
+        text_id: "tour-choose-text",
+        fallback_id: "tour-needs-photo",
         target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Choose,
+    },
+    TourStep {
+        title_id: "tour-adjust-title",
+        text_id: "tour-adjust-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Adjust,
+    },
+    TourStep {
+        title_id: "tour-reset-title",
+        text_id: "tour-reset-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Reset,
+    },
+    TourStep {
+        title_id: "tour-hold-title",
+        text_id: "tour-hold-text",
+        fallback_id: "tour-needs-photo",
+        target: Target::Stage,
+        tab: Some(Tab::Edit),
+        goal: Goal::Hold,
+    },
+    TourStep {
+        title_id: "tour-strip-title",
+        text_id: "tour-strip-text",
+        fallback_id: "tour-strip-text",
+        target: Target::Strip,
+        tab: Some(Tab::Edit),
+        goal: Goal::Module,
+    },
+    TourStep {
+        title_id: "tour-photo-title",
+        text_id: "tour-photo-text",
+        fallback_id: "tour-photo-one",
+        target: Target::Stage,
+        tab: Some(Tab::Library),
+        goal: Goal::Photo,
+    },
+    TourStep {
+        title_id: "tour-end-title",
+        text_id: "tour-end-text",
+        fallback_id: "tour-end-text",
+        target: Target::Nothing,
         tab: None,
+        goal: Goal::Done,
     },
 ];
 
@@ -1502,7 +2255,10 @@ enum BarIcon {
 /// bar's line, as the font's glyphs are not.
 fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    let (rect, response) = widgets::allocate_control(ui, vec2(32.0, 32.0), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tip)
+    });
     let hovered = enabled && response.hovered();
     let colour = match (enabled, active, hovered) {
         (false, ..) => theme::TEXT_FAINT,
@@ -1600,16 +2356,39 @@ fn swipe(ui: &mut egui::Ui, rect: Rect, id: egui::Id, vertical: bool) -> Option<
 /// A look in the Presets row: its two colours over its name, outlined when chosen.
 fn look_tile(ui: &mut egui::Ui, name: &str, swatch: [Color32; 2], chosen: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(72.0, 70.0), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            true,
+            chosen,
+            format!("look: {name}"),
+        )
+    });
     let painter = ui.painter();
     let chip = Rect::from_min_size(rect.min + vec2(4.0, 2.0), vec2(64.0, 44.0));
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(chip.left_top(), swatch[0]);
-    mesh.colored_vertex(chip.right_top(), swatch[0]);
-    mesh.colored_vertex(chip.right_bottom(), swatch[1]);
-    mesh.colored_vertex(chip.left_bottom(), swatch[1]);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(egui::Shape::mesh(mesh));
+    // Two flat halves, not a blend: DESIGN.md keeps gradients off everything next to the
+    // photo, and this row sits right under it.
+    let (top, bottom) = chip.split_top_bottom_at_fraction(0.5);
+    painter.rect_filled(
+        top,
+        egui::CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        },
+        swatch[0],
+    );
+    painter.rect_filled(
+        bottom,
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 4,
+            se: 4,
+        },
+        swatch[1],
+    );
     let outline = if chosen {
         Stroke::new(2.0, theme::ACCENT)
     } else if response.hovered() {
@@ -1653,8 +2432,14 @@ fn strip_tab(
         Color32::PLACEHOLDER,
     );
     let pad = 10.0;
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(galley.size().x + 2.0 * pad, STRIP_H), Sense::click());
+    let (rect, response) = widgets::allocate_control(
+        ui,
+        vec2(galley.size().x + 2.0 * pad, STRIP_H),
+        Sense::click(),
+    );
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, chosen, text)
+    });
     let colour = if !enabled {
         theme::TEXT_FAINT
     } else if chosen {
@@ -1689,7 +2474,10 @@ fn strip_tab(
 
 /// A glyph in the Edit strip, for an action rather than a module.
 fn strip_icon(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(34.0, STRIP_H), Sense::click());
+    let (rect, response) = widgets::allocate_control(ui, vec2(34.0, STRIP_H), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+    });
     let colour = if response.hovered() {
         theme::TEXT_HI
     } else {
@@ -1716,25 +2504,6 @@ fn divider(ui: &mut egui::Ui, height: f32) {
 }
 
 /// A module's name in the Edit strip: short enough that several fit across a phone.
-fn module_short_name(id: InspectorSectionId) -> &'static str {
-    match id {
-        InspectorSectionId::Scope => "scope",
-        InspectorSectionId::Geometry => "crop",
-        InspectorSectionId::WhiteBalance => "wb",
-        InspectorSectionId::Exposure => "exposure",
-        InspectorSectionId::Tonal => "tone",
-        InspectorSectionId::ToneCurve => "curve",
-        InspectorSectionId::Clarity => "clarity",
-        InspectorSectionId::Dehaze => "dehaze",
-        InspectorSectionId::ColorEq => "color",
-        InspectorSectionId::Filmic3D => "filmic",
-        InspectorSectionId::ColorBalance => "balance",
-        InspectorSectionId::Vibrance => "vibrance",
-        InspectorSectionId::Sharpen => "sharpen",
-        InspectorSectionId::Vignette => "vignette",
-    }
-}
-
 /// The tab icons, painted rather than taken from a font: the bundled fonts have no glyph
 /// for sliders or a scope, and painted strokes match the rest of the controls.
 fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {

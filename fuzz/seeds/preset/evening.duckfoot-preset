@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "name": "Evening",
+  "carries": {
+    "geometry": false,
+    "left_out": []
+  },
+  "stack": {
+    "geometry": {
+      "quarter_turns": 0,
+      "mirror_h": false,
+      "mirror_v": false,
+      "straighten_deg": 0.0,
+      "crop": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1.0,
+        "height": 1.0
+      },
+      "perspective_v": 0.0,
+      "perspective_h": 0.0
+    },
+    "white_balance": {
+      "enabled": true,
+      "params": {
+        "tint_r": 1.0,
+        "tint_b": 1.0
+      }
+    },
+    "exposure": {
+      "enabled": true,
+      "params": {
+        "ev": 1.5,
+        "black": 0.0,
+        "mode": "ClassicLinear",
+        "rolloff": 0.0,
+        "extended_range": false
+      }
+    },
+    "tonal": {
+      "enabled": false,
+      "params": {
+        "highlights": 0.0,
+        "shadows": 0.0,
+        "whites": 0.0,
+        "blacks": 0.0
+      }
+    },
+    "tone_curve": {
+      "enabled": false,
+      "params": [
+        {
+          "x": 0.0,
+          "y": 0.0
+        },
+        {
+          "x": 1.0,
+          "y": 1.0
+        }
+      ]
+    },
+    "curve_domain": "Display",
+    "working_space": "Rec2020",
+    "filmic": {
+      "enabled": false,
+      "params": {
+        "white_ev": 3.5,
+        "black_ev": -8.0,
+        "latitude": 20.0,
+        "contrast": 1.1
+      }
+    },
+    "color_balance": {
+      "enabled": false,
+      "params": {
+        "lift": {
+          "r": 0.0,
+          "g": 0.0,
+          "b": 0.0
+        },
+        "gamma": {
+          "r": 0.0,
+          "g": 0.0,
+          "b": 0.0
+        },
+        "gain": {
+          "r": 0.0,
+          "g": 0.0,
+          "b": 0.0
+        },
+        "offset": {
+          "r": 0.0,
+          "g": 0.0,
+          "b": 0.0
+        }
+      }
+    },
+    "vibrance": {
+      "enabled": true,
+      "params": {
+        "vibrance": 0.4,
+        "saturation": 0.0
+      }
+    },
+    "vignette": {
+      "enabled": false,
+      "params": {
+        "amount": 0.0,
+        "radius": 0.8
+      }
+    },
+    "sharpen": {
+      "enabled": false,
+      "params": {
+        "amount": 0.0
+      }
+    },
+    "clarity": {
+      "enabled": false,
+      "params": {
+        "clarity": 0.0,
+        "texture": 0.0
+      }
+    },
+    "dehaze": {
+      "enabled": false,
+      "params": {
+        "amount": 0.0
+      }
+    },
+    "color_eq": {
+      "enabled": false,
+      "params": {
+        "red": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "orange": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "yellow": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "green": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "aqua": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "blue": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "purple": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        },
+        "magenta": {
+          "hue": 0.0,
+          "saturation": 0.0,
+          "luminance": 0.0
+        }
+      }
+    },
+    "lens": {
+      "enabled": false,
+      "params": {
+        "distortion": 0.0,
+        "ca_red": 0.0,
+        "ca_blue": 0.0,
+        "vignetting": 0.0,
+        "profile": true
+      }
+    },
+    "denoise": {
+      "enabled": false,
+      "params": {
+        "luminance": 0.0,
+        "detail": 50.0,
+        "color": 25.0,
+        "smoothness": 50.0
+      }
+    },
+    "local": {
+      "enabled": false,
+      "params": {
+        "masks": []
+      }
+    },
+    "heal": {
+      "enabled": false,
+      "params": {
+        "spots": []
+      }
+    }
+  }
+}

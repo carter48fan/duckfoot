@@ -1,0 +1,72 @@
+# Fuzz targets for every parser a hostile file reaches (WP5.1). Run with cargo-fuzz on a
+# nightly toolchain, as the nightly CI lane does (.github/workflows/fuzz.yml):
+#
+#     cargo install cargo-fuzz
+#     cargo +nightly fuzz run tiff -- -max_total_time=600
+#
+# Its own workspace, so the app's builds never compile libFuzzer.
+[package]
+name = "duckfoot-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+photo-engine = { path = "../crates/photo-engine" }
+photo-app = { path = "../crates/photo-app" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "tiff"
+path = "fuzz_targets/tiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "embedded_jpeg"
+path = "fuzz_targets/embedded_jpeg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raster"
+path = "fuzz_targets/raster.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw"
+path = "fuzz_targets/raw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sidecar"
+path = "fuzz_targets/sidecar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "preset"
+path = "fuzz_targets/preset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icc"
+path = "fuzz_targets/icc.rs"
+test = false
+doc = false
+bench = false

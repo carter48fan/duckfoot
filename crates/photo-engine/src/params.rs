@@ -81,10 +81,35 @@ pub struct Filmic {
     ///
     /// The shader divides the normalised log position by `latitude / 100`, so this is the
     /// sigmoid's softness: small values give a steep S-curve, large values flatten it.
-    /// Anything much above ~60 compresses the whole image toward mid grey — at 200 the
-    /// output spanned only 0.43..0.57 and every photograph came out as a flat slab.
+    /// The curve is renormalised so `black_ev` always lands on black, `white_ev` on white
+    /// and 0.18 on mid grey (adjust.wgsl `filmic_curve`), so a large latitude flattens the
+    /// S toward a plain log curve rather than squeezing the picture into grey.
     pub latitude: f32,
     pub contrast: f32,
+}
+
+impl Filmic {
+    /// The display value (sRGB-encoded, 0..=1) the adjust shader's filmic curve gives a
+    /// scene-linear value — the same curve as `filmic_curve` in adjust.wgsl, for the views
+    /// that draw it. Kept beside the shader's by a test on both.
+    pub fn display_value(&self, v: f32) -> f32 {
+        const MID_GREY: f32 = 0.18;
+        // Mid grey as it shows with filmic off: 118/255.
+        const MID_GREY_DISPLAY: f32 = 0.46135;
+        let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+        let black_ev = self.black_ev;
+        let range = (self.white_ev - black_ev).max(0.01);
+        let k = self.contrast.max(0.01) / (self.latitude / 100.0).max(0.01);
+        let x_grey = ((MID_GREY.log2() - black_ev) / range).clamp(0.001, 0.999);
+        let s0 = sigmoid(-k * x_grey);
+        let s1 = sigmoid(k * (1.0 - x_grey));
+        let span = (s1 - s0).max(1e-6);
+        let x = ((v.max(1e-10).log2() - black_ev) / range).clamp(0.0, 1.0);
+        let y = ((sigmoid(k * (x - x_grey)) - s0) / span).clamp(0.0, 1.0);
+        let y_grey = ((0.5 - s0) / span).clamp(1e-4, 1.0 - 1e-4);
+        let power = (MID_GREY_DISPLAY.log2() / y_grey.log2()).clamp(0.2, 5.0);
+        y.max(1e-7).powf(power)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -162,6 +187,13 @@ pub struct Geometry {
     /// the corners rotate out of frame and a crop is expected to take them.
     pub straighten_deg: f32,
     pub crop: Crop,
+    /// Keystone, -100..=100. Positive vertical widens the top: lines that lean in toward
+    /// the top of the frame, as a building's do when shot looking up, stand straight.
+    #[serde(default)]
+    pub perspective_v: f32,
+    /// Positive horizontal widens the right side, for a wall shot at an angle from the left.
+    #[serde(default)]
+    pub perspective_h: f32,
 }
 
 impl Default for Geometry {
@@ -172,14 +204,126 @@ impl Default for Geometry {
             mirror_v: false,
             straighten_deg: 0.0,
             crop: Crop::default(),
+            perspective_v: 0.0,
+            perspective_h: 0.0,
         }
     }
+}
+
+/// A keystone correction as the shader applies it: a homography from the output (centred,
+/// in units of half its long side) to the frame before straightening, with the zoom that
+/// keeps every corner of the frame on the photo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Perspective {
+    /// Row-major, acting on (x, y, 1).
+    pub m: [[f32; 3]; 3],
+    /// Pixels per unit: half the output's long side.
+    pub unit: f32,
+}
+
+impl Perspective {
+    /// Where the output point `p` (pixels from the frame's centre) is taken from.
+    pub fn source(&self, p: (f32, f32)) -> (f32, f32) {
+        let (x, y) = (p.0 / self.unit, p.1 / self.unit);
+        let m = &self.m;
+        let w = m[2][0] * x + m[2][1] * y + m[2][2];
+        let (sx, sy) = (
+            (m[0][0] * x + m[0][1] * y + m[0][2]) / w,
+            (m[1][0] * x + m[1][1] * y + m[1][2]) / w,
+        );
+        (sx * self.unit, sy * self.unit)
+    }
+
+    /// The output point that takes from `q`: [`Self::source`]'s inverse.
+    pub fn output(&self, q: (f32, f32)) -> (f32, f32) {
+        let inv = invert3(&self.m);
+        Perspective {
+            m: inv,
+            unit: self.unit,
+        }
+        .source(q)
+    }
+}
+
+fn invert3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = if det.abs() < 1e-12 { 1.0 } else { 1.0 / det };
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * d,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * d,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * d,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * d,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * d,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * d,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * d,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * d,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * d,
+        ],
+    ]
 }
 
 impl Geometry {
     /// Right-angle turns swap the axes; straightening does not.
     pub fn swaps_axes(&self) -> bool {
         self.quarter_turns % 2 == 1
+    }
+
+    /// The keystone correction for an output of `out` pixels, if any is set.
+    pub fn perspective(&self, out: (u32, u32)) -> Option<Perspective> {
+        let finite = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-100.0, 100.0)
+            } else {
+                0.0
+            }
+        };
+        let (kv, kh) = (
+            finite(self.perspective_v) / 100.0 * 0.6,
+            finite(self.perspective_h) / 100.0 * 0.6,
+        );
+        if kv == 0.0 && kh == 0.0 {
+            return None;
+        }
+        let unit = out.0.max(out.1) as f32 * 0.5;
+        let (hx, hy) = (out.0 as f32 * 0.5 / unit, out.1 as f32 * 0.5 / unit);
+        let matrix = |s: f32| [[s, 0.0, 0.0], [0.0, s, 0.0], [-kh * s, -kv * s, 1.0]];
+        // The largest zoom at which all four corners still take from inside the frame.
+        let fits = |s: f32| {
+            let p = Perspective {
+                m: matrix(s),
+                unit: 1.0,
+            };
+            [(-hx, -hy), (hx, -hy), (-hx, hy), (hx, hy)]
+                .iter()
+                .all(|&c| {
+                    let (x, y) = p.source(c);
+                    x.abs() <= hx * 1.0001 && y.abs() <= hy * 1.0001
+                })
+        };
+        let (mut lo, mut hi) = (0.05f32, 1.0f32);
+        if fits(hi) {
+            lo = hi;
+        } else {
+            for _ in 0..24 {
+                let mid = (lo + hi) * 0.5;
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        Some(Perspective {
+            m: matrix(lo),
+            unit,
+        })
     }
 
     pub fn output_size(&self, sensor_w: u32, sensor_h: u32) -> (u32, u32) {
@@ -329,6 +473,84 @@ impl Default for Dehaze {
     }
 }
 
+/// Noise reduction, as a pre-pass over the sensor (see `shaders/denoise.wgsl`). Sliders
+/// are 0..=100; 0 luminance and 0 colour is none.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Denoise {
+    /// How much grain is averaged out of brightness.
+    pub luminance: f32,
+    /// How much fine texture the luminance smoothing keeps; higher keeps more.
+    pub detail: f32,
+    /// How much colour noise (blotches of false colour) is averaged out.
+    pub color: f32,
+    /// How wide an area colour is averaged over; higher removes coarser blotches.
+    pub smoothness: f32,
+}
+
+impl Default for Denoise {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            detail: 50.0,
+            color: 25.0,
+            smoothness: 50.0,
+        }
+    }
+}
+
+impl Denoise {
+    /// A starting point for a photo shot at `iso`: nothing but a little colour at base
+    /// ISO, and about a tenth more luminance smoothing per stop from there.
+    pub fn for_iso(iso: u32) -> Self {
+        let stops = (iso.max(1) as f32 / 200.0).log2().max(0.0);
+        Self {
+            luminance: (stops * 12.0).clamp(0.0, 70.0).round(),
+            color: (25.0 + stops * 8.0).clamp(25.0, 60.0).round(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether it would change a pixel at all.
+    pub fn is_neutral(&self) -> bool {
+        !(self.luminance > 0.0 || self.color > 0.0)
+    }
+}
+
+/// Lens corrections: the lens's profile when one is known, and manual ones on top of it.
+/// Each slider is -100..=100 and 0 is none; see `lens::LensModel` for what they become.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Lens {
+    /// Positive straightens barrel distortion (lines bowing out), negative pincushion.
+    pub distortion: f32,
+    /// Positive shrinks a red image that the lens drew larger than green (red fringes on
+    /// the outer side of edges toward the corners), negative the reverse (cyan).
+    pub ca_red: f32,
+    /// The same for blue (blue outward) against yellow.
+    pub ca_blue: f32,
+    /// Positive brightens the corners a lens darkened; negative darkens them.
+    pub vignetting: f32,
+    /// Whether the lens's profile (from the lensfun database, when one matches) is
+    /// applied under the sliders. A file that corrects its own lens ignores this.
+    #[serde(default = "yes")]
+    pub profile: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Self {
+            distortion: 0.0,
+            ca_red: 0.0,
+            ca_blue: 0.0,
+            vignetting: 0.0,
+            profile: true,
+        }
+    }
+}
+
 /// Single color band adjustments for 8-band Color EQ.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorBand {
@@ -413,6 +635,25 @@ impl<T: Default> Default for Module<T> {
     }
 }
 
+/// What the tone curve's axes measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CurveDomain {
+    /// Linear scene light, where mid grey sits at 0.18 and half the curve's width is the
+    /// top stop and a half. How curves worked before the display domain; a sidecar
+    /// without the field was made this way and keeps it, so its look does not change.
+    Linear,
+    /// Display-encoded values (sRGB), where mid grey sits near the middle and the axes
+    /// line up with the histogram drawn under the curve. Every new edit uses this.
+    #[default]
+    Display,
+}
+
+impl CurveDomain {
+    fn legacy() -> Self {
+        Self::Linear
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhotoStack {
     /// Not a `Module`: there is no meaningful "disabled" state for orientation, and a
@@ -423,6 +664,12 @@ pub struct PhotoStack {
     #[serde(default)]
     pub tonal: Module<Tonal>,
     pub tone_curve: Module<Vec<CurveNode>>,
+    #[serde(default = "CurveDomain::legacy")]
+    pub curve_domain: CurveDomain,
+    /// Where the adjust pass works (W-09). A sidecar without it was made in linear sRGB
+    /// and keeps it, so its look does not change; every new edit is wide.
+    #[serde(default = "crate::gamut::WorkingSpace::legacy")]
+    pub working_space: crate::gamut::WorkingSpace,
     pub filmic: Module<Filmic>,
     pub color_balance: Module<ColorBalance>,
     #[serde(default)]
@@ -437,6 +684,14 @@ pub struct PhotoStack {
     pub dehaze: Module<Dehaze>,
     #[serde(default)]
     pub color_eq: Module<ColorEq>,
+    #[serde(default)]
+    pub lens: Module<Lens>,
+    #[serde(default)]
+    pub denoise: Module<Denoise>,
+    #[serde(default)]
+    pub local: Module<crate::local::Locals>,
+    #[serde(default)]
+    pub heal: Module<crate::heal::Spots>,
 }
 
 impl Default for PhotoStack {
@@ -453,6 +708,8 @@ impl Default for PhotoStack {
             exposure: Module::new(true, Exposure::default()),
             tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
+            curve_domain: CurveDomain::Display,
+            working_space: crate::gamut::WorkingSpace::Rec2020,
             filmic: Module::new(
                 false,
                 Filmic {
@@ -477,6 +734,10 @@ impl Default for PhotoStack {
             clarity: Module::new(false, Clarity::default()),
             dehaze: Module::new(false, Dehaze::default()),
             color_eq: Module::new(false, ColorEq::default()),
+            lens: Module::new(false, Lens::default()),
+            denoise: Module::new(false, Denoise::default()),
+            local: Module::new(false, crate::local::Locals::default()),
+            heal: Module::new(false, crate::heal::Spots::default()),
         }
     }
 }
@@ -494,6 +755,12 @@ pub(crate) mod flags {
     pub const CLARITY: u32 = 512;
     pub const DEHAZE: u32 = 1024;
     pub const COLOR_EQ: u32 = 2048;
+    pub const LENS: u32 = 4096;
+    /// Not read by the adjust shader: noise reduction is a pre-pass. Here so the bitmask
+    /// says everything that is on.
+    pub const DENOISE: u32 = 8192;
+    pub const LOCAL: u32 = 16384;
+    pub const HEAL: u32 = 32768;
 }
 
 impl PhotoStack {
@@ -535,6 +802,18 @@ impl PhotoStack {
         if self.color_eq.enabled {
             m |= flags::COLOR_EQ;
         }
+        if self.lens.enabled {
+            m |= flags::LENS;
+        }
+        if self.denoise.enabled {
+            m |= flags::DENOISE;
+        }
+        if self.local.enabled && self.local.params.masks.iter().any(|m| m.on) {
+            m |= flags::LOCAL;
+        }
+        if self.heal.enabled && !self.heal.params.spots.is_empty() {
+            m |= flags::HEAL;
+        }
         m
     }
 }
@@ -548,6 +827,8 @@ impl PhotoStack {
         let g = &mut s.geometry;
         g.quarter_turns %= 4;
         g.straighten_deg = finite_or(g.straighten_deg, 0.0).clamp(-45.0, 45.0);
+        g.perspective_v = finite_or(g.perspective_v, 0.0).clamp(-100.0, 100.0);
+        g.perspective_h = finite_or(g.perspective_h, 0.0).clamp(-100.0, 100.0);
         g.crop = Crop {
             x: finite_or(g.crop.x, 0.0),
             y: finite_or(g.crop.y, 0.0),
@@ -563,9 +844,12 @@ impl PhotoStack {
             n.x = finite_or(n.x, 0.0).clamp(0.0, 1.0);
             n.y = finite_or(n.y, 0.0).clamp(0.0, 1.0);
         }
+        nodes.sort_by(|a, b| a.x.total_cmp(&b.x));
         if nodes.len() < 2 {
             *nodes = crate::curve::identity_nodes();
         }
+        s.local.params = s.local.params.sanitised();
+        s.heal.params = s.heal.params.sanitised();
         s
     }
 }
@@ -581,6 +865,47 @@ fn finite_or(v: f32, fallback: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denoise_for_iso_grows_with_the_iso() {
+        let base = Denoise::for_iso(100);
+        assert_eq!((base.luminance, base.color), (0.0, 25.0));
+        let high = Denoise::for_iso(3200);
+        assert_eq!((high.luminance, high.color), (48.0, 57.0));
+        assert!(Denoise::for_iso(204_800).luminance <= 70.0);
+        assert_eq!(Denoise::for_iso(0), Denoise::for_iso(1));
+    }
+
+    #[test]
+    fn a_keystone_keeps_the_frame_on_the_photo_and_inverts() {
+        let mut g = Geometry::default();
+        assert!(g.perspective((6000, 4000)).is_none());
+        g.perspective_v = 60.0;
+        let p = g.perspective((6000, 4000)).unwrap();
+        // Every corner of the output takes from inside the frame.
+        for c in [
+            (-3000.0, -2000.0),
+            (3000.0, -2000.0),
+            (-3000.0, 2000.0),
+            (3000.0, 2000.0),
+        ] {
+            let (x, y) = p.source(c);
+            assert!(
+                x.abs() <= 3000.5 && y.abs() <= 2000.5,
+                "{c:?} -> ({x}, {y})"
+            );
+        }
+        // Widening the top: the top row takes from a narrower strip than the bottom row.
+        let top = p.source((3000.0, -2000.0)).0;
+        let bottom = p.source((3000.0, 2000.0)).0;
+        assert!(top < bottom * 0.9, "top {top} bottom {bottom}");
+        let q = p.source((1234.0, -567.0));
+        let back = p.output(q);
+        assert!(
+            (back.0 - 1234.0).abs() < 1e-2 && (back.1 + 567.0).abs() < 1e-2,
+            "{back:?}"
+        );
+    }
 
     #[test]
     fn quarter_turns_swap_the_output_axes() {
@@ -770,5 +1095,30 @@ mod tests {
         assert_eq!(deserialized.ev, 1.5);
         assert_eq!(deserialized.mode, ExposureMode::ClassicLinear);
         assert_eq!(deserialized.rolloff, 0.0);
+    }
+
+    #[test]
+    fn curves_saved_before_the_display_domain_stay_linear() {
+        let mut json = serde_json::to_value(PhotoStack::default()).unwrap();
+        json.as_object_mut().unwrap().remove("curve_domain");
+        json.as_object_mut().unwrap().remove("working_space");
+        let old: PhotoStack = serde_json::from_value(json).unwrap();
+        assert_eq!(old.curve_domain, CurveDomain::Linear);
+        assert_eq!(PhotoStack::default().curve_domain, CurveDomain::Display);
+        assert_eq!(old.working_space, crate::gamut::WorkingSpace::Srgb);
+        assert_eq!(
+            PhotoStack::default().working_space,
+            crate::gamut::WorkingSpace::Rec2020
+        );
+    }
+
+    #[test]
+    fn filmic_on_the_cpu_lands_where_the_shader_does() {
+        // The GPU test pins the shader at these values; this pins the CPU copy the
+        // tonemap views draw, so the two cannot drift.
+        let f = PhotoStack::default().filmic.params;
+        assert!((f.display_value(0.18) * 255.0 - 118.0).abs() <= 1.5);
+        assert!(f.display_value(2f32.powf(f.black_ev)) * 255.0 <= 2.0);
+        assert!(f.display_value(2f32.powf(f.white_ev)) * 255.0 >= 253.0);
     }
 }
