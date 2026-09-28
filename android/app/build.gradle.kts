@@ -16,8 +16,8 @@ android {
         // is the same scheme everywhere (L-17): major.minor.patch, then CI's run number
         // (0 for a local build), so a newer version always installs over an older one and,
         // within a version, each CI build over the one before.
-        versionName = System.getenv("DUCKFOOT_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.1.0"
-        val parts = (versionName ?: "0.1.0").split(".").map { part ->
+        versionName = System.getenv("DUCKFOOT_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.2.0"
+        val parts = (versionName ?: "0.2.0").split(".").map { part ->
             part.filter { c -> c.isDigit() }.toIntOrNull() ?: 0
         }
         val major = parts.getOrElse(0) { 0 }
