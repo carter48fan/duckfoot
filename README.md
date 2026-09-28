@@ -2,8 +2,9 @@
 
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
-> **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; other
-> platforms not yet built.**
+> **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; Android
+> and Windows build in CI (Android is untested on devices); Windows and macOS run the
+> test suite in CI and are experimental: not yet smoke-tested by hand.**
 >
 > Duckfoot is a native Rust application on wgpu. The only thing under construction is the
 > **Photo Studio and RAW processor**. Audio and Video are design, not code — see
@@ -147,28 +148,58 @@ You can also **drag a RAW file onto the window**.
 
 ### Controls
 
+<!-- keymap:start (generated from crates/photo-app/src/keymap.rs) -->
 | | |
 |---|---|
-| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo |
-| `Ctrl+S` | save sidecar (`.duckfoot`) |
-| `Ctrl+C` / `Ctrl+V` | copy / paste adjustment stack |
-| `\` | toggle before / after split view |
-| `C` / `Esc` | toggle crop tool / cancel crop gesture |
-| `[` / `]` | rotate 90° CCW / CW |
-| `H` / `V` | mirror / flip horizontal / vertical |
-| Scroll wheel | zoom about the cursor |
-| Drag the image | pan |
-| `0` / `1` | fit to window / 100% (1:1) |
-| Drag a slider | live re-render; one undo step per gesture, not per frame |
-| Drag in the curve box | move the nearest node; endpoints keep their x |
-| Drag in 3D Map / Tonemap | interactive 3D orbit camera (yaw & pitch) |
-| Scroll on 3D viewport | zoom 3D camera view (0.5x..=2.8x) |
-| Double-click on 3D view | reset 3D camera angle and zoom |
-| `▲` / `▼` on module header | reorder module up / down in sidebar |
-| `⚙ Custom` | show/hide modules and manage pipeline ordering |
-| `⤢ Expand` / `⤹ Narrow` | toggle sidebar width between compact (288px) and wide (460px) |
-| `↕ All` | expand all / collapse all inspector sections |
-| Checkbox by a module name | enable/disable that stage of the chain |
+| **Photos** | |
+| `←` / `→` | previous / next photo, in the filmstrip's order |
+| `Ctrl+S` | save now (edits also save on their own) |
+| `Ctrl+E` | export this photo: size, format, metadata, then where |
+| `Ctrl+Shift+E` | batch export the selection |
+| **Editing** | |
+| `Alt+↑` / `Alt+↓`, `Alt+←` / `Alt+→` | choose a value of the card last worked on, then turn it (as a right-drag on the photo does) |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
+| `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
+| `Ctrl+Shift+V` | choose what paste carries |
+| `Ctrl+'` | virtual copy: another edit of the same photo |
+| `Ctrl+Alt+V` | the same edits as the photo open before this one |
+| `Esc` with a mask chosen or healing | put the mask's handles away / stop healing |
+| `C` | crop tool on / off |
+| `Enter` / `Esc` | apply / cancel the crop |
+| `X` / `O` while cropping | turn the crop's shape / next guide |
+| `Shift` while resizing a crop | keep its shape |
+| `[` / `]` | rotate 90° left / right |
+| `H` / `V` | mirror / flip |
+| `Esc` while dragging | put the control back where the drag started |
+| `W`, then click | white balance from something that should be grey |
+| **View** | |
+| `\` | before / after split |
+| `S` | soft proof: the preview in the export's colour space |
+| `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
+| `?` or `F1` | this list of shortcuts |
+| **Library** | |
+| `0`–`5` | star rating for the selection (`0` clears) |
+| `6` / `7` / `8` / `9` | red / yellow / green / blue label (again takes it off) |
+| `P` / `X` / `U` | flag as pick / reject / clear the flag |
+| `Ctrl+A` | select every photo on the shelf |
+| `Shift`+click / `Ctrl`+click | select a range / add to the selection |
+| **Mouse and touch** | |
+| Scroll or pinch over the photo | zoom about the pointer |
+| Drag the photo | pan, once zoomed in |
+| Drag a slider | live; one undo step per gesture |
+| `Shift` while dragging a slider | ten times finer |
+| Double-click a slider or its label | back to its default |
+| Drag in the curve | move the nearest point; the ends keep their place |
+| Drag a 3D view | orbit it; `Ctrl`+scroll zooms, double-click resets |
+| Click a module's header | open it and close the others; `Shift`+click opens it alongside |
+| Touch a control in a module that's off | turns the module on |
+| Click a History row | jump to that step |
+| Drag the split divider | move it; double-click centres it |
+| Hold the scope's clip readout | show clipping while held |
+| Drop files on the window | add them to the shelf and open the first |
+<!-- keymap:end -->
+
+Press `?` in the app for the same list. On a Mac, `Ctrl` is `⌘`.
 
 Hotkeys deliberately do not fire while a text field has focus.
 
@@ -176,7 +207,8 @@ Hotkeys deliberately do not fire while a text field has focus.
 
 `.cr2 .cr3 .nef .nrw .arw .srf .sr2 .dng .orf .rw2 .raf .pef .raw`
 
-Decoding is `rawloader`'s — a few hundred camera models. Files it cannot handle fail with
+Decoding is `rawler`'s (~2,500 camera models), with `rawloader` as a fallback for anything
+rawler refuses. Files neither can handle fail with
 the filename and a reason in the status bar rather than silently rendering garbage.
 
 ---
@@ -262,6 +294,37 @@ copies a 256×256 patch back and **fails** if the pipeline produced a black fram
 channel. "The window opened without crashing" is not evidence the pipeline is correct;
 this is.
 
+### Where the time goes when a photo opens
+
+```bash
+cargo run --release -p photo-engine --example open_profile -- ~/Pictures/DSC08450.ARW
+```
+
+Times each stage of what the app does on open (read, rawler decode, the full `decode_raw`
+the loader runs) and the embedded-preview path thumbnails and the stage stand-in use. Each
+stage runs five times and the fastest is reported, so the first cold read does not
+dominate. Like `probe` and `bench`, it goes through the decoder the app actually uses.
+
+No camera files to hand? `synth_raw` writes a camera-sized DNG with a clipped highlight
+and an embedded preview, so every stage has real work to do:
+
+```bash
+cargo run --release -p photo-engine --example synth_raw -- /tmp/a7iv.dng                    # 33 MP, uncompressed, ~66 MB
+cargo run --release -p photo-engine --example synth_raw -- /tmp/big.dng 9728 6656 --lossless # 65 MP, LJ92, ~56 MB
+cargo run --release -p photo-engine --example synth_raw -- /tmp/cam.jpg 6000 4000            # 24 MP JPEG
+```
+
+### See a layout without its device
+
+```bash
+cargo run --release -p photo-app --example screenshot -- phone.png 412x892 photo.dng edit exposure
+```
+
+Renders the whole app to a PNG at any size (in points, drawn at 2× like a phone), with a
+photo open and, for the phone layout, a sheet and module chosen. Needs a Vulkan driver;
+Mesa's software one (`mesa-vulkan-drivers`, lavapipe) is enough, so it works on a
+headless machine.
+
 ### Stub audit
 
 ```bash
@@ -297,13 +360,53 @@ Categories=Graphics;Photography;
 MimeType=image/x-sony-arw;image/x-canon-cr3;image/x-adobe-dng;
 ```
 
-### Windows, macOS, Android — not yet built
+### Android — builds in CI, not yet verified on a device
 
-**These have not been attempted and no claim is made that they work.** The architecture is
-arranged so they should be a new bootstrap rather than a port — `photo-engine` and
-`photo-app` hold no window handle — but that is a design intention, not a tested result.
+`crates/duckfoot-android` is the entry point (`android_main`) and `android/` is the Gradle
+project around it: a small Java `NativeActivity` subclass for the system file picker,
+"Open with", and hiding the system bars. Everything drawn is the same Rust as the desktop.
 
-Expected shape when we get there:
+```bash
+# needs an Android SDK + NDK (ANDROID_HOME, ANDROID_NDK_HOME), JDK 17, cargo-ndk
+cargo install cargo-ndk
+android/build-apk.sh            # → android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb logcat -s duckfoot          # the app's log
+```
+
+Every push builds an optimised Linux binary and a release APK in the **Build** workflow
+(artifacts `duckfoot-linux-x86_64` and `duckfoot-android`). Every push to `main` also
+refreshes the **nightly** release with both; a `v…` tag, or a hand-run given a version,
+drafts a versioned one. A signing key in the repository's secrets lets each APK install
+over the last — see [android/README.md](./android/README.md).
+
+How it differs from the desktop, for now:
+
+- **Files are imported.** Android hands out documents, not paths, so a picked photo is
+  copied into the app's private library and edited there; its sidecar lives beside the
+  copy. Picking the same photo again reuses the copy, so its edits come back. The shelf's
+  **Library** bookmark lists everything imported.
+- **Exports go to `Pictures/Duckfoot`**, where the gallery shows them. There is no save
+  dialog.
+- **Back** closes the crop tool or an open dialog first, then sends the app to the
+  background. Backgrounding keeps the photo, stack and undo history.
+- **The phone layout.** Below 900 × 560 points (phones either way up, tablets held
+  upright) the stage fills the screen and a navigation bar opens one sheet at a time:
+  **Library · Edit · Scopes · History · Export**. Edit shows one module's sliders at a
+  time, picked from a scroller. Turned sideways, the bar becomes a rail on the right.
+  What a keyboard does on the desktop has a touch control: select mode (Ctrl/Shift-click),
+  select all, a **fine** toggle (Shift-drag), rating and flag chips, and a sideways swipe
+  across the photo for the next or previous one.
+- Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
+
+### Windows, macOS — experimental
+
+**Built and tested in CI, not yet smoke-tested by hand; no claim is made that they work.**
+Every push builds a Windows zip. A manual run of the Build workflow, and every tag, also
+runs the workspace tests on `windows-latest` and `macos-latest` (the GPU tests skip
+themselves where the runner has no GPU) and builds an unsigned macOS `.dmg`, attached to
+the run; macOS runner minutes cost ten times Linux's, so not every push pays for them. The shell in `crates/duckfoot/src/lib.rs` holds no
+Linux-specific code.
 
 ```bash
 # Windows (from Linux)
@@ -312,14 +415,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 # macOS — must build on a Mac; no cross-compilation
 cargo build --release --target aarch64-apple-darwin
-
-# Android — needs NDK + cargo-ndk + a gradle harness, and a new
-# crates/duckfoot-android/ bootstrap using android-activity
 ```
-
-The Android lifecycle work is already written into `crates/duckfoot/src/main.rs`:
-`suspended` drops the surface and everything bound to it, `resumed` rebuilds. That is the
-classic Android wgpu crash and it is handled. The NDK toolchain and APK packaging are not.
 
 **Do not distribute a binary yet** — see the licence note at the bottom.
 
@@ -331,21 +427,29 @@ classic Android wgpu crash and it is handled. The NDK toolchain and APK packagin
 duckfoot/
 ├── DESIGN.md                    # the design brief — start here
 ├── Cargo.toml                   # workspace root
+├── android/                     # Gradle project for the APK; build-apk.sh builds it
 └── crates/
     ├── photo-engine/            # wgpu device, textures, shaders, RAW decode
-    │   ├── src/decode.rs        #   rawloader → cropped CFA mosaic + metadata
+    │   ├── src/decode.rs        #   rawler/rawloader → cropped CFA mosaic + metadata
+    │   ├── src/preview.rs       #   embedded JPEG previews: found, then decoded scaled
     │   ├── src/engine.rs        #   textures, pipelines, uniforms, GPU dispatch
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
     │   ├── src/params.rs        #   the adjustment stack (plain data + serde)
     │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
-    │   ├── src/shaders/         #   demosaic.wgsl, adjust.wgsl
-    │   └── examples/            #   probe.rs, bench.rs
+    │   ├── src/shaders/         #   demosaic, downsample (preview mips), adjust, histogram
+    │   └── examples/            #   probe.rs, bench.rs, open_profile.rs, synth_raw.rs
     ├── photo-app/               # egui UI — no windowing dependency
-    │   ├── src/lib.rs           #   inspector, undo, shelf, crop, split view
+    │   ├── src/lib.rs           #   layout: shelf, stage, filmstrip, inspector, undo
     │   ├── src/inspector_map_3d.rs # 3D rotatable inspector map & scopes
     │   ├── src/tonemap_3d.rs    #   interactive 3D filmic tonemap & RGB cube
-    │   └── src/theme.rs         #   DESIGN.md look and feel
-    └── duckfoot/                # bootstrap: winit. The only platform crate
+    │   ├── src/theme.rs         #   pitch-black palette, fonts, egui visuals
+    │   ├── src/widgets.rs       #   painted controls: chips, rails, module cards
+    │   ├── src/loader.rs        #   background decode: opening photos, thumbnails
+    │   ├── src/platform.rs      #   file pickers and storage places, supplied by the shell
+    │   ├── src/compact.rs       #   the phone layout: navigation bar, one sheet at a time
+    │   └── assets/fonts/        #   JetBrains Mono, Space Grotesk, Hanken Grotesk (OFL)
+    ├── duckfoot/                # the winit shell (lib.rs) and the desktop main
+    └── duckfoot-android/        # android_main and the Java bridge; see android/
 ```
 
 `apps/` and `packages/` are the superseded TypeScript build, pending removal.
@@ -359,11 +463,14 @@ DESIGN.md invariant 8.
 
 | Area | Symbol | Status | Notes |
 |---|---|---|---|
-| **Decode** | `RawloaderBackend` | Working | Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
+| **Decode** | `DefaultRawDecoder` | Working | rawler, then rawloader, each tried once. Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
+| **Decode** | measured white level | Working | Finds the real clip plateau in the data; Canon's per-ISO saturation no longer turns highlights magenta |
+| **Decode** | DNG `AsShotWhiteXY` | Working | Pixel-style DNGs; matrices interpolated by colour temperature per the DNG spec |
+| **Decode** | EXIF orientation | Working | Opens upright; the camera's turn is the starting geometry, not an edit |
 | **Decode** | `RawDecoder` trait | Working | `rawler` is a drop-in behind it |
 | **Decode** | non-mosaic (`cpp != 1`) | `@stub` | Refuses loudly rather than mis-indexing |
 | **Decode** | float-encoded RAW | `@stub` | Some DNGs; refuses loudly |
-| **Decode** | 4-colour CFA (CYGM / X-Trans) | `@stub` | Only 2×2 RGB patterns |
+| **Decode** | 4-colour CFA (CYGM) | `@stub` | 2×2 Bayer and 6×6 X-Trans RGB patterns only |
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
 | **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |
@@ -375,22 +482,25 @@ DESIGN.md invariant 8.
 | **Params** | capture sharpen, vignette | Working | Edge-preserving convolution & radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
 | **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
-| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, cropped & oriented, encoded off UI thread |
+| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits (PNG, TIFF); resize, output sharpening; EXIF and an sRGB profile embedded; cropped & oriented, encoded off the UI thread |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
 | **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
-| **App** | inspector sidebar | Working | Smooth scrolling, module reorder (`▲`/`▼`), customizer, width toggle |
+| **App** | inspector sidebar | Working | Module cards with live values, Customize tab (show/hide, reorder), width toggle |
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
-| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop |
+| **App** | history list | Working | Every undo step labelled by what changed; click a row to jump to it |
+| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded and uploaded to the GPU off the UI thread |
+| **App** | filmstrip thumbnails | Working | The camera's embedded preview, decoded at reduced size on a worker per spare core; from the mosaic only when a file has none. The open photo shows its live render. Only tiles in view are laid out, so a 2000-photo roll costs the same per frame as a 20-photo one |
+| **App** | open stand-in | Working | The embedded preview is on the stage in ~20–35 ms while the full decode runs |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
-| **App** | before / after split view | Working | Draggable brass divider (`\`), raw baseline vs active stack |
+| **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
-| **App** | export | Working | Export… button, format from the filename |
+| **App** | export | Working | Export dialog (Ctrl+E) and the phone's Export sheet share one settings panel with the batch recipes |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
-| **App** | preview at fit-to-window scale | Not built | Renders at full sensor res today |
-| **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
+| **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
+| **Platform** | Windows / macOS / Android | Built in CI | Android untested on devices; Windows and macOS experimental (tests run in CI, no manual smoke test yet) |
 
 ### Measured
 
@@ -468,12 +578,12 @@ Checked items are done **and verified**, not merely written.
 
 - [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
       near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
-- [ ] Preview at fit-to-window scale; full resolution reserved for export
-- [x] PNG/JPEG export through the same shader — the real test of invariant 2
+- [x] Preview at fit-to-window scale; full resolution reserved for export
+- [x] JPEG/PNG/TIFF/WebP export through the same shader — the real test of invariant 2
 - [x] Live histogram via a compute pass and a 4 KB readback
 - [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
 - [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)
-- [x] Before/after split view with draggable brass divider
+- [x] Before/after split view with draggable divider
 
 ### Stage 3 — Platforms
 
@@ -545,6 +655,10 @@ MIT — see [LICENSE](./LICENSE).
 settled before any binary is distributed. This does not block local development or building
 from source. The alternative, `rawler`, is LGPL-2.1 as well — so this is a question about
 distribution, not about which crate to pick.
+
+The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono,
+Space Grotesk and Hanken Grotesk. Their licences sit beside the files in
+`crates/photo-app/assets/fonts/`.
 
 Duckfoot previously contained code derived from
 [OpenCut](https://github.com/OpenCut-app/OpenCut) (MIT); that code is superseded, and their

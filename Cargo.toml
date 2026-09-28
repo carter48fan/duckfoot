@@ -1,12 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/photo-engine", "crates/photo-app", "crates/duckfoot"]
+members = [
+    "crates/photo-engine",
+    "crates/photo-app",
+    "crates/duckfoot",
+    "crates/duckfoot-android",
+]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/goldtone/duckfoot"
+# egui 0.36 needs 1.95.
+rust-version = "1.95"
+repository = "https://github.com/carter48fan/duckfoot"
 
 [workspace.dependencies]
 photo-engine = { path = "crates/photo-engine" }
@@ -14,19 +21,20 @@ photo-app = { path = "crates/photo-app" }
 
 wgpu = "30"
 egui = "0.36"
-egui-wgpu = { version = "0.36", features = ["winit"] }
+egui-wgpu = "0.36"
 # eframe is deliberately absent. eframe 0.36.2 requires egui_glow ^0.36.2, which was never
 # published — that crate stops at 0.34.3 — and Cargo resolves optional dependencies whether
 # or not a feature enables them, so eframe cannot be locked at current versions at all.
 # Driving winit directly is also what the Android bootstrap will need, so this is not a
 # detour taken under protest.
 egui-winit = { version = "0.36", default-features = false, features = ["x11", "wayland"] }
-winit = "0.30"
+winit = { version = "0.30", features = ["x11", "wayland"] }
 bytemuck = { version = "1", features = ["derive"] }
 rawloader = "0.37"
+rawler = "0.8"
 # Only the encoders we actually write; the default feature set pulls a dozen decoders
 # we will never use, since RAW decoding is rawloader's job.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "webp"] }
 anyhow = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

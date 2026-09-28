@@ -3,6 +3,7 @@ name = "duckfoot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "duckfoot"
@@ -18,5 +19,12 @@ winit.workspace = true
 wgpu.workspace = true
 anyhow.workspace = true
 log.workspace = true
-env_logger = "0.11"
 pollster = "1"
+
+# The desktop binary's logger; Android logs through logcat instead. Screen readers
+# (AccessKit) on the desktop; Android's goes through its own accessibility bridge later.
+# rfd for the message box shown when no GPU can be started.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11"
+egui-winit = { workspace = true, features = ["accesskit"] }
+rfd = "0.17"

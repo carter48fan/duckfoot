@@ -9,9 +9,14 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+use rawler::decoders::RawDecodeParams;
+use rawler::imgop::xyz::Illuminant;
+use rawler::rawsource::RawSource;
+
+use crate::params::Geometry;
 
 /// sRGB (D65) primaries — the standard XYZ→linear-sRGB matrix.
-const XYZ_TO_SRGB: [[f32; 3]; 3] = [
+pub(crate) const XYZ_TO_SRGB: [[f32; 3]; 3] = [
     [3.2404542, -1.5371385, -0.4985314],
     [-0.969266, 1.8760108, 0.041556],
     [0.0556434, -0.2040259, 1.0572252],
@@ -24,25 +29,262 @@ pub struct CfaImage {
     pub data: Vec<u16>,
     pub width: u32,
     pub height: u32,
-    /// CFA colour index (0=R, 1=G, 2=B) at each position of the 2×2 block, row-major:
-    /// `[(0,0), (0,1), (1,0), (1,1)]`. Already phase-corrected for the crop.
-    pub cfa2x2: [u32; 4],
+    /// Which colour each photosite measured. Already phase-corrected for the crop.
+    pub cfa: CfaPattern,
     /// Black level per CFA colour index.
     pub black: [f32; 4],
     /// White level per CFA colour index.
     pub white: [f32; 4],
     /// As-shot camera-neutral multipliers, normalised so green is 1.0.
     pub wb: [f32; 3],
-    /// Camera-native RGB → linear sRGB, row-normalised so neutral maps to neutral.
+    /// White-balanced camera RGB → linear sRGB; neutral maps to neutral (see `cam_to_srgb`).
     pub cam_to_srgb: [[f32; 3]; 3],
+    /// The same, as the DNG's own profile has it: its ForwardMatrix, or its two colour
+    /// matrices interpolated for the white it was shot under (W-09). Used by the wide
+    /// working space only, so an edit made before keeps the colour it had.
+    pub cam_profiled: Option<[[f32; 3]; 3]>,
+    /// Multipliers that neutralise a D65 white, green = 1. The normalisation of
+    /// `cam_to_srgb` discards the camera's response to daylight, and kelvin cannot be
+    /// read off a white balance without it (`temperature::WhiteScale`).
+    pub daylight_wb: [f32; 3],
+    /// How the camera says the frame is meant to be viewed, as the geometry that does it.
+    /// A starting point for a new edit, not a fact about the pixels.
+    pub orientation: Geometry,
     pub make: String,
     pub model: String,
+    /// The distortion (and colour fringing) correction the file carries for itself, as a
+    /// DNG's WarpRectilinear: applied as the photo is drawn, like its colour matrix.
+    pub warp: Option<crate::lens::FileWarp>,
+}
+
+/// A colour filter array's repeating tile: a 2×2 Bayer tile, or Fuji's 6×6 X-Trans.
+/// Colour indices 0 = R, 1 = G, 2 = B, row-major in `colours`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CfaPattern {
+    pub width: u32,
+    pub height: u32,
+    pub colours: [u8; 36],
+}
+
+impl CfaPattern {
+    /// A Bayer tile, `[(0,0), (0,1), (1,0), (1,1)]`.
+    pub const fn bayer(tile: [u32; 4]) -> Self {
+        let mut colours = [0u8; 36];
+        colours[0] = tile[0] as u8;
+        colours[1] = tile[1] as u8;
+        colours[2] = tile[2] as u8;
+        colours[3] = tile[3] as u8;
+        Self {
+            width: 2,
+            height: 2,
+            colours,
+        }
+    }
+
+    /// A 6×6 tile from its rows, as "GGRGGB…" (36 letters).
+    pub fn xtrans(pattern: &str) -> Option<Self> {
+        let colours: Vec<u8> = pattern
+            .chars()
+            .map(|c| match c {
+                'R' => Some(0),
+                'G' => Some(1),
+                'B' => Some(2),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        Some(Self {
+            width: 6,
+            height: 6,
+            colours: colours.try_into().ok()?,
+        })
+    }
+
+    pub fn colour_at(&self, row: usize, col: usize) -> u32 {
+        let (w, h) = (self.width as usize, self.height as usize);
+        self.colours[(row % h) * w + col % w] as u32
+    }
+
+    pub fn is_bayer(&self) -> bool {
+        (self.width, self.height) == (2, 2)
+    }
+
+    /// The top-left 2×2, which for Bayer is the whole pattern.
+    pub fn tile2x2(&self) -> [u32; 4] {
+        [
+            self.colour_at(0, 0),
+            self.colour_at(0, 1),
+            self.colour_at(1, 0),
+            self.colour_at(1, 1),
+        ]
+    }
 }
 
 impl CfaImage {
     pub fn megapixels(&self) -> f32 {
         (self.width as f32 * self.height as f32) / 1_000_000.0
     }
+}
+
+/// A decoded raster image (JPEG, PNG, TIFF, WebP) converted to linear camera-RGB half-floats.
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    /// 4 half-floats per pixel (R, G, B, A=0.0) in linear space (8 bytes per pixel), in the
+    /// file's own primaries.
+    pub data: Vec<u8>,
+    /// Those primaries → linear sRGB: the identity for sRGB, which is most files.
+    pub cam_to_srgb: [[f32; 3]; 3],
+    pub orientation: Geometry,
+    pub make: String,
+    pub model: String,
+}
+
+impl RasterImage {
+    pub fn megapixels(&self) -> f32 {
+        (self.width as f32 * self.height as f32) / 1_000_000.0
+    }
+}
+
+/// Decode standard raster image formats into linear camera space.
+/// The most pixels a photo may have: past every camera (a 150 MP medium format is the
+/// largest in common use), short of what a hostile file's header can claim.
+pub const MAX_PIXELS: u64 = 250_000_000;
+
+/// Refuse a photo too large to open, from its header, before its pixels are allocated.
+pub fn check_pixels(width: u64, height: u64) -> Result<()> {
+    if width == 0 || height == 0 {
+        bail!("the file says its image is {width} × {height}");
+    }
+    let pixels = width.saturating_mul(height);
+    if pixels > MAX_PIXELS {
+        bail!(
+            "{width} × {height} is {} MP, more than the {} MP this opens",
+            pixels / 1_000_000,
+            MAX_PIXELS / 1_000_000
+        );
+    }
+    Ok(())
+}
+
+pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
+    use image::ImageDecoder;
+    use rayon::prelude::*;
+
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .context("reading raster image format")?
+        .into_decoder()
+        .context("decoding raster image format")?;
+    let (w, h) = decoder.dimensions();
+    check_pixels(u64::from(w), u64::from(h))?;
+    // A profile that cannot be read is sRGB's fault-tolerant default, as every browser
+    // treats it; one that is sRGB takes the fast path below.
+    let profile = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .and_then(|icc| crate::icc::MatrixTrc::parse(&icc))
+        .filter(|p| !p.is_srgb());
+    let img = image::DynamicImage::from_decoder(decoder).context("decoding raster image format")?;
+    let orientation = raster_orientation(bytes);
+    let (width, height) = (img.width(), img.height());
+    let srgb_curve = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let linear = |channel: usize, c: f32| match &profile {
+        Some(p) => p.curves[channel].eval(c),
+        None => srgb_curve(c),
+    };
+    let f16 = |v: f32| half::f16::from_f32(v).to_le_bytes();
+
+    // 4 half-floats per pixel = 8 bytes per pixel; A = 0.0, the reconstruction neutral.
+    // Alpha is not carried: the sensor texture's alpha is that neutral, not coverage.
+    let mut data = vec![0u8; width as usize * height as usize * 8];
+    let row_out = width as usize * 8;
+    // Each channel through a table of every value it can take, already as half-float
+    // bits: one lookup per channel instead of a transfer function and a conversion.
+    fn by_table<T: Copy + Into<usize> + Sync>(
+        data: &mut [u8],
+        row_out: usize,
+        pixels: &[T],
+        luts: &[Vec<[u8; 2]>; 3],
+    ) {
+        use rayon::prelude::*;
+        let row_in = row_out / 8 * 3;
+        if row_in == 0 {
+            return;
+        }
+        data.par_chunks_mut(row_out)
+            .zip(pixels.par_chunks(row_in))
+            .for_each(|(out, src)| {
+                for (o, p) in out.chunks_exact_mut(8).zip(src.chunks_exact(3)) {
+                    for c in 0..3 {
+                        o[c * 2..c * 2 + 2].copy_from_slice(&luts[c][p[c].into()]);
+                    }
+                }
+            });
+    }
+    let table = |levels: usize| -> [Vec<[u8; 2]>; 3] {
+        std::array::from_fn(|c| {
+            (0..levels)
+                .map(|i| f16(linear(c, i as f32 / (levels - 1) as f32)))
+                .collect()
+        })
+    };
+    let deep = matches!(
+        img,
+        image::DynamicImage::ImageLuma16(_)
+            | image::DynamicImage::ImageLumaA16(_)
+            | image::DynamicImage::ImageRgb16(_)
+            | image::DynamicImage::ImageRgba16(_)
+    );
+    let float = matches!(
+        img,
+        image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_)
+    );
+    if float {
+        // Float TIFFs hold light itself unless a profile says otherwise.
+        let rgb = img.into_rgb32f();
+        let row_in = width as usize * 3;
+        if row_in > 0 {
+            data.par_chunks_mut(row_out)
+                .zip(rgb.as_raw().par_chunks(row_in))
+                .for_each(|(out, src)| {
+                    for (o, p) in out.chunks_exact_mut(8).zip(src.chunks_exact(3)) {
+                        for c in 0..3 {
+                            let v = match &profile {
+                                Some(pr) => pr.curves[c].eval(p[c]),
+                                None => p[c].max(0.0),
+                            };
+                            o[c * 2..c * 2 + 2].copy_from_slice(&f16(v));
+                        }
+                    }
+                });
+        }
+    } else if deep {
+        // 16 bits kept as 16: a smooth sky in a 16-bit TIFF is why it was saved as one.
+        by_table(&mut data, row_out, img.into_rgb16().as_raw(), &table(65536));
+    } else {
+        by_table(&mut data, row_out, img.into_rgb8().as_raw(), &table(256));
+    }
+
+    Ok(RasterImage {
+        width,
+        height,
+        data,
+        // Pixels stay in their own primaries, as a RAW's stay in the camera's, and the
+        // adjust pass converts: nothing a wide-gamut file holds goes negative on the way.
+        cam_to_srgb: profile.map_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], |p| {
+            p.to_srgb
+        }),
+        orientation,
+        make: "Raster".to_string(),
+        model: "Image".to_string(),
+    })
 }
 
 /// Behind a trait so `rawler` (~2500 cameras, same LGPL-2.1 licence) is a drop-in later.
@@ -58,17 +300,237 @@ pub trait RawDecoder {
     }
 }
 
+pub struct RawlerBackend;
+
+impl RawDecoder for RawlerBackend {
+    fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
+        decode_source_rawler(&RawSource::new_from_slice(bytes))
+    }
+
+    /// Memory-mapped, not read: `fs::read` followed by `RawSource::new_from_slice` holds
+    /// the whole file in memory twice and copies it twice before decoding starts, which
+    /// on a 60 MB RAW is several times the cost of an uncompressed decode itself.
+    fn decode_file(&self, path: &Path) -> Result<CfaImage> {
+        let source = RawSource::new(path)
+            .with_context(|| format!("{}: could not be read", path.display()))?;
+        decode_source_rawler(&source).with_context(|| format!("{}", path.display()))
+    }
+}
+
+fn decode_source_rawler(source: &RawSource) -> Result<CfaImage> {
+    // rawler tells formats apart by their bytes, not their names, so a .dng holding an
+    // Apple QuickTake's would reach a decoder that sizes its pixels from the header
+    // unchecked (found by the fuzzer). Only the families the RAW extensions name go on.
+    if !rawler_family(source.buf()) {
+        bail!("not a RAW format Duckfoot opens");
+    }
+    // What the file says it holds, before anything is allocated for it.
+    if source.buf().starts_with(&[0xFF, 0xD8, 0xFF, 0xE1]) && !rawler_may_read_jfif(source.buf()) {
+        bail!("this is a JPEG, not a RAW file");
+    }
+    if dng::overclaims(source.buf()) {
+        bail!("this file is damaged: it claims more data than it holds");
+    }
+    if let Some((w, h)) = dng::largest_image(source.buf()) {
+        check_pixels(w, h)?;
+    }
+    let mut img = decode_reader_rawler(source)?;
+    with_dng_opcodes(&mut img, source.buf());
+    Ok(with_dng_colour(img, source.buf()))
+}
+
+/// Whether the bytes are one of the RAW families [`crate::RAW_EXTENSIONS`] names: a TIFF
+/// or TIFF-shaped RAW (DNG, CR2, NEF, ARW, PEF, ORF, RW2 and the rest), Fujifilm's RAF,
+/// Canon's CR3 (an ISO box file of brand `crx `), or Minolta's MRW, bare or in a JPEG.
+fn rawler_family(bytes: &[u8]) -> bool {
+    dng::is_tiff_like(bytes)
+        || bytes.starts_with(b"FUJIFILMCCD-RAW")
+        || (bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12) == Some(b"crx "))
+        || bytes.starts_with(b"\0MRM")
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF, 0xE1])
+}
+
+/// Whether a file that starts like a JPEG with EXIF (`FF D8 FF E1`) is safe to hand to
+/// rawler. rawler 0.8 reads such a file segment by segment, and one it cannot read (an
+/// EXIF block it cannot parse, a segment cut short, a length under two) sends
+/// `Jfif::parse` round the same loop for ever: four bytes hung it (found by the fuzzer,
+/// WP5.1). It only decodes one make from there, Konica Minolta's; anything else it gives
+/// up on after the walk. So only a file whose segments are all whole and whose EXIF names
+/// that make goes on.
+fn rawler_may_read_jfif(bytes: &[u8]) -> bool {
+    const XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    let mut minolta = false;
+    let mut at = 2;
+    loop {
+        match bytes.get(at..at + 2) {
+            // The end, at a segment's edge: rawler stops there too.
+            None => return minolta && at == bytes.len(),
+            Some(&[0xFF, 0xD9]) | Some(&[0xFF, 0xDA]) => return minolta,
+            Some(&[0xFF, marker]) => {
+                let Some(len) = bytes
+                    .get(at + 2..at + 4)
+                    .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+                else {
+                    return false;
+                };
+                let end = at + 2 + len;
+                if len < 2 || end > bytes.len() {
+                    return false;
+                }
+                let body = &bytes[at + 4..end];
+                if marker == 0xE1 {
+                    if let Some(tiff) = body.strip_prefix(b"Exif\0\0") {
+                        let Ok(exif) = exif::Reader::new().read_raw(tiff.to_vec()) else {
+                            return false;
+                        };
+                        minolta |= exif
+                            .get_field(exif::Tag::Make, exif::In::PRIMARY)
+                            .is_some_and(|f| {
+                                f.display_value().to_string().trim_matches('"').trim_end()
+                                    == "Konica Minolta Photo Imaging, Inc."
+                            });
+                    } else if body.starts_with(&XMP[..XMP.len().min(body.len())])
+                        && body.len() < XMP.len()
+                    {
+                        // An XMP marker with no room for its packet.
+                        return false;
+                    }
+                }
+                at = end;
+            }
+            Some(_) => return false,
+        }
+    }
+}
+
+/// A DNG's own lens corrections: its gain maps and radial vignette applied to the mosaic
+/// now, its warp kept for the adjust pass.
+fn with_dng_opcodes(img: &mut Decoded, bytes: &[u8]) {
+    let Some(area) = img.area else { return };
+    let (list2, list3) = dng::opcodes(bytes);
+    if list2.is_empty() && list3.is_empty() {
+        return;
+    }
+    let cfa = &mut img.cfa;
+    let (pattern, black) = (cfa.cfa, cfa.black);
+    let gains: Vec<_> = list2
+        .iter()
+        .chain(&list3)
+        .filter(|o| !matches!(o, crate::opcodes::Opcode::Warp(_)))
+        .cloned()
+        .collect();
+    crate::opcodes::apply_gains(&gains, &mut cfa.data, cfa.width as usize, area, |r, c| {
+        black[pattern.colour_at(r, c) as usize]
+    });
+    cfa.warp = list3.iter().find_map(|o| match o {
+        crate::opcodes::Opcode::Warp(w) => crate::lens::FileWarp::new(w, area),
+        _ => None,
+    });
+}
+
+/// A decode that found no as-shot white balance of its own takes the DNG's colour tags
+/// (AsShotWhiteXY and the dual-illuminant matrices), as Pixel-style DNGs need.
+fn with_dng_colour(mut img: Decoded, bytes: &[u8]) -> CfaImage {
+    if let Some(dng) = dng::colour(bytes) {
+        if img.wb_missing {
+            img.cfa.wb = dng.wb;
+            img.cfa.cam_to_srgb = cam_to_srgb(&dng.xyz_to_cam);
+            img.cfa.daylight_wb = daylight_multipliers(&dng.xyz_to_cam).unwrap_or(dng.wb);
+        }
+        img.cfa.cam_profiled = Some(match dng.forward {
+            Some(fm) => forward_to_srgb(&fm),
+            None => cam_to_srgb(&dng.xyz_to_cam),
+        });
+    }
+    img.cfa
+}
+
+/// Bradford D50 → D65 (Lindbloom): the ForwardMatrix's connection space to sRGB's white.
+const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
+    [0.955_576_6, -0.023_039_3, 0.063_163_6],
+    [-0.028_289_5, 1.009_941_6, 0.021_007_7],
+    [0.012_298_2, -0.020_483, 1.329_909_8],
+];
+
+/// A DNG ForwardMatrix (white-balanced camera → XYZ D50) as camera → linear sRGB. The
+/// spec scales its rows so the neutral maps to D50's white; what that leaves of rounding
+/// is taken out, so a neutral lands exactly on a neutral as `cam_to_srgb`'s does.
+fn forward_to_srgb(fm: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut m = mul3(&XYZ_TO_SRGB, &mul3(&BRADFORD_D50_TO_D65, fm));
+    for row in m.iter_mut() {
+        let sum: f32 = row.iter().sum();
+        if (sum - 1.0).abs() < 0.1 {
+            for v in row.iter_mut() {
+                *v /= sum;
+            }
+        }
+    }
+    m
+}
+
+/// Default decoder: tries `rawler` first (~2,500 modern cameras including Sony A7 IV),
+/// falling back to `rawloader` if needed.
+pub struct DefaultRawDecoder;
+
+impl RawDecoder for DefaultRawDecoder {
+    fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
+        RawlerBackend
+            .decode_bytes(bytes)
+            .or_else(|first| rawloader_only(bytes).map_err(|second| both_failed(first, second)))
+    }
+
+    fn decode_file(&self, path: &Path) -> Result<CfaImage> {
+        RawlerBackend.decode_file(path).or_else(|first| {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("{}: could not be read", path.display()))?;
+            rawloader_only(&bytes).map_err(|second| both_failed(first, second))
+        })
+    }
+}
+
+/// Each decoder is tried once. The error keeps both reasons: rawler's is usually the one
+/// that explains a modern camera, rawloader's an old one.
+fn both_failed(rawler: anyhow::Error, rawloader: anyhow::Error) -> anyhow::Error {
+    log::debug!("rawler: {rawler:#}; rawloader: {rawloader:#}");
+    anyhow::anyhow!("{rawler:#} (rawloader could not read it either: {rawloader:#})")
+}
+
+/// rawloader alone, with the DNG white-balance fallback, and no second try with rawler.
+fn rawloader_only(bytes: &[u8]) -> Result<CfaImage> {
+    if let Some((w, h)) = dng::largest_image(bytes) {
+        check_pixels(w, h)?;
+    }
+    Ok(with_dng_colour(
+        decode_reader(&mut Cursor::new(bytes))?,
+        bytes,
+    ))
+}
+
+/// Convenience function to decode a RAW file using the default backend.
+pub fn decode_raw(path: &Path) -> Result<CfaImage> {
+    DefaultRawDecoder.decode_file(path)
+}
+
 pub struct RawloaderBackend;
 
 impl RawDecoder for RawloaderBackend {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        let mut cursor = Cursor::new(bytes);
-        decode_reader(&mut cursor)
+        rawloader_only(bytes)
     }
 }
 
-fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
-    let raw = rawloader::decode(reader).map_err(|e| anyhow!("not a supported RAW file: {e:?}"))?;
+/// A decode, plus whether the file carried no usable as-shot white balance of its own.
+struct Decoded {
+    cfa: CfaImage,
+    wb_missing: bool,
+    /// Where the kept mosaic sits in the active area, which DNG opcodes are relative to.
+    /// Only the rawler path knows it.
+    area: Option<crate::opcodes::Area>,
+}
+
+fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
+    let mut raw =
+        rawloader::decode(reader).map_err(|e| anyhow!("not a supported RAW file: {e:?}"))?;
 
     // `cpp == 3` means the file is already demosaiced RGB (Foveon, some DNGs). Indexing it
     // as a mosaic is exactly the bug the last decoder shipped, so refuse loudly instead.
@@ -81,14 +543,15 @@ fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
         );
     }
 
-    let samples = match raw.data {
-        rawloader::RawImageData::Integer(ref d) => d,
-        rawloader::RawImageData::Float(_) => bail!(
-            "{} {}: float-encoded RAW is not supported yet (@stub)",
-            raw.make,
-            raw.model
-        ),
-    };
+    let samples =
+        match std::mem::replace(&mut raw.data, rawloader::RawImageData::Integer(Vec::new())) {
+            rawloader::RawImageData::Integer(d) => d,
+            rawloader::RawImageData::Float(_) => bail!(
+                "{} {}: float-encoded RAW is not supported yet (@stub)",
+                raw.make,
+                raw.model
+            ),
+        };
 
     // crops are [top, right, bottom, left]. Skipping this leaves the masked black sensor
     // border in the frame.
@@ -112,11 +575,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
         );
     }
 
-    let mut data = Vec::with_capacity(width * height);
-    for row in 0..height {
-        let start = (row + ct) * src_w + cl;
-        data.extend_from_slice(&samples[start..start + width]);
-    }
+    let data = crop_in_place(samples, src_w, cl, ct, width, height);
 
     // Cropping by a non-even offset rotates the mosaic phase. `shift` is rawloader's own
     // correction for exactly this; guessing RGGB here swaps red and blue on any BGGR,
@@ -125,20 +584,12 @@ fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
     if !cfa.is_valid() {
         bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
     }
-    let cfa2x2 = [
-        cfa.color_at(0, 0) as u32,
-        cfa.color_at(0, 1) as u32,
-        cfa.color_at(1, 0) as u32,
-        cfa.color_at(1, 1) as u32,
-    ];
-    if cfa2x2.iter().any(|c| *c > 2) {
-        bail!(
-            "{} {}: CFA pattern '{}' has a fourth colour — not supported yet (@stub)",
-            raw.make,
-            raw.model,
-            cfa.to_string()
-        );
-    }
+    let pattern = cfa_pattern(
+        (cfa.width, cfa.height),
+        |row, col| cfa.color_at(row, col),
+        &cfa.to_string(),
+        (&raw.make, &raw.model),
+    )?;
 
     let mut black = [0.0f32; 4];
     let mut white = [65535.0f32; 4];
@@ -148,19 +599,499 @@ fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
         // A white level at or below black would make the normalisation divide by zero.
         white[i] = if w > black[i] { w } else { black[i] + 1.0 };
     }
+    let white = measured_white(&data, width, &pattern, &black, &white);
 
-    Ok(CfaImage {
-        data,
-        width: width as u32,
-        height: height as u32,
-        cfa2x2,
-        black,
-        white,
-        wb: neutral_multipliers(&raw.wb_coeffs),
-        cam_to_srgb: cam_to_srgb(&raw.xyz_to_cam),
-        make: raw.make.clone(),
-        model: raw.model.clone(),
+    let wb_missing = raw.wb_coeffs[..3]
+        .iter()
+        .any(|c| !c.is_finite() || *c <= 0.0);
+    let mut wb = neutral_multipliers(&raw.wb_coeffs);
+    if wb_missing {
+        // No as-shot white at all: daylight is a better guess than none, which is 2× green.
+        wb = daylight_multipliers(&raw.xyz_to_cam).unwrap_or(wb);
+    }
+
+    Ok(Decoded {
+        cfa: CfaImage {
+            data,
+            width: width as u32,
+            height: height as u32,
+            cfa: pattern,
+            black,
+            white,
+            wb,
+            cam_to_srgb: cam_to_srgb(&raw.xyz_to_cam),
+            cam_profiled: None,
+            daylight_wb: daylight_multipliers(&raw.xyz_to_cam).unwrap_or(wb),
+            orientation: orientation_geometry(raw.orientation),
+            make: raw.make.clone(),
+            model: raw.model.clone(),
+            warp: None,
+        },
+        wb_missing,
+        area: None,
     })
+}
+
+/// EXIF orientation as the turns and mirrors that display it upright. The shader applies
+/// turns first, then mirrors in screen space, so the two diagonal flips are a turn plus a
+/// mirror.
+fn orientation_geometry(o: rawloader::Orientation) -> Geometry {
+    use rawloader::Orientation as O;
+    let (quarter_turns, mirror_h, mirror_v) = match o {
+        O::Normal | O::Unknown => (0, false, false),
+        O::HorizontalFlip => (0, true, false),
+        O::Rotate180 => (2, false, false),
+        O::VerticalFlip => (0, false, true),
+        O::Transpose => (1, true, false),
+        O::Rotate90 => (1, false, false),
+        O::Transverse => (1, false, true),
+        O::Rotate270 => (3, false, false),
+    };
+    Geometry {
+        quarter_turns,
+        mirror_h,
+        mirror_v,
+        ..Geometry::default()
+    }
+}
+
+/// The EXIF orientation of a TIFF-structured RAW (most of them: ARW, NEF, CR2, DNG,
+/// PEF…), read without decoding anything. `None` for other containers.
+/// The geometry for an EXIF orientation value (1-8).
+pub(crate) fn orientation_from_exif(value: u16) -> Geometry {
+    orientation_geometry_rawler(rawler::Orientation::from_u16(value))
+}
+
+pub(crate) fn tiff_orientation(bytes: &[u8]) -> Option<Geometry> {
+    const ORIENTATION: u16 = 0x0112;
+    let v = dng::tag(bytes, ORIENTATION)?;
+    Some(orientation_geometry_rawler(rawler::Orientation::from_u16(
+        v as u16,
+    )))
+}
+
+/// The EXIF orientation of a JPEG, PNG, TIFF or WebP. Phones write every photo in the
+/// sensor's own landscape frame and record which way up it was held only here, so a
+/// raster that ignores it shows every portrait on its side.
+pub fn raster_orientation(bytes: &[u8]) -> Geometry {
+    use image::ImageDecoder;
+    let exif = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .and_then(|mut d| d.orientation().ok())
+        .map(|o| o.to_exif());
+    exif.map(|v| orientation_geometry_rawler(rawler::Orientation::from_u16(v as u16)))
+        .unwrap_or_default()
+}
+
+fn orientation_geometry_rawler(o: rawler::Orientation) -> Geometry {
+    use rawler::Orientation as O;
+    let (quarter_turns, mirror_h, mirror_v) = match o {
+        O::Normal | O::Unknown => (0, false, false),
+        O::HorizontalFlip => (0, true, false),
+        O::Rotate180 => (2, false, false),
+        O::VerticalFlip => (0, false, true),
+        O::Transpose => (1, true, false),
+        O::Rotate90 => (1, false, false),
+        O::Transverse => (1, false, true),
+        O::Rotate270 => (3, false, false),
+    };
+    Geometry {
+        quarter_turns,
+        mirror_h,
+        mirror_v,
+        ..Geometry::default()
+    }
+}
+
+fn extract_xyz_to_cam_rawler(raw: &rawler::RawImage) -> [[f32; 3]; 4] {
+    let is_nonzero = |m: &[[f32; 3]; 4]| m[..3].iter().any(|row| row.iter().any(|&v| v != 0.0));
+    if is_nonzero(&raw.xyz_to_cam) {
+        return raw.xyz_to_cam;
+    }
+    let flat_opt = raw
+        .color_matrix
+        .get(&Illuminant::D65)
+        .or_else(|| raw.color_matrix.get(&Illuminant::Daylight))
+        .or_else(|| raw.camera.color_matrix.get(&Illuminant::D65))
+        .or_else(|| raw.camera.color_matrix.get(&Illuminant::Daylight))
+        .or_else(|| raw.color_matrix.values().next())
+        .or_else(|| raw.camera.color_matrix.values().next());
+
+    if let Some(flat) = flat_opt {
+        if flat.len() >= 9 {
+            return [
+                [flat[0], flat[1], flat[2]],
+                [flat[3], flat[4], flat[5]],
+                [flat[6], flat[7], flat[8]],
+                if flat.len() >= 12 {
+                    [flat[9], flat[10], flat[11]]
+                } else {
+                    [0.0; 3]
+                },
+            ];
+        }
+    }
+    [[0.0; 3]; 4]
+}
+
+fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
+    let mut raw = rawler::decode(raw_source, &RawDecodeParams::default())
+        .map_err(|e| anyhow!("not a supported RAW file (rawler): {e:?}"))?;
+
+    if raw.cpp != 1 {
+        bail!(
+            "{} {}: {} components per pixel — non-mosaic sensors are not supported yet (@stub)",
+            raw.make,
+            raw.model,
+            raw.cpp
+        );
+    }
+
+    let samples = match std::mem::replace(&mut raw.data, rawler::RawImageData::Integer(Vec::new()))
+    {
+        rawler::RawImageData::Integer(d) => d,
+        rawler::RawImageData::Float(_) => bail!(
+            "{} {}: float-encoded RAW is not supported yet (@stub)",
+            raw.make,
+            raw.model
+        ),
+    };
+
+    let src_w = raw.width;
+    let src_h = raw.height;
+
+    if samples.len() < src_w * src_h {
+        bail!(
+            "truncated sensor data: {} samples for {src_w}×{src_h}",
+            samples.len()
+        );
+    }
+
+    let crop = raw.crop_area.or(raw.active_area);
+    let (cl, ct, width, height) = if let Some(rect) = crop {
+        if !rect.is_empty() && rect.p.x + rect.d.w <= src_w && rect.p.y + rect.d.h <= src_h {
+            (rect.p.x, rect.p.y, rect.d.w, rect.d.h)
+        } else {
+            (0, 0, src_w, src_h)
+        }
+    } else {
+        (0, 0, src_w, src_h)
+    };
+
+    if width == 0 || height == 0 {
+        bail!("empty sensor dimensions after crop: {width}x{height}");
+    }
+
+    // DNG opcodes are in active-area coordinates, and the kept window may be a crop of it.
+    let area = {
+        let (ax, ay, aw, ah) = match raw.active_area {
+            Some(a) if !a.is_empty() => (a.p.x, a.p.y, a.d.w, a.d.h),
+            _ => (0, 0, src_w, src_h),
+        };
+        crate::opcodes::Area {
+            offset: (cl as i64 - ax as i64, ct as i64 - ay as i64),
+            size: (aw as u32, ah as u32),
+        }
+    };
+    let data = crop_in_place(samples, src_w, cl, ct, width, height);
+
+    let raw_cfa = match &raw.photometric {
+        rawler::rawimage::RawPhotometricInterpretation::Cfa(cfg) => cfg.cfa.clone(),
+        _ => raw.camera.cfa.clone(),
+    };
+    if !raw_cfa.is_valid() {
+        bail!("{} {}: unrecognised CFA pattern", raw.make, raw.model);
+    }
+    let cfa = raw_cfa.shift(cl, ct);
+    let pattern = cfa_pattern(
+        (cfa.width, cfa.height),
+        |row, col| cfa.color_at(row, col),
+        &cfa.to_string(),
+        (&raw.make, &raw.model),
+    )?;
+
+    // rawler gives black per 2×2 *position* (hence the shift); the shader wants it per
+    // colour. White is per component, so every position of a mosaic already agrees.
+    let raw_black = by_colour(
+        raw.blacklevel.shift(cl, ct).as_bayer_array(),
+        &pattern.tile2x2(),
+    );
+    let raw_white = raw.whitelevel.as_bayer_array();
+    let mut black = [0.0f32; 4];
+    let mut white = [65535.0f32; 4];
+    for i in 0..4 {
+        black[i] = raw_black[i];
+        let w = raw_white[i];
+        white[i] = if w > black[i] { w } else { black[i] + 1.0 };
+    }
+    let white = measured_white(&data, width, &pattern, &black, &white);
+
+    let xyz_to_cam = extract_xyz_to_cam_rawler(&raw);
+
+    let wb_missing = raw.wb_coeffs[..3]
+        .iter()
+        .any(|c| !c.is_finite() || *c <= 0.0);
+    let mut wb = neutral_multipliers(&raw.wb_coeffs);
+    if wb_missing {
+        wb = daylight_multipliers(&xyz_to_cam).unwrap_or(wb);
+    }
+
+    let make = if !raw.clean_make.is_empty() {
+        raw.clean_make
+    } else {
+        raw.make
+    };
+    let model = if !raw.clean_model.is_empty() {
+        raw.clean_model
+    } else {
+        raw.model
+    };
+
+    Ok(Decoded {
+        cfa: CfaImage {
+            data,
+            width: width as u32,
+            height: height as u32,
+            cfa: pattern,
+            black,
+            white,
+            wb,
+            cam_to_srgb: cam_to_srgb(&xyz_to_cam),
+            cam_profiled: None,
+            daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
+            orientation: orientation_geometry_rawler(raw.orientation),
+            make,
+            model,
+            warp: None,
+        },
+        wb_missing,
+        area: Some(area),
+    })
+}
+
+/// The CFA as a pattern the demosaic shaders know: a 2×2 Bayer tile, or a 6×6 X-Trans one.
+///
+/// Anything else is refused here rather than demosaiced wrongly: taking an unknown
+/// pattern's top-left 2×2 as if it were Bayer is how X-Trans files used to open with maze
+/// artefacts, the wrong colour and no error at all. A larger pattern that does repeat
+/// every 2×2 (some files spell Bayer as 2×8) is Bayer.
+fn cfa_pattern(
+    (width, height): (usize, usize),
+    colour_at: impl Fn(usize, usize) -> usize,
+    name: &str,
+    (make, model): (&str, &str),
+) -> Result<CfaPattern> {
+    let periodic = |pw: usize, ph: usize| {
+        width % pw == 0
+            && height % ph == 0
+            && (0..height).all(|r| (0..width).all(|c| colour_at(r, c) == colour_at(r % ph, c % pw)))
+    };
+    let (pw, ph) = if periodic(2, 2) {
+        (2, 2)
+    } else if periodic(6, 6) {
+        (6, 6)
+    } else {
+        bail!("{make} {model}: {width}×{height} CFA pattern '{name}' — not supported yet (@stub)");
+    };
+    let colours_used: Vec<usize> = (0..ph)
+        .flat_map(|r| (0..pw).map(move |c| (r, c)))
+        .map(|(r, c)| colour_at(r, c))
+        .collect();
+    if colours_used.iter().any(|c| *c > 2) {
+        bail!(
+            "{make} {model}: CFA pattern '{name}' has a fourth colour — not supported yet (@stub)"
+        );
+    }
+    if (0..3).any(|c| !colours_used.contains(&c)) {
+        bail!("{make} {model}: CFA pattern '{name}' lacks a colour — not supported yet (@stub)");
+    }
+    let mut colours = [0u8; 36];
+    for (slot, c) in colours.iter_mut().zip(&colours_used) {
+        *slot = *c as u8;
+    }
+    Ok(CfaPattern {
+        width: pw as u32,
+        height: ph as u32,
+        colours,
+    })
+}
+
+/// Per-position values of a 2×2 block as per-colour ones, in the `CfaImage::black` layout.
+/// The two greens, which can differ by a count or two, are averaged; slot 3 repeats green.
+fn by_colour(per_position: [f32; 4], cfa2x2: &[u32; 4]) -> [f32; 4] {
+    let mut sum = [0.0f32; 3];
+    let mut n = [0u32; 3];
+    for (v, &c) in per_position.iter().zip(cfa2x2) {
+        sum[c as usize] += v;
+        n[c as usize] += 1;
+    }
+    let colour = |c: usize| {
+        if n[c] > 0 {
+            sum[c] / n[c] as f32
+        } else {
+            per_position[0]
+        }
+    };
+    [colour(0), colour(1), colour(2), colour(1)]
+}
+
+/// Cut the `width × height` window at (`left`, `top`) out of a `src_w`-wide mosaic,
+/// reusing its buffer. Each row only ever moves toward the front, so a forward pass of
+/// overlapping moves is safe, and a full-frame "crop" costs nothing at all — rather than
+/// a second sensor-sized allocation and copy per open.
+fn crop_in_place(
+    mut samples: Vec<u16>,
+    src_w: usize,
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u16> {
+    if left == 0 && top == 0 && width == src_w {
+        samples.truncate(width * height);
+        return samples;
+    }
+    for row in 0..height {
+        let from = (row + top) * src_w + left;
+        samples.copy_within(from..from + width, row * width);
+    }
+    samples.truncate(width * height);
+    samples
+}
+
+/// The level the sensor actually clipped at, where the data shows one.
+///
+/// A camera database gives one white level per model, but sensors do not clip at one
+/// level: Canon bodies saturate lower at their intermediate ISOs (160, 320, 640…) than at
+/// full stops. When the real clip sits below the declared white, blown highlights
+/// normalise to ~0.87 instead of 1.0, highlight reconstruction never engages, and white
+/// balance turns them magenta. When it sits above, highlight range is thrown away.
+///
+/// A clip is recognisable in the data as a plateau: many photosites at the very top of the
+/// range and next to none just below it, because a saturated ADC reports one value while
+/// real light is spread out by noise. Where a colour has no plateau — nothing clipped — the
+/// declared level stands, unless another colour clipped (the ADC saturates at one level
+/// for all three). An unclipped photo is left exactly as before.
+fn measured_white(
+    data: &[u16],
+    width: usize,
+    cfa: &CfaPattern,
+    black: &[f32; 4],
+    declared: &[f32; 4],
+) -> [f32; 4] {
+    let hist = top_histogram(data, width, cfa, black, declared);
+    plateau_white(&hist, black, declared)
+}
+
+/// Photosite counts per value and CFA colour, for the values the plateau search in
+/// `plateau_white` can ever look at; zero below that.
+///
+/// That search gives up on any colour whose top sits in the bottom half of its range, and
+/// then looks at most 8 tolerances (≤ 8 × 66 values) below the top. So nothing under the
+/// lowest half-range mark, less that margin, can change its answer — and in a normally
+/// exposed photo that is nearly every photosite. Skipping them avoids a scattered
+/// increment per photosite, and rows are split across threads; together this takes the
+/// pass from the single largest CPU cost of an open to a small one.
+fn top_histogram(
+    data: &[u16],
+    width: usize,
+    cfa: &CfaPattern,
+    black: &[f32; 4],
+    declared: &[f32; 4],
+) -> Vec<[u32; 3]> {
+    use rayon::prelude::*;
+
+    let floor = (0..3)
+        .map(|c| black[c] + 0.5 * (declared[c] - black[c]))
+        .fold(f32::MAX, f32::min);
+    let lo = (floor.floor() as i64 - 8 * 66 - 2).clamp(0, 65535) as u16;
+    let bins = 65536 - lo as usize;
+
+    // A multiple of every pattern's height (2 and 6), so every job starts on the same CFA
+    // row phase.
+    let rows_per_job = 96;
+    let mut top = data
+        .par_chunks((width * rows_per_job).max(1))
+        .fold(
+            || vec![[0u32; 3]; bins],
+            |mut hist, block| {
+                for (row, line) in block.chunks_exact(width).enumerate() {
+                    for (col, &v) in line.iter().enumerate() {
+                        if v >= lo {
+                            hist[(v - lo) as usize][cfa.colour_at(row, col) as usize] += 1;
+                        }
+                    }
+                }
+                hist
+            },
+        )
+        .reduce_with(|mut a, b| {
+            for (x, y) in a.iter_mut().zip(&b) {
+                for c in 0..3 {
+                    x[c] += y[c];
+                }
+            }
+            a
+        })
+        .unwrap_or_else(|| vec![[0u32; 3]; bins]);
+
+    let mut hist = vec![[0u32; 3]; lo as usize];
+    hist.append(&mut top);
+    hist
+}
+
+/// The white level per CFA colour, given a histogram of the mosaic.
+fn plateau_white(hist: &[[u32; 3]], black: &[f32; 4], declared: &[f32; 4]) -> [f32; 4] {
+    let mut plateau = [None::<f32>; 3];
+    for (c, found) in plateau.iter_mut().enumerate() {
+        let count = |v: usize| hist[v][c] as u64;
+        // The top of the range, ignoring values only a stray photosite or two reached: a
+        // hot pixel above the real clip must not hide the plateau underneath it.
+        let Some(max) = (0..65536).rev().find(|&v| count(v) >= 4) else {
+            continue;
+        };
+        let floor = black[c].max(0.0) as usize;
+        let range = declared[c] - black[c];
+        // A "clip" in the bottom half of the range is a dark frame, not saturation.
+        if (max as f32) < black[c] + 0.5 * range {
+            continue;
+        }
+        let tol = (((max - floor) as f32) * 0.001).round().max(2.0) as usize;
+        let top: u64 = (max.saturating_sub(tol)..=max).map(count).sum();
+        let below: u64 = (max.saturating_sub(8 * tol)..max.saturating_sub(tol))
+            .map(count)
+            .sum();
+        // `below` spans 7 tolerance widths; a plateau is several times denser than that.
+        let below_per_band = below as f64 / 7.0;
+        if top as f64 > 4.0 * (below_per_band + 1.0) {
+            // The lowest value holding a real share of the plateau, so that every clipped
+            // photosite normalises to at least 1.0.
+            let start = (max.saturating_sub(tol)..=max)
+                .find(|&v| count(v) * 4 >= top)
+                .unwrap_or(max);
+            *found = Some(start as f32);
+        }
+    }
+
+    let shared = plateau.iter().flatten().copied().reduce(f32::min);
+    let mut white = *declared;
+    for c in 0..3 {
+        if let Some(w) = plateau[c].or(shared) {
+            if w > black[c] + 1.0 {
+                if (w - declared[c]).abs() > 0.5 {
+                    log::info!(
+                        "white level, colour {c}: declared {} measured {w}",
+                        declared[c]
+                    );
+                }
+                white[c] = w;
+            }
+        }
+    }
+    white[3] = white[1];
+    white
 }
 
 /// As-shot white balance, normalised against green.
@@ -168,6 +1099,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<CfaImage> {
 /// Sensor data without these applied is roughly 2× green — this is the single most
 /// visible thing the previous decoder omitted.
 fn neutral_multipliers(coeffs: &[f32; 4]) -> [f32; 3] {
+    // (the fallback for a file that has none is `daylight_multipliers`)
     let g = coeffs[1];
     if !g.is_finite() || g <= 0.0 {
         return [1.0, 1.0, 1.0];
@@ -183,23 +1115,638 @@ fn neutral_multipliers(coeffs: &[f32; 4]) -> [f32; 3] {
     [norm(coeffs[0]), 1.0, norm(coeffs[2])]
 }
 
+/// White balance for a D65 white, from the camera's own colour matrix: the camera's
+/// response to daylight is `xyz_to_cam · XYZ(D65)`, and the multipliers undo it.
+fn daylight_multipliers(xyz_to_cam: &[[f32; 3]; 4]) -> Option<[f32; 3]> {
+    neutral_for_white(&[xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2]], D65_XY)
+}
+
+/// CIE 1931 chromaticity of D65.
+const D65_XY: (f32, f32) = (0.3127, 0.3290);
+
+/// Multipliers that make a white of chromaticity `xy` neutral, given XYZ → camera.
+fn neutral_for_white(xyz_to_cam: &[[f32; 3]; 3], (x, y): (f32, f32)) -> Option<[f32; 3]> {
+    if y <= 0.0 {
+        return None;
+    }
+    let xyz = [x / y, 1.0, (1.0 - x - y) / y];
+    let cam: Vec<f32> = xyz_to_cam
+        .iter()
+        .map(|row| row.iter().zip(xyz).map(|(m, v)| m * v).sum())
+        .collect();
+    if cam.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return None;
+    }
+    let g = cam[1];
+    Some([
+        (g / cam[0]).clamp(0.05, 20.0),
+        1.0,
+        (g / cam[2]).clamp(0.05, 20.0),
+    ])
+}
+
+/// DNG colour tags that rawloader does not read, parsed straight from the TIFF structure.
+/// What the fuzz targets (`fuzz/`) drive: every parser a hostile file reaches, each
+/// expected to refuse bad bytes rather than panic, hang or allocate without bound
+/// (WP5.1). Not part of the API.
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+
+    /// The TIFF walker and what reads through it: DNG colour, image sizes, opcodes and
+    /// orientation.
+    pub fn tiff(bytes: &[u8]) {
+        let _ = dng::colour(bytes);
+        let _ = dng::largest_image(bytes);
+        let _ = dng::opcodes(bytes);
+        let _ = tiff_orientation(bytes);
+    }
+
+    /// The embedded-preview scanner, and decoding what it finds.
+    pub fn embedded_jpeg(bytes: &[u8]) {
+        if let Some(j) = crate::preview::find_embedded_jpeg(bytes, 64) {
+            let _ = crate::preview::decode_jpeg_scaled(j.data, 64);
+        }
+    }
+
+    /// A raster file (JPEG, PNG, TIFF, WebP…).
+    pub fn raster(bytes: &[u8]) {
+        let _ = decode_raster(bytes);
+    }
+
+    /// A RAW file, through rawler.
+    pub fn raw(bytes: &[u8]) {
+        let _ = RawlerBackend.decode_bytes(bytes);
+    }
+
+    /// A display's ICC profile, as the user picks one (W-14).
+    pub fn icc(bytes: &[u8]) {
+        let _ = crate::icc::MatrixTrc::parse(bytes);
+    }
+
+    /// A sidecar's text.
+    pub fn sidecar(bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            let _ = crate::sidecar::parse_sidecar(text);
+        }
+    }
+}
+
+mod dng {
+    /// What the decode needs from a DNG that recorded its white as a chromaticity.
+    pub struct Colour {
+        pub wb: [f32; 3],
+        /// Interpolated for the as-shot white's colour temperature, in rawloader's layout.
+        pub xyz_to_cam: [[f32; 3]; 4],
+        /// ForwardMatrix, interpolated the same way, if the file has one.
+        pub forward: Option<[[f32; 3]; 3]>,
+    }
+
+    const AS_SHOT_NEUTRAL: u16 = 0xC628;
+    const FORWARD_MATRIX_1: u16 = 0xC714;
+    const FORWARD_MATRIX_2: u16 = 0xC715;
+
+    const AS_SHOT_WHITE_XY: u16 = 0xC629;
+    const COLOR_MATRIX_1: u16 = 0xC621;
+    const COLOR_MATRIX_2: u16 = 0xC622;
+    const CAMERA_CALIBRATION_1: u16 = 0xC623;
+    const CAMERA_CALIBRATION_2: u16 = 0xC624;
+    const CALIBRATION_ILLUMINANT_1: u16 = 0xC65A;
+    const CALIBRATION_ILLUMINANT_2: u16 = 0xC65B;
+    const SUB_IFDS: u16 = 0x014A;
+
+    const OPCODE_LIST_2: u16 = 51009;
+    const OPCODE_LIST_3: u16 = 51022;
+
+    /// The lens opcodes a DNG carries: OpcodeList2's (applied to the mosaic) and
+    /// OpcodeList3's (after demosaic), as far as `opcodes` understands them.
+    pub fn opcodes(bytes: &[u8]) -> (Vec<crate::opcodes::Opcode>, Vec<crate::opcodes::Opcode>) {
+        let Some(tiff) = Tiff::new(bytes) else {
+            return (Vec::new(), Vec::new());
+        };
+        let list = |tag| {
+            tiff.find_bytes(tag)
+                .map(crate::opcodes::parse_list)
+                .unwrap_or_default()
+        };
+        (list(OPCODE_LIST_2), list(OPCODE_LIST_3))
+    }
+
+    /// The first value of a numeric tag in any TIFF-structured file, DNG or not.
+    pub fn tag(bytes: &[u8], tag: u16) -> Option<f64> {
+        Tiff::new(bytes)?.find(tag)?.first().copied()
+    }
+
+    /// The largest image any IFD of a TIFF-structured file says it holds, as width and
+    /// height: read before a decode allocates for it.
+    pub fn largest_image(bytes: &[u8]) -> Option<(u64, u64)> {
+        let tiff = Tiff::new(bytes)?;
+        let mut best: Option<(u64, u64)> = None;
+        let mut walk = Walk::default();
+        let mut stack = vec![(tiff.u32(4)? as usize, 0u32)];
+        while let Some((ifd, depth)) = stack.pop() {
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
+                continue;
+            }
+            let Some(n) = tiff.u16(ifd).map(usize::from) else {
+                continue;
+            };
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                break;
+            }
+            let (mut w, mut h) = (None, None);
+            for i in 0..n {
+                let e = ifd + 2 + 12 * i;
+                let (Some(t), Some(kind), Some(count)) =
+                    (tiff.u16(e), tiff.u16(e + 2), tiff.u32(e + 4))
+                else {
+                    break;
+                };
+                let first = || tiff.values(e, kind, count as usize)?.first().copied();
+                match t {
+                    0x0100 => w = first(),
+                    0x0101 => h = first(),
+                    SUB_IFDS => {
+                        for sub in tiff.values(e, kind, count as usize).unwrap_or_default() {
+                            if (1.0..=u32::MAX as f64).contains(&sub) {
+                                stack.push((sub as usize, depth + 1));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(w), Some(h)) = (w, h) {
+                let (w, h) = (w as u64, h as u64);
+                if best.is_none_or(|(bw, bh)| w.saturating_mul(h) > bw.saturating_mul(bh)) {
+                    best = Some((w, h));
+                }
+            }
+            if let Some(next) = tiff.u32(ifd + 2 + 12 * n) {
+                stack.push((next as usize, depth + 1));
+            }
+        }
+        best
+    }
+
+    /// Whether any entry of the file's TIFF structure (IFD0's chain, SubIFDs, the EXIF,
+    /// GPS and interoperability IFDs) claims more data than the whole file holds. rawler
+    /// allocates an entry's values from its count before reading them, so a count of four
+    /// billion in a 600-byte file asked it for 13 GB (found by the fuzzer, WP5.1): such a
+    /// file is refused before rawler sees it. Only what no file could hold is refused; an
+    /// entry merely pointing somewhere odd is left to rawler, as some cameras write them.
+    /// A TIFF, or a RAW shaped like one under a magic number of its own.
+    pub fn is_tiff_like(bytes: &[u8]) -> bool {
+        Tiff::any(bytes).is_some()
+    }
+
+    pub fn overclaims(bytes: &[u8]) -> bool {
+        if bytes.starts_with(b"\0MRM") {
+            return mrw_overclaims(bytes);
+        }
+        let Some(tiff) = Tiff::any(bytes) else {
+            return false;
+        };
+        let Some(first) = tiff.u32(4) else {
+            return false;
+        };
+        tiff_overclaims(&tiff, first)
+    }
+
+    /// Minolta's MRW: blocks, one of which (TTW) holds a big-endian TIFF whose IFD rawler
+    /// reads at 8, or at 8 in the file itself when there is no TTW. rawler steps from block
+    /// to block by `len + 8` in 32 bits, which a length of 0xFFFF_FFF8 wraps to nothing:
+    /// it would never move again.
+    fn mrw_overclaims(bytes: &[u8]) -> bool {
+        let be32 = |at: u64| -> Option<u32> {
+            let at = usize::try_from(at).ok()?;
+            Some(u32::from_be_bytes(
+                bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
+        };
+        let Some(data) = be32(4) else {
+            return false;
+        };
+        let data_offset = data as u64 + 8;
+        let (mut at, mut tiff_at) = (8u64, 0u64);
+        while at + 20 < data_offset {
+            let (Some(tag), Some(len)) = (be32(at), be32(at + 4)) else {
+                // rawler would read past the end and panic, which is contained.
+                return false;
+            };
+            if tag == 0x0054_5457 {
+                tiff_at = at + 8;
+            }
+            let step = len.wrapping_add(8);
+            if step == 0 {
+                return true;
+            }
+            at += step as u64;
+        }
+        let Some(b) = usize::try_from(tiff_at).ok().and_then(|at| bytes.get(at..)) else {
+            return false;
+        };
+        tiff_overclaims(&Tiff { b, le: false }, 8)
+    }
+
+    fn tiff_overclaims(tiff: &Tiff, first: u32) -> bool {
+        let bytes = tiff.b;
+        let len = bytes.len() as u64;
+        let mut walk = Walk::default();
+        let mut stack = vec![(first as usize, 0u32)];
+        // rawler follows the chain of next-IFD pointers with no limit and no memory of
+        // where it has been, so a chain that comes back on itself grows until the process
+        // is killed (found by the fuzzer).
+        let mut chain = std::collections::HashSet::from([first as usize]);
+        while let Some((ifd, depth)) = stack.pop() {
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
+                continue;
+            }
+            let Some(n) = tiff.u16(ifd).map(usize::from) else {
+                continue;
+            };
+            // Only the entries the file has room for: rawler reads on until one is cut
+            // short, so those are the ones to check.
+            let n = n.min(bytes.len().saturating_sub(ifd + 2) / 12);
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                // More than any camera writes: not a file to vouch for.
+                return true;
+            }
+            for i in 0..n {
+                let e = ifd + 2 + 12 * i;
+                let (Some(t), Some(kind), Some(count)) =
+                    (tiff.u16(e), tiff.u16(e + 2), tiff.u32(e + 4))
+                else {
+                    break;
+                };
+                let size: u64 = match kind {
+                    3 | 8 => 2,
+                    4 | 9 | 11 | 13 => 4,
+                    5 | 10 | 12 | 16..=18 => 8,
+                    _ => 1,
+                };
+                if size * count as u64 > len {
+                    return true;
+                }
+                match t {
+                    SUB_IFDS => {
+                        for sub in tiff.values(e, kind, count as usize).unwrap_or_default() {
+                            if (1.0..=u32::MAX as f64).contains(&sub) {
+                                stack.push((sub as usize, depth + 1));
+                            }
+                        }
+                    }
+                    // EXIF, GPS, interoperability: one offset each.
+                    0x8769 | 0x8825 | 0xA005 => {
+                        if let Some(at) = tiff.u32(e + 8) {
+                            stack.push((at as usize, depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(next) = tiff.u32(ifd + 2 + 12 * n).filter(|&next| next != 0) {
+                if chain.contains(&ifd) && (!chain.insert(next as usize) || chain.len() > 64) {
+                    return true;
+                }
+                stack.push((next as usize, depth + 1));
+            }
+        }
+        false
+    }
+
+    /// As-shot white balance and a matching colour matrix, if the file has a white
+    /// (`AsShotWhiteXY` or `AsShotNeutral`) and at least one `ColorMatrix`.
+    ///
+    /// Follows the DNG spec's model: XYZ → camera is `CameraCalibration · ColorMatrix`,
+    /// each (and `ForwardMatrix`) interpolated between its two calibration illuminants
+    /// linearly in inverse colour temperature. A white given as a chromaticity says its
+    /// temperature directly; one given as the camera's neutral is found by iterating:
+    /// the matrix for a temperature puts the neutral at some white, whose temperature
+    /// picks the next matrix, until they agree.
+    pub fn colour(bytes: &[u8]) -> Option<Colour> {
+        let tiff = Tiff::new(bytes)?;
+        let get = |tag| tiff.find(tag).and_then(|v| matrix(&v));
+        let (cm1, cm2) = (get(COLOR_MATRIX_1), get(COLOR_MATRIX_2));
+        let (cc1, cc2) = (get(CAMERA_CALIBRATION_1), get(CAMERA_CALIBRATION_2));
+        let (fm1, fm2) = (get(FORWARD_MATRIX_1), get(FORWARD_MATRIX_2));
+        let t1 = tiff
+            .find(CALIBRATION_ILLUMINANT_1)
+            .and_then(|v| kelvin(*v.first()?));
+        let t2 = tiff
+            .find(CALIBRATION_ILLUMINANT_2)
+            .and_then(|v| kelvin(*v.first()?));
+        let dual = match (cm1, cm2, t1, t2) {
+            (Some(_), Some(_), Some(t1), Some(t2)) if t1 != t2 => Some((t1, t2)),
+            _ => None,
+        };
+        cm1.or(cm2)?;
+
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        // XYZ → camera and the forward matrix, weighted `w` towards illuminant 1.
+        let at = |w: f32| {
+            let pick = |a: Option<[[f32; 3]; 3]>, b: Option<[[f32; 3]; 3]>| match (a, b, dual) {
+                (Some(a), Some(b), Some(_)) => Some(lerp(&a, &b, w)),
+                (a, b, _) => a.or(b),
+            };
+            let cm = pick(cm1, cm2).expect("one matrix, checked above");
+            let cc = pick(cc1, cc2).unwrap_or(identity);
+            (super::mul3(&cc, &cm), pick(fm1, fm2))
+        };
+        let weight_for = |x: f64, y: f64| dual.map_or(1.0, |(t1, t2)| weight(cct(x, y), t1, t2));
+
+        let (w, wb) = if let Some(white) = tiff.find(AS_SHOT_WHITE_XY) {
+            let (x, y) = (*white.first()?, *white.get(1)?);
+            let w = weight_for(x, y);
+            (w, super::neutral_for_white(&at(w).0, (x as f32, y as f32))?)
+        } else {
+            let n = tiff.find(AS_SHOT_NEUTRAL)?;
+            let n = [*n.first()?, *n.get(1)?, *n.get(2)?];
+            if n.iter().any(|v| v.is_nan() || *v <= 0.0) {
+                return None;
+            }
+            let mut w = 0.5;
+            for _ in 0..30 {
+                let inv = super::invert3(&at(w).0)?;
+                let xyz = super::mul3v(&inv, n);
+                let sum = xyz.iter().sum::<f64>();
+                if sum.is_nan() || sum <= 0.0 {
+                    break;
+                }
+                let next = weight_for(xyz[0] / sum, xyz[1] / sum);
+                let done = (next - w).abs() < 1e-5;
+                w = next;
+                if done {
+                    break;
+                }
+            }
+            let g = n[1] as f32;
+            (w, [g / n[0] as f32, 1.0, g / n[2] as f32])
+        };
+        let (xyz_to_cam, forward) = at(w);
+        Some(Colour {
+            wb,
+            xyz_to_cam: [xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2], [0.0; 3]],
+            forward,
+        })
+    }
+
+    fn matrix(v: &[f64]) -> Option<[[f32; 3]; 3]> {
+        if v.len() < 9 {
+            return None;
+        }
+        let mut m = [[0.0f32; 3]; 3];
+        for (i, value) in v.iter().take(9).enumerate() {
+            m[i / 3][i % 3] = *value as f32;
+        }
+        Some(m)
+    }
+
+    /// Weight toward illuminant 1, linear in inverse temperature, clamped to the pair.
+    fn weight(cct: f64, t1: f64, t2: f64) -> f32 {
+        let (inv, inv1, inv2) = (1.0 / cct, 1.0 / t1, 1.0 / t2);
+        ((inv - inv2) / (inv1 - inv2)).clamp(0.0, 1.0) as f32
+    }
+
+    fn lerp(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3], w: f32) -> [[f32; 3]; 3] {
+        let mut out = [[0.0f32; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                out[i][j] = w * a[i][j] + (1.0 - w) * b[i][j];
+            }
+        }
+        out
+    }
+
+    /// McCamy's approximation: correlated colour temperature from a chromaticity. Good to
+    /// a few kelvin across the range DNG calibration illuminants span.
+    fn cct(x: f64, y: f64) -> f64 {
+        let n = (x - 0.3320) / (0.1858 - y);
+        (449.0 * n.powi(3) + 3525.0 * n.powi(2) + 6823.3 * n + 5520.33).clamp(1000.0, 25000.0)
+    }
+
+    /// EXIF LightSource codes, as colour temperatures.
+    fn kelvin(code: f64) -> Option<f64> {
+        Some(match code as u32 {
+            1 | 4 | 9 => 5500.0, // daylight, flash, fine weather
+            2 => 4200.0,         // fluorescent
+            3 => 2850.0,         // tungsten
+            10 => 6500.0,        // cloudy
+            11 => 7500.0,        // shade
+            12 => 6430.0,        // daylight fluorescent
+            13 => 5000.0,        // day white fluorescent
+            14 => 4150.0,        // cool white fluorescent
+            15 => 3450.0,        // white fluorescent
+            17 => 2856.0,        // standard light A
+            18 => 4874.0,        // standard light B
+            19 => 6774.0,        // standard light C
+            20 => 5503.0,        // D55
+            21 => 6504.0,        // D65
+            22 => 7504.0,        // D75
+            23 => 5003.0,        // D50
+            24 => 3200.0,        // ISO studio tungsten
+            _ => return None,
+        })
+    }
+
+    /// The most IFDs and entries one search reads: far past any camera's (a DNG has a
+    /// handful of IFDs of a few dozen entries), well short of a hostile file's millions.
+    const MAX_IFDS: usize = 64;
+    const MAX_ENTRIES: usize = 20_000;
+
+    /// Where a search has been.
+    #[derive(Default)]
+    struct Walk {
+        seen: std::collections::HashSet<usize>,
+        entries: usize,
+    }
+
+    /// Just enough TIFF to find a numeric tag anywhere in IFD0, its chain, and SubIFDs.
+    struct Tiff<'a> {
+        b: &'a [u8],
+        le: bool,
+    }
+
+    impl<'a> Tiff<'a> {
+        fn new(b: &'a [u8]) -> Option<Self> {
+            let le = match b.get(..2)? {
+                b"II" => true,
+                b"MM" => false,
+                _ => return None,
+            };
+            let t = Self { b, le };
+            (t.u16(2)? == 42).then_some(t)
+        }
+
+        /// A TIFF, or one of the TIFF-shaped RAWs that mark themselves with a magic of
+        /// their own: Olympus ORF (`RO`, `RS`) and Panasonic RW2 (0x55).
+        fn any(b: &'a [u8]) -> Option<Self> {
+            let le = match b.get(..2)? {
+                b"II" => true,
+                b"MM" => false,
+                _ => return None,
+            };
+            let t = Self { b, le };
+            matches!(t.u16(2)?, 42 | 0x4F52 | 0x5352 | 0x55).then_some(t)
+        }
+
+        fn u16(&self, at: usize) -> Option<u16> {
+            let s: [u8; 2] = self.b.get(at..at.checked_add(2)?)?.try_into().ok()?;
+            Some(if self.le {
+                u16::from_le_bytes(s)
+            } else {
+                u16::from_be_bytes(s)
+            })
+        }
+
+        fn u32(&self, at: usize) -> Option<u32> {
+            let s: [u8; 4] = self.b.get(at..at.checked_add(4)?)?.try_into().ok()?;
+            Some(if self.le {
+                u32::from_le_bytes(s)
+            } else {
+                u32::from_be_bytes(s)
+            })
+        }
+
+        fn find(&self, tag: u16) -> Option<Vec<f64>> {
+            let mut walk = Walk::default();
+            let values = |e: usize, kind: u16, count: usize| self.values(e, kind, count);
+            self.search(self.u32(4)? as usize, tag, &mut walk, 0, &values)
+        }
+
+        /// A tag's bytes as they are, for the byte and undefined types (opcode lists).
+        fn find_bytes(&self, tag: u16) -> Option<&'a [u8]> {
+            let mut walk = Walk::default();
+            let bytes = |e: usize, kind: u16, count: usize| {
+                if !matches!(kind, 1 | 7) {
+                    return None;
+                }
+                let at = if count <= 4 {
+                    e + 8
+                } else {
+                    self.u32(e + 8)? as usize
+                };
+                self.b.get(at..at.checked_add(count)?)
+            };
+            self.search(self.u32(4)? as usize, tag, &mut walk, 0, &bytes)
+        }
+
+        fn search<T>(
+            &self,
+            ifd: usize,
+            tag: u16,
+            walk: &mut Walk,
+            depth: u32,
+            read: &dyn Fn(usize, u16, usize) -> Option<T>,
+        ) -> Option<T> {
+            // Malformed files can loop an IFD chain back on itself, or fan out into more
+            // IFDs and entries than any camera writes: both end the walk.
+            if ifd == 0 || depth > 8 || walk.seen.len() >= MAX_IFDS || !walk.seen.insert(ifd) {
+                return None;
+            }
+            let n = self.u16(ifd)? as usize;
+            walk.entries += n;
+            if walk.entries > MAX_ENTRIES {
+                return None;
+            }
+            let mut subs = Vec::new();
+            for i in 0..n {
+                let e = ifd + 2 + 12 * i;
+                let (t, kind, count) = (self.u16(e)?, self.u16(e + 2)?, self.u32(e + 4)? as usize);
+                if t == tag {
+                    return read(e, kind, count);
+                }
+                if t == SUB_IFDS {
+                    subs = self.values(e, kind, count).unwrap_or_default();
+                }
+            }
+            // An offset is a u32; anything else a hostile file claims is skipped.
+            for sub in subs
+                .into_iter()
+                .filter(|s| (1.0..=u32::MAX as f64).contains(s))
+            {
+                if let Some(v) = self.search(sub as usize, tag, walk, depth + 1, read) {
+                    return Some(v);
+                }
+            }
+            let next = self.u32(ifd + 2 + 12 * n)? as usize;
+            self.search(next, tag, walk, depth + 1, read)
+        }
+
+        fn values(&self, entry: usize, kind: u16, count: usize) -> Option<Vec<f64>> {
+            let size = match kind {
+                3 => 2,
+                4 | 9 | 11 | 13 => 4,
+                5 | 10 | 12 => 8,
+                _ => return None,
+            };
+            let at = if size * count <= 4 {
+                entry + 8
+            } else {
+                self.u32(entry + 8)? as usize
+            };
+            (0..count.min(64))
+                .map(|i| {
+                    let p = at + i * size;
+                    Some(match kind {
+                        3 => self.u16(p)? as f64,
+                        4 | 13 => self.u32(p)? as f64,
+                        9 => self.u32(p)? as i32 as f64,
+                        11 => f32::from_bits(self.u32(p)?) as f64,
+                        12 => {
+                            let (a, b) = (self.u32(p)? as u64, self.u32(p + 4)? as u64);
+                            let bits = if self.le {
+                                a | (b << 32)
+                            } else {
+                                (a << 32) | b
+                            };
+                            f64::from_bits(bits)
+                        }
+                        5 => {
+                            let (n, d) = (self.u32(p)?, self.u32(p + 4)?);
+                            if d == 0 {
+                                return None;
+                            }
+                            n as f64 / d as f64
+                        }
+                        10 => {
+                            let (n, d) = (self.u32(p)? as i32, self.u32(p + 4)? as i32);
+                            if d == 0 {
+                                return None;
+                            }
+                            n as f64 / d as f64
+                        }
+                        _ => return None,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
 /// Camera-native RGB → linear sRGB.
 ///
-/// `xyz_to_cam` comes from the file. Inverting it gives camera→XYZ; composing with the
-/// sRGB matrix gives camera→sRGB. Row-normalising makes a neutral camera signal land on a
-/// neutral display signal, which is also why rawloader's dcraw-style ×10000 scaling does
-/// not need undoing — a uniform scale cancels in the normalisation.
+/// `xyz_to_cam` comes from the file. Composed with sRGB → XYZ it gives sRGB → camera, and
+/// inverting that gives camera → sRGB.
+///
+/// The camera side has to be normalised so a neutral lands on a neutral, and it is the
+/// rows of sRGB → camera that get scaled — one gain per *camera* channel, which is exactly
+/// what white balance already is, so the matrix only has to carry the primaries. Scaling
+/// the rows of the finished camera → sRGB matrix instead also maps neutral to neutral,
+/// but it is a gain per *display* channel, which distorts every colour that is not grey:
+/// on a Canon 7D it turned the green row from dcraw's [-0.25, 1.76, -0.51] into
+/// [-1.17, 3.56, -1.39], and every photo came out with pink skin and purple water. This is
+/// dcraw's construction, and why the ×10000 scaling of its integer matrices does not need
+/// undoing — a uniform scale cancels in the normalisation.
 fn cam_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let m = [xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2]];
+    let srgb_to_xyz = invert3(&XYZ_TO_SRGB).expect("the sRGB matrix is invertible");
 
-    let Some(cam_to_xyz) = invert3(&m) else {
-        log::warn!("camera has no colour matrix; falling back to identity primaries");
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    };
-
-    let mut out = mul3(&XYZ_TO_SRGB, &cam_to_xyz);
-
-    for row in out.iter_mut() {
+    let mut srgb_to_cam = mul3(&m, &srgb_to_xyz);
+    for row in srgb_to_cam.iter_mut() {
         let sum: f32 = row.iter().sum();
         if sum.is_finite() && sum.abs() > 1e-6 {
             for v in row.iter_mut() {
@@ -208,11 +1755,21 @@ fn cam_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
         }
     }
 
+    let Some(out) = invert3(&srgb_to_cam) else {
+        log::warn!("camera has no colour matrix; falling back to identity primaries");
+        return identity;
+    };
+
     if out.iter().flatten().any(|v| !v.is_finite()) {
         log::warn!("degenerate colour matrix; falling back to identity primaries");
-        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        return identity;
     }
     out
+}
+
+/// Matrix × vector, in f64 for code that inverts what it computes.
+pub(crate) fn mul3v(m: &[[f32; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    m.map(|row| (0..3).map(|k| row[k] as f64 * v[k]).sum())
 }
 
 fn mul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
@@ -225,7 +1782,7 @@ fn mul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     out
 }
 
-fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+pub(crate) fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
@@ -249,6 +1806,341 @@ fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A little-endian TIFF with one IFD: each tag's values as FLOATs, or a SHORT.
+    fn dng_tags(tags: &[(u16, Vec<f32>)]) -> Vec<u8> {
+        let mut tags = tags.to_vec();
+        tags.sort_by_key(|t| t.0);
+        let ifd = 8;
+        let data_at = ifd + 2 + 12 * tags.len() + 4;
+        let (mut entries, mut data) = (Vec::new(), Vec::new());
+        for (tag, values) in &tags {
+            entries.extend_from_slice(&tag.to_le_bytes());
+            let short = *tag == 0xC65A || *tag == 0xC65B;
+            if short {
+                entries.extend_from_slice(&3u16.to_le_bytes());
+                entries.extend_from_slice(&1u32.to_le_bytes());
+                entries.extend_from_slice(&(values[0] as u32).to_le_bytes());
+                continue;
+            }
+            entries.extend_from_slice(&11u16.to_le_bytes());
+            entries.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            if values.len() == 1 {
+                entries.extend_from_slice(&values[0].to_le_bytes());
+            } else {
+                entries.extend_from_slice(&((data_at + data.len()) as u32).to_le_bytes());
+                for v in values {
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        let mut b = b"II".to_vec();
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&(ifd as u32).to_le_bytes());
+        b.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        b.extend_from_slice(&entries);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&data);
+        b
+    }
+
+    fn flat(m: &[[f32; 3]; 3]) -> Vec<f32> {
+        m.iter().flatten().copied().collect()
+    }
+
+    /// A reproducible stream of mutations: the same seeds fail the same way on every run.
+    struct Mutations(u64);
+
+    impl Mutations {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// `seed` with a few bytes changed, or cut short.
+        fn of(&mut self, seed: &[u8]) -> Vec<u8> {
+            let mut b = seed.to_vec();
+            if b.is_empty() {
+                return b;
+            }
+            for _ in 0..1 + self.next() % 6 {
+                let at = (self.next() % b.len() as u64) as usize;
+                b[at] = match self.next() % 4 {
+                    0 => 0xFF,
+                    1 => 0x00,
+                    2 => b[at].wrapping_add(1),
+                    _ => self.next() as u8,
+                };
+            }
+            if self.next().is_multiple_of(5) {
+                let keep = (self.next() % b.len() as u64) as usize;
+                b.truncate(keep);
+            }
+            b
+        }
+    }
+
+    #[test]
+    fn hostile_bytes_are_refused_not_crashed_on() {
+        use image::ImageEncoder;
+        let tiff = dng_tags(&[
+            (0xC621, flat(&XYZ_TO_SRGB)),
+            (0xC65A, vec![21.0]),
+            (0xC628, vec![0.5, 1.0, 0.7]),
+            (0x0100, vec![4000.0]),
+            (0x0101, vec![3000.0]),
+        ]);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(
+                &[120u8; 48 * 32 * 3],
+                48,
+                32,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[90u8; 16 * 16 * 3], 16, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // A RAW-shaped file: a TIFF header with the preview inside it.
+        let mut raw = tiff.clone();
+        raw.extend_from_slice(&jpeg);
+        let mut m = Mutations(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..3000 {
+            let t = m.of(&tiff);
+            let _ = dng::colour(&t);
+            let _ = dng::largest_image(&t);
+            let _ = dng::opcodes(&t);
+            let _ = tiff_orientation(&t);
+            let r = m.of(&raw);
+            if let Some(j) = crate::preview::find_embedded_jpeg(&r, 64) {
+                let _ = crate::preview::decode_jpeg_scaled(j.data, 64);
+            }
+            let _ = decode_raster(&m.of(&jpeg));
+            let _ = decode_raster(&m.of(&png));
+        }
+    }
+
+    /// Writes the fuzz targets' seed files (`fuzz/seeds`); run by hand when a format
+    /// changes: `DUCKFOOT_FUZZ_SEEDS=fuzz/seeds cargo test -p photo-engine --lib
+    /// write_fuzz_seeds -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_fuzz_seeds() {
+        use image::ImageEncoder;
+        let Some(root) = std::env::var_os("DUCKFOOT_FUZZ_SEEDS").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let put = |target: &str, name: &str, bytes: &[u8]| {
+            let dir = root.join(target);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), bytes).unwrap();
+        };
+        let tiff = dng_tags(&[
+            (0xC621, flat(&XYZ_TO_SRGB)),
+            (0xC65A, vec![21.0]),
+            (0xC628, vec![0.5, 1.0, 0.7]),
+            (0x0100, vec![64.0]),
+            (0x0101, vec![48.0]),
+            (0x0112, vec![6.0]),
+        ]);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(&[120u8; 16 * 8 * 3], 16, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[90u8; 8 * 8 * 3], 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut raw = tiff.clone();
+        raw.extend_from_slice(&jpeg);
+        put("tiff", "dng-tags", &tiff);
+        put("raw", "dng-tags", &tiff);
+        put("embedded_jpeg", "tiff-with-preview", &raw);
+        put("raster", "small.jpg", &jpeg);
+        put("raster", "small.png", &png);
+        let mut stack = crate::PhotoStack::default();
+        stack.exposure.params.ev = 0.5;
+        stack.tone_curve.enabled = true;
+        let data = crate::SidecarData {
+            stack: Some(stack),
+            ..Default::default()
+        };
+        put("icc", "srgb.icc", crate::icc::srgb_profile());
+        put("icc", "adobe-rgb.icc", crate::icc::adobe_rgb_profile());
+        put(
+            "sidecar",
+            "edited.duckfoot",
+            serde_json::to_string_pretty(&data).unwrap().as_bytes(),
+        );
+    }
+
+    #[test]
+    fn an_entry_claiming_more_than_the_file_holds_is_refused_before_rawler() {
+        // A float tag counting four billion values, in a file of a few dozen bytes: rawler
+        // would allocate 16 GB for it before reading a value.
+        let mut tiff = dng_tags(&[(0x0100, vec![64.0]), (0x0101, vec![48.0])]);
+        assert!(!dng::overclaims(&tiff), "a sound file passes");
+        // The first entry's count, at 8 (header) + 2 (entry count) + 4 (tag, type).
+        tiff[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(dng::overclaims(&tiff));
+        let Err(err) = RawlerBackend.decode_bytes(&tiff) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("damaged"), "{err:#}");
+        // An IFD whose next pointer is itself: rawler's chain would grow for ever.
+        let mut looped = dng_tags(&[(0x0100, vec![64.0]), (0x0101, vec![48.0])]);
+        let n = u16::from_le_bytes([looped[8], looped[9]]) as usize;
+        let next = 8 + 2 + 12 * n;
+        looped[next..next + 4].copy_from_slice(&8u32.to_le_bytes());
+        assert!(dng::overclaims(&looped));
+        // An MRW whose block length wraps rawler's step to nothing.
+        let mut mrw = b"\0MRM".to_vec();
+        mrw.extend_from_slice(&100u32.to_be_bytes());
+        mrw.extend_from_slice(b"\0PRD");
+        mrw.extend_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
+        mrw.resize(120, 0);
+        assert!(dng::overclaims(&mrw));
+        // A QuickTake's bytes, whatever the name: not a family the app opens.
+        let mut qtk = b"qktn".to_vec();
+        qtk.resize(800, 0);
+        let Err(err) = RawlerBackend.decode_bytes(&qtk) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("not a RAW format"), "{err:#}");
+        // A JPEG's start and nothing more hung rawler; now it is refused at once.
+        let Err(err) = RawlerBackend.decode_bytes(&[0xFF, 0xD8, 0xFF, 0xE1]) else {
+            panic!("decoded");
+        };
+        assert!(format!("{err:#}").contains("JPEG"), "{err:#}");
+        // The fuzzer's: an IFD claiming 21,830 entries in 47 bytes, one of them four
+        // billion shorts. Only the entries the file has room for are checked.
+        let found: &[u8] = &[
+            0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x46, 0x55, 0x4a, 0x49, 0x46, 0x49,
+            0x4c, 0x4d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x80, 0x42, 0x01, 0x01, 0x0b, 0x00,
+            0x0b, 0x00, 0x01, 0x00, 0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0xc4, 0xbf, 0x82,
+            0x37, 0xff, 0xbe, 0xd1, 0x00,
+        ];
+        assert!(dng::overclaims(found));
+    }
+
+    #[test]
+    fn a_file_claiming_a_huge_image_is_refused_before_it_is_read() {
+        use image::ImageEncoder;
+        let tiff = dng_tags(&[(0x0100, vec![100_000.0]), (0x0101, vec![100_000.0])]);
+        assert_eq!(dng::largest_image(&tiff), Some((100_000, 100_000)));
+        assert!(RawlerBackend.decode_bytes(&tiff).is_err());
+        // A PNG whose header says 30000 × 30000: refused from the header alone.
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0u8; 3], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        // IHDR's width and height sit at bytes 16..24; its CRC no longer matches, which
+        // is exactly what a hostile file would look like.
+        png[16..20].copy_from_slice(&30_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&30_000u32.to_be_bytes());
+        assert!(decode_raster(&png).is_err(), "refused");
+        assert!(check_pixels(30_000, 30_000).is_err());
+        assert!(check_pixels(9_504, 6_336).is_ok(), "a 60 MP camera opens");
+    }
+
+    #[test]
+    fn a_forward_matrix_for_an_srgb_camera_is_the_identity() {
+        // White-balanced linear sRGB → XYZ D50: sRGB → XYZ, then Bradford D65 → D50.
+        let srgb_to_xyz = invert3(&XYZ_TO_SRGB).unwrap();
+        let d65_to_d50 = invert3(&BRADFORD_D50_TO_D65).unwrap();
+        let fm = mul3(&d65_to_d50, &srgb_to_xyz);
+        let m = forward_to_srgb(&fm);
+        for (i, row) in m.iter().enumerate() {
+            for (j, v) in row.iter().enumerate() {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((v - want).abs() < 2e-3, "{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_as_shot_neutral_finds_its_white_between_two_illuminants() {
+        // A camera whose matrix under tungsten (A) differs from its daylight one.
+        let d65 = XYZ_TO_SRGB;
+        let mut a = XYZ_TO_SRGB;
+        a[0] = a[0].map(|v| v * 1.3);
+        a[2] = a[2].map(|v| v * 0.7);
+        let fm1 = [[0.7, 0.2, 0.1], [0.3, 0.6, 0.1], [0.0, 0.1, 0.7]];
+        let fm2 = [[0.6, 0.3, 0.1], [0.2, 0.7, 0.1], [0.0, 0.0, 0.8]];
+        let neutral = [0.55f32, 1.0, 0.8];
+        let file = dng_tags(&[
+            (0xC621, flat(&a)),
+            (0xC622, flat(&d65)),
+            (0xC65A, vec![17.0]),
+            (0xC65B, vec![21.0]),
+            (0xC714, flat(&fm1)),
+            (0xC715, flat(&fm2)),
+            (0xC628, neutral.to_vec()),
+        ]);
+        let c = dng::colour(&file).expect("the colour tags");
+        // The balance undoes the neutral.
+        for (k, v) in c.wb.iter().enumerate() {
+            assert!((v * neutral[k] - 1.0).abs() < 1e-5, "{:?}", c.wb);
+        }
+        // Whatever white the matrix found, both the colour and forward matrices are the
+        // same blend of their pair.
+        let fm = c.forward.expect("forward matrices");
+        let w = (fm[0][0] - fm2[0][0]) / (fm1[0][0] - fm2[0][0]);
+        assert!((0.0..=1.0).contains(&w), "{w}");
+        let cm0 = c.xyz_to_cam[0][0];
+        let want = w * a[0][0] + (1.0 - w) * d65[0][0];
+        assert!((cm0 - want).abs() < 1e-4, "{cm0} for {want}");
+        // And the white that blend puts the neutral at has the temperature it assumed.
+        let m = [c.xyz_to_cam[0], c.xyz_to_cam[1], c.xyz_to_cam[2]];
+        let xyz = mul3v(&invert3(&m).unwrap(), neutral.map(f64::from));
+        let sum: f64 = xyz.iter().sum();
+        let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        let n = (x - 0.3320) / (0.1858 - y);
+        let t = 449.0 * n.powi(3) + 3525.0 * n.powi(2) + 6823.3 * n + 5520.33;
+        let inv = |k: f64| 1.0 / k;
+        let w_of_t = ((inv(t) - inv(6504.0)) / (inv(2856.0) - inv(6504.0))).clamp(0.0, 1.0);
+        assert!(
+            (w_of_t as f32 - w).abs() < 1e-3,
+            "{t:.0} K gives {w_of_t}, used {w}"
+        );
+    }
+
+    #[test]
+    fn raster_pixels_become_linear_half_floats() {
+        let img = image::RgbImage::from_fn(3, 2, |x, y| {
+            image::Rgb([(x * 100) as u8, (y * 255) as u8, 188])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img.clone())
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let out = decode_raster(&png).unwrap();
+        assert_eq!((out.width, out.height), (3, 2));
+        let to_linear = |v: u8| {
+            let c = v as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for (i, p) in img.pixels().enumerate() {
+            let texel = &out.data[i * 8..i * 8 + 8];
+            let half = |k: usize| half::f16::from_le_bytes([texel[k], texel[k + 1]]).to_f32();
+            for c in 0..3 {
+                assert!(
+                    (half(c * 2) - to_linear(p[c])).abs() < 1e-3,
+                    "pixel {i} channel {c}"
+                );
+            }
+            assert_eq!(half(6), 0.0);
+        }
+    }
 
     #[test]
     fn inverts_a_known_matrix() {
@@ -298,11 +2190,364 @@ mod tests {
     }
 
     #[test]
+    fn camera_matrix_matches_dcraw() {
+        // Canon EOS 7D, dcraw's adobe_coeff. Expected: dcraw's rgb_cam for the same
+        // matrix. Normalising the wrong side still passes the neutral test above, and
+        // gives a green row of [-1.17, 3.56, -1.39]: pink skin, purple water.
+        let xyz_to_cam = [
+            [6844.0, -996.0, -856.0],
+            [-3876.0, 11761.0, 2396.0],
+            [-593.0, 1772.0, 6198.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let want = [
+            [1.9205, -1.0414, 0.1209],
+            [-0.2470, 1.7594, -0.5124],
+            [-0.0070, -0.4896, 1.4965],
+        ];
+        let got = cam_to_srgb(&xyz_to_cam);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((got[i][j] - want[i][j]).abs() < 1e-3, "{got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn black_levels_move_from_positions_to_colours() {
+        // GBRG, as a Canon 7D crop lands: positions (G, B, R, G).
+        let black = by_colour([2047.0, 2049.0, 2051.0, 2045.0], &[1, 2, 0, 1]);
+        assert_eq!(black, [2051.0, 2046.0, 2049.0, 2046.0]);
+        assert_eq!(by_colour([512.0; 4], &RGGB), [512.0; 4]);
+    }
+
+    /// The Fuji X-T2's X-Trans layout, as rawloader's camera table records it.
+    const XTRANS: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
+
+    fn rawloader_tile(pattern: &str, shift: (usize, usize)) -> Result<CfaPattern> {
+        let cfa = rawloader::CFA::new(pattern).shift(shift.0, shift.1);
+        cfa_pattern(
+            (cfa.width, cfa.height),
+            |r, c| cfa.color_at(r, c),
+            &cfa.to_string(),
+            ("FUJIFILM", "X-T2"),
+        )
+    }
+
+    fn rawler_tile(pattern: &str, shift: (usize, usize)) -> Result<CfaPattern> {
+        let cfa = rawler::CFA::new(pattern).shift(shift.0, shift.1);
+        cfa_pattern(
+            (cfa.width, cfa.height),
+            |r, c| cfa.color_at(r, c),
+            &cfa.to_string(),
+            ("FUJIFILM", "X-T2"),
+        )
+    }
+
+    #[test]
+    fn an_xtrans_pattern_is_read_as_its_whole_6x6_tile_at_every_phase() {
+        // Every phase of it, since a crop can land the 6×6 tile anywhere: its top-left 2×2
+        // is a plausible Bayer tile at some offsets, which is how it used to slip through
+        // as Bayer.
+        let tile = CfaPattern::xtrans(XTRANS).unwrap();
+        for shift in [(0, 0), (1, 0), (0, 1), (3, 2), (5, 5)] {
+            for got in [rawloader_tile(XTRANS, shift), rawler_tile(XTRANS, shift)] {
+                let got = got.expect("X-Trans refused");
+                assert_eq!((got.width, got.height), (6, 6));
+                for r in 0..6 {
+                    for c in 0..6 {
+                        assert_eq!(
+                            got.colour_at(r, c),
+                            tile.colour_at(r + shift.1, c + shift.0),
+                            "shift {shift:?} at ({r}, {c})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bayer_patterns_pass_with_their_phase() {
+        let tile = |p: Result<CfaPattern>| {
+            let p = p.unwrap();
+            assert!(p.is_bayer());
+            p.tile2x2()
+        };
+        assert_eq!(tile(rawloader_tile("RGGB", (0, 0))), RGGB);
+        assert_eq!(tile(rawler_tile("RGGB", (0, 0))), RGGB);
+        // An odd crop offset on both axes turns RGGB into BGGR.
+        assert_eq!(tile(rawloader_tile("RGGB", (1, 1))), [2, 1, 1, 0]);
+        assert_eq!(tile(rawler_tile("RGGB", (1, 1))), [2, 1, 1, 0]);
+        // Bayer spelled as a 2×8 repeat is still Bayer.
+        assert_eq!(tile(rawler_tile("RGGBRGGBRGGBRGGB", (0, 0))), RGGB);
+    }
+
+    #[test]
+    fn other_unsupported_patterns_say_what_they_are() {
+        // Not 2×2-periodic, and not X-Trans either.
+        let err = rawler_tile("RGGBGRBGRGGBRGGB", (0, 0)).unwrap_err();
+        assert!(err.to_string().contains("2×8 CFA pattern"), "{err}");
+        // A fourth colour (RGBE) still has its own refusal.
+        let err = rawler_tile("RGEB", (0, 0)).unwrap_err();
+        assert!(err.to_string().contains("fourth colour"), "{err}");
+    }
+
+    #[test]
+    fn a_16_bit_png_keeps_its_levels() {
+        use image::ImageEncoder;
+        // A ramp finer than 8 bits can hold: 1024 distinct values across a row.
+        let (w, h) = (1024u32, 2u32);
+        let px: Vec<u16> = (0..w * h)
+            .flat_map(|i| {
+                let v = ((i % w) * 16 + 20000) as u16;
+                [v, v, v]
+            })
+            .collect();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                bytemuck::cast_slice(&px),
+                w,
+                h,
+                image::ExtendedColorType::Rgb16,
+            )
+            .unwrap();
+        let raster = decode_raster(&png).unwrap();
+        let reds: std::collections::HashSet<[u8; 2]> = raster.data[..w as usize * 8]
+            .chunks(8)
+            .map(|t| [t[0], t[1]])
+            .collect();
+        assert!(reds.len() > 700, "{} levels", reds.len());
+    }
+
+    #[test]
+    fn a_dngs_own_lens_opcodes_are_applied() {
+        use crate::opcodes::tests::{f64s, gain_map_params, list};
+        let (w, h) = (64, 48);
+        let plain = DefaultRawDecoder
+            .decode_bytes(&crate::testkit::synth_dng(w, h, false).unwrap())
+            .unwrap();
+        assert!(plain.warp.is_none());
+        // Every photosite's light doubled, and a barrel correction.
+        let list2 = list(&[(9, gain_map_params((0, 0, 1), (2, 2), &[2.0; 4]))]);
+        let warp = [
+            &1u32.to_be_bytes()[..],
+            &f64s(&[1.0, -0.08, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5]),
+        ]
+        .concat();
+        let list3 = list(&[(1, warp)]);
+        let bytes =
+            crate::testkit::synth_dng_with(w, h, false, &[(51009, list2), (51022, list3)]).unwrap();
+        let fixed = DefaultRawDecoder.decode_bytes(&bytes).unwrap();
+        let black = plain.black[1];
+        let (a, b) = (
+            plain.data[w * 20 + 21] as f32,
+            fixed.data[w * 20 + 21] as f32,
+        );
+        assert!(((b - black) - 2.0 * (a - black)).abs() <= 1.0, "{a} -> {b}");
+        let warp = fixed.warp.expect("the warp was not kept");
+        assert_eq!(warp.planes[1], [1.0, 0.0, -0.08, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(
+            (warp.centre[0] - w as f32 * 0.5).abs() < 1.0,
+            "{:?}",
+            warp.centre
+        );
+    }
+
+    #[test]
     fn white_balance_normalises_against_green() {
         let wb = neutral_multipliers(&[2048.0, 1024.0, 1536.0, 0.0]);
         assert!((wb[0] - 2.0).abs() < 1e-6);
         assert_eq!(wb[1], 1.0);
         assert!((wb[2] - 1.5).abs() < 1e-6);
+    }
+
+    /// A 2×2 RGGB mosaic `w × h`, every photosite `value`.
+    fn flat_mosaic(w: usize, h: usize, value: impl Fn(usize) -> u16) -> Vec<u16> {
+        (0..w * h).map(value).collect()
+    }
+
+    const RGGB: [u32; 4] = [0, 1, 1, 2];
+
+    #[test]
+    fn a_clip_below_the_declared_white_is_found() {
+        // Canon-style: declared 12277, the sensor actually saturated at 11000.
+        let (w, h) = (200, 200);
+        let data = flat_mosaic(w, h, |i| {
+            if i % 10 == 0 {
+                11000
+            } else {
+                2048 + (i % 7919) as u16
+            }
+        });
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
+        for (c, w) in white.iter().take(3).enumerate() {
+            assert_eq!(*w, 11000.0, "colour {c}");
+        }
+    }
+
+    #[test]
+    fn an_unclipped_image_keeps_the_declared_white() {
+        // A smooth ramp that never reaches a single repeated top value.
+        let (w, h) = (200, 200);
+        let data = flat_mosaic(w, h, |i| 2048 + (i % 9000) as u16);
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
+        assert_eq!(white, [12277.0; 4]);
+    }
+
+    #[test]
+    fn a_hot_pixel_is_not_a_clip() {
+        let (w, h) = (200, 200);
+        let data = flat_mosaic(w, h, |i| {
+            if i == 555 {
+                16383
+            } else {
+                2048 + (i % 9000) as u16
+            }
+        });
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
+        assert_eq!(white, [12277.0; 4]);
+    }
+
+    #[test]
+    fn a_hot_pixel_above_a_real_clip_does_not_hide_it() {
+        let (w, h) = (200, 200);
+        let data = flat_mosaic(w, h, |i| match i {
+            555 => 16383,
+            _ if i % 10 == 0 => 11000,
+            _ => 2048 + (i % 7919) as u16,
+        });
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
+        for (c, w) in white.iter().take(3).enumerate() {
+            assert_eq!(*w, 11000.0, "colour {c}");
+        }
+    }
+
+    #[test]
+    fn one_clipped_colour_sets_the_level_for_the_rest() {
+        // Green saturates first on a neutral subject; red and blue never reach the clip.
+        let (w, h) = (200, 200);
+        let data = flat_mosaic(w, h, |i| {
+            let (x, y) = (i % w, i / w);
+            let green = (x + y) % 2 == 1;
+            if green && i % 5 == 0 {
+                13583
+            } else {
+                2048 + (i % 7000) as u16
+            }
+        });
+        let white = measured_white(
+            &data,
+            w,
+            &CfaPattern::bayer(RGGB),
+            &[2048.0; 4],
+            &[12277.0; 4],
+        );
+        assert_eq!(white[0], 13583.0);
+        assert_eq!(white[1], 13583.0);
+        assert_eq!(white[2], 13583.0);
+    }
+
+    /// The histogram as it was built before `top_histogram`: every photosite, one thread.
+    fn full_histogram(data: &[u16], width: usize, cfa: &CfaPattern) -> Vec<[u32; 3]> {
+        let mut hist = vec![[0u32; 3]; 65536];
+        for (row, line) in data.chunks_exact(width).enumerate() {
+            for (col, &v) in line.iter().enumerate() {
+                hist[v as usize][cfa.colour_at(row, col) as usize] += 1;
+            }
+        }
+        hist
+    }
+
+    #[test]
+    fn the_partial_histogram_measures_exactly_what_the_full_one_does() {
+        // Tall enough to span several parallel jobs, with a clip, a hot pixel, a
+        // dark frame and a frame that clips only just above the half-range mark.
+        let (w, h) = (130, 500);
+        let cases: Vec<Vec<u16>> = vec![
+            flat_mosaic(w, h, |i| match i {
+                555 => 16383,
+                _ if i % 10 == 0 => 11000,
+                _ => 2048 + (i % 7919) as u16,
+            }),
+            flat_mosaic(w, h, |i| 2048 + (i % 97) as u16),
+            flat_mosaic(w, h, |i| {
+                if i % 3 == 0 {
+                    7200
+                } else {
+                    2048 + (i % 5000) as u16
+                }
+            }),
+            flat_mosaic(w, h, |i| (i % 65536) as u16),
+        ];
+        for data in cases {
+            let (black, declared) = ([2048.0; 4], [12277.0; 4]);
+            let full = plateau_white(
+                &full_histogram(&data, w, &CfaPattern::bayer(RGGB)),
+                &black,
+                &declared,
+            );
+            let part = measured_white(&data, w, &CfaPattern::bayer(RGGB), &black, &declared);
+            assert_eq!(full, part);
+        }
+    }
+
+    #[test]
+    fn cropping_in_place_matches_a_copy() {
+        let (src_w, src_h) = (9, 7);
+        let src: Vec<u16> = (0..(src_w * src_h) as u16).collect();
+        for (left, top, w, h) in [(0, 0, 9, 7), (1, 2, 6, 4), (0, 1, 9, 6), (3, 0, 6, 7)] {
+            let want: Vec<u16> = (0..h)
+                .flat_map(|r| src[(r + top) * src_w + left..][..w].to_vec())
+                .collect();
+            assert_eq!(crop_in_place(src.clone(), src_w, left, top, w, h), want);
+        }
+    }
+
+    #[test]
+    fn daylight_white_balance_comes_from_the_matrix() {
+        // An identity camera sees D65 as XYZ(D65); the multipliers must undo exactly that.
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]];
+        let wb = daylight_multipliers(&id).unwrap();
+        let (x, y) = D65_XY;
+        let xyz = [x / y, 1.0, (1.0 - x - y) / y];
+        assert!((wb[0] - 1.0 / xyz[0]).abs() < 1e-4);
+        assert!((wb[2] - 1.0 / xyz[2]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn exif_orientation_maps_to_geometry() {
+        use rawloader::Orientation as O;
+        assert_eq!(orientation_geometry(O::Rotate90).quarter_turns, 1);
+        assert_eq!(orientation_geometry(O::Rotate270).quarter_turns, 3);
+        assert!(orientation_geometry(O::Normal).is_identity());
+        let t = orientation_geometry(O::Transpose);
+        assert!(t.quarter_turns == 1 && t.mirror_h && !t.mirror_v);
     }
 
     #[test]
@@ -312,5 +2557,97 @@ mod tests {
             neutral_multipliers(&[1.0, f32::NAN, 1.0, 0.0]),
             [1.0, 1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn exif_orientation_rawler_maps_to_geometry() {
+        use rawler::Orientation as O;
+        assert_eq!(orientation_geometry_rawler(O::Rotate90).quarter_turns, 1);
+        assert_eq!(orientation_geometry_rawler(O::Rotate270).quarter_turns, 3);
+        assert!(orientation_geometry_rawler(O::Normal).is_identity());
+        let t = orientation_geometry_rawler(O::Transpose);
+        assert!(t.quarter_turns == 1 && t.mirror_h && !t.mirror_v);
+    }
+
+    #[test]
+    fn a_phone_jpeg_held_upright_opens_upright() {
+        let mut jpeg = Vec::new();
+        image::RgbImage::new(8, 4)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        assert!(raster_orientation(&jpeg).is_identity());
+
+        // APP1 with one IFD entry: Orientation (0x0112), SHORT, 6 = turn 90° clockwise.
+        let tiff: &[u8] = &[
+            b'M', b'M', 0, 42, 0, 0, 0, 8, // header, IFD at 8
+            0, 1, // one entry
+            0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation = 6
+            0, 0, 0, 0, // no next IFD
+        ];
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(tiff);
+        jpeg.splice(2..2, app1);
+
+        let g = raster_orientation(&jpeg);
+        assert_eq!(g.quarter_turns, 1);
+        assert!(!g.mirror_h && !g.mirror_v);
+        assert_eq!(decode_raster(&jpeg).unwrap().orientation.quarter_turns, 1);
+    }
+
+    #[test]
+    fn extract_xyz_to_cam_extracts_d65_matrix() {
+        use std::collections::HashMap;
+        let mut raw = rawler::RawImage {
+            camera: rawler::decoders::Camera::default(),
+            make: "SONY".to_string(),
+            model: "ILCE-7M4".to_string(),
+            clean_make: "Sony".to_string(),
+            clean_model: "ILCE-7M4".to_string(),
+            width: 100,
+            height: 100,
+            cpp: 1,
+            bps: 14,
+            wb_coeffs: [2.0, 1.0, 1.5, f32::NAN],
+            whitelevel: rawler::rawimage::WhiteLevel::default(),
+            blacklevel: rawler::rawimage::BlackLevel::default(),
+            xyz_to_cam: [[0.0; 3]; 4],
+            photometric: rawler::rawimage::RawPhotometricInterpretation::BlackIsZero,
+            active_area: None,
+            crop_area: None,
+            blackareas: Vec::new(),
+            orientation: rawler::Orientation::Normal,
+            data: rawler::RawImageData::Integer(vec![0; 10000]),
+            color_matrix: HashMap::new(),
+            dng_tags: HashMap::new(),
+            fuji_rotation_width: None,
+        };
+
+        // Initially zero
+        assert_eq!(extract_xyz_to_cam_rawler(&raw), [[0.0; 3]; 4]);
+
+        // Insert Sony A7 IV D65 matrix
+        let d65_matrix = vec![
+            0.7374, -0.2389, -0.0551, -0.5435, 1.3162, 0.2519, -0.1006, 0.1795, 0.6552,
+        ];
+        raw.color_matrix
+            .insert(rawler::imgop::xyz::Illuminant::D65, d65_matrix);
+
+        let extracted = extract_xyz_to_cam_rawler(&raw);
+        assert_eq!(extracted[0], [0.7374, -0.2389, -0.0551]);
+        assert_eq!(extracted[1], [-0.5435, 1.3162, 0.2519]);
+        assert_eq!(extracted[2], [-0.1006, 0.1795, 0.6552]);
+        assert_eq!(extracted[3], [0.0; 3]);
+
+        // cam_to_srgb converts it cleanly without panic
+        let srgb = cam_to_srgb(&extracted);
+        for row in srgb {
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "row sum is {sum}");
+        }
     }
 }

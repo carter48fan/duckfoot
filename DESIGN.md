@@ -8,7 +8,8 @@ completely and refuses the other two.
 The measure of success is not what Duckfoot can do — it's what it declines to do. Every
 feature request answered with *"that belongs in another barrel, or nowhere"* is the
 design working. Build tools a friend can open, do one thing, and close: no project
-wizard, no onboarding, no mode you can get lost in.
+wizard, no onboarding, no mode you can get lost in. (The phone's short tour is offered —
+its chip is lit until it has been seen — and never started on its own.)
 
 ## Where this document is aimed right now
 
@@ -36,7 +37,7 @@ JSON it is an order of magnitude worse. There is no amount of optimisation downs
 that decision that recovers it — the fix is to not have the boundary.
 
 In the native design the sensor data is uploaded to the GPU **once**, and a slider drag
-writes **32 bytes to a uniform buffer**. The image never travels again.
+writes **one uniform buffer — a few hundred bytes**. The image never travels again.
 
 The same reasoning rules out a webview on Android, where the copy is most expensive and
 the hardware least able to absorb it.
@@ -64,7 +65,8 @@ a new `main.rs`, never a second implementation.
 crates/
   photo-engine/     wgpu device, textures, shaders, decode. Knows nothing about windows.
   photo-app/        egui UI. Knows nothing about winit.
-  duckfoot/         bootstrap: winit. The only platform-specific crate.
+  duckfoot/         the winit shell, and the desktop main.
+  duckfoot-android/ android_main, logcat, and the bridge to android/'s Java activity.
 ```
 
 `photo-engine` takes a `wgpu::Device` and `Queue` it did not create. `photo-app` takes an
@@ -87,11 +89,13 @@ makes the Android bootstrap a small file instead of a fork.
         PASS 1b demosaic red/blue ──►  SENSOR TEXTURE  RGBA16Float, immutable
               │                         colour-difference against green
               │                         linear camera-native RGB
+              │                         highlight reconstruction (neutral in A)
               │
               ▼
         PASS 2  the adjustment chain — ONE fragment shader, ONE pass
               │   levels · white balance · camera→working matrix · exposure
-              │   tone curve (1D LUT texture) · filmic · colour balance
+              │   tone curve (1D LUT texture) · filmic · colour eq · saturation
+              │   · colour balance (after saturation, so black and white can be toned)
               │   all driven by ONE uniform buffer
               ▼
         PASS 3  output transform → sRGB ──► egui texture, presented
@@ -146,9 +150,16 @@ sRGB. The chain is:
 camera RGB ──[xyz_to_cam⁻¹]──► XYZ ──[Bradford]──► working space ──[OETF]──► display
 ```
 
+**As built today** the working space is linear sRGB: one `cam_to_srgb` matrix (the steps
+above, folded together, dcraw-normalised) takes camera RGB straight there, and the chain
+clamps per channel only at the very end. Saturated colours can sit outside sRGB with a
+negative channel until then, which every stage must tolerate (see the NaN guard in local
+contrast). A wide-gamut working space (linear Rec.2020) with gamut-mapped output is planned,
+and is what P3 and Adobe RGB export will need.
+
 The previous implementation skipped this entirely and encoded camera primaries as if they
 were sRGB. Every image came out wrong in a way that looks like a bad white balance and
-isn't. The matrix comes from the file — `rawloader` exposes `xyz_to_cam` — and applying it
+isn't. The matrix comes from the file — the decoder exposes `xyz_to_cam` — and applying it
 is not optional.
 
 White balance is applied as camera-neutral channel multipliers from `wb_coeffs`, **before**
@@ -189,23 +200,34 @@ and blue are above it. So the damaging case is *partial* clipping, not total: a 
 clipped pixel clamps to white anyway, which is why a test built on one proves nothing.
 
 A saturated photosite carries no colour information, so the only defensible colour for it is
-neutral. The shader collapses toward the minimum balanced channel as the sensor approaches
-saturation, which is self-normalising — an unclipped neutral pixel already has three equal
-channels, so it is a no-op everywhere the sensor had range left.
+neutral, at green's level: on a neutral subject green is the first to saturate, so at the
+clip it *is* the clip level, and at the rim of a blown area it is the one channel not taken
+through a colour difference. (The minimum channel, which this used to be, turns rim pixels
+black wherever red or blue undershot to zero.) An unclipped neutral pixel already has three
+equal channels, so it is a no-op everywhere the sensor had range left.
+
+Two things decide *where* it applies, and both were magenta in practice:
+
+- **Judge the photosites, not the pixel.** A pixel next to a clipped site is built partly
+  from it and is wrong by unequal amounts per channel, while its own demosaiced value can sit
+  well under the clip. So a pixel is reconstructed if it, or any photosite in the 3×3 block
+  around it, is near saturation. Otherwise every blown specular keeps a one-pixel magenta rim.
+- **Do it before the mips, and store it linearly.** Reconstruction is not linear, and the
+  preview samples a box-filtered mip: a texel half blown and half not averages to a peak
+  nowhere near the clip and comes through magenta. So it runs once, in the demosaic, and the
+  sensor texture holds each pixel as `rgb` (the camera colour still trusted) plus `a` (the
+  neutral replacing the rest). Both average correctly into every mip, and pass 2 recombines
+  them as `rgb × wb + a` — white balance scales the measured colour and never tints the
+  neutral.
 
 This recovers **colour, not detail**. Texture inside a blown highlight is gone at capture.
 
 ## Decoding
 
-`rawloader` 0.37, behind a `RawDecoder` trait.
-
-It is LGPL-2.1, as is `rawler` — the licence is a wash between them, so the choice is on
-merit and convenience. `rawloader` wins on convenience today: it is a two-call API that
-hands over exactly the fields needed (`cfa`, `crops`, `wb_coeffs`, `xyz_to_cam`, `cpp`,
-`blacklevels`, `whitelevels`), and it cross-compiles cleanly.
-
-`rawler` (~2,500 camera models vs a few hundred, actively maintained) is the known upgrade
-and the reason the trait exists. Swapping is one module.
+`rawler` (~2,500 camera models, actively maintained) behind a `RawDecoder` trait, with
+`rawloader` 0.37 as a fallback for anything rawler refuses. Each is tried once, under
+`catch_unwind`, and a failure names both reasons. rawloader goes once a real-camera corpus
+shows no camera depends on it.
 
 **The LGPL-2.1 obligation is real and unresolved.** Static linking into an MIT binary
 carries a relink obligation. This must be settled before any binary is distributed. It does
@@ -270,7 +292,12 @@ region on screen. Everything else recedes.
 - **One accent, used sparingly.** Warm brass/amber, after the duckfoot pistol — brass and
   walnut. Not indigo; indigo-on-zinc is the default generated-app look.
 - **Semantic colour is reserved and never decorative:** red = destructive, accent wash =
-  selection, high-contrast = active value.
+  selection, high-contrast = active value, green = kept (a pick, a saved sidecar). Clipping
+  follows the convention every RAW editor shares: red for blown highlights, blue for
+  crushed shadows.
+- **Colour that is information may be shown as colour.** The white-balance rails are
+  painted from blue to amber and green to magenta because that is what they do; that is a
+  scale, not decoration, and it is the one gradient allowed.
 - **No gradients, shadows or glows on or adjacent to the media surface.** They lie about
   what you're editing.
 - Monospace for all numbers — dimensions, EV, kelvin, percentages. They are read as values,

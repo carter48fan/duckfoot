@@ -1,0 +1,7 @@
+# egui/eframe 0.36 and wgpu 30 both set rust-version 1.95, above the 1.92 that
+# `rustup default stable` currently resolves to on this machine. Pin explicitly so
+# the workspace builds the same way everywhere instead of depending on how recently
+# someone ran `rustup update`.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]

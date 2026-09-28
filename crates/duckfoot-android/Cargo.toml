@@ -1,0 +1,23 @@
+[package]
+name = "duckfoot-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Android bootstrap: android_main, logcat, and the Java activity bridge"
+
+# Loaded by the activity as libduckfoot_android.so; see android/.
+[lib]
+crate-type = ["cdylib"]
+
+# Everything is Android-only so that `cargo build --workspace` on a desktop builds an
+# empty library rather than failing on android-activity.
+[target.'cfg(target_os = "android")'.dependencies]
+duckfoot = { path = "../duckfoot" }
+photo-app.workspace = true
+photo-engine.workspace = true
+log.workspace = true
+winit = { workspace = true, features = ["android-native-activity"] }
+jni = "0.21"
+anyhow.workspace = true
+android_logger = "0.15"

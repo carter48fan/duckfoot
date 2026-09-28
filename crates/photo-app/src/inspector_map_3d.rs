@@ -3,11 +3,10 @@
 //! Provides a 3D rotatable visualization of the image's tonal and color distribution:
 //! - 3D Channels / Ribbons: Depth-separated RGB + Luminance ribbons in 3D space with
 //!   smooth area fills and glowing peak outlines.
-//! - 3D Surface / Terrain: Continuous spectral density mesh over Tone (0..255) and Spectrum.
-//! - 3D RGB Cube: Color gamut distribution volume inside a 3D coordinate cube.
+//! - 3D Surface: the red, green, blue and luma histograms joined into one surface.
 //! - 2D Plot: Classic 2D histogram plot.
 //!
-//! Features an interactive orbit camera (drag to rotate, scroll to zoom, double-click
+//! Features an interactive orbit camera (drag to rotate, Ctrl+scroll to zoom, double-click
 //! or button to reset) with depth-sorted immediate-mode rendering.
 
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
@@ -20,7 +19,6 @@ use crate::tonemap_3d::project_3d;
 pub enum InspectorMapMode {
     Channels3D,
     Surface3D,
-    Cube3D,
     Plot2D,
 }
 
@@ -39,79 +37,44 @@ impl Default for InspectorMapState {
             yaw: -0.65,  // ~ -37 degrees
             pitch: 0.38, // ~ +22 degrees
             zoom: 1.0,
-            mode: InspectorMapMode::Channels3D,
+            // The flat histogram is the one every photographer reads at a glance; the 3D
+            // views are a tap away.
+            mode: InspectorMapMode::Plot2D,
             large_view: false,
         }
     }
 }
 
-pub fn render_inspector_map(
-    ui: &mut egui::Ui,
-    state: &mut InspectorMapState,
-    hist: &Histogram,
-) {
-    // Mode toolbar & controls
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Channels3D, "3D Ribbons")
-            .on_hover_text("3D Layered Color Channel Ribbons (Red, Green, Blue, Luma)")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Channels3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Surface3D, "3D Surface")
-            .on_hover_text("3D Continuous Spectral Density Surface")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Surface3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Cube3D, "3D Cube")
-            .on_hover_text("3D RGB Gamut Color Distribution Cube")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Cube3D;
-        }
-        if ui
-            .selectable_label(state.mode == InspectorMapMode::Plot2D, "2D")
-            .on_hover_text("Classic 2D Histogram Plot")
-            .clicked()
-        {
-            state.mode = InspectorMapMode::Plot2D;
-        }
+/// The scope's modes, in display order, for the header band that switches between them:
+/// `(mode, chip label, tooltip)`.
+pub const MODES: [(InspectorMapMode, &str, &str); 3] = [
+    (InspectorMapMode::Plot2D, "hist", "Classic 2D histogram"),
+    (
+        InspectorMapMode::Channels3D,
+        "ribbon",
+        "3D layered channel ribbons (red, green, blue, luma)",
+    ),
+    (
+        InspectorMapMode::Surface3D,
+        "surface",
+        "The red, green, blue and luma histograms as one 3D surface",
+    ),
+];
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if state.mode != InspectorMapMode::Plot2D {
-                if ui
-                    .small_button("↺ 3D")
-                    .on_hover_text("Reset 3D camera angle and zoom")
-                    .clicked()
-                {
-                    state.yaw = -0.65;
-                    state.pitch = 0.38;
-                    state.zoom = 1.0;
-                }
-            }
-            let expand_icon = if state.large_view { "⤡" } else { "⤢" };
-            if ui
-                .small_button(expand_icon)
-                .on_hover_text(if state.large_view {
-                    "Standard scope view height"
-                } else {
-                    "Enlarge scope view height"
-                })
-                .clicked()
-            {
-                state.large_view = !state.large_view;
-            }
-        });
-    });
-
+/// Draws the scope itself. The mode switch lives in the caller's header band — see [`MODES`].
+pub fn render_inspector_map(ui: &mut egui::Ui, state: &mut InspectorMapState, hist: &Histogram) {
     let view_height = if state.mode == InspectorMapMode::Plot2D {
-        if state.large_view { 140.0 } else { 96.0 }
+        if state.large_view {
+            140.0
+        } else {
+            96.0
+        }
     } else {
-        if state.large_view { 240.0 } else { 165.0 }
+        if state.large_view {
+            240.0
+        } else {
+            165.0
+        }
     };
 
     let (rect, response) = ui.allocate_exact_size(
@@ -136,10 +99,12 @@ pub fn render_inspector_map(
             state.pitch = (state.pitch - delta.y * 0.012).clamp(-1.45, 1.45);
         }
 
+        // Ctrl+wheel or pinch, which egui reports as a zoom factor. A plain wheel is left
+        // alone: this view sits in a scrolling sidebar, and one gesture must not do both.
         if response.hovered() {
-            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                state.zoom = (state.zoom * (1.0 + scroll * 0.005)).clamp(0.5, 2.8);
+            let zoom = ui.ctx().input(|i| i.zoom_delta());
+            if zoom != 1.0 {
+                state.zoom = (state.zoom * zoom).clamp(0.5, 2.8);
             }
         }
 
@@ -159,11 +124,11 @@ pub fn render_inspector_map(
         egui::StrokeKind::Inside,
     );
 
-    // Readout line: Clipping and peak stats
+    // Readout line: clipping, then the view controls.
     let low = hist.clipped_low() * 100.0;
     let high = hist.clipped_high() * 100.0;
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(theme::dim("clipped"));
         let warn = |v: f32| {
             if v >= 0.1 {
                 theme::num(format!("{v:.2}%")).color(theme::DANGER)
@@ -171,16 +136,44 @@ pub fn render_inspector_map(
                 theme::num(format!("{v:.2}%"))
             }
         };
-        ui.label(theme::dim("lo"));
-        ui.label(warn(low));
-        ui.label(theme::dim("hi"));
-        ui.label(warn(high));
-
-        if hist.peak > 0 {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::dim(format!("peak {}", hist.peak)));
-            });
+        let readout = ui
+            .scope(|ui| {
+                ui.label(theme::tag("clip lo").color(theme::TEXT_DIM));
+                ui.label(warn(low));
+                ui.label(theme::tag("hi").color(theme::TEXT_DIM));
+                ui.label(warn(high));
+            })
+            .response
+            .interact(egui::Sense::click_and_drag())
+            .on_hover_text("Hold to see where: red is blown, blue is crushed (J toggles it)");
+        if readout.is_pointer_button_down_on() {
+            crate::widgets::hold_clip_overlay(ui.ctx());
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let expand_icon = if state.large_view { "⊟" } else { "⊞" };
+            let expand_tip = if state.large_view {
+                "Standard scope height"
+            } else {
+                "Taller scope"
+            };
+            if crate::widgets::icon(ui, expand_icon, state.large_view, expand_tip).clicked() {
+                state.large_view = !state.large_view;
+            }
+            if state.mode != InspectorMapMode::Plot2D
+                && crate::widgets::icon(
+                    ui,
+                    "⟲",
+                    false,
+                    "Reset the 3D camera (or double-click the view)",
+                )
+                .clicked()
+            {
+                state.yaw = -0.65;
+                state.pitch = 0.38;
+                state.zoom = 1.0;
+            }
+        });
     });
 }
 
@@ -228,7 +221,12 @@ fn render_2d_plot(painter: &egui::Painter, rect: Rect, hist: &Histogram) {
         let points: Vec<Pos2> = data
             .iter()
             .enumerate()
-            .map(|(i, v)| Pos2::new(rect.left() + i as f32 * step, rect.bottom() - height(*v) - 2.0))
+            .map(|(i, v)| {
+                Pos2::new(
+                    rect.left() + i as f32 * step,
+                    rect.bottom() - height(*v) - 2.0,
+                )
+            })
             .collect();
         painter.add(egui::Shape::line(points, Stroke::new(1.0, colour)));
     }
@@ -254,9 +252,6 @@ fn render_3d_scope(
         InspectorMapMode::Surface3D => {
             render_3d_surface(painter, center, scale, state, hist);
         }
-        InspectorMapMode::Cube3D => {
-            render_3d_cube(painter, center, scale, state, hist);
-        }
         InspectorMapMode::Plot2D => {}
     }
 
@@ -264,18 +259,13 @@ fn render_3d_scope(
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 12.0),
         egui::Align2::LEFT_BOTTOM,
-        "Drag to rotate 3D view • Scroll to zoom • Double-click to reset",
+        crate::widgets::orbit_hint(painter.ctx()),
         egui::FontId::proportional(9.5),
         theme::TEXT_DIM.linear_multiply(0.75),
     );
 }
 
-fn draw_3d_grid(
-    painter: &egui::Painter,
-    center: Pos2,
-    scale: f32,
-    state: &InspectorMapState,
-) {
+fn draw_3d_grid(painter: &egui::Painter, center: Pos2, scale: f32, state: &InspectorMapState) {
     // Floor boundary
     let floor_pts = [
         [-1.0, -1.0, -1.0],
@@ -300,18 +290,63 @@ fn draw_3d_grid(
 
     // Floor grid lines along tonal levels (Shadows, Midtones, Highlights)
     for frac in [-0.5, 0.0, 0.5] {
-        let p_start = project_3d([frac, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-        let p_end = project_3d([frac, 1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
+        let p_start = project_3d(
+            [frac, -1.0, -1.0],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        );
+        let p_end = project_3d(
+            [frac, 1.0, -1.0],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        );
         if let (Some((s, _)), Some((e, _))) = (p_start, p_end) {
-            painter.line_segment([s, e], Stroke::new(0.8, theme::BORDER.linear_multiply(0.35)));
+            painter.line_segment(
+                [s, e],
+                Stroke::new(0.8, theme::BORDER.linear_multiply(0.35)),
+            );
         }
     }
 
     // 3D Axis indicators
-    let origin_proj = project_3d([-1.0, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let x_proj = project_3d([1.25, -1.0, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let y_proj = project_3d([-1.0, 1.25, -1.0], center, scale, state.yaw, state.pitch, state.zoom);
-    let z_proj = project_3d([-1.0, -1.0, 1.15], center, scale, state.yaw, state.pitch, state.zoom);
+    let origin_proj = project_3d(
+        [-1.0, -1.0, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let x_proj = project_3d(
+        [1.25, -1.0, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let y_proj = project_3d(
+        [-1.0, 1.25, -1.0],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
+    let z_proj = project_3d(
+        [-1.0, -1.0, 1.15],
+        center,
+        scale,
+        state.yaw,
+        state.pitch,
+        state.zoom,
+    );
 
     if let (Some((o, _)), Some((x, _))) = (origin_proj, x_proj) {
         painter.line_segment([o, x], Stroke::new(1.1, Color32::from_rgb(180, 70, 70)));
@@ -346,7 +381,7 @@ fn draw_3d_grid(
 }
 
 struct DepthPoly {
-    points: Vec<Pos2>,
+    points: [Pos2; 4],
     depth: f32,
     fill_col: Color32,
     stroke_col: Color32,
@@ -370,20 +405,38 @@ fn render_3d_channels(
 
     let channel_defs = [
         (&hist.red, -0.65, Color32::from_rgb(0xe0, 0x48, 0x40), "RED"),
-        (&hist.green, -0.22, Color32::from_rgb(0x40, 0xb8, 0x50), "GREEN"),
-        (&hist.blue, 0.22, Color32::from_rgb(0x45, 0x85, 0xe5), "BLUE"),
-        (&hist.luma, 0.65, Color32::from_rgb(0xdf, 0xd0, 0xb5), "LUMA"),
+        (
+            &hist.green,
+            -0.22,
+            Color32::from_rgb(0x40, 0xb8, 0x50),
+            "GREEN",
+        ),
+        (
+            &hist.blue,
+            0.22,
+            Color32::from_rgb(0x45, 0x85, 0xe5),
+            "BLUE",
+        ),
+        (
+            &hist.luma,
+            0.65,
+            Color32::from_rgb(0xdf, 0xd0, 0xb5),
+            "LUMA",
+        ),
     ];
 
-    let mut depth_items: Vec<DepthPoly> = Vec::new();
+    let mut depth_items: Vec<DepthPoly> = Vec::with_capacity(channel_defs.len() * SAMPLES);
     let mut channel_labels: Vec<(Pos2, &str, Color32)> = Vec::new();
+    // One pair of rows for every channel in turn, not a pair each (WP5.4).
+    let mut top_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
+    let mut bot_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
 
     for (data, y_coord, base_color, label) in channel_defs {
         let fill_col = base_color.linear_multiply(0.24);
         let stroke_col = base_color;
 
-        let mut top_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
-        let mut bot_pts: Vec<(Pos2, f32)> = Vec::with_capacity(SAMPLES);
+        top_pts.clear();
+        bot_pts.clear();
 
         for i in 0..SAMPLES {
             let bin_idx = ((i as f32 * step_bin).round() as usize).min(255);
@@ -394,16 +447,37 @@ fn render_3d_channels(
             let z_top = -1.0 + norm_height * 1.95;
             let z_bot = -1.0;
 
-            if let Some(pt) = project_3d([x, y_coord, z_top], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some(pt) = project_3d(
+                [x, y_coord, z_top],
+                center,
+                scale,
+                state.yaw,
+                state.pitch,
+                state.zoom,
+            ) {
                 top_pts.push(pt);
             }
-            if let Some(pt) = project_3d([x, y_coord, z_bot], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some(pt) = project_3d(
+                [x, y_coord, z_bot],
+                center,
+                scale,
+                state.yaw,
+                state.pitch,
+                state.zoom,
+            ) {
                 bot_pts.push(pt);
             }
         }
 
         // Add channel label in 3D near the ribbon start
-        if let Some((lbl_pos, _)) = project_3d([-1.1, y_coord, -0.95], center, scale, state.yaw, state.pitch, state.zoom) {
+        if let Some((lbl_pos, _)) = project_3d(
+            [-1.1, y_coord, -0.95],
+            center,
+            scale,
+            state.yaw,
+            state.pitch,
+            state.zoom,
+        ) {
             channel_labels.push((lbl_pos, label, stroke_col));
         }
 
@@ -417,7 +491,7 @@ fn render_3d_channels(
 
                 let avg_depth = (p_t0.1 + p_t1.1 + p_b0.1 + p_b1.1) * 0.25;
                 depth_items.push(DepthPoly {
-                    points: vec![p_b0.0, p_t0.0, p_t1.0, p_b1.0],
+                    points: [p_b0.0, p_t0.0, p_t1.0, p_b1.0],
                     depth: avg_depth,
                     fill_col,
                     stroke_col,
@@ -428,17 +502,24 @@ fn render_3d_channels(
     }
 
     // Sort descending by depth (Painter's algorithm: farthest first)
-    depth_items.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
+    depth_items.sort_by(|a, b| {
+        b.depth
+            .partial_cmp(&a.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for item in depth_items {
         painter.add(egui::Shape::convex_polygon(
-            item.points.clone(),
+            item.points.to_vec(),
             item.fill_col,
             Stroke::NONE,
         ));
         // Top curve stroke
         if item.points.len() == 4 {
-            painter.line_segment([item.points[1], item.points[2]], Stroke::new(item.stroke_width, item.stroke_col));
+            painter.line_segment(
+                [item.points[1], item.points[2]],
+                Stroke::new(item.stroke_width, item.stroke_col),
+            );
         }
     }
 
@@ -490,7 +571,9 @@ fn render_3d_surface(
             let val = (channel_data[j][bin_idx] as f32 / peak).clamp(0.0, 1.0);
             let z = -1.0 + val * 1.95;
 
-            if let Some((sp, depth)) = project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom) {
+            if let Some((sp, depth)) =
+                project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom)
+            {
                 // Color blended from spectrum and channel position
                 let vertex_col = match j {
                     0 => Color32::from_rgb((160.0 + r_val * 95.0) as u8, 60, 50),
@@ -520,9 +603,15 @@ fn render_3d_surface(
                 let p3 = grid[i][j + 1];
                 let avg_depth = (p0.1 + p1.1 + p2.1 + p3.1) * 0.25;
 
-                let r_avg = ((p0.2.r() as u16 + p1.2.r() as u16 + p2.2.r() as u16 + p3.2.r() as u16) / 4) as u8;
-                let g_avg = ((p0.2.g() as u16 + p1.2.g() as u16 + p2.2.g() as u16 + p3.2.g() as u16) / 4) as u8;
-                let b_avg = ((p0.2.b() as u16 + p1.2.b() as u16 + p2.2.b() as u16 + p3.2.b() as u16) / 4) as u8;
+                let r_avg =
+                    ((p0.2.r() as u16 + p1.2.r() as u16 + p2.2.r() as u16 + p3.2.r() as u16) / 4)
+                        as u8;
+                let g_avg =
+                    ((p0.2.g() as u16 + p1.2.g() as u16 + p2.2.g() as u16 + p3.2.g() as u16) / 4)
+                        as u8;
+                let b_avg =
+                    ((p0.2.b() as u16 + p1.2.b() as u16 + p2.2.b() as u16 + p3.2.b() as u16) / 4)
+                        as u8;
 
                 let quad_col = Color32::from_rgb(r_avg, g_avg, b_avg).linear_multiply(0.45);
                 quads.push(SurfaceQuad {
@@ -534,7 +623,11 @@ fn render_3d_surface(
         }
     }
 
-    quads.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
+    quads.sort_by(|a, b| {
+        b.depth
+            .partial_cmp(&a.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for q in quads {
         painter.add(egui::Shape::convex_polygon(
@@ -542,111 +635,5 @@ fn render_3d_surface(
             q.color,
             Stroke::new(0.6, q.color.linear_multiply(1.5)),
         ));
-    }
-}
-
-fn render_3d_cube(
-    painter: &egui::Painter,
-    center: Pos2,
-    scale: f32,
-    state: &InspectorMapState,
-    hist: &Histogram,
-) {
-    if hist.peak == 0 {
-        return;
-    }
-    let peak = hist.peak as f32;
-
-    // Draw 3D Color Cube wireframe
-    let corners = [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
-    ];
-
-    let edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0), // Bottom
-        (4, 5), (5, 6), (6, 7), (7, 4), // Top
-        (0, 4), (1, 5), (2, 6), (3, 7), // Verticals
-    ];
-
-    let mut proj_corners = [None; 8];
-    for (i, c) in corners.iter().enumerate() {
-        proj_corners[i] = project_3d(*c, center, scale, state.yaw, state.pitch, state.zoom);
-    }
-
-    for (a, b) in edges {
-        if let (Some((p1, _)), Some((p2, _))) = (proj_corners[a], proj_corners[b]) {
-            painter.line_segment([p1, p2], Stroke::new(1.0, theme::BORDER.linear_multiply(0.6)));
-        }
-    }
-
-    // Corner RGB tags
-    let tag_defs = [
-        (0, "Black (0,0,0)", theme::TEXT_DIM),
-        (1, "Red", Color32::from_rgb(220, 80, 70)),
-        (2, "Yellow", Color32::from_rgb(220, 200, 60)),
-        (3, "Green", Color32::from_rgb(70, 190, 70)),
-        (4, "Blue", Color32::from_rgb(70, 130, 230)),
-        (5, "Magenta", Color32::from_rgb(210, 80, 200)),
-        (6, "White", theme::TEXT),
-        (7, "Cyan", Color32::from_rgb(60, 200, 210)),
-    ];
-    for (idx, lbl, col) in tag_defs {
-        if let Some((pos, _)) = proj_corners[idx] {
-            painter.circle_filled(pos, 2.5, col);
-            painter.text(
-                pos + Vec2::new(3.0, -3.0),
-                egui::Align2::LEFT_BOTTOM,
-                lbl,
-                egui::FontId::monospace(7.5),
-                col,
-            );
-        }
-    }
-
-    // Sample RGB histogram bins to plot the 3D RGB distribution curve and point cloud
-    const SAMPLES: usize = 36;
-    let step = 256.0 / SAMPLES as f32;
-
-    let mut points_3d: Vec<(Pos2, f32, Color32, f32)> = Vec::new();
-    let mut curve_pts: Vec<Pos2> = Vec::new();
-
-    for i in 0..SAMPLES {
-        let b = ((i as f32 * step).round() as usize).min(255);
-        let r_norm = (b as f32 / 255.0 - 0.5) * 2.0;
-        let g_norm = (hist.green[b] as f32 / peak).clamp(0.0, 1.0) * 2.0 - 1.0;
-        let b_norm = (hist.blue[b] as f32 / peak).clamp(0.0, 1.0) * 2.0 - 1.0;
-
-        let density = (hist.luma[b] as f32 / peak).clamp(0.0, 1.0);
-        let dot_color = Color32::from_rgb(
-            b as u8,
-            ((g_norm * 0.5 + 0.5) * 255.0) as u8,
-            ((b_norm * 0.5 + 0.5) * 255.0) as u8,
-        );
-
-        if let Some((sp, depth)) = project_3d([r_norm, g_norm, b_norm], center, scale, state.yaw, state.pitch, state.zoom) {
-            curve_pts.push(sp);
-            points_3d.push((sp, depth, dot_color, density));
-        }
-    }
-
-    // Connect 3D trajectory
-    for pair in curve_pts.windows(2) {
-        painter.line_segment([pair[0], pair[1]], Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)));
-    }
-
-    // Depth sort points
-    points_3d.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    for (sp, _, col, density) in points_3d {
-        let radius = 2.0 + density * 3.5;
-        painter.circle_filled(sp, radius, col);
-        painter.circle_stroke(sp, radius, Stroke::new(0.5, theme::BG_950));
     }
 }
