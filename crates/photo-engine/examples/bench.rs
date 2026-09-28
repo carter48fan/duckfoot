@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use photo_engine::{Crop, Engine, PhotoStack, RawDecoder, RawloaderBackend};
+use photo_engine::{DefaultRawDecoder, Engine, PhotoStack, RawDecoder};
 
 /// Read back a square from the middle of the image. 256 px keeps `bytes_per_row` at
 /// 1024 — already a multiple of wgpu's 256-byte copy alignment, so no padding dance.
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let t = Instant::now();
-    let cfa = RawloaderBackend.decode_file(std::path::Path::new(&path))?;
+    let cfa = DefaultRawDecoder.decode_file(std::path::Path::new(&path))?;
     let (w, h) = (cfa.width, cfa.height);
     println!(
         "decode       {:.0} ms   {w}×{h} ({:.1} MP)",
@@ -100,6 +100,26 @@ fn main() -> anyhow::Result<()> {
     wait(&device)?;
     let per_frame = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
     println!("slider drag  {per_frame:.2} ms/frame over {N} frames at FULL resolution");
+
+    // The same drag at the preview levels a window actually shows. Level 2 (1/4 per axis)
+    // is what a 24 MP frame gets at fit-to-window on a 1080p–1440p screen.
+    for level in 1..=3 {
+        engine.set_preview_level(&device, level);
+        engine.render(&device, &queue, &stack, None);
+        wait(&device)?;
+        let t = Instant::now();
+        for i in 0..N {
+            stack.exposure.params.ev = (i as f32) * 0.01;
+            engine.render(&device, &queue, &stack, None);
+        }
+        wait(&device)?;
+        let per_frame = t.elapsed().as_secs_f64() * 1000.0 / N as f64;
+        let (w, h) = engine.image().expect("image loaded").preview_size();
+        println!("slider drag  {per_frame:.2} ms/frame at preview level {level} ({w}×{h})");
+    }
+    engine.set_preview_level(&device, 0);
+    engine.render(&device, &queue, &stack, None);
+    wait(&device)?;
 
     // --- read pixels back and prove they are real -------------------------------------
     let image = engine.image().expect("image loaded");
@@ -144,7 +164,7 @@ fn main() -> anyhow::Result<()> {
     wait(&device)?;
 
     let data = slice.get_mapped_range()?;
-    let px = data.chunks_exact(4);
+    let px = data.as_chunks::<4>().0;
     let n = px.len() as f64;
     let (mut r, mut g, mut b) = (0.0f64, 0.0, 0.0);
     let mut black = 0usize;
@@ -176,7 +196,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- export the full frame and read it back off disk --------------------------------
     let t = Instant::now();
-    let exported = engine.export(&device, &queue, Crop::default())?;
+    let exported = engine.export(&device, &queue, &stack)?;
     println!(
         "export readback {:.0} ms   {}x{} ({:.1} MP, {} MB)",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -188,7 +208,7 @@ fn main() -> anyhow::Result<()> {
 
     let out = std::env::temp_dir().join("duckfoot-bench-export.png");
     let t = Instant::now();
-    exported.write(&out)?;
+    exported.write(&out, &photo_engine::ExportSettings::for_path(&out)?, None)?;
     println!(
         "png encode+write {:.0} ms   {}",
         t.elapsed().as_secs_f64() * 1000.0,
@@ -241,7 +261,9 @@ fn main() -> anyhow::Result<()> {
     //   no filmic:                    stddev ~33
     let luma: Vec<f64> = exported
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64)
         .collect();
     let mean_luma = luma.iter().sum::<f64>() / luma.len() as f64;
@@ -283,7 +305,8 @@ fn main() -> anyhow::Result<()> {
         data,
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [white as f32; 4],
         wb: [2.03, 1.0, 1.80],
@@ -293,13 +316,16 @@ fn main() -> anyhow::Result<()> {
             [-0.5488, 2.4177, -0.8689],
             [0.0203, -0.2783, 1.2581],
         ],
+        cam_profiled: None,
+        daylight_wb: [2.03, 1.0, 1.80],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "clipped-green".into(),
     };
     engine.load(&device, &queue, clipped)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let blown = engine.export(&device, &queue, Crop::default())?;
+    let blown = engine.export(&device, &queue, &PhotoStack::default())?;
     // Sample away from the border so the demosaic has full neighbourhoods.
     let mid = ((sh / 2 * sw + sw / 2) * 4) as usize;
     let px = &blown.rgba[mid..mid + 3];
@@ -335,18 +361,22 @@ fn main() -> anyhow::Result<()> {
         data,
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [white as f32; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        cam_profiled: None,
+        daylight_wb: [1.0, 1.0, 1.0],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "neutral-stripes".into(),
     };
     engine.load(&device, &queue, stripes)?;
     engine.render(&device, &queue, &PhotoStack::default(), None);
     wait(&device)?;
-    let out = engine.export(&device, &queue, Crop::default())?;
+    let out = engine.export(&device, &queue, &PhotoStack::default())?;
 
     // Skip a 4 px border, where the clamped edge sampling has no real neighbourhood.
     let mut worst = 0i32;
@@ -384,11 +414,15 @@ fn main() -> anyhow::Result<()> {
         data: vec![level; (sw * sh) as usize],
         width: sw,
         height: sh,
-        cfa2x2,
+        cfa: photo_engine::CfaPattern::bayer(cfa2x2),
+        warp: None,
         black: [0.0; 4],
         white: [4095.0; 4],
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        cam_profiled: None,
+        daylight_wb: [1.0, 1.0, 1.0],
+        orientation: Default::default(),
         make: "synthetic".into(),
         model: "flat".into(),
     };
@@ -396,17 +430,17 @@ fn main() -> anyhow::Result<()> {
     // The readback is asynchronous by design, so drive frames rather than blocking. The
     // first poll discards whatever was in flight for the previous image.
     for _ in 0..64 {
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         engine.render(&device, &queue, &PhotoStack::default(), None);
         wait(&device)?;
-        engine.poll_histogram(&device);
+        engine.poll_histogram(&device, &queue);
         if engine.histogram().peak > 0 {
             break;
         }
     }
-    let hist = engine.histogram();
+    let hist = engine.histogram().clone();
     let expected = {
-        let flat_px = engine.export(&device, &queue, Crop::default())?;
+        let flat_px = engine.export(&device, &queue, &PhotoStack::default())?;
         flat_px.rgba[1] as usize
     };
     let populated: Vec<usize> = hist

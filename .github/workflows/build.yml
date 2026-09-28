@@ -1,0 +1,490 @@
+name: Build
+
+run-name: >-
+  ${{ (inputs.release || startsWith(github.ref, 'refs/tags/v'))
+      && format('Release {0}', inputs.release || github.ref_name)
+      || github.event_name == 'workflow_dispatch' && inputs.release == ''
+      && format('Build of {0} (no release: no version given)', github.ref_name)
+      || github.event.head_commit.message
+      || github.event.pull_request.title
+      || 'Build' }}
+
+# Every push, on every branch, builds:
+# - Android APK (arm64)
+# - Linux AppImage & tarball (x86_64)
+# - Windows portable zip (x86_64)
+# - macOS app (.dmg and .zip)
+# and attaches them to the workflow run. On top of that (see the `release` job):
+#
+# - every push to main or master auto-increments and publishes a full release
+#   with all 4 platform builds (Android APK, Linux AppImage, Windows, macOS);
+# - every push to any other branch updates that branch's rolling test build
+#   pre-release with the APK (the `test-build` job), downloadable straight onto a phone;
+# - a tag starting with v (v0.2.0, v0.2.0-alpha.1), or a manual run given a version,
+#   publishes a release with all artifacts attached.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release version, e.g. v0.2.0, or 'auto' to auto-increment (empty: build only)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.calc_version.outputs.tag }}
+      version: ${{ steps.calc_version.outputs.version }}
+      is_release: ${{ steps.calc_version.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: calc_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_RELEASE: ${{ inputs.release }}
+        run: |
+          set -e
+          cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+
+          if [ -n "$INPUT_RELEASE" ] && [ "$INPUT_RELEASE" != "auto" ]; then
+            TAG="$INPUT_RELEASE"
+            IS_RELEASE="true"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+            IS_RELEASE="true"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" || "$INPUT_RELEASE" == "auto" ]]; then
+            # Query existing releases for latest semver tag
+            latest=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null | tr -d ' ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
+            if [ -z "$latest" ]; then
+              latest=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | tr -d ' ' | sort -V | tail -n 1 || true)
+            fi
+
+            if [ -z "$latest" ]; then
+              TAG="v${cargo_ver}"
+            else
+              latest_clean="${latest#v}"
+              IFS='.' read -r l_maj l_min l_pat <<< "$latest_clean"
+              l_pat=$(echo "$l_pat" | sed 's/[^0-9].*//')
+
+              IFS='.' read -r c_maj c_min c_pat <<< "$cargo_ver"
+              c_pat=$(echo "$c_pat" | sed 's/[^0-9].*//')
+
+              if [ "$c_maj" -gt "$l_maj" ] 2>/dev/null || \
+                 ([ "$c_maj" -eq "$l_maj" ] && [ "$c_min" -gt "$l_min" ]) 2>/dev/null || \
+                 ([ "$c_maj" -eq "$l_maj" ] && [ "$c_min" -eq "$l_min" ] && [ "$c_pat" -gt "$l_pat" ]) 2>/dev/null; then
+                TAG="v${cargo_ver}"
+              else
+                next_pat=$((l_pat + 1))
+                TAG="v${l_maj}.${l_min}.${next_pat}"
+              fi
+            fi
+            IS_RELEASE="true"
+          else
+            TAG="v${cargo_ver}-dev.${GITHUB_SHA::7}"
+            IS_RELEASE="false"
+          fi
+
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG (version: $VERSION, is_release: $IS_RELEASE)"
+
+  android:
+    needs: [version]
+    runs-on: ubuntu-latest
+    env:
+      DUCKFOOT_KEYSTORE_BASE64: ${{ secrets.DUCKFOOT_KEYSTORE_BASE64 }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      DUCKFOOT_VERSION_NAME: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the version: install it, then add the Android target to
+      # *that* toolchain, which a target installed on `stable` would not be.
+      - run: |
+          rustup toolchain install
+          rustup target add aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      # The runner image ships the Android SDK and NDK; AGP 8 needs JDK 17.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      # C dependencies (libwebp) are compiled by cc-rs even under clippy, and it looks for
+      # the NDK's clang under a name the NDK does not ship. Name it for every later step.
+      - name: Name the NDK's C compiler
+        run: |
+          ndk="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          bin=("$ndk"/toolchains/llvm/prebuilt/*/bin)
+          {
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=${bin[0]}/aarch64-linux-android30-clang"
+            echo "CXX_aarch64_linux_android=${bin[0]}/aarch64-linux-android30-clang++"
+            echo "AR_aarch64_linux_android=${bin[0]}/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      # Clippy needs no linker, so it runs before the (slower) NDK build.
+      - run: cargo clippy -p duckfoot-android --target aarch64-linux-android -- -D warnings
+
+      # With a signing key in the repository's secrets (android/README.md), every build is
+      # signed with it and installs over the last; without one, each uses a throwaway key.
+      - name: Use the repository's signing key
+        if: env.DUCKFOOT_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$DUCKFOOT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/duckfoot.jks"
+          echo "DUCKFOOT_KEYSTORE=$RUNNER_TEMP/duckfoot.jks" >> "$GITHUB_ENV"
+
+      - run: android/build-apk.sh release
+        env:
+          DUCKFOOT_KEYSTORE_PASSWORD: ${{ secrets.DUCKFOOT_KEYSTORE_PASSWORD }}
+          DUCKFOOT_KEY_ALIAS: ${{ secrets.DUCKFOOT_KEY_ALIAS }}
+          DUCKFOOT_KEY_PASSWORD: ${{ secrets.DUCKFOOT_KEY_PASSWORD }}
+
+      - name: Name the APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk dist/duckfoot-android-arm64.apk
+          if [ -n "${DUCKFOOT_KEYSTORE:-}" ]; then
+            echo "repository key" > dist/android-signing.txt
+          else
+            echo "testing key" > dist/android-signing.txt
+          fi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: duckfoot-android
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    needs: [version]
+    runs-on: ubuntu-latest
+    # Built against Ubuntu 22.04's glibc (2.35), so the binary also runs on older
+    # distributions than the runner's own, Pop!_OS 22.04 among them.
+    container: ubuntu:22.04
+    steps:
+      # winit needs these to build even though CI never opens a window; git is for checkout.
+      - name: Build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev file
+
+      - uses: actions/checkout@v5
+
+      # The container has no Rust: rustup, then the version rust-toolchain.toml pins.
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux
+
+      - run: cargo build --release --locked -p duckfoot
+
+      - name: Package tarball and AppImage
+        run: |
+          dir=duckfoot-linux-x86_64
+          mkdir -p "$dir" dist
+          cp target/release/duckfoot "$dir/"
+          strip "$dir/duckfoot"
+          cp LICENSE "$dir/"
+          cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
+          {
+            echo "Duckfoot for Linux (x86_64), built from ${GITHUB_SHA}."
+            echo
+            echo "Run ./duckfoot, or ./duckfoot photo.ARW. Needs a Vulkan driver, Wayland or X11,"
+            echo "and xdg-desktop-portal for the file dialog. More: the README in the repository."
+          } > "$dir/README.txt"
+          # README.md promises libc, libm and libgcc_s only; say so if that ever changes.
+          echo "Linked against:"
+          ldd "$dir/duckfoot"
+          tar czf "dist/$dir.tar.gz" "$dir"
+
+          # Build AppImage
+          echo "Packaging AppImage..."
+          appdir=AppDir
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/256x256/apps"
+          cp "$dir/duckfoot" "$appdir/usr/bin/"
+          cp brand/duckfoot-1024.png "$appdir/duckfoot.png"
+          cp brand/duckfoot-1024.png "$appdir/usr/share/icons/hicolor/256x256/apps/duckfoot.png"
+          cp brand/duckfoot.desktop "$appdir/"
+          cp brand/duckfoot.desktop "$appdir/usr/share/applications/"
+          cp brand/AppRun "$appdir/AppRun"
+          chmod +x "$appdir/AppRun"
+
+          curl -sL -o /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x /tmp/appimagetool
+          (cd /tmp && ./appimagetool --appimage-extract)
+          ARCH=x86_64 /tmp/squashfs-root/AppRun "$appdir" "dist/$dir.AppImage"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: duckfoot-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    needs: [version]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - run: cargo build --release --locked -p duckfoot
+
+      - name: Package
+        shell: bash
+        run: |
+          dir=duckfoot-windows-x86_64
+          mkdir -p "$dir" dist
+          cp target/release/duckfoot.exe "$dir/"
+          cp LICENSE "$dir/"
+          cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
+          {
+            echo "Duckfoot for Windows (x86_64), built from ${GITHUB_SHA}."
+            echo
+            echo "Run duckfoot.exe, or duckfoot.exe photo.ARW. Needs a working Vulkan driver."
+            echo "More: https://github.com/carter48fan/duckfoot"
+          } > "$dir/README.txt"
+          7z a "dist/$dir.zip" "$dir"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: duckfoot-windows-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    needs: [version]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - run: cargo build --release --locked -p duckfoot
+
+      - name: Package macOS app and dmg
+        run: |
+          mkdir -p dist
+          app=dist/Duckfoot.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/duckfoot "$app/Contents/MacOS/duckfoot"
+          cp brand/duckfoot-1024.png "$app/Contents/Resources/duckfoot.png"
+          version="${{ needs.version.outputs.version }}"
+          cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Duckfoot</string>
+  <key>CFBundleDisplayName</key><string>Duckfoot</string>
+  <key>CFBundleIdentifier</key><string>com.walker.duckfoot</string>
+  <key>CFBundleExecutable</key><string>duckfoot</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleIconFile</key><string>duckfoot.png</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+          hdiutil create -volname Duckfoot -srcfolder "$app" -ov -format UDZO dist/duckfoot-macos.dmg
+          (cd dist && zip -r duckfoot-macos.zip Duckfoot.app)
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: duckfoot-macos
+          path: |
+            dist/duckfoot-macos.dmg
+            dist/duckfoot-macos.zip
+          if-no-files-found: error
+
+  desktop-tests:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tests-${{ matrix.os }}
+
+      - name: cargo test --workspace --locked
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export WGPU_BACKEND=noop; fi
+          cargo test --workspace --locked
+
+  release:
+    needs: [version, android, linux, windows, macos]
+    if: needs.version.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          case "$(cat dist/android-signing.txt 2>/dev/null)" in
+            "repository key")
+              signing="The APK is signed with the repository's key, so it installs over earlier builds." ;;
+            *)
+              signing="The APK is signed with the testing key, so it installs over any earlier testing build (uninstall once if an older build signed with a one-off key is on the phone)." ;;
+          esac
+          {
+            echo "Duckfoot $RELEASE_TAG, built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
+            echo
+            echo "### Downloads"
+            echo "- **Android APK** (\`duckfoot-$RELEASE_TAG-android-arm64.apk\`): Android 11+, Vulkan GPU, arm64. Open on phone or \`adb install -r\`. $signing"
+            echo "- **Linux AppImage** (\`duckfoot-$RELEASE_TAG-linux-x86_64.AppImage\`): Standalone executable AppImage. Run \`chmod +x\` and execute."
+            echo "- **Linux Tarball** (\`duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz\`): Unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
+            echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan."
+            echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS application (\`Duckfoot.app\`). Drag to Applications folder."
+          } > notes.md
+          cat notes.md
+
+      - name: Publish versioned release
+        run: |
+          mv dist/duckfoot-android-arm64.apk "dist/duckfoot-$RELEASE_TAG-android-arm64.apk"
+          mv dist/duckfoot-linux-x86_64.tar.gz "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz"
+          mv dist/duckfoot-linux-x86_64.AppImage "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage"
+          mv dist/duckfoot-windows-x86_64.zip "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip"
+          mv dist/duckfoot-macos.dmg "dist/duckfoot-$RELEASE_TAG-macos.dmg"
+          mv dist/duckfoot-macos.zip "dist/duckfoot-$RELEASE_TAG-macos.zip"
+
+          # If the release already exists, delete it so gh release create succeeds
+          gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
+          git tag -d "$RELEASE_TAG" 2>/dev/null || true
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" 2>/dev/null || true
+
+          gh release create "$RELEASE_TAG" \
+            "dist/duckfoot-$RELEASE_TAG-android-arm64.apk" \
+            "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage" \
+            "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz" \
+            "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip" \
+            "dist/duckfoot-$RELEASE_TAG-macos.dmg" \
+            "dist/duckfoot-$RELEASE_TAG-macos.zip" \
+            --target "$GITHUB_SHA" \
+            --title "Duckfoot $RELEASE_TAG" \
+            --generate-notes \
+            --notes-file notes.md
+
+  # Every push to a feature branch other than main/master: that branch's rolling pre-release,
+  # replaced on every push, with the APK as a plain file a phone can download and open.
+  test-build:
+    needs: [version, android]
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref, 'refs/heads/')
+      && github.ref != 'refs/heads/main'
+      && github.ref != 'refs/heads/master'
+      && needs.version.outputs.is_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: test-build-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.ref_name }}
+      HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: duckfoot-android
+          path: dist
+
+      - name: Publish the test build
+        run: |
+          slug="$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-60)"
+          tag="build-$slug"
+          apk="dist/duckfoot-$slug-android-arm64.apk"
+          mv dist/duckfoot-android-arm64.apk "$apk"
+          {
+            echo "Built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
+            echo
+            echo "**Android** (\`$(basename "$apk")\`): Android 11+, Vulkan GPU, arm64. Open it on the phone, or \`adb install -r\`."
+            if [ "$(cat dist/android-signing.txt 2>/dev/null)" = "repository key" ]; then
+              echo "Signed with the repository's key: installs over earlier builds."
+            else
+              echo "Signed with the testing key: installs over any earlier testing build. (If a build signed with a one-off key is on the phone, uninstall it once.)"
+            fi
+            echo
+            echo "Desktop builds for this commit are on its workflow run: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
+          } > notes.md
+          for id in $(gh api "repos/$GH_REPO/releases" --paginate \
+                        --jq ".[] | select(.tag_name == \"$tag\") | .id"); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" 2>/dev/null || true
+          gh release create "$tag" "$apk" \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Test build: $BRANCH @ ${GITHUB_SHA::7}" \
+            --notes-file notes.md
+
+  no-release:
+    needs: [version]
+    if: github.event_name == 'workflow_dispatch' && inputs.release == '' && needs.version.outputs.is_release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say why there is no release
+        run: |
+          echo "::notice::Built only. To draft a release, run again with a version such as v0.2.0 in the 'Release version' box, or type 'auto' to auto-increment."

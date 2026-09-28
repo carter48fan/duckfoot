@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Duckfoot
+GenericName=Photo & RAW Editor
+Comment=Local-first creative suite
+Exec=duckfoot %F
+Icon=duckfoot
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=image/x-adobe-dng;image/x-sony-arw;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-fuji-raf;image/x-panasonic-rw2;image/x-olympus-orf;image/x-pentax-pef;image/x-samsung-srw;image/x-dcraw;image/tiff;image/png;image/jpeg;image/webp;

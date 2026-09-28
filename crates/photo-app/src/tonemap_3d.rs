@@ -1,10 +1,10 @@
 //! Interactive 3D tonemap visualization and manipulation for Barrel 1.
 //!
 //! Visualizes the logarithmic dynamic range transfer function (filmic tonemap) in 3D space:
-//! - Surface mode: 3D transfer surface over scene dynamic range (EV) and color spectrum,
+//! - Surface mode: 3D transfer surface over scene dynamic range (EV) and exposure (±1 EV),
 //!   with interactive 3D control handles for White EV, Black EV, Latitude, and Contrast.
-//! - RGB Gamut Cube mode: 3D color cube deformation showing how camera gamut is mapped
-//!   into the display-referred color space.
+//! - RGB Cube mode: a lattice of scene-linear colours, placed where filmic sends them on
+//!   the display — brightness compressed, ratios (and so hues) kept.
 //!
 //! Interactive orbit camera (drag to rotate, wheel to zoom, double-click to reset) with
 //! zero latency and depth-sorted immediate-mode rendering.
@@ -12,7 +12,7 @@
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use photo_engine::params::Filmic;
 
-use crate::theme;
+use crate::{theme, widgets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tonemap3DMode {
@@ -49,18 +49,142 @@ impl Default for Tonemap3DState {
     }
 }
 
-/// Evaluates the filmic sigmoid transfer function for a linear value `v`.
-pub fn eval_filmic(v: f32, f: &Filmic) -> f32 {
-    if v <= 0.0 {
-        return 0.0;
+/// The filmic presets as a row of chips. A click sets all four values as one step.
+pub fn filmic_presets(
+    ui: &mut egui::Ui,
+    filmic: &mut Filmic,
+    changed: &mut bool,
+    started: &mut bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::tag("presets").color(theme::TEXT_DIM));
+        if widgets::chip(ui, false, "neutral")
+            .on_hover_text("Balanced photographic tone curve")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 3.5;
+            filmic.black_ev = -8.0;
+            filmic.latitude = 20.0;
+            filmic.contrast = 1.1;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "dynamic")
+            .on_hover_text("Wide dynamic range with highlight & shadow preservation")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 5.0;
+            filmic.black_ev = -10.0;
+            filmic.latitude = 35.0;
+            filmic.contrast = 1.0;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "punchy")
+            .on_hover_text("High-contrast commercial look with crisp blacks")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 3.0;
+            filmic.black_ev = -7.0;
+            filmic.latitude = 16.0;
+            filmic.contrast = 1.35;
+            *changed = true;
+        }
+        if widgets::chip(ui, false, "film flat")
+            .on_hover_text("Soft shoulder and toe for cinematic film grading")
+            .clicked()
+        {
+            *started = true;
+            filmic.white_ev = 4.2;
+            filmic.black_ev = -6.5;
+            filmic.latitude = 42.0;
+            filmic.contrast = 0.92;
+            *changed = true;
+        }
+    });
+}
+
+/// The filmic curve flat: scene EV across, display value up, with the white and black
+/// points marked. Read-only — the sliders under it set the values — so on a phone it
+/// never fights the sheet's scrolling the way the orbiting 3D view does.
+pub fn render_filmic_2d(ui: &mut egui::Ui, filmic: &Filmic) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(width, (width * 0.42).clamp(110.0, 170.0)),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, theme::BG_950);
+    let ev_min = (filmic.black_ev - 1.5).min(-12.0);
+    let ev_max = (filmic.white_ev + 1.5).max(6.0);
+    let x_of = |ev: f32| rect.left() + (ev - ev_min) / (ev_max - ev_min) * rect.width();
+    let y_of = |v: f32| rect.bottom() - 6.0 - v.clamp(0.0, 1.0) * (rect.height() - 12.0);
+    let grid = Stroke::new(1.0, Color32::from_gray(0x1a));
+    let mut ev = ev_min.ceil();
+    while ev <= ev_max {
+        if (ev as i32) % 2 == 0 {
+            painter.vline(x_of(ev), rect.y_range(), grid);
+        }
+        ev += 1.0;
     }
-    let white = 2.0_f32.powf(f.white_ev);
-    let black = 2.0_f32.powf(f.black_ev);
-    let lat = (f.latitude / 100.0).max(0.01);
-    let log_range = (white / black).log2().max(0.001);
-    let norm = ((v / black).log2() / log_range - 0.5) * f.contrast;
-    let exp_term = (-norm / lat).exp();
-    (1.0 / (1.0 + exp_term)).clamp(0.0, 1.0)
+    for v in [0.25, 0.5, 0.75] {
+        painter.hline(rect.x_range(), y_of(v), grid);
+    }
+    for (ev, colour, label) in [
+        (
+            filmic.black_ev,
+            Color32::from_rgb(0x6a, 0x8c, 0xff),
+            "black",
+        ),
+        (
+            filmic.white_ev,
+            Color32::from_rgb(0xff, 0xd0, 0x6a),
+            "white",
+        ),
+    ] {
+        let x = x_of(ev);
+        painter.vline(
+            x,
+            rect.y_range(),
+            Stroke::new(1.0, colour.gamma_multiply(0.6)),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, rect.top() + 3.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::monospace(9.5),
+            colour,
+        );
+    }
+    let points: Vec<Pos2> = (0..=96)
+        .map(|i| {
+            let ev = ev_min + (ev_max - ev_min) * i as f32 / 96.0;
+            let v = eval_filmic(2.0_f32.powf(ev), filmic);
+            egui::pos2(x_of(ev), y_of(v))
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, Stroke::new(2.0, theme::ACCENT)));
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.bottom() - 3.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "scene EV →",
+        egui::FontId::monospace(9.5),
+        theme::TEXT_FAINT,
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Evaluates the filmic sigmoid transfer function for a linear value `v`.
+/// Filmic's output for a scene-linear value, as a display value (0..=1): the engine's own
+/// curve (`Filmic::display_value`), so what is drawn here is what the shader does.
+pub fn eval_filmic(v: f32, f: &Filmic) -> f32 {
+    f.display_value(v)
 }
 
 /// Perspective projection of a 3D point (X, Y, Z) to 2D screen coordinates.
@@ -108,15 +232,13 @@ pub fn render_tonemap_3d(
 ) {
     // Mode switcher and toolbar
     ui.horizontal(|ui| {
-        if ui
-            .selectable_label(state.mode == Tonemap3DMode::Surface, "Surface 3D")
+        if widgets::chip(ui, state.mode == Tonemap3DMode::Surface, "surface")
             .on_hover_text("3D Dynamic Range & Tone Response Surface")
             .clicked()
         {
             state.mode = Tonemap3DMode::Surface;
         }
-        if ui
-            .selectable_label(state.mode == Tonemap3DMode::RgbCube, "RGB Cube 3D")
+        if widgets::chip(ui, state.mode == Tonemap3DMode::RgbCube, "rgb cube")
             .on_hover_text("3D Color Gamut Compression Volume")
             .clicked()
         {
@@ -124,10 +246,13 @@ pub fn render_tonemap_3d(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("↺ 3D")
-                .on_hover_text("Reset 3D camera angle and zoom")
-                .clicked()
+            if widgets::icon(
+                ui,
+                "⟲",
+                false,
+                "Reset the 3D camera (or double-click the view)",
+            )
+            .clicked()
             {
                 state.yaw = -0.65;
                 state.pitch = 0.42;
@@ -136,58 +261,7 @@ pub fn render_tonemap_3d(
         });
     });
 
-    // 1-Click Tonemap Presets
-    ui.horizontal_wrapped(|ui| {
-        ui.label(theme::dim("presets:"));
-        if ui
-            .small_button("Neutral")
-            .on_hover_text("Balanced photographic tone curve")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 3.5;
-            filmic.black_ev = -8.0;
-            filmic.latitude = 20.0;
-            filmic.contrast = 1.1;
-            *changed = true;
-        }
-        if ui
-            .small_button("Dynamic")
-            .on_hover_text("Wide dynamic range with highlight & shadow preservation")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 5.0;
-            filmic.black_ev = -10.0;
-            filmic.latitude = 35.0;
-            filmic.contrast = 1.0;
-            *changed = true;
-        }
-        if ui
-            .small_button("Punchy")
-            .on_hover_text("High-contrast commercial look with crisp blacks")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 3.0;
-            filmic.black_ev = -7.0;
-            filmic.latitude = 16.0;
-            filmic.contrast = 1.35;
-            *changed = true;
-        }
-        if ui
-            .small_button("Film Flat")
-            .on_hover_text("Soft shoulder and toe for cinematic film grading")
-            .clicked()
-        {
-            *started = true;
-            filmic.white_ev = 4.2;
-            filmic.black_ev = -6.5;
-            filmic.latitude = 42.0;
-            filmic.contrast = 0.92;
-            *changed = true;
-        }
-    });
+    filmic_presets(ui, filmic, changed, started);
 
     let height = 230.0;
     let (rect, response) = ui.allocate_exact_size(
@@ -286,9 +360,15 @@ pub fn render_tonemap_3d(
 
     // Interaction handling
     let hover_pos = response.hover_pos();
+    // A fingertip covers far more than a pointer does.
+    let reach = if crate::widgets::is_touch(ui.ctx()) {
+        24.0
+    } else {
+        12.0
+    };
     let hovered_handle = hover_pos.and_then(|hpos| {
         handle_screen.iter().find_map(|(handle, spos, _)| {
-            if hpos.distance(*spos) <= 12.0 {
+            if hpos.distance(*spos) <= reach {
                 Some(*handle)
             } else {
                 None
@@ -336,11 +416,12 @@ pub fn render_tonemap_3d(
         state.active_handle = None;
     }
 
-    // Scroll zoom
+    // Ctrl+wheel or pinch, which egui reports as a zoom factor. A plain wheel is left
+    // alone: this view sits in a scrolling sidebar, and one gesture must not do both.
     if response.hovered() {
-        let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            state.zoom = (state.zoom * (1.0 + scroll * 0.005)).clamp(0.6, 2.5);
+        let zoom = ui.ctx().input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            state.zoom = (state.zoom * zoom).clamp(0.6, 2.5);
         }
     }
 
@@ -435,7 +516,7 @@ pub fn render_tonemap_3d(
             y,
             egui::Align2::LEFT_CENTER,
             if state.mode == Tonemap3DMode::Surface {
-                "Spectrum"
+                "Exposure ±1 EV"
             } else {
                 "Green"
             },
@@ -479,7 +560,7 @@ pub fn render_tonemap_3d(
     } else if hovered_handle.is_some() {
         "Click & drag handle to adjust parameter"
     } else {
-        "Drag to rotate 3D view • Scroll to zoom • Double-click to reset"
+        crate::widgets::orbit_hint(ui.ctx())
     };
     painter.text(
         Pos2::new(rect.min.x + 8.0, rect.max.y - 14.0),
@@ -519,20 +600,17 @@ fn render_surface_mode(
             let v_norm = j as f32 / (NY - 1) as f32;
             let y = (v_norm - 0.5) * 1.6;
 
-            // Chromatic shift across spectrum for 3D visualization
-            let channel_gain = 1.0 + (v_norm - 0.5) * 0.4;
-            let mapped = eval_filmic(v_lin * channel_gain, filmic);
+            // Depth is exposure, −1 EV to +1 EV: the same curve met by a darker or brighter
+            // version of the scene, which is what an exposure change does to it.
+            let exposure_gain = 2.0_f32.powf((v_norm - 0.5) * 2.0);
+            let mapped = eval_filmic(v_lin * exposure_gain, filmic);
             let z = (mapped - 0.5) * 2.0;
 
             if let Some((sp, depth)) =
                 project_3d([x, y, z], center, scale, state.yaw, state.pitch, state.zoom)
             {
-                // Vertex color based on height/output luminance and spectrum
-                let lum_byte = (mapped * 240.0) as u8;
-                let r_tint = ((lum_byte as f32 * (1.1 - v_norm * 0.3)).clamp(0.0, 255.0)) as u8;
-                let g_tint = ((lum_byte as f32 * 0.95).clamp(0.0, 255.0)) as u8;
-                let b_tint = ((lum_byte as f32 * (0.8 + v_norm * 0.4)).clamp(0.0, 255.0)) as u8;
-                let col = Color32::from_rgb(r_tint, g_tint, b_tint);
+                // Coloured by the display value it maps to: grey, as the output is.
+                let col = Color32::from_gray((mapped * 240.0) as u8);
 
                 *pt = (sp, depth, col);
                 valid[i][j] = true;
@@ -625,8 +703,10 @@ fn render_surface_mode(
         };
         let node_radius = if is_hovered { 6.0 } else { 4.5 };
 
-        // Outer glow/ring
-        painter.circle_filled(*pos, node_radius + 2.0, theme::ACCENT.linear_multiply(0.35));
+        // A plain ring when it is the one under the pointer: no glow (DESIGN.md).
+        if is_hovered {
+            painter.circle_stroke(*pos, node_radius + 2.5, Stroke::new(1.0, theme::ACCENT));
+        }
         painter.circle_filled(*pos, node_radius, node_color);
         painter.circle_stroke(*pos, node_radius, Stroke::new(1.0, theme::BG_950));
 
@@ -675,10 +755,18 @@ fn render_rgb_cube_mode(
             for b in 0..STEPS {
                 let fb = b as f32 / (STEPS - 1) as f32;
 
-                // Scene linear input
-                let r_mapped = eval_filmic(fr * 4.0, filmic);
-                let g_mapped = eval_filmic(fg * 4.0, filmic);
-                let b_mapped = eval_filmic(fb * 4.0, filmic);
+                // Scene-linear input, through filmic as the shader applies it: the curve on
+                // the brightest channel, and every channel scaled by the same ratio.
+                let (r_in, g_in, b_in) = (fr * 4.0, fg * 4.0, fb * 4.0);
+                let norm = r_in.max(g_in).max(b_in);
+                let ratio = if norm > 0.0 {
+                    srgb_to_linear(eval_filmic(norm, filmic)) / norm
+                } else {
+                    0.0
+                };
+                let r_mapped = linear_to_srgb(r_in * ratio);
+                let g_mapped = linear_to_srgb(g_in * ratio);
+                let b_mapped = linear_to_srgb(b_in * ratio);
 
                 // Center in [-1, 1]
                 let x = (r_mapped - 0.5) * 2.0;
@@ -718,5 +806,22 @@ fn render_rgb_cube_mode(
     for (sp, _, col, _) in lattice {
         painter.circle_filled(sp, 3.5, col);
         painter.circle_stroke(sp, 3.5, Stroke::new(0.5, theme::BG_950));
+    }
+}
+
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }

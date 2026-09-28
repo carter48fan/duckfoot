@@ -1,0 +1,5 @@
+.gradle/
+build/
+local.properties
+# Built by build-apk.sh from crates/duckfoot-android; never committed.
+app/src/main/jniLibs/

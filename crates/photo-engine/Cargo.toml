@@ -3,17 +3,36 @@ name = "photo-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 wgpu.workspace = true
 bytemuck.workspace = true
 rawloader.workspace = true
+rawler.workspace = true
 anyhow.workspace = true
 log.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+half = { version = "2", features = ["bytemuck"] }
+# TIFF written directly, for its EXIF directory (`image` wraps the same crate).
+tiff = "0.11"
+# Inflating the bundled lensfun table. Already in the tree through png.
+miniz_oxide = "0.8"
+# Parallel white-level histogram. Already in the tree through rawler.
+rayon = "1"
+# Finding embedded JPEG previews inside a RAW container.
+memchr = "2"
+# The one JPEG decoder that can scale in the DCT domain: a 45 MP embedded preview decoded
+# at 1/8 skips nearly all of the IDCT, which is most of the cost of a thumbnail.
+jpeg-decoder = { version = "0.3", default-features = false }
+webp = { version = "0.3", default-features = false }
+kamadak-exif = "0.6"
 
 [dev-dependencies]
+# The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.
+# Counters: tests/drag.rs counts what is alive on the GPU through a drag (invariant 6).
+wgpu = { workspace = true, features = ["noop", "counters"] }
 pollster = "1"
 env_logger = "0.11"

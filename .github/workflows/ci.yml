@@ -2,8 +2,11 @@ name: Duckfoot CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +15,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -24,13 +27,21 @@ jobs:
       - name: Install Linux windowing dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
 
       - run: cargo fmt --all --check
 
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
+
+      # The pixel tests, on Mesa's software Vulkan: the only tests in which shaders
+      # actually run. Required, so a missing driver fails rather than silently skipping.
+      - name: GPU pixel tests (lavapipe)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          DUCKFOOT_REQUIRE_GPU: "1"
+        run: cargo test --release --locked -p photo-engine --test gpu --test drag
 
       # Catches WGSL errors, which are otherwise only found at device creation.
       - run: cargo build --workspace --all-targets
@@ -38,7 +49,7 @@ jobs:
   stubs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # DESIGN.md invariant 8: the docs document only what runs. The previous audit only
       # grepped the TypeScript packages, which is exactly where the unfinished code wasn't.
       - name: Audit stubs
