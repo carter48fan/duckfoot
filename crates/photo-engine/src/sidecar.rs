@@ -32,6 +32,37 @@ pub struct AssetMetadata {
     /// Color label (e.g. "red", "yellow", "green", "blue", "purple").
     #[serde(default)]
     pub color_label: Option<String>,
+    /// Words to find the photo by, in the order given, none twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+}
+
+/// The longest a keyword may be, in characters.
+pub const KEYWORD_MAX: usize = 64;
+
+impl AssetMetadata {
+    /// Add the keywords in `text`, split at commas and semicolons: trimmed, cut to
+    /// [`KEYWORD_MAX`], and skipped when already there in any case. True if any were new.
+    pub fn add_keywords(&mut self, text: &str) -> bool {
+        let before = self.keywords.len();
+        for word in text.split([',', ';']) {
+            let word: String = word.trim().chars().take(KEYWORD_MAX).collect();
+            let word = word.trim().to_string();
+            if !word.is_empty() && !self.has_keyword(&word) {
+                self.keywords.push(word);
+            }
+        }
+        self.keywords.len() > before
+    }
+
+    pub fn has_keyword(&self, word: &str) -> bool {
+        let word = word.to_lowercase();
+        self.keywords.iter().any(|k| k.to_lowercase() == word)
+    }
+
+    pub fn remove_keyword(&mut self, word: &str) {
+        self.keywords.retain(|k| k != word);
+    }
 }
 
 /// The sidecar format this build writes. A file from a newer build is read for display
@@ -63,6 +94,10 @@ pub struct SidecarData {
     pub metadata: AssetMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snapshots: Vec<Snapshot>,
+    /// The undo steps behind `stack`, oldest first, so undo reaches back past a relaunch
+    /// (W-06). A recent few, not all: see `HISTORY_BUDGET`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<PhotoStack>,
     /// Fields this build does not know, kept so a save does not drop them.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -75,6 +110,7 @@ impl Default for SidecarData {
             stack: None,
             metadata: AssetMetadata::default(),
             snapshots: Vec::new(),
+            history: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }
@@ -134,7 +170,7 @@ pub fn load_sidecar_full(raw_path: &Path) -> Result<Option<SidecarData>> {
         .with_context(|| format!("failed to parse sidecar file {}", path.display()))
 }
 
-fn parse_sidecar(content: &str) -> Result<SidecarData> {
+pub(crate) fn parse_sidecar(content: &str) -> Result<SidecarData> {
     let mut value: serde_json::Value = serde_json::from_str(content)?;
     clamp_numbers(&mut value);
     let is_container = value.as_object().is_some_and(|o| {
@@ -156,6 +192,12 @@ fn parse_sidecar(content: &str) -> Result<SidecarData> {
     for snapshot in &mut data.snapshots {
         snapshot.stack = snapshot.stack.sanitised();
     }
+    for stack in &mut data.history {
+        *stack = stack.sanitised();
+    }
+    // A hand-edited file's keywords, held to what the app itself would keep.
+    let keywords = std::mem::take(&mut data.metadata.keywords);
+    data.metadata.add_keywords(&keywords.join(","));
     data.metadata.rating = data.metadata.rating.min(5);
     Ok(data)
 }
@@ -222,6 +264,43 @@ pub fn save_sidecar_full(
     })
 }
 
+/// The most undo steps a sidecar keeps.
+pub const HISTORY_STEPS: usize = 50;
+/// And the most bytes they take: brush strokes make a stack large, and a sidecar is read on
+/// every open.
+pub const HISTORY_BUDGET: usize = 256 * 1024;
+
+/// The newest of `past` (oldest first) that fit [`HISTORY_STEPS`] and [`HISTORY_BUDGET`],
+/// still oldest first.
+pub fn recent_history(past: &[PhotoStack]) -> Vec<PhotoStack> {
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for stack in past.iter().rev().take(HISTORY_STEPS) {
+        bytes += serde_json::to_string(stack).map_or(usize::MAX, |s| s.len());
+        if bytes > HISTORY_BUDGET {
+            break;
+        }
+        kept.push(stack.clone());
+    }
+    kept.reverse();
+    kept
+}
+
+/// [`save_sidecar_full`], with the undo steps behind the stack.
+pub fn save_sidecar_with_history(
+    raw_path: &Path,
+    stack: &PhotoStack,
+    metadata: &AssetMetadata,
+    past: &[PhotoStack],
+) -> Result<PathBuf> {
+    let history = recent_history(past);
+    update_sidecar(raw_path, |data| {
+        data.stack = Some(stack.clone());
+        data.metadata = metadata.clone();
+        data.history = history;
+    })
+}
+
 /// Save a stack, keeping the metadata already in the sidecar.
 pub fn save_sidecar(raw_path: &Path, stack: &PhotoStack) -> Result<PathBuf> {
     update_sidecar(raw_path, |data| data.stack = Some(stack.clone()))
@@ -240,6 +319,90 @@ mod tests {
     use crate::params::{Crop, Geometry, Module, WhiteBalance};
 
     #[test]
+    fn a_mangled_sidecar_is_refused_not_crashed_on() {
+        let mut stack = PhotoStack::default();
+        stack.local.enabled = true;
+        stack
+            .local
+            .params
+            .masks
+            .push(crate::local::Mask::radial([0.5, 0.5], 0.2));
+        let good = serde_json::to_vec(&SidecarData {
+            stack: Some(stack.clone()),
+            history: vec![stack],
+            ..SidecarData::default()
+        })
+        .unwrap();
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..2000 {
+            let mut b = good.clone();
+            for _ in 0..1 + next() % 4 {
+                let at = (next() % b.len() as u64) as usize;
+                b[at] = b"0123456789-.e{}[]\",:tfn\\"[(next() % 20) as usize];
+            }
+            if let Ok(text) = String::from_utf8(b) {
+                if let Ok(data) = parse_sidecar(&text) {
+                    // Whatever parsed is within range.
+                    let s = data.stack.unwrap_or_default();
+                    assert_eq!(s, s.sanitised());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keywords_are_trimmed_split_and_kept_once() {
+        let mut m = AssetMetadata::default();
+        assert!(m.add_keywords(" Iceland, waterfall;; iceland ,"));
+        assert_eq!(m.keywords, ["Iceland", "waterfall"]);
+        assert!(!m.add_keywords("WATERFALL"));
+        m.remove_keyword("Iceland");
+        assert_eq!(m.keywords, ["waterfall"]);
+        assert!(m.add_keywords(&"x".repeat(100)));
+        assert_eq!(m.keywords[1].len(), KEYWORD_MAX);
+    }
+
+    #[test]
+    fn history_keeps_the_newest_steps_within_budget() {
+        let past: Vec<PhotoStack> = (0..80)
+            .map(|i| {
+                let mut s = PhotoStack::default();
+                s.exposure.params.ev = i as f32 / 100.0;
+                s
+            })
+            .collect();
+        let kept = recent_history(&past);
+        assert_eq!(kept.len(), HISTORY_STEPS);
+        assert_eq!(kept.first(), past.get(80 - HISTORY_STEPS));
+        assert_eq!(kept.last(), past.last());
+        // One step bigger than the budget keeps nothing rather than a gap.
+        let json = serde_json::to_string(&past[0]).unwrap().len();
+        let many = vec![past[0].clone(); HISTORY_BUDGET / json + 5];
+        assert!(recent_history(&many).len() <= HISTORY_BUDGET / json);
+    }
+
+    #[test]
+    fn history_round_trips_through_a_sidecar() {
+        let dir = std::env::temp_dir().join(format!("df-history-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("a.dng");
+        let mut before = PhotoStack::default();
+        before.exposure.params.ev = 0.25;
+        let now = PhotoStack::default();
+        save_sidecar_with_history(&raw, &now, &AssetMetadata::default(), &[before.clone()])
+            .unwrap();
+        let data = load_sidecar_full(&raw).unwrap().unwrap();
+        assert_eq!(data.history, vec![before.sanitised()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sidecar_roundtrips_through_json() {
         let mut stack = PhotoStack {
             geometry: Geometry {
@@ -253,6 +416,8 @@ mod tests {
                     width: 0.7,
                     height: 0.8,
                 },
+                perspective_v: 12.0,
+                perspective_h: 0.0,
             },
             white_balance: Module::new(
                 true,

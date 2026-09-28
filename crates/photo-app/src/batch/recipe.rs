@@ -5,145 +5,96 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExportImageFormat {
-    Jpeg,
-    Png,
-    Tiff,
-    Webp,
-}
+/// The engine's own format list: batch and single export share one encoder.
+pub type ExportImageFormat = photo_engine::ExportFormat;
 
-impl ExportImageFormat {
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpg",
-            Self::Png => "png",
-            Self::Tiff => "tif",
-            Self::Webp => "webp",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
-pub enum SizingOption {
-    #[default]
-    Original,
-    LongEdge(u32),
-    ShortEdge(u32),
-    FitDimensions {
-        width: u32,
-        height: u32,
-    },
-    Percentage(f32),
-}
-
-impl SizingOption {
-    /// Computes the target dimensions given the source dimensions.
-    pub fn calculate_size(&self, src_w: u32, src_h: u32) -> (u32, u32) {
-        match *self {
-            Self::Original => (src_w, src_h),
-            Self::LongEdge(long) => {
-                if src_w >= src_h {
-                    let h = ((src_h as f32 / src_w as f32) * long as f32).round() as u32;
-                    (long.max(1), h.max(1))
-                } else {
-                    let w = ((src_w as f32 / src_h as f32) * long as f32).round() as u32;
-                    (w.max(1), long.max(1))
-                }
-            }
-            Self::ShortEdge(short) => {
-                if src_w <= src_h {
-                    let h = ((src_h as f32 / src_w as f32) * short as f32).round() as u32;
-                    (short.max(1), h.max(1))
-                } else {
-                    let w = ((src_w as f32 / src_h as f32) * short as f32).round() as u32;
-                    (w.max(1), short.max(1))
-                }
-            }
-            Self::FitDimensions { width, height } => {
-                let scale_w = width as f32 / src_w as f32;
-                let scale_h = height as f32 / src_h as f32;
-                let scale = scale_w.min(scale_h);
-                (
-                    ((src_w as f32 * scale).round() as u32).max(1),
-                    ((src_h as f32 * scale).round() as u32).max(1),
-                )
-            }
-            Self::Percentage(pct) => {
-                let p = (pct * 0.01).clamp(0.01, 4.0);
-                (
-                    ((src_w as f32 * p).round() as u32).max(1),
-                    ((src_h as f32 * p).round() as u32).max(1),
-                )
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ColorProfile {
-    #[default]
-    Srgb,
-    DisplayP3,
-    AdobeRgb,
-}
+/// How big a recipe exports: the engine's, shared with the single export.
+pub type SizingOption = photo_engine::Resize;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExportRecipe {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    pub format: ExportImageFormat,
-    /// JPEG / WebP quality (1..=100)
-    pub quality: u8,
-    pub sizing: SizingOption,
-    pub color_profile: ColorProfile,
+    /// Format, quality, size, depth, sharpening and metadata: the same settings the
+    /// single export uses. Flattened, so recipes saved when they held only format,
+    /// quality and size still load, with defaults for the rest.
+    #[serde(flatten)]
+    pub settings: photo_engine::ExportSettings,
     pub subfolder: Option<String>,
 }
 
 impl ExportRecipe {
+    fn new(
+        id: &str,
+        name: &str,
+        enabled: bool,
+        format: ExportImageFormat,
+        quality: u8,
+        sizing: SizingOption,
+        subfolder: Option<&str>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            enabled,
+            settings: photo_engine::ExportSettings {
+                quality,
+                sizing,
+                ..photo_engine::ExportSettings::new(format)
+            },
+            subfolder: subfolder.map(Into::into),
+        }
+    }
+}
+
+impl ExportRecipe {
     pub fn default_recipes() -> Vec<Self> {
+        use ExportImageFormat as F;
+        let mut print = Self::new(
+            "print_tiff",
+            "Print TIFF (16-bit, full resolution)",
+            false,
+            F::Tiff,
+            100,
+            SizingOption::Original,
+            Some("Print"),
+        );
+        print.settings.depth = photo_engine::BitDepth::Sixteen;
+        let mut web = Self::new(
+            "web_jpeg_2048",
+            "Web JPEG (2048 px)",
+            true,
+            F::Jpeg,
+            85,
+            SizingOption::LongEdge(2048),
+            Some("Web"),
+        );
+        web.settings.sharpen = photo_engine::SharpenFor::Screen;
+        let mut social = Self::new(
+            "social_webp",
+            "Social WebP (1080 px)",
+            false,
+            F::Webp,
+            82,
+            SizingOption::LongEdge(1080),
+            Some("Social"),
+        );
+        social.settings.sharpen = photo_engine::SharpenFor::Screen;
+        social.settings.metadata = photo_engine::MetadataPolicy::CopyrightOnly;
         vec![
-            Self {
-                id: "web_jpeg_2048".into(),
-                name: "Web High-Res JPEG (2048px sRGB)".into(),
-                enabled: true,
-                format: ExportImageFormat::Jpeg,
-                quality: 85,
-                sizing: SizingOption::LongEdge(2048),
-                color_profile: ColorProfile::Srgb,
-                subfolder: Some("Web".into()),
-            },
-            Self {
-                id: "full_png".into(),
-                name: "Full-Resolution Lossless PNG".into(),
-                enabled: false,
-                format: ExportImageFormat::Png,
-                quality: 100,
-                sizing: SizingOption::Original,
-                color_profile: ColorProfile::Srgb,
-                subfolder: None,
-            },
-            Self {
-                id: "print_tiff".into(),
-                name: "Master Print TIFF (Full-Res)".into(),
-                enabled: false,
-                format: ExportImageFormat::Tiff,
-                quality: 100,
-                sizing: SizingOption::Original,
-                color_profile: ColorProfile::AdobeRgb,
-                subfolder: Some("Print".into()),
-            },
-            Self {
-                id: "social_webp".into(),
-                name: "Social WebP (1080px)".into(),
-                enabled: false,
-                format: ExportImageFormat::Webp,
-                quality: 82,
-                sizing: SizingOption::LongEdge(1080),
-                color_profile: ColorProfile::Srgb,
-                subfolder: Some("Social".into()),
-            },
+            web,
+            Self::new(
+                "full_png",
+                "Lossless PNG (full resolution)",
+                false,
+                F::Png,
+                100,
+                SizingOption::Original,
+                None,
+            ),
+            print,
+            social,
         ]
     }
 }
@@ -153,22 +104,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sizing_options_calculate_correct_dimensions() {
-        let (src_w, src_h) = (6000, 4000); // 3:2 landscape
-        assert_eq!(
-            SizingOption::Original.calculate_size(src_w, src_h),
-            (6000, 4000)
-        );
-
-        // Long edge 2048 on 3:2 landscape -> 2048 x 1365
-        let (w, h) = SizingOption::LongEdge(2048).calculate_size(src_w, src_h);
-        assert_eq!(w, 2048);
-        assert_eq!(h, 1365);
-
-        // Percentage 50% -> 3000 x 2000
-        assert_eq!(
-            SizingOption::Percentage(50.0).calculate_size(src_w, src_h),
-            (3000, 2000)
-        );
+    fn recipes_saved_before_export_settings_still_load() {
+        let old = r#"{"id":"w","name":"Web","enabled":true,"format":"Jpeg","quality":85,
+            "sizing":{"LongEdge":2048},"subfolder":"Web"}"#;
+        let r: ExportRecipe = serde_json::from_str(old).unwrap();
+        assert_eq!(r.settings.format, ExportImageFormat::Jpeg);
+        assert_eq!(r.settings.quality, 85);
+        assert_eq!(r.settings.sizing, SizingOption::LongEdge(2048));
+        assert!(r.settings.strip_location);
+        // And round-trip as they are now.
+        let again: ExportRecipe =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(again, r);
     }
 }

@@ -29,6 +29,12 @@ if ! command -v cargo-ndk >/dev/null; then
 fi
 
 rustup target add aarch64-linux-android
+# C dependencies (libwebp) are compiled by cc-rs, which looks for the NDK's clang under a
+# name cargo-ndk does not always export. Name it, for the same API level as the link.
+ndk_bin=("$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin)
+export CC_aarch64_linux_android="${ndk_bin[0]}/aarch64-linux-android30-clang"
+export CXX_aarch64_linux_android="${ndk_bin[0]}/aarch64-linux-android30-clang++"
+export AR_aarch64_linux_android="${ndk_bin[0]}/llvm-ar"
 cd "$root"
 # API 30 matches minSdk in app/build.gradle.kts.
 cargo ndk --target arm64-v8a --platform 30 \
@@ -56,5 +62,19 @@ exported="$("${nm[0]}" -D --defined-only "$root/target/apk-check.so")"
 if ! grep -q ' ANativeActivity_onCreate$' <<<"$exported"; then
     echo "$lib does not export ANativeActivity_onCreate" >&2
     exit 1
+fi
+# And that it is signed as expected, so it installs over the last build: with the
+# repository's key when one is given, otherwise the testing key beside this script.
+signer=("${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"/build-tools/*/apksigner)
+if [[ -x "${signer[-1]}" ]]; then
+    certs="$("${signer[-1]}" verify --print-certs "$apk")"
+    if [[ -z "${DUCKFOOT_KEYSTORE:-}" ]] && ! grep -q "CN=Duckfoot testing" <<<"$certs"; then
+        echo "$apk is not signed with the testing key:" >&2
+        echo "$certs" >&2
+        exit 1
+    fi
+    grep -m1 "certificate DN" <<<"$certs" || true
+else
+    echo "apksigner not found; skipping the signature check" >&2
 fi
 echo "APK: $apk ($(du -h "$apk" | cut -f1); $lib $(du -h "$root/target/apk-check.so" | cut -f1))"

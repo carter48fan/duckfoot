@@ -72,7 +72,12 @@ fn main() -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     photo_app::theme::apply(&ctx);
 
-    let mut app = PhotoApp::with_platform(&gpu, Box::new(NoPlatform));
+    // DUCKFOOT_SHOT_STORAGE=<dir>: a phone's library of copies in <dir>, its screen open.
+    let library = std::env::var_os("DUCKFOOT_SHOT_STORAGE").map(std::path::PathBuf::from);
+    let mut app = match library.clone() {
+        Some(dir) => PhotoApp::with_platform(&gpu, Box::new(LibraryPlatform(dir))),
+        None => PhotoApp::with_platform(&gpu, Box::new(NoPlatform)),
+    };
     let screen = egui::vec2(w, h);
     let frame = |app: &mut PhotoApp| {
         let mut input = egui::RawInput {
@@ -110,14 +115,167 @@ fn main() -> anyhow::Result<()> {
         frame(&mut app);
         std::thread::sleep(Duration::from_millis(10));
     }
+    if library.is_some() {
+        app.open_storage();
+        let started = Instant::now();
+        while app.storage.as_ref().is_some_and(|v| v.entries.is_none())
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            frame(&mut app);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(view) = &mut app.storage {
+            if let Some(first) = view.entries.as_ref().and_then(|e| e.first()) {
+                view.selected.insert(first.path.clone());
+            }
+        }
+    }
     if let Some(tab) = tab {
         app.compact_tab = tab;
     }
     if let Some(module) = module {
         app.compact_module = module?;
     }
+    // DUCKFOOT_SHOT_READOUT=value|list: the on-photo readout, or the list of values.
+    if let Ok(what) = std::env::var("DUCKFOOT_SHOT_READOUT") {
+        app.show_photo_readout(what == "list");
+    }
     if let Some(step) = args.next() {
         app.show_tour_step(step.parse()?);
+    }
+    // DUCKFOOT_SHOT_SHORTCUTS=1: the `?` sheet over it all.
+    app.shortcuts_open = std::env::var_os("DUCKFOOT_SHOT_SHORTCUTS").is_some();
+    // DUCKFOOT_SHOT_LOOKS=1: the desktop inspector's Looks band open.
+    app.looks_open = std::env::var_os("DUCKFOOT_SHOT_LOOKS").is_some();
+    app.info_open = std::env::var_os("DUCKFOOT_SHOT_INFO").is_some();
+    app.clip_overlay = std::env::var_os("DUCKFOOT_SHOT_CLIP").is_some();
+    // DUCKFOOT_SHOT_LENS=1: lens corrections on, their card open on the desktop.
+    if std::env::var_os("DUCKFOOT_SHOT_LENS").is_some() {
+        app.edit(|s| {
+            s.lens.enabled = true;
+            s.lens.params.distortion = 40.0;
+            s.lens.params.vignetting = 60.0;
+        });
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Lens;
+        }
+    }
+    // DUCKFOOT_SHOT_DENOISE=1: noise reduction on, its card open on the desktop.
+    if std::env::var_os("DUCKFOOT_SHOT_DENOISE").is_some() {
+        app.edit(|s| {
+            s.denoise.enabled = true;
+            s.denoise.params.luminance = 40.0;
+        });
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Denoise;
+        }
+    }
+    // DUCKFOOT_SHOT_PASTE=1: the paste picker open.
+    app.paste_picker_open = std::env::var_os("DUCKFOOT_SHOT_PASTE").is_some();
+    // DUCKFOOT_SHOT_PRESETS=1: a user preset beside the looks, and one being named.
+    if std::env::var_os("DUCKFOOT_SHOT_PRESETS").is_some() {
+        app.looks_open = true;
+        let stack = app.stack().clone();
+        app.user_presets.push((
+            PathBuf::from("evening.duckfoot-preset"),
+            photo_app::user_presets::UserPreset::new("Evening glow", Default::default(), &stack),
+        ));
+        app.preset_draft = Some("Portrait".into());
+    }
+    // DUCKFOOT_SHOT_MASK=1: a radial mask chosen, with its wash, and a gradient beside it.
+    if std::env::var_os("DUCKFOOT_SHOT_MASK").is_some() {
+        app.edit(|s| {
+            s.local.enabled = true;
+            let mut m = photo_engine::local::Mask::radial([0.35, 0.45], 0.18);
+            m.adjust.exposure = 0.8;
+            m.adjust.temperature = 30.0;
+            s.local.params.masks.push(m);
+            let mut g = photo_engine::local::Mask::linear([0.5, 0.0], [0.5, 0.4]);
+            g.adjust.exposure = -0.7;
+            s.local.params.masks.push(g);
+        });
+        app.selected_mask = Some(0);
+        app.mask_overlay = std::env::var_os("DUCKFOOT_SHOT_WASH").is_some();
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Local;
+        }
+    }
+    // DUCKFOOT_SHOT_BRUSH=1: a painted brush mask, chosen, washed red.
+    if std::env::var_os("DUCKFOOT_SHOT_BRUSH").is_some() {
+        app.edit(|s| {
+            s.local.enabled = true;
+            let dabs = (0..40)
+                .map(|i| {
+                    let t = i as f32 / 39.0;
+                    photo_engine::local::Dab {
+                        at: [0.2 + 0.5 * t, 0.6 - 0.25 * (t * 3.1).sin()],
+                        radius: 0.05,
+                        hardness: 0.4,
+                        erase: false,
+                    }
+                })
+                .collect();
+            let mut m = photo_engine::local::Mask::brush();
+            m.shape = photo_engine::local::Shape::Brush { dabs };
+            m.adjust.exposure = -0.8;
+            s.local.params.masks.push(m);
+        });
+        app.selected_mask = Some(0);
+        app.mask_overlay = true;
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Local;
+        }
+    }
+    // DUCKFOOT_SHOT_HEAL=1: healing, three spots, one chosen; DUCKFOOT_SHOT_DUST=1 too for
+    // the dust view.
+    if std::env::var_os("DUCKFOOT_SHOT_HEAL").is_some() {
+        app.edit(|s| {
+            s.heal.enabled = true;
+            for (d, src) in [
+                ([0.3, 0.4], [0.3, 0.55]),
+                ([0.55, 0.3], [0.62, 0.36]),
+                ([0.7, 0.7], [0.6, 0.72]),
+            ] {
+                s.heal
+                    .params
+                    .spots
+                    .push(photo_engine::heal::Spot::new(d, src, 0.025));
+            }
+        });
+        app.healing = true;
+        app.selected_spot = Some(0);
+        app.dust_view = std::env::var_os("DUCKFOOT_SHOT_DUST").is_some();
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Heal;
+        }
+    }
+    // DUCKFOOT_SHOT_KEYSTONE=1: a vertical keystone, the crop & rotate card open.
+    if std::env::var_os("DUCKFOOT_SHOT_KEYSTONE").is_some() {
+        app.edit(|s| s.geometry.perspective_v = 40.0);
+        for s in &mut app.inspector_sections {
+            s.collapsed = s.id != photo_app::InspectorSectionId::Geometry;
+        }
+    }
+    // DUCKFOOT_SHOT_FILTERS=1: a filter showing, one kept under a name, the phone's filter
+    // rows open.
+    if std::env::var_os("DUCKFOOT_SHOT_FILTERS").is_some() {
+        app.filter.color_label = Some("green".into());
+        app.saved_filters
+            .push(photo_app::dam::SavedFilter::new("keepers", &app.filter));
+        app.filter.rating = photo_app::dam::RatingFilter::MinStars(3);
+        app.library_filters_open = true;
+    }
+    // DUCKFOOT_SHOT_PROOF=1: soft proofing with the gamut warning.
+    app.proofing = std::env::var_os("DUCKFOOT_SHOT_PROOF").is_some();
+    // DUCKFOOT_SHOT_CROP=1: framing a 4:5 crop.
+    if std::env::var_os("DUCKFOOT_SHOT_CROP").is_some() {
+        app.begin_crop();
+        app.set_crop_aspect(photo_app::crop_tool::Aspect::Ratio(4, 5));
+    }
+    // DUCKFOOT_SHOT_EXPORT=1: the Export dialog (desktop) or its options (phone).
+    if std::env::var_os("DUCKFOOT_SHOT_EXPORT").is_some() {
+        app.export_dialog_open = true;
+        app.export_options_open = true;
     }
     // Let the layout, the render and the histogram readback settle.
     for _ in 0..8 {
@@ -214,4 +372,17 @@ fn main() -> anyhow::Result<()> {
         .save(&out)?;
     eprintln!("wrote {out}");
     Ok(())
+}
+
+/// A phone's platform, as far as the Library screen needs one.
+struct LibraryPlatform(std::path::PathBuf);
+
+impl photo_app::platform::Platform for LibraryPlatform {
+    fn request(&mut self, _request: photo_app::platform::Request) {}
+    fn poll(&mut self) -> Vec<photo_app::platform::Response> {
+        Vec::new()
+    }
+    fn library_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.0.clone())
+    }
 }

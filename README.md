@@ -3,7 +3,8 @@
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
 > **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; Android
-> builds in CI and is untested on devices; Windows and macOS not yet built.**
+> and Windows build in CI (Android is untested on devices); Windows and macOS run the
+> test suite in CI and are experimental: not yet smoke-tested by hand.**
 >
 > Duckfoot is a native Rust application on wgpu. The only thing under construction is the
 > **Photo Studio and RAW processor**. Audio and Video are design, not code — see
@@ -147,40 +148,58 @@ You can also **drag a RAW file onto the window**.
 
 ### Controls
 
+<!-- keymap:start (generated from crates/photo-app/src/keymap.rs) -->
 | | |
 |---|---|
-| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo |
-| `Ctrl+S` | save sidecar (`.duckfoot`) |
-| `Ctrl+C` / `Ctrl+V` | copy / paste adjustment stack |
-| `\` | toggle before / after split view |
-| `C` / `Esc` | toggle crop tool / cancel crop gesture |
-| `[` / `]` | rotate 90° CCW / CW |
-| `H` / `V` | mirror / flip horizontal / vertical |
-| Scroll wheel / pinch over the image | zoom about the cursor |
-| Drag the image | pan, once zoomed in (at fit there is nothing to pan) |
-| `←` / `→` | previous / next photo on the shelf |
-| `Ctrl+0` / `Ctrl+1` / `Z` | fit to window / 100% (1:1) / toggle between them |
+| **Photos** | |
+| `←` / `→` | previous / next photo, in the filmstrip's order |
+| `Ctrl+S` | save now (edits also save on their own) |
+| `Ctrl+E` | export this photo: size, format, metadata, then where |
+| `Ctrl+Shift+E` | batch export the selection |
+| **Editing** | |
+| `Alt+↑` / `Alt+↓`, `Alt+←` / `Alt+→` | choose a value of the card last worked on, then turn it (as a right-drag on the photo does) |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | undo / redo, per photo |
+| `Ctrl+C` / `Ctrl+V` | copy / paste the adjustments (crop and rotation stay put) |
+| `Ctrl+Shift+V` | choose what paste carries |
+| `Ctrl+'` | virtual copy: another edit of the same photo |
+| `Ctrl+Alt+V` | the same edits as the photo open before this one |
+| `Esc` with a mask chosen or healing | put the mask's handles away / stop healing |
+| `C` | crop tool on / off |
+| `Enter` / `Esc` | apply / cancel the crop |
+| `X` / `O` while cropping | turn the crop's shape / next guide |
+| `Shift` while resizing a crop | keep its shape |
+| `[` / `]` | rotate 90° left / right |
+| `H` / `V` | mirror / flip |
+| `Esc` while dragging | put the control back where the drag started |
+| `W`, then click | white balance from something that should be grey |
+| **View** | |
+| `\` | before / after split |
+| `S` | soft proof: the preview in the export's colour space |
+| `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
+| `?` or `F1` | this list of shortcuts |
+| **Library** | |
 | `0`–`5` | star rating for the selection (`0` clears) |
+| `6` / `7` / `8` / `9` | red / yellow / green / blue label (again takes it off) |
 | `P` / `X` / `U` | flag as pick / reject / clear the flag |
 | `Ctrl+A` | select every photo on the shelf |
-| `Ctrl+Shift+E` | batch export the selection |
-| `Enter` | apply the crop |
-| Drag a slider | live re-render; one undo step per gesture, not per frame |
+| `Shift`+click / `Ctrl`+click | select a range / add to the selection |
+| **Mouse and touch** | |
+| Scroll or pinch over the photo | zoom about the pointer |
+| Drag the photo | pan, once zoomed in |
+| Drag a slider | live; one undo step per gesture |
 | `Shift` while dragging a slider | ten times finer |
-| Double-click a slider or its label | back to default (the tick on the rail) |
-| Drag in the curve box | move the nearest node; endpoints keep their x |
-| Drag in 3D Map / Tonemap | interactive 3D orbit camera (yaw & pitch) |
-| `Ctrl`+scroll on a 3D view | zoom its camera (a plain wheel scrolls the sidebar) |
-| Double-click on 3D view | reset 3D camera angle and zoom |
+| Double-click a slider or its label | back to its default |
+| Drag in the curve | move the nearest point; the ends keep their place |
+| Drag a 3D view | orbit it; `Ctrl`+scroll zooms, double-click resets |
 | Click a module's header | open it and close the others; `Shift`+click opens it alongside |
 | Touch a control in a module that's off | turns the module on |
-| Checkbox by a module name | enable/disable that stage of the chain |
-| `⚙` in the Pipeline header | show/hide and reorder modules; the one-open-at-a-time switch |
-| `↕` in the Pipeline header | expand all / collapse all modules |
-| `◧` / `◫` / `◨` in the top bar | shelf on/off · split view · inspector width (300px ↔ 460px) |
-| Click a History row | jump to that step — undoes or redoes to it |
-| Drag the split divider | move it; at fit, dragging anywhere on the image moves it |
-| Double-click the split divider | centre it |
+| Click a History row | jump to that step |
+| Drag the split divider | move it; double-click centres it |
+| Hold the scope's clip readout | show clipping while held |
+| Drop files on the window | add them to the shelf and open the first |
+<!-- keymap:end -->
+
+Press `?` in the app for the same list. On a Mac, `Ctrl` is `⌘`.
 
 Hotkeys deliberately do not fire while a text field has focus.
 
@@ -188,7 +207,8 @@ Hotkeys deliberately do not fire while a text field has focus.
 
 `.cr2 .cr3 .nef .nrw .arw .srf .sr2 .dng .orf .rw2 .raf .pef .raw`
 
-Decoding is `rawloader`'s — a few hundred camera models. Files it cannot handle fail with
+Decoding is `rawler`'s (~2,500 camera models), with `rawloader` as a fallback for anything
+rawler refuses. Files neither can handle fail with
 the filename and a reason in the status bar rather than silently rendering garbage.
 
 ---
@@ -283,8 +303,7 @@ cargo run --release -p photo-engine --example open_profile -- ~/Pictures/DSC0845
 Times each stage of what the app does on open (read, rawler decode, the full `decode_raw`
 the loader runs) and the embedded-preview path thumbnails and the stage stand-in use. Each
 stage runs five times and the fastest is reported, so the first cold read does not
-dominate. Unlike `probe` and `bench`, which go through rawloader, this measures the
-decoder the app actually uses.
+dominate. Like `probe` and `bench`, it goes through the decoder the app actually uses.
 
 No camera files to hand? `synth_raw` writes a camera-sized DNG with a clipped highlight
 and an embedded preview, so every stage has real work to do:
@@ -380,11 +399,14 @@ How it differs from the desktop, for now:
   across the photo for the next or previous one.
 - Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
 
-### Windows, macOS — not yet built
+### Windows, macOS — experimental
 
-**These have not been attempted and no claim is made that they work.** Both type-check
-(`cargo check --target x86_64-pc-windows-msvc` / `aarch64-apple-darwin`), and the shell in
-`crates/duckfoot/src/lib.rs` holds no Linux-specific code.
+**Built and tested in CI, not yet smoke-tested by hand; no claim is made that they work.**
+Every push builds a Windows zip. A manual run of the Build workflow, and every tag, also
+runs the workspace tests on `windows-latest` and `macos-latest` (the GPU tests skip
+themselves where the runner has no GPU) and builds an unsigned macOS `.dmg`, attached to
+the run; macOS runner minutes cost ten times Linux's, so not every push pays for them. The shell in `crates/duckfoot/src/lib.rs` holds no
+Linux-specific code.
 
 ```bash
 # Windows (from Linux)
@@ -441,14 +463,14 @@ DESIGN.md invariant 8.
 
 | Area | Symbol | Status | Notes |
 |---|---|---|---|
-| **Decode** | `RawloaderBackend` | Working | Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
+| **Decode** | `DefaultRawDecoder` | Working | rawler, then rawloader, each tried once. Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
 | **Decode** | measured white level | Working | Finds the real clip plateau in the data; Canon's per-ISO saturation no longer turns highlights magenta |
 | **Decode** | DNG `AsShotWhiteXY` | Working | Pixel-style DNGs; matrices interpolated by colour temperature per the DNG spec |
 | **Decode** | EXIF orientation | Working | Opens upright; the camera's turn is the starting geometry, not an edit |
 | **Decode** | `RawDecoder` trait | Working | `rawler` is a drop-in behind it |
 | **Decode** | non-mosaic (`cpp != 1`) | `@stub` | Refuses loudly rather than mis-indexing |
 | **Decode** | float-encoded RAW | `@stub` | Some DNGs; refuses loudly |
-| **Decode** | 4-colour CFA (CYGM / X-Trans) | `@stub` | Only 2×2 RGB patterns |
+| **Decode** | 4-colour CFA (CYGM) | `@stub` | 2×2 Bayer and 6×6 X-Trans RGB patterns only |
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
 | **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |
@@ -460,7 +482,7 @@ DESIGN.md invariant 8.
 | **Params** | capture sharpen, vignette | Working | Edge-preserving convolution & radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
 | **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
-| **Export** | `Engine::export`, `ExportedImage` | Working | Full-res PNG/JPEG, cropped & oriented, encoded off UI thread |
+| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits (PNG, TIFF); resize, output sharpening; EXIF and an sRGB profile embedded; cropped & oriented, encoded off the UI thread |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
 | **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
@@ -474,11 +496,11 @@ DESIGN.md invariant 8.
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
-| **App** | export | Working | Export… button, format from the filename |
+| **App** | export | Working | Export dialog (Ctrl+E) and the phone's Export sheet share one settings panel with the batch recipes |
 | **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
 | **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
-| **Platform** | Windows / macOS / Android | Not built | Bootstrap only exists for Linux |
+| **Platform** | Windows / macOS / Android | Built in CI | Android untested on devices; Windows and macOS experimental (tests run in CI, no manual smoke test yet) |
 
 ### Measured
 
@@ -557,7 +579,7 @@ Checked items are done **and verified**, not merely written.
 - [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
       near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
 - [x] Preview at fit-to-window scale; full resolution reserved for export
-- [x] PNG/JPEG export through the same shader — the real test of invariant 2
+- [x] JPEG/PNG/TIFF/WebP export through the same shader — the real test of invariant 2
 - [x] Live histogram via a compute pass and a 4 KB readback
 - [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
 - [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)

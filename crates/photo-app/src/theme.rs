@@ -31,8 +31,9 @@ pub const TEXT_HI: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
 pub const TEXT: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5);
 /// Secondary readouts and labels.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x99, 0x99, 0x99);
-/// Disabled, or not yet applied (redo steps).
-pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
+/// Disabled, or not yet applied (redo steps). 4.6:1 on black: faint, but still legible
+/// text (WCAG AA), where #555 at 2.8:1 was not.
+pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x76, 0x76, 0x76);
 
 /// Calibrated amber: selection, the active module, the one primary action.
 pub const ACCENT: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);

@@ -1,0 +1,50 @@
+# Weekly fuzzing (WP5.1): every parser a hostile file reaches, ten minutes each, on a
+# nightly toolchain with cargo-fuzz; weekly rather than nightly, since seven targets cost
+# over an hour and a half of runner time, and it can be run by hand at any time. Found inputs are attached to the run; each becomes a
+# regression test once fixed (see decode.rs's hostile-input tests). Nothing waits on it.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [tiff, embedded_jpeg, raster, raw, sidecar, preset, icc]
+    steps:
+      - uses: actions/checkout@v5
+
+      # photo-app, which the preset target links, needs these to build on Linux.
+      - name: Install Linux windowing dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
+      - run: rustup toolchain install nightly --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz-${{ matrix.target }}
+
+      - run: cargo +nightly install cargo-fuzz --locked
+
+      # -timeout: a sanitised debug build decodes a legitimate 15 MP JPEG in about ten
+      # seconds, so only a minute is a hang.
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }}
+          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
+            -max_total_time=600 -rss_limit_mb=4096 -timeout=60
+
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts

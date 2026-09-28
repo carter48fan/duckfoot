@@ -3,14 +3,14 @@
 use photo_engine::{AssetMetadata, Flag};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RatingFilter {
     #[default]
     All,
     MinStars(u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FlagFilter {
     #[default]
     All,
@@ -19,7 +19,7 @@ pub enum FlagFilter {
     RejectsOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum EditFilter {
     #[default]
     All,
@@ -27,7 +27,7 @@ pub enum EditFilter {
     PristineOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SortBy {
     #[default]
     FileName,
@@ -35,15 +35,47 @@ pub enum SortBy {
     FileSize,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FilterState {
     pub rating: RatingFilter,
     pub flag: FlagFilter,
     pub edit: EditFilter,
     pub color_label: Option<String>,
+    #[serde(skip)]
     pub search_query: String,
     pub sort_by: SortBy,
     pub sort_descending: bool,
+}
+
+/// A filter kept under a name (W-11's collections-lite): what it shows, how it is sorted
+/// and what it searches for.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SavedFilter {
+    pub name: String,
+    pub filter: FilterState,
+    pub search: String,
+}
+
+impl SavedFilter {
+    pub fn new(name: &str, filter: &FilterState) -> Self {
+        let mut filter = filter.clone();
+        let search = std::mem::take(&mut filter.search_query);
+        Self {
+            name: name.trim().to_string(),
+            filter,
+            search,
+        }
+    }
+
+    /// The filter it keeps, search included.
+    pub fn filter(&self) -> FilterState {
+        FilterState {
+            search_query: self.search.clone(),
+            ..self.filter.clone()
+        }
+    }
 }
 
 impl FilterState {
@@ -51,6 +83,30 @@ impl FilterState {
     pub fn matches(
         &self,
         path: &Path,
+        metadata: &AssetMetadata,
+        is_edited: bool,
+        has_sidecar: bool,
+    ) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        self.matches_lowered(
+            &self.search_query.to_lowercase(),
+            &name,
+            metadata,
+            is_edited,
+            has_sidecar,
+        )
+    }
+
+    /// [`FilterState::matches`] for a whole shelf, every frame (WP5.4): the query
+    /// lowercased once by the caller, and each name when it was shelved.
+    pub fn matches_lowered(
+        &self,
+        query: &str,
+        name: &str,
         metadata: &AssetMetadata,
         is_edited: bool,
         has_sidecar: bool,
@@ -105,14 +161,14 @@ impl FilterState {
         }
 
         // 5. Text search query
-        if !self.search_query.is_empty() {
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let query = self.search_query.to_lowercase();
-            if !file_name.contains(&query) {
+        if !query.is_empty() {
+            let keyword = || {
+                metadata
+                    .keywords
+                    .iter()
+                    .any(|k| k.to_lowercase().contains(query))
+            };
+            if !name.contains(query) && !keyword() {
                 return false;
             }
         }
@@ -134,12 +190,14 @@ mod tests {
             rating: 4,
             flag: Flag::Pick,
             color_label: Some("green".into()),
+            keywords: vec!["Iceland".into()],
         };
 
         let meta_rejected = AssetMetadata {
             rating: 5,
             flag: Flag::Reject,
             color_label: None,
+            keywords: Vec::new(),
         };
 
         assert!(filter.matches(path, &meta_good, false, false));
@@ -153,5 +211,45 @@ mod tests {
         // Filter: Min 5 stars
         filter.rating = RatingFilter::MinStars(5);
         assert!(!filter.matches(path, &meta_good, false, false));
+    }
+
+    #[test]
+    fn a_saved_filter_keeps_its_search() {
+        let filter = FilterState {
+            rating: RatingFilter::MinStars(3),
+            search_query: "iceland".into(),
+            ..Default::default()
+        };
+        let saved = SavedFilter::new(" Best of Iceland ", &filter);
+        assert_eq!(saved.name, "Best of Iceland");
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: SavedFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.filter(), filter);
+    }
+
+    #[test]
+    fn a_label_or_a_keyword_finds_a_photo() {
+        let path = Path::new("/photos/DSC08450.ARW");
+        let mut tagged = AssetMetadata {
+            color_label: Some("red".into()),
+            ..Default::default()
+        };
+        tagged.add_keywords("Iceland, waterfall");
+        let plain = AssetMetadata::default();
+        let mut filter = FilterState {
+            color_label: Some("red".into()),
+            ..Default::default()
+        };
+        assert!(filter.matches(path, &tagged, false, false));
+        assert!(!filter.matches(path, &plain, false, false));
+        filter.color_label = None;
+        filter.search_query = "WATERF".into();
+        assert!(filter.matches(path, &tagged, false, false));
+        assert!(!filter.matches(path, &plain, false, false));
+        filter.search_query = "dsc084".into();
+        assert!(
+            filter.matches(path, &plain, false, false),
+            "the name still finds it"
+        );
     }
 }

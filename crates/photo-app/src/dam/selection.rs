@@ -46,7 +46,9 @@ impl SelectionModel {
         if self.selected.contains(&path) {
             self.selected.remove(&path);
             if self.active.as_ref() == Some(&path) {
-                self.active = self.selected.iter().next().cloned();
+                // The anchor if it is still selected, else none — not whichever entry a
+                // hash set happens to yield first.
+                self.active = self.anchor.clone().filter(|a| self.selected.contains(a));
             }
         } else {
             self.selected.insert(path.clone());
@@ -57,10 +59,14 @@ impl SelectionModel {
         }
     }
 
-    /// Shift+Click: select all items between anchor and the target path.
+    /// Shift+Click: the items between the anchor and the target, in the order shown, and
+    /// only those — as in every file manager. The anchor stays, so a second Shift+Click
+    /// re-spans from the same place.
     pub fn select_range(&mut self, target: PathBuf, all_items: &[PathBuf]) {
         let anchor = self.anchor.clone().unwrap_or_else(|| target.clone());
         self.active = Some(target.clone());
+        self.anchor = Some(anchor.clone());
+        self.selected.clear();
 
         let idx_a = all_items.iter().position(|p| p == &anchor);
         let idx_b = all_items.iter().position(|p| p == &target);
@@ -117,5 +123,19 @@ mod tests {
         assert!(sel.is_selected(&items[3]));
         assert!(!sel.is_selected(&items[0]));
         assert!(!sel.is_selected(&items[4]));
+    }
+
+    #[test]
+    fn a_second_shift_click_respans_from_the_anchor() {
+        let items: Vec<PathBuf> = (0..6)
+            .map(|i| PathBuf::from(format!("/p/{i}.jpg")))
+            .collect();
+        let mut sel = SelectionModel::new();
+        sel.select_single(items[2].clone());
+        sel.select_range(items[5].clone(), &items);
+        assert_eq!(sel.count(), 4);
+        sel.select_range(items[0].clone(), &items);
+        assert_eq!(sel.count(), 3, "2..=0, not the union with 2..=5");
+        assert!(!sel.is_selected(&items[5]));
     }
 }
