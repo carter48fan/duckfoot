@@ -244,7 +244,7 @@ impl PhotoApp {
         }
         self.compact_status(ui);
         self.compact_rects.stage = Rect::NOTHING;
-        self.workspace(ui);
+        self.workspace(ui, gpu);
         self.batch_export_dialog(ui);
         self.tour(ui);
     }
