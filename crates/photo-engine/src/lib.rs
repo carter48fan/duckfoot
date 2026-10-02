@@ -22,6 +22,7 @@ pub mod keystone;
 pub mod lens;
 pub mod lensfun;
 pub mod local;
+pub mod lut3d;
 pub mod metadata;
 pub mod opcodes;
 pub mod params;
@@ -32,7 +33,7 @@ pub mod temperature;
 #[doc(hidden)]
 pub mod testkit;
 
-pub use curve::{identity_nodes, CurveNode};
+pub use curve::{build_lut, build_lut_4channel, identity_nodes, CurveNode, RgbCurves};
 pub use decode::{
     decode_raster, decode_raw, raster_orientation, CfaImage, CfaPattern, DefaultRawDecoder,
     RasterImage, RawDecoder, RawlerBackend, RawloaderBackend,
@@ -43,11 +44,12 @@ pub use engine::{
 };
 pub use exif_out::MetadataPolicy;
 pub use export::{
-    BitDepth, ExportFormat, ExportSettings, Exported, ExportedImage, Resize, SharpenAmount,
-    SharpenFor, JPEG_QUALITY,
+    BitDepth, ExportFormat, ExportSettings, Exported, ExportedImage, GainMap, GainMapMetadata,
+    Resize, SharpenAmount, SharpenFor, JPEG_QUALITY,
 };
 pub use histogram::Histogram;
 pub use lens::{FileWarp, LensModel};
+pub use lut3d::{parse_cube, Lut3D};
 pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Denoise, Exposure,

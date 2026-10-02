@@ -26,6 +26,48 @@ pub fn identity_nodes() -> Vec<CurveNode> {
     vec![CurveNode::new(0.0, 0.0), CurveNode::new(1.0, 1.0)]
 }
 
+/// Per-channel RGB tone curves for individual Red, Green, and Blue grading.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RgbCurves {
+    #[serde(default = "identity_nodes")]
+    pub red: Vec<CurveNode>,
+    #[serde(default = "identity_nodes")]
+    pub green: Vec<CurveNode>,
+    #[serde(default = "identity_nodes")]
+    pub blue: Vec<CurveNode>,
+}
+
+impl Default for RgbCurves {
+    fn default() -> Self {
+        Self {
+            red: identity_nodes(),
+            green: identity_nodes(),
+            blue: identity_nodes(),
+        }
+    }
+}
+
+/// Build a 4-channel LUT (1024 x 4 floats):
+/// - Row 0: Combined luminance curve
+/// - Row 1: Red channel curve
+/// - Row 2: Green channel curve
+/// - Row 3: Blue channel curve
+pub fn build_lut_4channel(combined: &[CurveNode], rgb: Option<&RgbCurves>) -> Vec<f32> {
+    let mut out = Vec::with_capacity(LUT_SIZE * 4);
+    out.extend(build_lut(combined));
+    if let Some(c) = rgb {
+        out.extend(build_lut(&c.red));
+        out.extend(build_lut(&c.green));
+        out.extend(build_lut(&c.blue));
+    } else {
+        let ident = build_lut(&identity_nodes());
+        out.extend(ident.iter().copied());
+        out.extend(ident.iter().copied());
+        out.extend(ident.iter().copied());
+    }
+    out
+}
+
 pub fn build_lut(nodes: &[CurveNode]) -> Vec<f32> {
     let mut pts: Vec<CurveNode> = nodes.to_vec();
     pts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
@@ -147,5 +189,34 @@ mod tests {
             CurveNode::new(1.0, 1.0),
         ]);
         assert!(dup.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn build_lut_4channel_packs_rgb_rows() {
+        let master = vec![CurveNode::new(0.0, 0.2), CurveNode::new(1.0, 0.8)];
+        let rgb = RgbCurves {
+            red: vec![CurveNode::new(0.0, 0.1), CurveNode::new(1.0, 0.9)],
+            green: vec![CurveNode::new(0.0, 0.3), CurveNode::new(1.0, 0.7)],
+            blue: vec![CurveNode::new(0.0, 0.4), CurveNode::new(1.0, 0.6)],
+        };
+
+        let lut = build_lut_4channel(&master, Some(&rgb));
+        assert_eq!(lut.len(), LUT_SIZE * 4);
+
+        // Row 0: master
+        assert!((lut[0] - 0.2).abs() < 1e-3);
+        assert!((lut[LUT_SIZE - 1] - 0.8).abs() < 1e-3);
+
+        // Row 1: red
+        assert!((lut[LUT_SIZE] - 0.1).abs() < 1e-3);
+        assert!((lut[2 * LUT_SIZE - 1] - 0.9).abs() < 1e-3);
+
+        // Row 2: green
+        assert!((lut[2 * LUT_SIZE] - 0.3).abs() < 1e-3);
+        assert!((lut[3 * LUT_SIZE - 1] - 0.7).abs() < 1e-3);
+
+        // Row 3: blue
+        assert!((lut[3 * LUT_SIZE] - 0.4).abs() < 1e-3);
+        assert!((lut[4 * LUT_SIZE - 1] - 0.6).abs() < 1e-3);
     }
 }

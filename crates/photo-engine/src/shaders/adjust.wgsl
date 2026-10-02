@@ -59,7 +59,8 @@ struct Adjust {
     //   brush: x = its layer in `brushes`
     //   the second's w = kind (0 linear, 1 radial, 2 brush) + 4 if inverted
     //   exposure (EV), temperature, tint, contrast; saturation, clarity, sharpness, 0
-    masks:      array<vec4<f32>, 32>,
+    //   range: x = mode (0 none, 1 luminance, 2 color), y = param1, z = param2, w = feather
+    masks:      array<vec4<f32>, 40>,
     mask_info:  vec4<u32>,   // x = masks in use, y = 1 + the mask shown as an overlay, or 0,
                              // z = 1 for the dust view, w = heal spots in use
     // Spot heal (W-02), two vec4 each: destination xy, source xy (sensor px); radius (px),
@@ -134,12 +135,17 @@ fn not_finite(c: vec3<f32>) -> bool {
     return any(exponent == vec3<u32>(0x7f800000u));
 }
 
-fn lut_at(i: i32) -> f32 {
-    return textureLoad(curve_lut, vec2<i32>(clamp(i, 0, LUT_MAX), 0), 0).r;
+fn lut_at_row(i: i32, row: i32) -> f32 {
+    return textureLoad(curve_lut, vec2<i32>(clamp(i, 0, LUT_MAX), row), 0).r;
 }
 
-// The LUT is 1024x1 r32float, built on the CPU with a monotone cubic (Fritsch-Carlson)
-// spline. Interpolated by hand rather than by a sampler: linear filtering of r32float is
+fn lut_at(i: i32) -> f32 {
+    return lut_at_row(i, 0);
+}
+
+// The LUT is 1024x4 r32float, built on the CPU with monotone cubic (Fritsch-Carlson)
+// splines: row 0 is Master/RGB, row 1 is Red, row 2 is Green, row 3 is Blue.
+// Interpolated by hand rather than by a sampler: linear filtering of r32float is
 // an optional WebGPU feature (FLOAT32_FILTERABLE) that plenty of Android GPUs lack, and
 // textureLoad has no such requirement.
 //
@@ -147,26 +153,34 @@ fn lut_at(i: i32) -> f32 {
 // rather than being clamped here — clamping mid-chain is what destroys highlight recovery.
 // The curve with its axes in display values: what the histogram under the editor shows,
 // and where a quarter-tone node sits on a quarter tone. Encoded, looked up, decoded.
-fn curve_display(v: f32) -> f32 {
+fn curve_row(v: f32, row: i32) -> f32 {
+    if (v <= 0.0) {
+        return lut_at_row(0, row);
+    }
+    if (v >= 1.0) {
+        return lut_at_row(LUT_MAX, row) + (v - 1.0);
+    }
+    let p = v * f32(LUT_MAX);
+    let i = i32(floor(p));
+    return mix(lut_at_row(i, row), lut_at_row(i + 1, row), p - floor(p));
+}
+
+fn curve(v: f32) -> f32 {
+    return curve_row(v, 0);
+}
+
+fn curve_display_row(v: f32, row: i32) -> f32 {
     var e = 0.0;
     if (v > 0.0031308) {
         e = 1.055 * pow(v, 1.0 / 2.4) - 0.055;
     } else if (v > 0.0) {
         e = v * 12.92;
     }
-    return srgb_to_linear1(curve(e));
+    return srgb_to_linear1(curve_row(e, row));
 }
 
-fn curve(v: f32) -> f32 {
-    if (v <= 0.0) {
-        return lut_at(0);
-    }
-    if (v >= 1.0) {
-        return lut_at(LUT_MAX) + (v - 1.0);
-    }
-    let p = v * f32(LUT_MAX);
-    let i = i32(floor(p));
-    return mix(lut_at(i), lut_at(i + 1), p - floor(p));
+fn curve_display(v: f32) -> f32 {
+    return curve_display_row(v, 0);
 }
 
 // Mid grey, and what the display shows it as with filmic off: sRGB-encoded 0.18, 118/255.
@@ -576,10 +590,56 @@ fn local_contrast(s: vec4<f32>, uv: vec2<f32>, lod: f32, wb: vec3<f32>, clarity:
     return exp2(k_clarity * d_clarity + k_texture * d_texture);
 }
 
+fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
+    let cmax = max(c.r, max(c.g, c.b));
+    let cmin = min(c.r, min(c.g, c.b));
+    let delta = cmax - cmin;
+    var h = 0.0;
+    if (delta > 0.0001) {
+        if (cmax == c.r) {
+            h = ((c.g - c.b) / delta) % 6.0;
+        } else if (cmax == c.g) {
+            h = ((c.b - c.r) / delta) + 2.0;
+        } else {
+            h = ((c.r - c.g) / delta) + 4.0;
+        }
+        h = h * 60.0;
+        if (h < 0.0) {
+            h = h + 360.0;
+        }
+    }
+    let s = select(0.0, delta / max(cmax, 0.0001), cmax > 0.0001);
+    let v = cmax;
+    return vec3<f32>(h, s, v);
+}
+
+fn range_weight(range_vec: vec4<f32>, c: vec3<f32>) -> f32 {
+    let mode = range_vec.x;
+    if (mode > 0.5 && mode < 1.5) {
+        // Luminance range: y = min_luma, z = max_luma, w = feather
+        let lum = clamp(luma(c), 0.0, 1.0);
+        let min_l = range_vec.y;
+        let max_l = range_vec.z;
+        let feather = max(range_vec.w, 0.001);
+        let lower = smoothstep(min_l - feather, min_l, lum);
+        let upper = 1.0 - smoothstep(max_l, max_l + feather, lum);
+        return lower * upper;
+    } else if (mode >= 1.5) {
+        // Color / Hue range: y = target_hue (0..360), z = spread (0..180), w = feather (0..180)
+        let hsv = rgb_to_hsv(c);
+        let target_hue = range_vec.y;
+        let spread = range_vec.z;
+        let feather = max(range_vec.w, 0.001);
+        let diff = abs((hsv.x - target_hue + 540.0) % 360.0 - 180.0);
+        return 1.0 - smoothstep(spread, spread + feather, diff);
+    }
+    return 1.0;
+}
+
 // How much of local mask `i` applies at sensor position `p` (pixels): `local::Mask::weight`.
 fn mask_weight(i: u32, p: vec2<f32>) -> f32 {
-    let g0 = u.masks[i * 4u];
-    let g1 = u.masks[i * 4u + 1u];
+    let g0 = u.masks[i * 5u];
+    let g1 = u.masks[i * 5u + 1u];
     let code = u32(g1.w + 0.5);
     let kind = code & 3u;
     var inside: f32;
@@ -615,15 +675,20 @@ struct Local {
     shown: f32,
 }
 
-fn local_at(p: vec2<f32>) -> Local {
+fn local_at(p: vec2<f32>, c: vec3<f32>) -> Local {
     var l = Local(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if (!enabled(FLAG_LOCAL)) {
         return l;
     }
     for (var i = 0u; i < min(u.mask_info.x, 8u); i = i + 1u) {
-        let w = mask_weight(i, p);
-        let a = u.masks[i * 4u + 2u];
-        let b = u.masks[i * 4u + 3u];
+        let slot = i * 5u;
+        var w = mask_weight(i, p);
+        let range_vec = u.masks[slot + 4u];
+        if (range_vec.x > 0.0) {
+            w = w * range_weight(range_vec, c);
+        }
+        let a = u.masks[slot + 2u];
+        let b = u.masks[slot + 3u];
         l.exposure += w * a.x;
         l.temperature += w * a.y;
         l.tint += w * a.z;
@@ -701,29 +766,6 @@ fn apply_exposure_with_rolloff(c: vec3<f32>, gain: f32, black: f32, rolloff: f32
     let over = max(scaled - vec3<f32>(threshold), vec3<f32>(0.0));
     let compressed = over / (vec3<f32>(1.0) + over * rolloff);
     return select(scaled, vec3<f32>(threshold) + compressed, scaled > vec3<f32>(threshold));
-}
-
-fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
-    let cmax = max(c.r, max(c.g, c.b));
-    let cmin = min(c.r, min(c.g, c.b));
-    let delta = cmax - cmin;
-    var h = 0.0;
-    if (delta > 0.0001) {
-        if (cmax == c.r) {
-            h = ((c.g - c.b) / delta) % 6.0;
-        } else if (cmax == c.g) {
-            h = ((c.b - c.r) / delta) + 2.0;
-        } else {
-            h = ((c.r - c.g) / delta) + 4.0;
-        }
-        h = h * 60.0;
-        if (h < 0.0) {
-            h = h + 360.0;
-        }
-    }
-    let s = select(0.0, delta / max(cmax, 0.0001), cmax > 0.0001);
-    let v = cmax;
-    return vec3<f32>(h, s, v);
 }
 
 fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
@@ -855,9 +897,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    var wb = vec3<f32>(1.0);
+    if (enabled(FLAG_WB)) {
+        wb = u.wb.rgb;
+    }
+    let base_c = scene(s, wb);
+
     // Local masks, read once for the pixel: where they are is in sensor space, so they
     // follow the photo through every turn and flip.
-    let local = local_at(ideal);
+    let local = local_at(ideal, base_c);
     var sharpen = local.sharpness * 0.01;
     if (enabled(FLAG_SHARPEN)) {
         sharpen += u.sharpen.x;
@@ -892,11 +940,6 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         s = s * gain;
     }
 
-    // White balance is applied in camera space, BEFORE the primaries conversion.
-    var wb = vec3<f32>(1.0);
-    if (enabled(FLAG_WB)) {
-        wb = u.wb.rgb;
-    }
     // Camera-native primaries -> linear sRGB. Never optional: skipping this is what made
     // every image in the last build look like a broken white balance.
     var c = scene(s, wb);
@@ -960,9 +1003,11 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     if (enabled(FLAG_CURVE)) {
         if (u.flags.y == 1u) {
-            c = vec3<f32>(curve_display(c.r), curve_display(c.g), curve_display(c.b));
+            c = vec3<f32>(curve_display_row(c.r, 0), curve_display_row(c.g, 0), curve_display_row(c.b, 0));
+            c = vec3<f32>(curve_display_row(c.r, 1), curve_display_row(c.g, 2), curve_display_row(c.b, 3));
         } else {
-            c = vec3<f32>(curve(c.r), curve(c.g), curve(c.b));
+            c = vec3<f32>(curve_row(c.r, 0), curve_row(c.g, 0), curve_row(c.b, 0));
+            c = vec3<f32>(curve_row(c.r, 1), curve_row(c.g, 2), curve_row(c.b, 3));
         }
     }
 

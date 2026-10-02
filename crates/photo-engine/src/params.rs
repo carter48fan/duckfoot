@@ -664,6 +664,8 @@ pub struct PhotoStack {
     #[serde(default)]
     pub tonal: Module<Tonal>,
     pub tone_curve: Module<Vec<CurveNode>>,
+    #[serde(default)]
+    pub rgb_curves: Module<crate::curve::RgbCurves>,
     #[serde(default = "CurveDomain::legacy")]
     pub curve_domain: CurveDomain,
     /// Where the adjust pass works (W-09). A sidecar without it was made in linear sRGB
@@ -708,6 +710,7 @@ impl Default for PhotoStack {
             exposure: Module::new(true, Exposure::default()),
             tonal: Module::new(false, Tonal::default()),
             tone_curve: Module::new(false, identity_nodes()),
+            rgb_curves: Module::new(false, crate::curve::RgbCurves::default()),
             curve_domain: CurveDomain::Display,
             working_space: crate::gamut::WorkingSpace::Rec2020,
             filmic: Module::new(
@@ -775,7 +778,7 @@ impl PhotoStack {
         if self.tonal.enabled {
             m |= flags::TONAL;
         }
-        if self.tone_curve.enabled {
+        if self.tone_curve.enabled || self.rgb_curves.enabled {
             m |= flags::CURVE;
         }
         if self.filmic.enabled {

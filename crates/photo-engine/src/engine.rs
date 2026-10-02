@@ -50,7 +50,7 @@ impl Make for wgpu::Device {
     }
 }
 
-use crate::curve::{build_lut, CurveNode, LUT_SIZE};
+use crate::curve::{build_lut_4channel, CurveNode, LUT_SIZE};
 use crate::decode::{CfaImage, CfaPattern, RasterImage};
 use crate::export::ExportedImage;
 use crate::histogram::{Histogram, ReadbackState, BUFFER_BYTES};
@@ -164,8 +164,8 @@ struct AdjustUniforms {
     tca_r: [f32; 4],
     tca_b: [f32; 4],
     warp_vig: [f32; 4],
-    /// Local masks, four vec4 each: see `adjust.wgsl`'s `masks`.
-    masks: [[f32; 4]; 32],
+    /// Local masks, five vec4 each: see `adjust.wgsl`'s `masks`.
+    masks: [[f32; 4]; 40],
     /// Masks in use, 1 + the one shown as an overlay (0 for none), the dust view, spots.
     mask_info: [u32; 4],
     /// Heal spots, two vec4 each: see `adjust.wgsl`'s `spots`.
@@ -181,6 +181,13 @@ struct AdjustUniforms {
     /// Proofing: the proof's space → the screen's, rows; [0].w = 1 while proofing,
     /// [1].w = 1 to mark what the proof cannot hold.
     proof_m: [[f32; 4]; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ResizeUniforms {
+    crop: [f32; 4],
+    dest_size: [f32; 4],
 }
 
 /// A soft proof: the space proofed against, and whether to mark what it cannot hold.
@@ -481,7 +488,14 @@ pub struct Engine {
     lut_view: wgpu::TextureView,
     sensor_sampler: wgpu::Sampler,
     cached_curve: Vec<CurveNode>,
+    cached_rgb_curves: crate::curve::RgbCurves,
     image: Option<LoadedImage>,
+
+    resize_pipeline: wgpu::RenderPipeline,
+    deep_resize_pipeline: wgpu::RenderPipeline,
+    resize_bgl: wgpu::BindGroupLayout,
+    resize_sampler: wgpu::Sampler,
+    resize_buffer: wgpu::Buffer,
 
     hist_pipeline: wgpu::ComputePipeline,
     hist_bgl: wgpu::BindGroupLayout,
@@ -794,6 +808,69 @@ impl Engine {
             &mip_bgl,
             SENSOR_FORMAT,
         );
+        let resize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gpu resize"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resize.wgsl").into()),
+        });
+        let resize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("gpu resize bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let resize_pipeline = fullscreen_pipeline(
+            device,
+            "export resize",
+            &resize_shader,
+            &resize_bgl,
+            OUTPUT_FORMAT,
+        );
+        let deep_resize_pipeline = fullscreen_pipeline(
+            device,
+            "export deep resize",
+            &resize_shader,
+            &resize_bgl,
+            DEEP_OUTPUT_FORMAT,
+        );
+        let resize_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("resize sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let resize_buffer = device.make_buffer(&wgpu::BufferDescriptor {
+            label: Some("resize uniforms"),
+            size: std::mem::size_of::<ResizeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mosaic_entry = wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -1043,7 +1120,7 @@ impl Engine {
             label: Some("tone curve lut"),
             size: wgpu::Extent3d {
                 width: LUT_SIZE as u32,
-                height: 1,
+                height: 4,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1158,7 +1235,13 @@ impl Engine {
             lut_view,
             sensor_sampler,
             cached_curve: Vec::new(),
+            cached_rgb_curves: crate::curve::RgbCurves::default(),
             image: None,
+            resize_pipeline,
+            deep_resize_pipeline,
+            resize_bgl,
+            resize_sampler,
+            resize_buffer,
             preview_level: 0,
             scratch: None,
             retired_sensor: None,
@@ -1866,15 +1949,82 @@ impl Engine {
         depth: crate::export::BitDepth,
         space: crate::gamut::OutputSpace,
     ) -> Result<crate::export::Exported> {
+        self.export_sized_in(device, queue, stack, depth, space, None)
+    }
+
+    /// Export `stack` with the requested settings, accelerating resizing on the GPU where possible.
+    pub fn export_with_settings(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        settings: &crate::export::ExportSettings,
+    ) -> Result<crate::export::Exported> {
+        let (crop_w, crop_h) = if let Some(image) = &self.image {
+            let (out_w, out_h) = stack
+                .geometry
+                .output_size(image.sensor_width, image.sensor_height);
+            let (_, _, w, h) = stack.geometry.crop.to_pixels(out_w, out_h);
+            (w, h)
+        } else {
+            (1, 1)
+        };
+        let target = settings.sizing.target(crop_w, crop_h);
+        let target_size = if target != (crop_w, crop_h) {
+            Some(target)
+        } else {
+            None
+        };
+        self.export_sized_in(
+            device,
+            queue,
+            stack,
+            settings.effective_depth(),
+            settings.color_space,
+            target_size,
+        )
+    }
+
+    /// Export `stack` at `depth` in `space`, with optional GPU resizing to `target_size`.
+    pub fn export_sized_in(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        depth: crate::export::BitDepth,
+        space: crate::gamut::OutputSpace,
+        target_size: Option<(u32, u32)>,
+    ) -> Result<crate::export::Exported> {
         use crate::export::{BitDepth, Exported};
         Ok(match depth {
-            BitDepth::Eight => Exported::Eight(self.export_8(device, queue, stack, space)?),
-            BitDepth::Sixteen => Exported::Sixteen(self.export_16_in(device, queue, stack, space)?),
+            BitDepth::Eight => {
+                let (width, height, rgba) =
+                    self.render_export_sized(device, queue, stack, false, space, target_size)?;
+                Exported::Eight(ExportedImage {
+                    width,
+                    height,
+                    rgba,
+                })
+            }
+            BitDepth::Sixteen => {
+                let (width, height, halves) =
+                    self.render_export_sized(device, queue, stack, true, space, target_size)?;
+                let rgba = halves
+                    .chunks_exact(2)
+                    .map(|h| {
+                        let v = half::f16::from_le_bytes([h[0], h[1]]).to_f32();
+                        (v.clamp(0.0, 1.0) * 65535.0).round() as u16
+                    })
+                    .collect();
+                Exported::Sixteen(ExportedImage {
+                    width,
+                    height,
+                    rgba,
+                })
+            }
         })
     }
 
-    /// Render `stack` at full resolution and read back the crop, as tightly packed rows
-    /// of the target's own texels: RGBA8, or RGBA16F little-endian when `deep`.
     fn render_export(
         &mut self,
         device: &wgpu::Device,
@@ -1882,6 +2032,21 @@ impl Engine {
         stack: &PhotoStack,
         deep: bool,
         space: crate::gamut::OutputSpace,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        self.render_export_sized(device, queue, stack, deep, space, None)
+    }
+
+    /// Render `stack` at full resolution (with optional GPU downsampling to `target_size`)
+    /// and read back the crop, as tightly packed rows of the target's own texels: RGBA8,
+    /// or RGBA16F little-endian when `deep`.
+    fn render_export_sized(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        deep: bool,
+        space: crate::gamut::OutputSpace,
+        target_size: Option<(u32, u32)>,
     ) -> Result<(u32, u32, Vec<u8>)> {
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
@@ -1948,8 +2113,76 @@ impl Engine {
         // The crop is not baked into the texture, so export is where it becomes real: copy
         // only the region the user framed. See `params::Crop` for why it is not in the shader.
         let rect = stack.geometry.crop.to_pixels(out_w, out_h);
-        let (_, _, width, height) = rect;
+        let (rx, ry, rw, rh) = rect;
         let texel = format.block_copy_size(None).unwrap_or(4);
+
+        if let Some((tw, th)) = target_size {
+            if (tw < rw || th < rh) && tw > 0 && th > 0 {
+                let target_tex = output_texture_as(device, tw, th, format);
+                let target_view = target_tex.create_view(&Default::default());
+                let full_view = full.create_view(&Default::default());
+
+                let crop_norm = [
+                    rx as f32 / out_w as f32,
+                    ry as f32 / out_h as f32,
+                    rw as f32 / out_w as f32,
+                    rh as f32 / out_h as f32,
+                ];
+                let uniforms = ResizeUniforms {
+                    crop: crop_norm,
+                    dest_size: [tw as f32, th as f32, 0.0, 0.0],
+                };
+                queue.write_buffer(&self.resize_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+                let resize_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("resize bind"),
+                    layout: &self.resize_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&full_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.resize_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.resize_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let r_pipeline = if deep {
+                    &self.deep_resize_pipeline
+                } else {
+                    &self.resize_pipeline
+                };
+
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resize encoder"),
+                });
+                draw_fullscreen(
+                    &mut encoder,
+                    "export gpu resize",
+                    r_pipeline,
+                    &resize_bind,
+                    &target_view,
+                );
+                queue.submit([encoder.finish()]);
+
+                let pixels = read_back(
+                    device,
+                    queue,
+                    &target_tex,
+                    (0, 0, tw, th),
+                    texel,
+                    self.export_band_bytes(device),
+                )?;
+                return Ok((tw, th, pixels));
+            }
+        }
+
         let pixels = read_back(
             device,
             queue,
@@ -1958,7 +2191,7 @@ impl Engine {
             texel,
             self.export_band_bytes(device),
         )?;
-        Ok((width, height, pixels))
+        Ok((rw, rh, pixels))
     }
 
     /// Choose the preview resolution: 1/2^level of full, clamped to what the sensor mip
@@ -2163,8 +2396,14 @@ impl Engine {
             self.mask_overlay,
         );
 
-        if stack.tone_curve.enabled && self.cached_curve != stack.tone_curve.params {
-            let lut = build_lut(&stack.tone_curve.params);
+        if (stack.tone_curve.enabled || stack.rgb_curves.enabled)
+            && (self.cached_curve != stack.tone_curve.params
+                || self.cached_rgb_curves != stack.rgb_curves.params)
+        {
+            let lut = build_lut_4channel(
+                &stack.tone_curve.params,
+                stack.rgb_curves.enabled.then_some(&stack.rgb_curves.params),
+            );
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.lut_texture,
@@ -2176,15 +2415,16 @@ impl Engine {
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(LUT_SIZE as u32 * 4),
-                    rows_per_image: Some(1),
+                    rows_per_image: Some(4),
                 },
                 wgpu::Extent3d {
                     width: LUT_SIZE as u32,
-                    height: 1,
+                    height: 4,
                     depth_or_array_layers: 1,
                 },
             );
             self.cached_curve = stack.tone_curve.params.clone();
+            self.cached_rgb_curves = stack.rgb_curves.params.clone();
         }
 
         let g = stack.geometry;
@@ -2796,9 +3036,9 @@ fn mask_uniforms(
     stack: &PhotoStack,
     sensor: (u32, u32),
     shown: Option<usize>,
-) -> ([[f32; 4]; 32], u32, u32) {
-    use crate::local::Shape;
-    let mut out = [[0.0f32; 4]; 32];
+) -> ([[f32; 4]; 40], u32, u32) {
+    use crate::local::{RangeMask, Shape};
+    let mut out = [[0.0f32; 4]; 40];
     let mut n = 0u32;
     let mut overlay = 0u32;
     if !stack.local.enabled {
@@ -2815,7 +3055,7 @@ fn mask_uniforms(
         .filter(|(_, m)| m.on);
     let mut brush = 0.0f32;
     for (i, m) in masks.take(crate::local::MAX_MASKS) {
-        let slot = n as usize * 4;
+        let slot = n as usize * 5;
         // Kind (0 gradient, 1 radial, 2 brush), plus 4 when inverted.
         let invert = if m.invert { 4.0 } else { 0.0 };
         match m.shape {
@@ -2847,6 +3087,17 @@ fn mask_uniforms(
         let a = &m.adjust;
         out[slot + 2] = [a.exposure, a.temperature, a.tint, a.contrast];
         out[slot + 3] = [a.saturation, a.clarity, a.sharpness, a.denoise];
+        match m.range {
+            RangeMask::None => {
+                out[slot + 4] = [0.0, 0.0, 0.0, 0.0];
+            }
+            RangeMask::Luminance { range, feather } => {
+                out[slot + 4] = [1.0, range[0], range[1], feather.clamp(0.001, 1.0)];
+            }
+            RangeMask::Color { hue, spread, feather } => {
+                out[slot + 4] = [2.0, hue, spread, feather.clamp(0.001, 1.0)];
+            }
+        }
         if shown == Some(i) {
             overlay = n + 1;
         }
@@ -2870,9 +3121,9 @@ impl LocalDenoise {
         let (all, n, _) = mask_uniforms(stack, sensor, None);
         let mut out = Self::default();
         for i in 0..n as usize {
-            if all[i * 4 + 3][3] > 0.0 {
+            if all[i * 5 + 3][3] > 0.0 {
                 let to = out.count as usize * 4;
-                out.masks[to..to + 4].copy_from_slice(&all[i * 4..i * 4 + 4]);
+                out.masks[to..to + 4].copy_from_slice(&all[i * 5..i * 5 + 4]);
                 out.count += 1;
             }
         }

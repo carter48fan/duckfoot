@@ -447,7 +447,7 @@ pub(crate) enum Sample {
     AutoWb,
     AutoTone,
     Upright(photo_engine::keystone::Upright),
-    TatSample(egui::Pos2, tat::TatMode, egui::Pos2),
+    Tat(egui::Pos2, tat::TatMode, egui::Pos2),
 }
 
 /// What a notice's Undo button takes back.
@@ -501,6 +501,8 @@ impl SidecarState {
         }
     }
 }
+
+type ShelfDisplayCache = Option<(usize, dam::FilterState, Option<std::path::PathBuf>, bool, Vec<usize>)>;
 
 pub struct PhotoApp {
     engine: Engine,
@@ -557,7 +559,7 @@ pub struct PhotoApp {
     /// Bumped whenever items are added/removed/rated in the shelf to invalidate caches.
     pub shelf_epoch: usize,
     /// Cached (epoch, filter, loaded_path, is_edited, indices) to eliminate per-frame O(N log N) sorting.
-    shelf_display_cache: std::cell::RefCell<Option<(usize, dam::FilterState, Option<std::path::PathBuf>, bool, Vec<usize>)>>,
+    shelf_display_cache: std::cell::RefCell<ShelfDisplayCache>,
     /// Before/after split view toggle and position (0.0..=1.0).
     pub split_active: bool,
     pub split_pos: f32,
@@ -1138,7 +1140,7 @@ impl PhotoApp {
                     }
                     None => Err("Not enough straight lines in the photo to go by"),
                 }),
-            Sample::TatSample(p, mode, cursor) => {
+            Sample::Tat(p, mode, cursor) => {
                 let res = self.engine.sample_color_at(device, queue, &self.stack, (p.x, p.y));
                 match res {
                     Ok(Some(rgb)) => {
