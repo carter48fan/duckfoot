@@ -89,11 +89,6 @@ impl PhotoApp {
                         }).inner;
                         if cutout_btn.clicked() {
                             self.cutout_studio.open = !self.cutout_studio.open;
-                            if self.cutout_studio.open {
-                                if let Some(path) = self.loaded_path.clone() {
-                                    self.cutout_studio.prepare(ui.ctx(), &path);
-                                }
-                            }
                         }
                         ui.add_space(4.0);
 

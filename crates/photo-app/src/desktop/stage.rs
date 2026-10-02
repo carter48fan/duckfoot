@@ -6,7 +6,7 @@ use crate::*;
 const HUD_LINGER: f32 = 1.5;
 
 impl PhotoApp {
-    pub(crate) fn workspace(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn workspace(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -52,10 +52,12 @@ impl PhotoApp {
                 }
 
                 if self.cutout_studio.open {
-                    if let Some(path) = &self.loaded_path {
-                        if self.cutout_studio.cached_source_path.as_deref() != Some(path.as_path()) {
-                            self.cutout_studio.prepare(ui.ctx(), path);
-                        }
+                    let needs_prepare = self.loaded_path.as_ref().is_some_and(|p| {
+                        self.cutout_studio.cached_source_path.as_deref() != Some(p.as_path())
+                            || self.cutout_studio.cached_pred_320.is_none()
+                    });
+                    if needs_prepare {
+                        self.prepare_cutout_studio(ui.ctx(), gpu);
                     }
                 }
 
@@ -1109,6 +1111,75 @@ impl PhotoApp {
         }
         if response.clicked() {
             self.pick_and_open(ui.ctx());
+        }
+    }
+
+    /// Prepare Cutout Studio with the current photo: renders an interactive ~1400px base image
+    /// directly from the GPU engine using the current stack edits (exposure, white balance, tone curve, crop),
+    /// falling back to raw embedded preview or raster file loader if the GPU engine is not ready.
+    pub(crate) fn prepare_cutout_studio(
+        &mut self,
+        ctx: &egui::Context,
+        gpu: &Gpu,
+    ) {
+        let Some(path) = self.loaded_path.clone() else {
+            return;
+        };
+        if self.cutout_studio.cached_source_path.as_deref() == Some(&path)
+            && self.cutout_studio.cached_pred_320.is_some()
+        {
+            return;
+        }
+
+        let rendered = if self.ready_image().is_some() {
+            let (crop_w, crop_h) = if let Some(image) = self.engine.image() {
+                let (out_w, out_h) = self
+                    .stack
+                    .geometry
+                    .output_size(image.sensor_width, image.sensor_height);
+                let (_, _, w, h) = self.stack.geometry.crop.to_pixels(out_w, out_h);
+                (w, h)
+            } else {
+                (1400, 1400)
+            };
+
+            let scale = 1400.0 / (crop_w.max(crop_h) as f32).max(1.0);
+            let target_size = if scale < 1.0 {
+                Some((
+                    ((crop_w as f32 * scale).round() as u32).max(1),
+                    ((crop_h as f32 * scale).round() as u32).max(1),
+                ))
+            } else {
+                None
+            };
+
+            match self.engine.export_sized_in(
+                gpu.device,
+                gpu.queue,
+                &self.stack,
+                photo_engine::export::BitDepth::Eight,
+                photo_engine::gamut::OutputSpace::Srgb,
+                target_size,
+            ) {
+                Ok(photo_engine::export::Exported::Eight(exported)) => {
+                    self.needs_render = true; // export_sized_in overwrote preview uniforms; put them back
+                    image::RgbaImage::from_raw(exported.width, exported.height, exported.rgba)
+                        .map(image::DynamicImage::ImageRgba8)
+                }
+                _ => {
+                    self.needs_render = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(dyn_img) = rendered {
+            self.cutout_studio.prepare_with_image(ctx, &path, dyn_img);
+        } else {
+            // Fallback to loading from disk (handles camera RAW embedded preview or raster formats)
+            self.cutout_studio.prepare(ctx, &path);
         }
     }
 }

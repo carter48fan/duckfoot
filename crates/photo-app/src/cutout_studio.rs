@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use egui::{pos2, RichText};
-use image::{GenericImageView, RgbaImage};
+use image::{DynamicImage, GenericImageView, RgbaImage};
 use photo_engine::rembg::{CutoutParams, RembgSession, TouchupDab};
 
 use crate::theme;
@@ -77,21 +77,32 @@ impl CutoutStudioState {
         self.status = None;
     }
 
-    /// Load source photo into memory, compute 320x320 prediction, and render initial preview.
-    pub fn prepare(&mut self, ctx: &egui::Context, path: &Path) {
-        if self.cached_source_path.as_deref() == Some(path) && self.cached_pred_320.is_some() {
+    /// Invalidate neural prediction and preview texture without wiping manual touch-up dabs.
+    pub fn invalidate_prediction(&mut self) {
+        self.cached_source_path = None;
+        self.cached_pred_320 = None;
+        self.preview_texture = None;
+        self.preview_base_rgba = None;
+        self.status = None;
+    }
+
+    /// Prepare Cutout Studio using a pre-rendered image (e.g. from the GPU pipeline with full exposure/edits).
+    pub fn prepare_with_image(&mut self, ctx: &egui::Context, path: &Path, img: DynamicImage) {
+        let is_same_path = self.cached_source_path.as_deref() == Some(path);
+        if is_same_path && self.cached_pred_320.is_some() {
             return;
         }
 
-        self.reset_cache();
+        if !is_same_path {
+            self.touchups.clear();
+        }
+        self.cached_pred_320 = None;
         self.cached_source_path = Some(path.to_path_buf());
+        self.preview_texture = None;
+        self.preview_base_rgba = None;
+        self.status = None;
 
-        let Ok(img) = image::open(path) else {
-            self.status = Some("Failed to open image for cutout".into());
-            return;
-        };
-
-        // Downscale source for fast 60fps interactive preview (~1400px long side)
+        // Downscale source for fast 60fps interactive preview (~1400px long side) if needed
         let (w, h) = img.dimensions();
         let scale = 1400.0 / (w.max(h) as f32).max(1.0);
         let (pw, ph) = if scale < 1.0 {
@@ -99,7 +110,11 @@ impl CutoutStudioState {
         } else {
             (w, h)
         };
-        let preview_img = img.resize_exact(pw, ph, image::imageops::FilterType::Triangle);
+        let preview_img = if (pw, ph) != (w, h) {
+            img.resize_exact(pw, ph, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
         self.preview_base_rgba = Some(preview_img.to_rgba8());
 
         // Run neural inference for 320x320 prediction
@@ -120,6 +135,56 @@ impl CutoutStudioState {
                 self.status = Some(format!("Failed to load rembg model: {e}"));
             }
         }
+    }
+
+    /// Load source photo into memory, compute 320x320 prediction, and render initial preview.
+    /// Supports both raster files (JPEG, PNG, TIFF, WebP) and camera RAW files (Sony ARW, Canon CR2/CR3, Nikon NEF, Fuji RAF, etc.).
+    pub fn prepare(&mut self, ctx: &egui::Context, path: &Path) {
+        if self.cached_source_path.as_deref() == Some(path) && self.cached_pred_320.is_some() {
+            return;
+        }
+
+        match Self::load_image_from_file(path) {
+            Ok(img) => {
+                self.prepare_with_image(ctx, path, img);
+            }
+            Err(e) => {
+                self.reset_cache();
+                self.cached_source_path = Some(path.to_path_buf());
+                self.status = Some(format!("Failed to open image for cutout: {e}"));
+            }
+        }
+    }
+
+    /// Load an image from file path with automatic support for camera RAW files and EXIF orientation.
+    pub fn load_image_from_file(path: &Path) -> Result<DynamicImage, String> {
+        // 1. If it's a standard raster format, try standard image loader first
+        if photo_engine::is_raster_path(path) {
+            if let Ok(img) = image::open(path) {
+                return Ok(img);
+            }
+        }
+
+        // 2. Try camera RAW embedded preview
+        if let Some(preview) = photo_engine::load_embedded_preview(path, 1400) {
+            let (w, h) = (preview.width, preview.height);
+            if let Some(rgb) = image::RgbImage::from_raw(w, h, preview.rgb) {
+                let mut dyn_img = DynamicImage::ImageRgb8(rgb);
+                for _ in 0..(preview.orientation.quarter_turns % 4) {
+                    dyn_img = dyn_img.rotate90();
+                }
+                if preview.orientation.mirror_h {
+                    dyn_img = dyn_img.fliph();
+                }
+                if preview.orientation.mirror_v {
+                    dyn_img = dyn_img.flipv();
+                }
+                return Ok(dyn_img);
+            }
+        }
+
+        // 3. Fallback to image::open
+        image::open(path).map_err(|e| format!("{e}"))
     }
 
     /// Re-render the interactive preview texture from the cached prediction, params, and touch-ups.
@@ -409,6 +474,12 @@ impl CutoutStudioState {
                     {
                         self.clear_touchups(ctx);
                     }
+                    if widgets::button(ui, Kind::Secondary, "↻ Recompute", 0.0)
+                        .on_hover_text("Re-render base image from current exposure/edits and recompute neural mask")
+                        .clicked()
+                    {
+                        self.invalidate_prediction();
+                    }
                 });
 
                 ui.separator();
@@ -503,5 +574,50 @@ mod tests {
         // Clear
         state.touchups.clear();
         assert!(state.touchups.is_empty());
+    }
+
+    #[test]
+    fn invalidate_prediction_preserves_touchups() {
+        let mut state = CutoutStudioState::default();
+        state.cached_source_path = Some(PathBuf::from("/test/mandolin.arw"));
+        state.cached_pred_320 = Some(vec![0.5; 320 * 320]);
+        state.touchups.push(TouchupDab {
+            at: [0.5, 0.5],
+            radius: 0.05,
+            hardness: 0.8,
+            keep: true,
+        });
+
+        state.invalidate_prediction();
+        assert!(state.cached_source_path.is_none());
+        assert!(state.cached_pred_320.is_none());
+        assert_eq!(state.touchups.len(), 1, "Touchups should be preserved on invalidate");
+    }
+
+    #[test]
+    fn prepare_with_image_populates_prediction() {
+        let ctx = egui::Context::default();
+        let mut state = CutoutStudioState::default();
+        let path = Path::new("/test/DSC05280.ARW");
+
+        // Synthetic 100x100 RGB image with a bright center (like an instrument) on dark background
+        let mut img = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                if x >= 30 && x <= 70 && y >= 20 && y <= 80 {
+                    img.put_pixel(x, y, image::Rgba([220, 160, 40, 255]));
+                } else {
+                    img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+                }
+            }
+        }
+        let dyn_img = DynamicImage::ImageRgba8(img);
+
+        state.prepare_with_image(&ctx, path, dyn_img);
+        assert_eq!(state.cached_source_path.as_deref(), Some(path));
+        assert!(state.cached_pred_320.is_some());
+        assert!(state.preview_base_rgba.is_some());
+        assert!(state.preview_texture.is_some());
+        assert!(state.status.as_ref().is_some_and(|s| s.contains("Cutout ready")));
     }
 }

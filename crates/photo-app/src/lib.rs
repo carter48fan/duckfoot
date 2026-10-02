@@ -1577,7 +1577,7 @@ impl PhotoApp {
             self.inspector(ui);
             self.filmstrip(ui, gpu);
             self.stage_toolbar(ui);
-            self.workspace(ui);
+            self.workspace(ui, gpu);
             self.batch_export_dialog(ui);
             self.export_dialog(&ctx);
             self.paste_picker(&ctx);
