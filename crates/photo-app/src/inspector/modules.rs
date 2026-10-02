@@ -572,6 +572,20 @@ impl PhotoApp {
                         let sel = self.color_eq_tab == tab;
                         if widgets::chip(ui, sel, label).clicked() {
                             self.color_eq_tab = tab;
+                            if self.tat_mode.is_some() {
+                                self.tat_mode = Some(crate::tat::TatMode::ColorEq(tab));
+                            }
+                        }
+                    }
+                    let tat_on = self.tat_mode == Some(crate::tat::TatMode::ColorEq(self.color_eq_tab));
+                    if widgets::chip(ui, tat_on, "🎯 on-photo drag")
+                        .on_hover_text("Drag directly on colors in the photo to adjust their band")
+                        .clicked()
+                    {
+                        if tat_on {
+                            self.tat_mode = None;
+                        } else {
+                            self.tat_mode = Some(crate::tat::TatMode::ColorEq(self.color_eq_tab));
                         }
                     }
                 });

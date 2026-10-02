@@ -325,6 +325,8 @@ impl PhotoApp {
         if crop_esc {
             self.cancel_crop();
             self.picking_wb = false;
+            self.tat_mode = None;
+            self.tat_drag = None;
         }
         if crop_enter {
             self.apply_crop();

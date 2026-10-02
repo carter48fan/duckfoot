@@ -3474,6 +3474,54 @@ impl Engine {
         Ok(neutralising(&patch, image.wb))
     }
 
+    /// Sample the average RGB colour in a 5×5 patch around `point` (0..1 of the frame).
+    pub fn sample_color_at(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        point: (f32, f32),
+    ) -> Result<Option<[f32; 3]>> {
+        let geometry = &stack.geometry;
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let sensor = (image.sensor_width, image.sensor_height);
+        let (ow, oh) = geometry.output_size(sensor.0, sensor.1);
+        let warp = image.warp_for(stack);
+        let (sx, sy) = sensor_point(
+            stack,
+            warp.as_ref(),
+            sensor,
+            (point.0 * ow as f32, point.1 * oh as f32),
+        );
+        if !(0.0..sensor.0 as f32).contains(&sx) || !(0.0..sensor.1 as f32).contains(&sy) {
+            return Ok(None);
+        }
+        let x0 = (sx as u32)
+            .saturating_sub(2)
+            .min(sensor.0.saturating_sub(5));
+        let y0 = (sy as u32)
+            .saturating_sub(2)
+            .min(sensor.1.saturating_sub(5));
+        let patch =
+            self.sensor_texels(device, queue, 0, (x0, y0, 5.min(sensor.0), 5.min(sensor.1)))?;
+        if patch.is_empty() {
+            return Ok(None);
+        }
+        let mut r = 0.0f32;
+        let mut g = 0.0f32;
+        let mut b = 0.0f32;
+        let wb = image.wb;
+        for px in &patch {
+            r += px[0] * wb[0];
+            g += px[1] * wb[1];
+            b += px[2] * wb[2];
+        }
+        let n = patch.len() as f32;
+        Ok(Some([r / n, g / n, b / n]))
+    }
+
     /// A white balance for the whole photo: grey-world and white-patch estimates on an
     /// overview of the sensor, clipped and near-black texels left out, and their geometric
     /// mean taken (each is wrong in its own way; together they rarely are).

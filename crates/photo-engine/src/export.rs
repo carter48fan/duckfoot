@@ -239,6 +239,13 @@ pub struct ExportSettings {
     /// The colours it is written in, and the profile it carries to say so (W-09).
     #[serde(default)]
     pub color_space: crate::gamut::OutputSpace,
+    /// Whether to strip the background using cross-platform neural inference.
+    #[serde(default)]
+    pub remove_background: bool,
+    /// Matte color to replace background with (e.g. Some([255, 255, 255]) for catalog white).
+    /// If None and format supports alpha (PNG, WebP, TIFF), produces transparent alpha channel.
+    #[serde(default)]
+    pub matte_color: Option<[u8; 3]>,
 }
 
 impl ExportSettings {
@@ -253,6 +260,8 @@ impl ExportSettings {
             metadata: MetadataPolicy::All,
             strip_location: true,
             color_space: crate::gamut::OutputSpace::Srgb,
+            remove_background: false,
+            matte_color: None,
         }
     }
 
@@ -448,6 +457,32 @@ impl ExportedImage<u8> {
             out,
         )
     }
+
+    pub fn remove_background(&mut self, session: &crate::rembg::RembgSession, matte: Option<[u8; 3]>) -> Result<()> {
+        let (w, h) = (self.width, self.height);
+        let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, self.rgba.clone())
+            .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mask = session.compute_mask(&dyn_img)?;
+
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize * 4;
+                let a = mask.get_pixel(x, y)[0];
+                if let Some(bg) = matte {
+                    let a_norm = a as f32 / 255.0;
+                    let inv_a = 1.0 - a_norm;
+                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg[0] as f32 * inv_a).round() as u8;
+                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg[1] as f32 * inv_a).round() as u8;
+                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg[2] as f32 * inv_a).round() as u8;
+                    self.rgba[idx + 3] = 255;
+                } else {
+                    self.rgba[idx + 3] = a;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ExportedImage<u16> {
@@ -486,6 +521,39 @@ impl ExportedImage<u16> {
             out,
         )
     }
+
+    pub fn remove_background(&mut self, session: &crate::rembg::RembgSession, matte: Option<[u8; 3]>) -> Result<()> {
+        let (w, h) = (self.width, self.height);
+        let eight = to_eight(&self.rgba);
+        let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, eight)
+            .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
+        let dyn_img = image::DynamicImage::ImageRgba8(img);
+        let mask = session.compute_mask(&dyn_img)?;
+
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize * 4;
+                let a = mask.get_pixel(x, y)[0];
+                if let Some(bg) = matte {
+                    let a_norm = a as f32 / 255.0;
+                    let inv_a = 1.0 - a_norm;
+                    let bg_16 = [
+                        (bg[0] as f32 / 255.0) * 65535.0,
+                        (bg[1] as f32 / 255.0) * 65535.0,
+                        (bg[2] as f32 / 255.0) * 65535.0,
+                    ];
+                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg_16[0] * inv_a).round() as u16;
+                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg_16[1] * inv_a).round() as u16;
+                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg_16[2] * inv_a).round() as u16;
+                    self.rgba[idx + 3] = 65535;
+                } else {
+                    let a_16 = ((a as u32 * 65535 + 127) / 255) as u16;
+                    self.rgba[idx + 3] = a_16;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Exported {
@@ -507,10 +575,23 @@ impl Exported {
     pub fn finished(self, settings: &ExportSettings) -> Result<Self> {
         let (w, h) = settings.sizing.target(self.width(), self.height());
         let strength = settings.sharpen.strength(settings.sharpen_amount);
-        Ok(match self {
+        let mut out = match self {
             Exported::Eight(i) => Exported::Eight(i.resized(w, h)?.sharpened(strength)),
             Exported::Sixteen(i) => Exported::Sixteen(i.resized(w, h)?.sharpened(strength)),
-        })
+        };
+        if settings.remove_background {
+            let matte = if settings.format == ExportFormat::Jpeg && settings.matte_color.is_none() {
+                Some([255, 255, 255])
+            } else {
+                settings.matte_color
+            };
+            let session = crate::rembg::RembgSession::auto()?;
+            match &mut out {
+                Exported::Eight(i) => i.remove_background(&session, matte)?,
+                Exported::Sixteen(i) => i.remove_background(&session, matte)?,
+            }
+        }
+        Ok(out)
     }
 
     /// Finish and write: what the single export and every batch recipe do.

@@ -82,6 +82,31 @@ impl ExportRecipe {
         );
         social.settings.sharpen = photo_engine::SharpenFor::Screen;
         social.settings.metadata = photo_engine::MetadataPolicy::CopyrightOnly;
+
+        let mut ecommerce_png = Self::new(
+            "ecommerce_png",
+            "E-Commerce Cutout (Transparent PNG)",
+            false,
+            F::Png,
+            100,
+            SizingOption::Original,
+            Some("Cutouts"),
+        );
+        ecommerce_png.settings.remove_background = true;
+
+        let mut catalog_white = Self::new(
+            "catalog_white",
+            "Catalog Pure White (JPEG)",
+            false,
+            F::Jpeg,
+            92,
+            SizingOption::LongEdge(2048),
+            Some("Catalog"),
+        );
+        catalog_white.settings.remove_background = true;
+        catalog_white.settings.matte_color = Some([255, 255, 255]);
+        catalog_white.settings.sharpen = photo_engine::SharpenFor::Screen;
+
         vec![
             web,
             Self::new(
@@ -95,6 +120,8 @@ impl ExportRecipe {
             ),
             print,
             social,
+            ecommerce_png,
+            catalog_white,
         ]
     }
 }

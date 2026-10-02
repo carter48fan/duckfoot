@@ -1313,6 +1313,32 @@ fn removing_from_the_shelf_can_be_taken_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn clear_shelf_removes_all_and_undo_restores_all() {
+    let dir = scratch_dir("clear-shelf");
+    let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone(), c.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.shelf.len(), 3);
+
+    app.clear_shelf();
+    assert_eq!(app.shelf.len(), 0);
+    assert_eq!(app.selection.count(), 0);
+
+    app.undo_remove_from_shelf();
+    assert_eq!(app.shelf.len(), 3);
+    let order: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+    assert_eq!(order, vec![a, b, c], "all photos restored back to shelf in order");
+    h.settle(&mut app, Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A platform with somewhere to keep settings, and nothing else.
 struct RememberingPlatform(PathBuf);
 

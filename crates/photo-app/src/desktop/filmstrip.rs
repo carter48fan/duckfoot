@@ -175,13 +175,27 @@ impl PhotoApp {
         });
     }
 
-    /// The shelf as the filter and sort leave it: indices into `self.shelf`, not copies of
-    /// it, since this runs every frame and cloning every item grew with the folder.
+    /// The shelf as the filter and sort leave it: indices into `self.shelf`.
+    /// Cached on (epoch, filter, loaded_path, is_edited) to eliminate per-frame O(N log N) sorting.
     pub(crate) fn displayed_indices(&self) -> Vec<usize> {
         let is_stack_edited = self.is_stack_edited();
         let loaded_path = self.loaded_path.clone();
-        let query = self.filter.search_query.to_lowercase();
 
+        // 1. Fast cache hit
+        if let Ok(borrow) = self.shelf_display_cache.try_borrow() {
+            if let Some((epoch, filter, cached_path, edited, indices)) = borrow.as_ref() {
+                if *epoch == self.shelf_epoch
+                    && *filter == self.filter
+                    && *cached_path == loaded_path
+                    && *edited == is_stack_edited
+                {
+                    return indices.clone();
+                }
+            }
+        }
+
+        // 2. Cache miss: filter and sort
+        let query = self.filter.search_query.to_lowercase();
         let mut displayed: Vec<usize> = self
             .shelf
             .iter()
@@ -222,6 +236,17 @@ impl PhotoApp {
                     displayed.sort_by(|&a, &b| order(shelf[a].bytes.cmp(&shelf[b].bytes)))
                 }
             }
+        }
+
+        // 3. Store in cache
+        if let Ok(mut borrow) = self.shelf_display_cache.try_borrow_mut() {
+            *borrow = Some((
+                self.shelf_epoch,
+                self.filter.clone(),
+                loaded_path,
+                is_stack_edited,
+                displayed.clone(),
+            ));
         }
 
         displayed

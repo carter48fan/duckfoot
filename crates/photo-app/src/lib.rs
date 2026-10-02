@@ -38,6 +38,7 @@ pub mod paste;
 mod requests;
 mod session;
 pub mod user_presets;
+pub mod tat;
 mod view;
 
 use curve_editor::*;
@@ -446,6 +447,7 @@ pub(crate) enum Sample {
     AutoWb,
     AutoTone,
     Upright(photo_engine::keystone::Upright),
+    TatSample(egui::Pos2, tat::TatMode, egui::Pos2),
 }
 
 /// What a notice's Undo button takes back.
@@ -552,6 +554,10 @@ pub struct PhotoApp {
     /// The Shelf: assets in the project/session.
     pub shelf: Vec<ShelfItem>,
     pub shelf_open: bool,
+    /// Bumped whenever items are added/removed/rated in the shelf to invalidate caches.
+    pub shelf_epoch: usize,
+    /// Cached (epoch, filter, loaded_path, is_edited, indices) to eliminate per-frame O(N log N) sorting.
+    shelf_display_cache: std::cell::RefCell<Option<(usize, dam::FilterState, Option<std::path::PathBuf>, bool, Vec<usize>)>>,
     /// Before/after split view toggle and position (0.0..=1.0).
     pub split_active: bool,
     pub split_pos: f32,
@@ -715,6 +721,9 @@ pub struct PhotoApp {
     /// How the single export writes: format, quality, size, depth, sharpening, metadata.
     pub export_settings: photo_engine::ExportSettings,
     pub color_eq_tab: ColorEqTab,
+    /// Targeted Adjustment Tool (TAT) mode and active on-image drag state.
+    pub tat_mode: Option<tat::TatMode>,
+    pub tat_drag: Option<tat::TatDrag>,
     /// File pickers and storage locations, supplied by the bootstrap.
     platform: Box<dyn platform::Platform>,
     /// A plain click adds to or removes from the selection, as Ctrl-click does: how a
@@ -896,6 +905,8 @@ impl PhotoApp {
             reveal_section: None,
             selection: dam::SelectionModel::new(),
             filter: dam::FilterState::default(),
+            shelf_epoch: 0,
+            shelf_display_cache: std::cell::RefCell::new(None),
             folder_tree,
             folder_browser_open: false,
             storage: None,
@@ -922,6 +933,8 @@ impl PhotoApp {
             batch_output_dir: None,
             export_settings: photo_engine::ExportSettings::new(photo_engine::ExportFormat::Jpeg),
             color_eq_tab: ColorEqTab::default(),
+            tat_mode: None,
+            tat_drag: None,
             platform,
             select_mode: false,
             fine_adjust: false,
@@ -1125,6 +1138,45 @@ impl PhotoApp {
                     }
                     None => Err("Not enough straight lines in the photo to go by"),
                 }),
+            Sample::TatSample(p, mode, cursor) => {
+                let res = self.engine.sample_color_at(device, queue, &self.stack, (p.x, p.y));
+                match res {
+                    Ok(Some(rgb)) => {
+                        let (hue, _sat, _luma) = tat::rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
+                        let band_name = tat::hue_to_band(hue);
+                        let initial_val = match mode {
+                            tat::TatMode::ColorEq(ColorEqTab::Hue) => {
+                                self.stack.color_eq.params.bands().into_iter()
+                                    .find(|(n, _)| *n == band_name)
+                                    .map(|(_, b)| b.hue)
+                                    .unwrap_or(0.0)
+                            }
+                            tat::TatMode::ColorEq(ColorEqTab::Saturation) => {
+                                self.stack.color_eq.params.bands().into_iter()
+                                    .find(|(n, _)| *n == band_name)
+                                    .map(|(_, b)| b.saturation)
+                                    .unwrap_or(0.0)
+                            }
+                            tat::TatMode::ColorEq(ColorEqTab::Luminance) => {
+                                self.stack.color_eq.params.bands().into_iter()
+                                    .find(|(n, _)| *n == band_name)
+                                    .map(|(_, b)| b.luminance)
+                                    .unwrap_or(0.0)
+                            }
+                        };
+                        self.stack.color_eq.enabled = true;
+                        self.tat_drag = Some(tat::TatDrag {
+                            band_name,
+                            initial_val,
+                            start_pos: cursor,
+                            current_delta: 0.0,
+                        });
+                        Ok(Ok("Targeted Color Band identified"))
+                    }
+                    Ok(None) => Ok(Err("Could not sample color there")),
+                    Err(e) => Err(e),
+                }
+            }
         };
         match outcome {
             Ok(Ok(msg)) => {
