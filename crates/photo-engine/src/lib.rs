@@ -26,6 +26,7 @@ pub mod metadata;
 pub mod opcodes;
 pub mod params;
 pub mod preview;
+pub mod rembg;
 pub mod sidecar;
 pub mod temperature;
 #[doc(hidden)]

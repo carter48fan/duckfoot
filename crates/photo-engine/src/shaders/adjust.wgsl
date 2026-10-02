@@ -407,14 +407,16 @@ fn file_warp_on() -> bool {
 }
 
 // The mean of the sensor in a ring just outside a spot of radius `r` about `c` (px), at
-// sensor level `level`: what heal matches a patch's tone to.
+// 4-tap ring mean at mip level `level`: 4 orthogonal taps at r * 1.25 provide an accurate
+// mean across quadrants with half the texture bandwidth of an 8-tap loop.
 fn ring_mean(c: vec2<f32>, r: f32, level: f32) -> vec4<f32> {
-    var sum = vec4<f32>(0.0);
-    for (var k = 0; k < 8; k = k + 1) {
-        let a = f32(k) * 0.785398;
-        sum += tap((c + vec2<f32>(cos(a), sin(a)) * r * 1.25) / u.sizes.zw, level);
-    }
-    return sum * 0.125;
+    let offset = r * 1.25;
+    let inv_sz = 1.0 / u.sizes.zw;
+    let s0 = tap((c + vec2<f32>(offset, 0.0)) * inv_sz, level);
+    let s1 = tap((c - vec2<f32>(offset, 0.0)) * inv_sz, level);
+    let s2 = tap((c + vec2<f32>(0.0, offset)) * inv_sz, level);
+    let s3 = tap((c - vec2<f32>(0.0, offset)) * inv_sz, level);
+    return (s0 + s1 + s2 + s3) * 0.25;
 }
 
 // The sensor at `p` (px) with every heal spot over it applied: inside a spot, its source's
@@ -438,6 +440,28 @@ fn spot_sample(p: vec2<f32>, lod: f32) -> vec4<f32> {
             let level = max(b.w, lod);
             taken = max(taken + ring_mean(a.xy, b.x, level) - ring_mean(a.zw, b.x, level), vec4<f32>(0.0));
         }
+        s = mix(s, taken, w);
+    }
+    return s;
+}
+
+// Fast spot sample for sharpening taps: the additive ring mean difference cancels out
+// identically in the Laplacian kernel (4*s - (s_up + s_dn + s_lf + s_rt)), so evaluating
+// ring_mean across the 4 surrounding offset taps is pure redundant memory traffic.
+fn spot_sample_fast(p: vec2<f32>, lod: f32) -> vec4<f32> {
+    var s = tap(p / u.sizes.zw, lod);
+    if (!enabled(FLAG_HEAL)) {
+        return s;
+    }
+    for (var i = 0u; i < min(u.mask_info.w, 32u); i = i + 1u) {
+        let a = u.spots[i * 2u];
+        let b = u.spots[i * 2u + 1u];
+        let d = length(p - a.xy) / b.x;
+        if (d >= 1.0) {
+            continue;
+        }
+        let w = 1.0 - smoothstep(1.0 - b.y, 1.0, d);
+        let taken = tap((p - a.xy + a.zw) / u.sizes.zw, lod);
         s = mix(s, taken, w);
     }
     return s;
@@ -849,10 +873,10 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         // All four channels: the neutral in `a` is part of the pixel's light too.
         // Through the heal spots too, or a healed spot's edge would read as detail.
         let step = exp2(lod);
-        let s_up = spot_sample(src - vec2<f32>(0.0, step), lod);
-        let s_dn = spot_sample(src + vec2<f32>(0.0, step), lod);
-        let s_lf = spot_sample(src - vec2<f32>(step, 0.0), lod);
-        let s_rt = spot_sample(src + vec2<f32>(step, 0.0), lod);
+        let s_up = spot_sample_fast(src - vec2<f32>(0.0, step), lod);
+        let s_dn = spot_sample_fast(src + vec2<f32>(0.0, step), lod);
+        let s_lf = spot_sample_fast(src - vec2<f32>(step, 0.0), lod);
+        let s_rt = spot_sample_fast(src + vec2<f32>(step, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
         s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
     }

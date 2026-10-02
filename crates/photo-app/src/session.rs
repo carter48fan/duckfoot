@@ -128,6 +128,7 @@ impl PhotoApp {
                 self.error = Some(format!("Could not save to {}: {e:#}", file_name(p)));
             }
         }
+        self.bump_shelf_epoch();
     }
 
     pub fn set_rating_for_path(&mut self, p: &Path, rating: u8) {
@@ -478,6 +479,7 @@ impl PhotoApp {
                 self.shelf.push(ShelfItem::waiting(path));
             }
         }
+        self.bump_shelf_epoch();
         if let Some(first) = to_open {
             self.edit_when_opened = true;
             self.open_path(gpu, first);
@@ -520,6 +522,7 @@ impl PhotoApp {
         };
         self.request_thumbnail(&copy);
         self.shelf.insert(at, ShelfItem::new(copy.clone()));
+        self.bump_shelf_epoch();
         self.open_path(gpu, copy.clone());
         self.set_status(crate::i18n::tr_args(
             "virtual-copy-made",
@@ -774,6 +777,7 @@ impl PhotoApp {
             let mut item = ShelfItem::new(path.to_path_buf());
             item.metadata = metadata;
             self.shelf.push(item);
+            self.bump_shelf_epoch();
         }
         // Stepping through a selection built for a batch keeps it.
         let keep_selection =
@@ -1148,6 +1152,24 @@ impl PhotoApp {
         }
     }
 
+    /// Empty the shelf completely. Flushes the open photo if dirty, clears thumbnails
+    /// and selections, and registers an undoable action to restore all items with Ctrl+Z.
+    pub fn clear_shelf(&mut self) {
+        if self.shelf.is_empty() {
+            return;
+        }
+        if self.loaded_path.is_some() {
+            self.flush();
+        }
+        let count = self.shelf.len();
+        let removed = self.take_off_shelf(|_| true);
+        self.removed_from_shelf = removed;
+        self.set_status_undoable(
+            format!("Cleared shelf ({count} stills removed)"),
+            NoticeAction::Remove,
+        );
+    }
+
     /// Take photos off the shelf. Nothing on disk changes; the notice's Undo puts them
     /// back where they were.
     pub fn remove_from_shelf(&mut self, paths: &[PathBuf]) {
@@ -1191,6 +1213,9 @@ impl PhotoApp {
             self.thumbs_requested.remove(&item.path);
             self.thumbs_pending.remove(&item.path);
             self.thumb_used.remove(&item.path);
+        }
+        if !removed.is_empty() {
+            self.bump_shelf_epoch();
         }
         removed
     }
@@ -1284,6 +1309,12 @@ impl PhotoApp {
         for (index, item) in removed {
             self.shelf.insert(index.min(self.shelf.len()), item);
         }
+        self.bump_shelf_epoch();
         self.set_status(format!("Put {n} back on the shelf"));
+    }
+
+    /// Invalidate shelf caches when items are added, removed, or modified.
+    pub fn bump_shelf_epoch(&mut self) {
+        self.shelf_epoch = self.shelf_epoch.wrapping_add(1);
     }
 }

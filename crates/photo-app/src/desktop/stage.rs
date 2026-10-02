@@ -317,6 +317,53 @@ impl PhotoApp {
                         }
                     }
                 }
+
+                // Targeted Adjustment Tool (TAT): click/drag on photo to adjust the targeted color band
+                if let Some(mode) = self.tat_mode {
+                    if !self.cropping {
+                        if response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                        }
+                        if response.drag_started() {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                if frame_now.contains(p) {
+                                    let n = (p - frame_now.min) / frame_now.size();
+                                    self.pending_sample = Some(crate::Sample::TatSample(pos2(n.x, n.y), mode, p));
+                                }
+                            }
+                        }
+                        if let Some(drag) = &mut self.tat_drag {
+                            if response.dragged() {
+                                if let Some(p) = response.interact_pointer_pos() {
+                                    let delta_y = drag.start_pos.y - p.y; // drag up is positive
+                                    drag.current_delta = delta_y * 0.4;
+                                    let target_name = drag.band_name;
+                                    let new_val = drag.initial_val + drag.current_delta;
+                                    for (name, band) in self.stack.color_eq.params.bands_mut() {
+                                        if name == target_name {
+                                            match mode {
+                                                crate::tat::TatMode::ColorEq(crate::ColorEqTab::Hue) => {
+                                                    band.hue = new_val.clamp(-30.0, 30.0);
+                                                }
+                                                crate::tat::TatMode::ColorEq(crate::ColorEqTab::Saturation) => {
+                                                    band.saturation = new_val.clamp(-100.0, 100.0);
+                                                }
+                                                crate::tat::TatMode::ColorEq(crate::ColorEqTab::Luminance) => {
+                                                    band.luminance = new_val.clamp(-100.0, 100.0);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    self.needs_render = true;
+                                }
+                            }
+                            if response.drag_stopped() {
+                                self.history.checkpoint(&self.stack);
+                                self.tat_drag = None;
+                            }
+                        }
+                    }
+                }
                 if self.cropping {
                     // In crop mode a drag frames the picture instead of moving it: on a
                     // handle it moves that edge or corner, inside the crop it slides it,
@@ -730,6 +777,35 @@ impl PhotoApp {
                         theme::ACCENT,
                         theme::ACCENT,
                     );
+                }
+
+                if let Some(mode) = self.tat_mode {
+                    let label = match mode {
+                        crate::tat::TatMode::ColorEq(tab) => format!("TARGETED ADJUSTMENT ({tab:?}) · Drag up/down on photo colors · Esc cancels"),
+                    };
+                    if let Some(drag) = &self.tat_drag {
+                        let val = drag.initial_val + drag.current_delta;
+                        let text = format!("🎯 {} {}: {:+.1}", drag.band_name, match mode {
+                            crate::tat::TatMode::ColorEq(tab) => format!("{tab:?}"),
+                        }, val);
+                        hud_badge(
+                            &painter,
+                            pos2(framed_view.center().x, framed_view.top() + 12.0),
+                            Align2::CENTER_TOP,
+                            &text,
+                            theme::ACCENT,
+                            theme::ACCENT,
+                        );
+                    } else {
+                        hud_badge(
+                            &painter,
+                            pos2(framed_view.center().x, framed_view.top() + 12.0),
+                            Align2::CENTER_TOP,
+                            &label,
+                            theme::ACCENT,
+                            theme::ACCENT,
+                        );
+                    }
                 }
 
                 if self.split_active {

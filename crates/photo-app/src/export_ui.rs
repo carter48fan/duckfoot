@@ -214,6 +214,23 @@ pub(crate) fn settings_editor(
         });
     }
 
+    row_label(ui, "Background");
+    ui.horizontal_wrapped(|ui| {
+        if widgets::chip(ui, s.remove_background, "remove background (rembg)").clicked() {
+            s.remove_background = !s.remove_background;
+        }
+        if s.remove_background {
+            let is_white = s.matte_color == Some([255, 255, 255]);
+            let is_trans = s.matte_color.is_none();
+            if widgets::chip(ui, is_trans, "transparent alpha").clicked() {
+                s.matte_color = None;
+            }
+            if widgets::chip(ui, is_white, "catalog white").clicked() {
+                s.matte_color = Some([255, 255, 255]);
+            }
+        }
+    });
+
     ui.label(
         RichText::new(summary(s, source))
             .family(theme::mono_bold())
@@ -249,6 +266,13 @@ pub(crate) fn summary(s: &ExportSettings, source: Option<(u32, u32)>) -> String 
             "{} sharpening",
             s.sharpen.label().to_lowercase().replace(" paper", "")
         ));
+    }
+    if s.remove_background {
+        if let Some([r, g, b]) = s.matte_color {
+            parts.push(format!("rembg matte #{:02x}{:02x}{:02x}", r, g, b));
+        } else {
+            parts.push("rembg cutout".into());
+        }
     }
     parts.push(match s.metadata {
         MetadataPolicy::All if s.strip_location => "metadata, no location".into(),

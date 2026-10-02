@@ -41,8 +41,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Debug builds of pixel code are unusably slow; optimise dependencies even in dev.
+# Omit debug symbols from dependencies (wgpu, tract, etc.) to prevent 60GB binary bloat.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.dev]
 opt-level = 1
+debug = 1
+
