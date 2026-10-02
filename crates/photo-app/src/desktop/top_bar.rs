@@ -76,6 +76,27 @@ impl PhotoApp {
                             self.pick_and_open(ui.ctx());
                         }
                         ui.add_space(4.0);
+
+                        let cutout_active = self.cutout_studio.open;
+                        let cutout_ready = self.loaded_path.is_some();
+                        let cutout_btn = ui.add_enabled_ui(cutout_ready, |ui| {
+                            widgets::button(
+                                ui,
+                                if cutout_active { Kind::Primary } else { Kind::Secondary },
+                                "✂ Cutout",
+                                0.0,
+                            ).on_hover_text("Open Cutout Studio for background removal & touch-up")
+                        }).inner;
+                        if cutout_btn.clicked() {
+                            self.cutout_studio.open = !self.cutout_studio.open;
+                            if self.cutout_studio.open {
+                                if let Some(path) = self.loaded_path.clone() {
+                                    self.cutout_studio.prepare(ui.ctx(), &path);
+                                }
+                            }
+                        }
+                        ui.add_space(4.0);
+
                         if widgets::icon(ui, "?", self.shortcuts_open, "Shortcuts (? or F1)")
                             .clicked()
                         {

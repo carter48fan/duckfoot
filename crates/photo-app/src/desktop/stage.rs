@@ -51,6 +51,14 @@ impl PhotoApp {
                     return;
                 }
 
+                if self.cutout_studio.open {
+                    if let Some(path) = &self.loaded_path {
+                        if self.cutout_studio.cached_source_path.as_deref() != Some(path.as_path()) {
+                            self.cutout_studio.prepare(ui.ctx(), path);
+                        }
+                    }
+                }
+
                 // Scale at which the whole frame fits. Everything is expressed relative to
                 // this so that resizing the window never changes what you are looking at.
                 let fit = (rect.width() / img.x).min(rect.height() / img.y);
@@ -507,18 +515,42 @@ impl PhotoApp {
                         };
                         ui.ctx().set_cursor_icon(cursor);
                     }
+                } else if self.cutout_studio.open {
+                    let space = ui.input(|i| i.key_down(egui::Key::Space));
+                    let is_middle = response.dragged_by(egui::PointerButton::Middle);
+                    if (space || is_middle) && response.dragged() && !at_fit {
+                        self.view.pan -= response.drag_delta() / scale_now;
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    } else if (response.dragged() || response.clicked()) && !space && !is_middle {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            if dest_now.contains(p) {
+                                let norm_x = ((p.x - dest_now.left()) / dest_now.width()).clamp(0.0, 1.0);
+                                let norm_y = ((p.y - dest_now.top()) / dest_now.height()).clamp(0.0, 1.0);
+                                let erase = ui.input(|i| i.modifiers.alt)
+                                    || response.dragged_by(egui::PointerButton::Secondary);
+                                let mode = if erase {
+                                    cutout_studio::CutoutBrushMode::Erase
+                                } else {
+                                    self.cutout_studio.brush_mode
+                                };
+                                self.cutout_studio.add_touchup_with_mode(ui.ctx(), [norm_x, norm_y], mode);
+                            }
+                        }
+                    }
                 } else if response.dragged() && !at_fit && !self.split_dragging && !mask_dragging {
                     self.view.pan -= response.drag_delta() / scale_now;
                 }
+                let cutout_active = self.cutout_studio.open && !self.cropping;
                 // On touch, one recogniser reads the photo's touches: it is the Edit
                 // sheet's control, or a sideways flick steps to the next photo (G-02).
                 let free = !self.cropping
                     && !mask_dragging
                     && !self.split_dragging
                     && self.selected_mask.is_none()
-                    && !self.healing;
+                    && !self.healing
+                    && !cutout_active;
                 self.stage_gestures(ui.ctx(), rect, at_fit, free);
-                if !widgets::is_touch(ui.ctx()) {
+                if !widgets::is_touch(ui.ctx()) && !cutout_active {
                     self.desktop_photo_drag(ui.ctx(), &response);
                 }
 
@@ -555,15 +587,27 @@ impl PhotoApp {
                 let frame = frame_of(dest);
                 self.stage_frame = Some(frame);
                 let painter = ui.painter().with_clip_rect(rect);
-                painter.image(
-                    id,
-                    dest,
-                    egui::Rect::from_min_size(
-                        egui::pos2(region.x, region.y),
-                        egui::vec2(region.width, region.height),
-                    ),
-                    egui::Color32::WHITE,
-                );
+                if let (true, Some(tex)) = (self.cutout_studio.open, &self.cutout_studio.preview_texture) {
+                    painter.image(
+                        tex.id(),
+                        dest,
+                        egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(1.0, 1.0),
+                        ),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    painter.image(
+                        id,
+                        dest,
+                        egui::Rect::from_min_size(
+                            egui::pos2(region.x, region.y),
+                            egui::vec2(region.width, region.height),
+                        ),
+                        egui::Color32::WHITE,
+                    );
+                }
                 // The frame the image sits in: a hairline, not a shadow.
                 let framed_view = dest.intersect(rect);
                 painter.rect_stroke(
@@ -906,6 +950,59 @@ impl PhotoApp {
                 }
 
                 self.paint_photo_overlay(ui, rect);
+
+                if cutout_active {
+                    if let Some(p) = response.hover_pos() {
+                        if dest.contains(p) {
+                            let space = ui.input(|i| i.key_down(egui::Key::Space));
+                            if space {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                            } else {
+                                let brush_screen_r = self.cutout_studio.brush_radius * dest.width().max(dest.height());
+                                let erase = ui.input(|i| i.modifiers.alt);
+                                let color = if erase || self.cutout_studio.brush_mode == cutout_studio::CutoutBrushMode::Erase {
+                                    Color32::from_rgb(0xf8, 0x71, 0x71)
+                                } else {
+                                    Color32::from_rgb(0x4a, 0xde, 0x80)
+                                };
+                                painter.circle_stroke(p, brush_screen_r, Stroke::new(2.5, Color32::from_black_alpha(150)));
+                                painter.circle_stroke(p, brush_screen_r, Stroke::new(1.2, color));
+                                painter.circle_filled(p, 1.5, color);
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                            }
+                        }
+                    }
+                }
+
+                if self.cutout_studio.open {
+                    hud_badge(
+                        &painter,
+                        pos2(framed_view.center().x, framed_view.top() + 12.0),
+                        Align2::CENTER_TOP,
+                        "CUTOUT STUDIO · Paint on photo to Keep/Erase · Alt erases · Space+drag pans · Esc closes",
+                        theme::ACCENT,
+                        theme::ACCENT,
+                    );
+                }
+
+                if self.cutout_studio.open {
+                    let mut export_clicked = false;
+                    self.cutout_studio.show_hud(ui.ctx(), &mut export_clicked);
+                    if export_clicked {
+                        self.export_settings.format = photo_engine::ExportFormat::Png;
+                        self.export_settings.remove_background = true;
+                        self.export_settings.cutout_params = self.cutout_studio.params;
+                        self.export_settings.matte_color = if self.cutout_studio.export_matte_white {
+                            Some([255, 255, 255])
+                        } else {
+                            None
+                        };
+                        self.pick_and_export(ui.ctx());
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.cutout_studio.open = false;
+                    }
+                }
 
                 if self.cropping {
                     if ui.ctx().output(|o| o.cursor_icon) != egui::CursorIcon::Move {

@@ -228,8 +228,34 @@ pub(crate) fn settings_editor(
             if widgets::chip(ui, is_white, "catalog white").clicked() {
                 s.matte_color = Some([255, 255, 255]);
             }
+            if widgets::chip(ui, s.cutout_params.defringe_white, "defringe white").clicked() {
+                s.cutout_params.defringe_white = !s.cutout_params.defringe_white;
+            }
         }
     });
+    if s.remove_background {
+        widgets::param_slider(
+            ui,
+            "threshold",
+            &mut s.cutout_params.threshold,
+            0.05..=0.95,
+            2,
+            0.50,
+        );
+        let mut shift_f = s.cutout_params.edge_shift as f32;
+        if widgets::param_slider(
+            ui,
+            "edge shift",
+            &mut shift_f,
+            -10.0..=10.0,
+            0,
+            0.0,
+        )
+        .changed()
+        {
+            s.cutout_params.edge_shift = shift_f.round() as i32;
+        }
+    }
 
     row_label(ui, "Dynamic Range");
     ui.horizontal_wrapped(|ui| {

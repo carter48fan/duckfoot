@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, RgbaImage};
+use serde::{Deserialize, Serialize};
 use tract_onnx::prelude::*;
 
 /// Predefined model types supported out of the box.
@@ -27,6 +28,43 @@ impl RembgModel {
             Self::Custom(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("custom.onnx"),
         }
     }
+}
+
+/// Comprehensive parameters for fine-tuning background cutout.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CutoutParams {
+    /// Foreground threshold cutoff (0.05..=0.95, default 0.50).
+    pub threshold: f32,
+    /// Edge feather in relative radius (0.0..=20.0 px, default 1.0).
+    pub feather: f32,
+    /// Edge shift (-20..=20 px, default 0: negative erodes/contracts, positive dilates/expands).
+    pub edge_shift: i32,
+    /// Whether to decontaminate/defringe white studio background from edge pixels (default true).
+    pub defringe_white: bool,
+}
+
+impl Default for CutoutParams {
+    fn default() -> Self {
+        Self {
+            threshold: 0.50,
+            feather: 1.0,
+            edge_shift: 0,
+            defringe_white: true,
+        }
+    }
+}
+
+/// One manual touch-up dab drawn by the user on the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TouchupDab {
+    /// Normalized coordinates (0.0..=1.0) on the original image.
+    pub at: [f32; 2],
+    /// Radius in normalized coordinates relative to max dimension.
+    pub radius: f32,
+    /// Hardness (0.0 = all feather, 1.0 = hard edge).
+    pub hardness: f32,
+    /// If true, restore foreground (alpha = 255); if false, erase background (alpha = 0).
+    pub keep: bool,
 }
 
 /// Locate a model file across standard locations, cache directories, and environment variables.
@@ -172,8 +210,8 @@ impl RembgSession {
         }
     }
 
-    /// Compute an alpha mask (0 = background, 255 = foreground) at original image dimensions.
-    pub fn compute_mask(&self, img: &DynamicImage) -> Result<GrayImage> {
+    /// Run neural inference on 320x320 and return the raw predicted foreground probabilities (0.0..=1.0).
+    pub fn raw_prediction_320(&self, img: &DynamicImage) -> Result<Vec<f32>> {
         let (orig_w, orig_h) = img.dimensions();
         if orig_w == 0 || orig_h == 0 {
             bail!("Cannot compute mask for empty image");
@@ -233,55 +271,137 @@ impl RembgSession {
             1.0
         };
 
-        let mut mask_320 = GrayImage::new(320, 320);
+        let mut pred_320 = vec![0.0f32; 320 * 320];
         if slice.len() >= 320 * 320 {
-            // First 320x320 elements correspond to predicted mask d0
-            for y in 0..320 {
-                for x in 0..320 {
-                    let val = slice[y * 320 + x];
-                    let norm = ((val - min_val) / range).clamp(0.0, 1.0);
-                    let byte = (norm * 255.0).round() as u8;
-                    mask_320.put_pixel(x as u32, y as u32, Luma([byte]));
-                }
+            for i in 0..320 * 320 {
+                pred_320[i] = ((slice[i] - min_val) / range).clamp(0.0, 1.0);
             }
         }
 
-        // 5. Upscale back to original image size
+        Ok(pred_320)
+    }
+
+    /// Compute an alpha mask from a cached 320x320 prediction with fine-tuning parameters and touch-ups.
+    pub fn compute_mask_from_prediction(
+        &self,
+        pred_320: &[f32],
+        orig_w: u32,
+        orig_h: u32,
+        params: &CutoutParams,
+        touchups: &[TouchupDab],
+    ) -> Result<GrayImage> {
+        let t = params.threshold.clamp(0.01, 0.99);
+        let feather_norm = (params.feather / 100.0).clamp(0.005, 0.45);
+        let t_low = (t - feather_norm).max(0.0);
+        let t_high = (t + feather_norm).min(1.0);
+        let span = (t_high - t_low).max(1e-5);
+
+        let mut mask_320 = GrayImage::new(320, 320);
+        for y in 0..320 {
+            for x in 0..320 {
+                let v = pred_320[y * 320 + x];
+                let smooth = if v <= t_low {
+                    0.0
+                } else if v >= t_high {
+                    1.0
+                } else {
+                    let s = (v - t_low) / span;
+                    s * s * (3.0 - 2.0 * s)
+                };
+                mask_320.put_pixel(x as u32, y as u32, Luma([(smooth * 255.0).round() as u8]));
+            }
+        }
+
+        // Upscale back to original image size
         let mask_dyn = DynamicImage::ImageLuma8(mask_320);
-        let mask_orig = mask_dyn.resize_exact(orig_w, orig_h, FilterType::CatmullRom).to_luma8();
+        let mut mask_orig = mask_dyn.resize_exact(orig_w, orig_h, FilterType::CatmullRom).to_luma8();
+
+        if params.edge_shift != 0 {
+            morphological_shift(&mut mask_orig, params.edge_shift);
+        }
+
+        if !touchups.is_empty() {
+            apply_touchups(&mut mask_orig, touchups);
+        }
 
         Ok(mask_orig)
     }
 
-    /// Remove background, returning an RGBA image with transparent background.
-    pub fn remove_background(&self, img: &DynamicImage) -> Result<RgbaImage> {
-        let mask = self.compute_mask(img)?;
-        let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
-
-        let mut out = RgbaImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let mut p = *rgba.get_pixel(x, y);
-                let alpha = mask.get_pixel(x, y)[0];
-                p[3] = alpha;
-                out.put_pixel(x, y, p);
-            }
-        }
-        Ok(out)
+    /// Compute an alpha mask with full fine-tuning parameters and touch-up points.
+    pub fn compute_mask_with_params(
+        &self,
+        img: &DynamicImage,
+        params: &CutoutParams,
+        touchups: &[TouchupDab],
+    ) -> Result<GrayImage> {
+        let pred = self.raw_prediction_320(img)?;
+        let (w, h) = img.dimensions();
+        self.compute_mask_from_prediction(&pred, w, h, params, touchups)
     }
 
-    /// Remove background, replacing it with a solid color matte (e.g. [255, 255, 255] for catalog white).
-    pub fn remove_background_with_matte(&self, img: &DynamicImage, matte: [u8; 3]) -> Result<RgbImage> {
-        let mask = self.compute_mask(img)?;
-        let rgb = img.to_rgb8();
-        let (w, h) = rgb.dimensions();
+    /// Compute default alpha mask (0 = background, 255 = foreground) at original image dimensions.
+    pub fn compute_mask(&self, img: &DynamicImage) -> Result<GrayImage> {
+        self.compute_mask_with_params(img, &CutoutParams::default(), &[])
+    }
+
+    /// Remove background with fine-tuning parameters and touch-ups, returning an RGBA image.
+    pub fn remove_background_with_params(
+        &self,
+        img: &DynamicImage,
+        params: &CutoutParams,
+        touchups: &[TouchupDab],
+    ) -> Result<RgbaImage> {
+        let mask = self.compute_mask_with_params(img, params, touchups)?;
+        let mut rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+
+        for y in 0..h {
+            for x in 0..w {
+                let p = rgba.get_pixel_mut(x, y);
+                p[3] = mask.get_pixel(x, y)[0];
+            }
+        }
+
+        if params.defringe_white {
+            defringe_rgba(rgba.as_mut(), w, h, [255, 255, 255]);
+        }
+
+        Ok(rgba)
+    }
+
+    /// Remove background, returning an RGBA image with transparent background.
+    pub fn remove_background(&self, img: &DynamicImage) -> Result<RgbaImage> {
+        self.remove_background_with_params(img, &CutoutParams::default(), &[])
+    }
+
+    /// Remove background with fine-tuning parameters, replacing it with a solid color matte.
+    pub fn remove_background_with_params_and_matte(
+        &self,
+        img: &DynamicImage,
+        params: &CutoutParams,
+        touchups: &[TouchupDab],
+        matte: [u8; 3],
+    ) -> Result<RgbImage> {
+        let mask = self.compute_mask_with_params(img, params, touchups)?;
+        let mut rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+
+        for y in 0..h {
+            for x in 0..w {
+                let p = rgba.get_pixel_mut(x, y);
+                p[3] = mask.get_pixel(x, y)[0];
+            }
+        }
+
+        if params.defringe_white {
+            defringe_rgba(rgba.as_mut(), w, h, [255, 255, 255]);
+        }
 
         let mut out = RgbImage::new(w, h);
         for y in 0..h {
             for x in 0..w {
-                let p = rgb.get_pixel(x, y);
-                let a = mask.get_pixel(x, y)[0] as f32 / 255.0;
+                let p = rgba.get_pixel(x, y);
+                let a = p[3] as f32 / 255.0;
                 let inv_a = 1.0 - a;
 
                 let r = (p[0] as f32 * a + matte[0] as f32 * inv_a).round() as u8;
@@ -292,6 +412,123 @@ impl RembgSession {
             }
         }
         Ok(out)
+    }
+
+    /// Remove background, replacing it with a solid color matte (e.g. [255, 255, 255] for catalog white).
+    pub fn remove_background_with_matte(&self, img: &DynamicImage, matte: [u8; 3]) -> Result<RgbImage> {
+        self.remove_background_with_params_and_matte(img, &CutoutParams::default(), &[], matte)
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(1e-5)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Decontaminate / defringe semi-transparent edge pixels by mathematically subtracting
+/// the background color (e.g. pure white [255, 255, 255] from a studio backdrop).
+pub fn defringe_rgba(rgba: &mut [u8], w: u32, h: u32, bg: [u8; 3]) {
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize * 4;
+            let a = rgba[idx + 3];
+            if a > 0 && a < 255 {
+                let a_norm = a as f32 / 255.0;
+                let inv_a = 1.0 - a_norm;
+                for c in 0..3 {
+                    let observed = rgba[idx + c] as f32;
+                    let unblended = (observed - bg[c] as f32 * inv_a) / a_norm;
+                    rgba[idx + c] = unblended.clamp(0.0, 255.0).round() as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Separable morphological min (erosion / contract) or max (dilation / expand).
+fn morphological_shift(mask: &mut GrayImage, shift: i32) {
+    if shift == 0 {
+        return;
+    }
+    let (w, h) = mask.dimensions();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let r = shift.unsigned_abs().min(30) as usize;
+    let erode = shift < 0;
+
+    let src = mask.as_raw();
+    let mut temp = vec![0u8; (w * h) as usize];
+
+    // Pass 1: Horizontal min/max
+    for y in 0..h as usize {
+        let row_start = y * w as usize;
+        for x in 0..w as usize {
+            let x_min = x.saturating_sub(r);
+            let x_max = (x + r).min(w as usize - 1);
+            let mut val = src[row_start + x];
+            if erode {
+                for kx in x_min..=x_max {
+                    val = val.min(src[row_start + kx]);
+                }
+            } else {
+                for kx in x_min..=x_max {
+                    val = val.max(src[row_start + kx]);
+                }
+            }
+            temp[row_start + x] = val;
+        }
+    }
+
+    // Pass 2: Vertical min/max
+    let dst = mask.as_mut();
+    for y in 0..h as usize {
+        let y_min = y.saturating_sub(r);
+        let y_max = (y + r).min(h as usize - 1);
+        let row_start = y * w as usize;
+        for x in 0..w as usize {
+            let mut val = temp[row_start + x];
+            if erode {
+                for ky in y_min..=y_max {
+                    val = val.min(temp[ky * w as usize + x]);
+                }
+            } else {
+                for ky in y_min..=y_max {
+                    val = val.max(temp[ky * w as usize + x]);
+                }
+            }
+            dst[row_start + x] = val;
+        }
+    }
+}
+
+/// Apply user touch-up dabs (keep restores foreground to 255, erase removes to 0).
+fn apply_touchups(mask: &mut GrayImage, touchups: &[TouchupDab]) {
+    let (w, h) = mask.dimensions();
+    let max_dim = w.max(h) as f32;
+    for dab in touchups {
+        let cx = dab.at[0] * w as f32;
+        let cy = dab.at[1] * h as f32;
+        let r_px = (dab.radius * max_dim).max(1.0);
+        let x_min = (cx - r_px).floor().max(0.0) as u32;
+        let x_max = (cx + r_px).ceil().min(w as f32 - 1.0) as u32;
+        let y_min = (cy - r_px).floor().max(0.0) as u32;
+        let y_max = (cy + r_px).ceil().min(h as f32 - 1.0) as u32;
+
+        let target_a = if dab.keep { 255.0 } else { 0.0 };
+        for py in y_min..=y_max {
+            for px in x_min..=x_max {
+                let dx = px as f32 - cx;
+                let dy = py as f32 - cy;
+                let dist = (dx * dx + dy * dy).sqrt() / r_px;
+                if dist <= 1.0 {
+                    let cov = 1.0 - smoothstep(dab.hardness.clamp(0.0, 0.99), 1.0, dist);
+                    let curr_a = mask.get_pixel(px, py)[0] as f32;
+                    let blended = curr_a * (1.0 - cov) + target_a * cov;
+                    mask.put_pixel(px, py, Luma([blended.round() as u8]));
+                }
+            }
+        }
     }
 }
 
@@ -360,5 +597,75 @@ mod tests {
         assert_eq!(mask.width(), 64);
         assert_eq!(mask.height(), 64);
         assert!(mask.get_pixel(32, 32)[0] > mask.get_pixel(0, 0)[0]);
+    }
+
+    #[test]
+    fn test_defringe_white_unblends_background() {
+        // Pixel is 50% opacity, observed RGB is (200, 200, 200) blended over white (255, 255, 255).
+        // True foreground should be: (200 - 255 * 0.5) / 0.5 = (200 - 127.5) / 0.5 = 145.
+        let mut rgba = [200u8, 200, 200, 128];
+        defringe_rgba(&mut rgba, 1, 1, [255, 255, 255]);
+        // Unblended value should be around 145
+        assert!((rgba[0] as i32 - 145).abs() <= 2);
+        assert!((rgba[1] as i32 - 145).abs() <= 2);
+        assert!((rgba[2] as i32 - 145).abs() <= 2);
+    }
+
+    #[test]
+    fn test_touchup_keep_and_erase() {
+        let mut mask = GrayImage::new(100, 100);
+        // Initially all 0
+        let touchups = vec![
+            TouchupDab {
+                at: [0.5, 0.5],
+                radius: 0.1,
+                hardness: 1.0,
+                keep: true,
+            },
+            TouchupDab {
+                at: [0.8, 0.8],
+                radius: 0.1,
+                hardness: 1.0,
+                keep: false,
+            },
+        ];
+        apply_touchups(&mut mask, &touchups);
+        // Center should now be 255
+        assert_eq!(mask.get_pixel(50, 50)[0], 255);
+        // Corner was 0, stays 0
+        assert_eq!(mask.get_pixel(80, 80)[0], 0);
+    }
+
+    #[test]
+    #[ignore = "manual validation on user's real desktop photo"]
+    fn test_dsc05273_cutout_real_photo() {
+        let test_path = std::path::Path::new("/home/carterw/Desktop/DSC05273.jpg");
+        if !test_path.exists() {
+            return;
+        }
+        let session = RembgSession::auto().expect("Auto session should load");
+        let img = image::open(test_path).expect("Image should open");
+        // Mandolin tailpiece is around x: ~0.505, y: ~0.865 in normalized coords
+        let params = CutoutParams {
+            threshold: 0.50,
+            feather: 1.0,
+            edge_shift: 0,
+            defringe_white: true,
+        };
+        let touchups = vec![
+            TouchupDab {
+                at: [0.505, 0.865],
+                radius: 0.045,
+                hardness: 0.85,
+                keep: true,
+            },
+        ];
+        let cutout = session.remove_background_with_params(&img, &params, &touchups)
+            .expect("Background removal should succeed");
+        assert_eq!(cutout.width(), img.width());
+        assert_eq!(cutout.height(), img.height());
+        // Save result so user can visually verify
+        let out_path = std::path::Path::new("/home/carterw/Desktop/DSC05273_duckfoot_cutout.png");
+        cutout.save(out_path).expect("Saving cutout should succeed");
     }
 }

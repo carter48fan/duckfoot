@@ -19,6 +19,7 @@ pub mod tonemap_3d;
 pub mod widgets;
 
 pub mod crop_tool;
+pub mod cutout_studio;
 mod curve_editor;
 mod desktop;
 mod display;
@@ -646,6 +647,7 @@ pub struct PhotoApp {
     pub customize_open: bool,
     pub inspector_width: f32,
     pub inspector_force_width: Option<f32>,
+    pub cutout_studio: cutout_studio::CutoutStudioState,
     /// The module card the user last touched; its border goes amber.
     focused_section: Option<InspectorSectionId>,
     /// Opening a module closes the others, so the inspector stays one screen tall.
@@ -960,6 +962,7 @@ impl PhotoApp {
             compact_rects: compact::Rects::default(),
             photo_touch: Default::default(),
             gestures_excluded: Vec::new(),
+            cutout_studio: cutout_studio::CutoutStudioState::default(),
         };
         if unclean {
             app.set_status("Duckfoot did not close cleanly last time; edits up to then were saved");
