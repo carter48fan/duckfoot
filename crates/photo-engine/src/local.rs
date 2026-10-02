@@ -75,6 +75,29 @@ pub struct Adjust {
     pub denoise: f32,
 }
 
+/// Restrict a local mask to pixels in a specific luminance or color range.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum RangeMask {
+    #[default]
+    None,
+    /// Restrict by pixel luminance (0.0..=1.0).
+    Luminance {
+        /// Lower and upper bounds of luminance.
+        range: [f32; 2],
+        /// Feather softness of the bounds transition.
+        feather: f32,
+    },
+    /// Restrict by pixel hue (0.0..=360.0 degrees).
+    Color {
+        /// Center hue in degrees.
+        hue: f32,
+        /// Angular spread around target hue in degrees.
+        spread: f32,
+        /// Angular feather softness in degrees.
+        feather: f32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
     pub shape: Shape,
@@ -86,6 +109,8 @@ pub struct Mask {
     pub on: bool,
     #[serde(default)]
     pub adjust: Adjust,
+    #[serde(default)]
+    pub range: RangeMask,
 }
 
 fn yes() -> bool {
@@ -104,6 +129,7 @@ impl Mask {
             invert: false,
             on: true,
             adjust: Adjust::default(),
+            range: RangeMask::None,
         }
     }
 
@@ -113,6 +139,7 @@ impl Mask {
             invert: false,
             on: true,
             adjust: Adjust::default(),
+            range: RangeMask::None,
         }
     }
 
@@ -122,6 +149,7 @@ impl Mask {
             invert: false,
             on: true,
             adjust: Adjust::default(),
+            range: RangeMask::None,
         }
     }
 
@@ -227,7 +255,52 @@ impl Mask {
         }
         a.sharpness = f(a.sharpness, 0.0, 100.0, 0.0);
         a.denoise = f(a.denoise, 0.0, 100.0, 0.0);
+        self.range = match self.range {
+            RangeMask::None => RangeMask::None,
+            RangeMask::Luminance { range, feather } => RangeMask::Luminance {
+                range: [f(range[0], 0.0, 1.0, 0.0), f(range[1], 0.0, 1.0, 1.0)],
+                feather: f(feather, 0.001, 1.0, 0.1),
+            },
+            RangeMask::Color { hue, spread, feather } => RangeMask::Color {
+                hue: f(hue, 0.0, 360.0, 0.0),
+                spread: f(spread, 1.0, 180.0, 30.0),
+                feather: f(feather, 0.001, 180.0, 10.0),
+            },
+        };
         self
+    }
+
+    /// Calculate range mask attenuation for given RGB sample [0.0..1.0].
+    pub fn range_factor(&self, rgb: [f32; 3]) -> f32 {
+        match self.range {
+            RangeMask::None => 1.0,
+            RangeMask::Luminance { range, feather } => {
+                let lum = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]).clamp(0.0, 1.0);
+                let f = feather.max(0.001);
+                let lower = smoothstep(range[0] - f, range[0], lum);
+                let upper = 1.0 - smoothstep(range[1], range[1] + f, lum);
+                lower * upper
+            }
+            RangeMask::Color { hue, spread, feather } => {
+                let max = rgb[0].max(rgb[1]).max(rgb[2]);
+                let min = rgb[0].min(rgb[1]).min(rgb[2]);
+                let delta = max - min;
+                if delta <= 1e-4 {
+                    return 0.0;
+                }
+                let h = if (max - rgb[0]).abs() < 1e-5 {
+                    60.0 * (((rgb[1] - rgb[2]) / delta) % 6.0)
+                } else if (max - rgb[1]).abs() < 1e-5 {
+                    60.0 * (((rgb[2] - rgb[0]) / delta) + 2.0)
+                } else {
+                    60.0 * (((rgb[0] - rgb[1]) / delta) + 4.0)
+                };
+                let h = (h + 360.0) % 360.0;
+                let diff = ((h - hue + 540.0) % 360.0 - 180.0).abs();
+                let f = feather.max(0.001);
+                1.0 - smoothstep(spread, spread + f, diff)
+            }
+        }
     }
 }
 
@@ -400,5 +473,32 @@ mod tests {
         assert_eq!(centre, [0.5, 2.0]);
         assert_eq!(radius, [0.005, 0.005]);
         assert_eq!(l.masks[0].adjust.exposure, 4.0);
+    }
+
+    #[test]
+    fn range_mask_restricts_by_luminance_and_color() {
+        let mut m = Mask::radial([0.5, 0.5], 0.5);
+        // By default, no range mask -> factor is 1.0 everywhere
+        assert_eq!(m.range_factor([0.1, 0.1, 0.1]), 1.0);
+        assert_eq!(m.range_factor([0.9, 0.9, 0.9]), 1.0);
+
+        // Luminance range mask: highlight only (0.7..1.0, feather 0.05)
+        m.range = RangeMask::Luminance {
+            range: [0.7, 1.0],
+            feather: 0.05,
+        };
+        assert_eq!(m.range_factor([0.1, 0.1, 0.1]), 0.0);
+        assert_eq!(m.range_factor([0.9, 0.9, 0.9]), 1.0);
+
+        // Color range mask: target green (hue ~120°, spread 30°, feather 5°)
+        m.range = RangeMask::Color {
+            hue: 120.0,
+            spread: 30.0,
+            feather: 5.0,
+        };
+        // Pure green: hue 120°
+        assert_eq!(m.range_factor([0.0, 1.0, 0.0]), 1.0);
+        // Pure red: hue 0° -> completely out of range
+        assert_eq!(m.range_factor([1.0, 0.0, 0.0]), 0.0);
     }
 }

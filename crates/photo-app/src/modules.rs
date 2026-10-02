@@ -47,8 +47,10 @@ macro_rules! module_table {
 
             /// Whether it is contributing to the image.
             pub(crate) fn is_on(self, stack: &PhotoStack) -> bool {
+                #[allow(unreachable_patterns)]
                 match self {
                     Self::Scope | Self::Geometry => true,
+                    Self::ToneCurve => stack.tone_curve.enabled || stack.rgb_curves.enabled,
                     $(Self::$id => stack.$field.enabled,)*
                 }
             }
@@ -61,6 +63,7 @@ macro_rules! module_table {
                     Self::Geometry => stack.geometry = baseline.geometry,
                     Self::ToneCurve => {
                         stack.tone_curve = baseline.tone_curve.clone();
+                        stack.rgb_curves = baseline.rgb_curves.clone();
                         stack.curve_domain = baseline.curve_domain;
                     }
                     $(Self::$id => stack.$field = baseline.$field.clone(),)*
@@ -74,9 +77,10 @@ macro_rules! module_table {
                 let (was, is, params_changed) = match self {
                     Self::Scope | Self::Geometry => return None,
                     Self::ToneCurve => (
-                        a.tone_curve.enabled,
-                        b.tone_curve.enabled,
+                        a.tone_curve.enabled || a.rgb_curves.enabled,
+                        b.tone_curve.enabled || b.rgb_curves.enabled,
                         a.tone_curve.params != b.tone_curve.params
+                            || a.rgb_curves.params != b.rgb_curves.params
                             || a.curve_domain != b.curve_domain,
                     ),
                     $(Self::$id => (
@@ -162,6 +166,7 @@ mod tests {
             let covered = PIPELINE_FIELDS.contains(&key.as_str())
                 || key == "geometry"
                 || key == "curve_domain"
+                || key == "rgb_curves"
                 // Not a module: the space every module works in (W-09).
                 || key == "working_space";
             assert!(covered, "PhotoStack::{key} has no row in the module table");

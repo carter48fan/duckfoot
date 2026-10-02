@@ -49,7 +49,7 @@ pub fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 /// Map a hue angle in degrees (0..360) to the corresponding 8-band ColorEq band name.
 pub fn hue_to_band(hue: f32) -> &'static str {
     let h = (hue % 360.0 + 360.0) % 360.0;
-    if h < 15.0 || h >= 340.0 {
+    if !(15.0..340.0).contains(&h) {
         "Red"
     } else if h < 45.0 {
         "Orange"

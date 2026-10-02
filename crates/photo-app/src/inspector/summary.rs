@@ -90,8 +90,13 @@ pub(crate) fn summarise(
         }
         S::ToneCurve => {
             let nodes = &s.tone_curve.params;
-            let modified = *nodes != d.tone_curve.params;
-            let text = if modified {
+            let rgb_mod = s.rgb_curves.params != d.rgb_curves.params;
+            let modified = *nodes != d.tone_curve.params || rgb_mod;
+            let text = if rgb_mod && *nodes != d.tone_curve.params {
+                format!("{} pts + RGB", nodes.len())
+            } else if rgb_mod {
+                "RGB curves".to_string()
+            } else if *nodes != d.tone_curve.params {
                 format!("{} pts", nodes.len())
             } else {
                 "linear".to_string()

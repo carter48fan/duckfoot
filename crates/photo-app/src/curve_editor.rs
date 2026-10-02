@@ -9,10 +9,48 @@ pub(crate) const CURVE_MAX_NODES: usize = 16;
 /// Closest two nodes may sit in x, so neither can pass the other.
 pub(crate) const CURVE_MIN_GAP: f32 = 0.02;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveChannel {
+    #[default]
+    Rgb,
+    Red,
+    Green,
+    Blue,
+}
+
+impl CurveChannel {
+    pub fn color(self) -> egui::Color32 {
+        match self {
+            Self::Rgb => theme::ACCENT,
+            Self::Red => egui::Color32::from_rgb(239, 68, 68),
+            Self::Green => egui::Color32::from_rgb(34, 197, 94),
+            Self::Blue => egui::Color32::from_rgb(59, 130, 246),
+        }
+    }
+
+    pub fn hi_color(self) -> egui::Color32 {
+        match self {
+            Self::Rgb => theme::ACCENT_HI,
+            Self::Red => egui::Color32::from_rgb(252, 165, 165),
+            Self::Green => egui::Color32::from_rgb(134, 239, 172),
+            Self::Blue => egui::Color32::from_rgb(147, 197, 253),
+        }
+    }
+}
+
 /// The tone curve. Tap the graph to add a node on the curve; drag a node to move it (the
 /// grab keeps its offset, so it never jumps under the finger); double-tap a node, or drag
 /// it well off the graph, to remove it. The two end nodes stay at black and white in x.
+#[allow(dead_code)]
 pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egui::Response {
+    curve_editor_channel(ui, nodes, CurveChannel::Rgb)
+}
+
+pub(crate) fn curve_editor_channel(
+    ui: &mut egui::Ui,
+    nodes: &mut Vec<CurveNode>,
+    channel: CurveChannel,
+) -> egui::Response {
     if nodes.len() < 2 {
         *nodes = identity_nodes();
     }
@@ -77,7 +115,13 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
     };
 
     // The node being dragged and where on it it was grabbed, for the length of a gesture.
-    let grab_id = response.id.with("grab");
+    let chan_key = match channel {
+        CurveChannel::Rgb => "rgb",
+        CurveChannel::Red => "red",
+        CurveChannel::Green => "green",
+        CurveChannel::Blue => "blue",
+    };
+    let grab_id = response.id.with(chan_key).with("grab");
     let mut grab: Option<(usize, egui::Vec2)> = ui.data(|d| d.get_temp(grab_id));
     let mut changed = false;
     let pointer = response.interact_pointer_pos();
@@ -184,7 +228,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
             .map(|(_, n)| *n)
     };
     let samples = ui.data_mut(|d| {
-        let cache = d.get_temp_mut_or_default::<CurveSamples>(response.id.with("samples"));
+        let cache = d.get_temp_mut_or_default::<CurveSamples>(response.id.with(chan_key).with("samples"));
         if cache.values.is_empty() || !cache.nodes.iter().copied().eq(shown()) {
             cache.nodes = shown().collect();
             let lut = photo_engine::curve::build_lut(&cache.nodes);
@@ -212,7 +256,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
         .collect();
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(widgets::sized(ui, 1.75, 2.25), theme::ACCENT),
+        egui::Stroke::new(widgets::sized(ui, 1.75, 2.25), channel.color()),
     ));
 
     let active = grab.map(|(i, _)| i);
@@ -221,9 +265,9 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, nodes: &mut Vec<CurveNode>) -> egu
         let (fill, stroke) = if Some(i) == tearing {
             (theme::BG_950, theme::DANGER)
         } else if Some(i) == active {
-            (theme::ACCENT, theme::ACCENT_HI)
+            (channel.color(), channel.hi_color())
         } else {
-            (theme::TEXT_HI, theme::ACCENT)
+            (theme::TEXT_HI, channel.color())
         };
         painter.circle(to_screen(n), r, fill, egui::Stroke::new(1.5, stroke));
     }

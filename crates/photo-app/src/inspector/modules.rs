@@ -487,8 +487,40 @@ impl PhotoApp {
                 ));
             }
             InspectorSectionId::ToneCurve => {
-                track!(curve_editor(ui, &mut self.stack.tone_curve.params));
-                let is_linear = self.stack.tone_curve.params == identity_nodes();
+                let mut chan: CurveChannel = ui
+                    .data(|d| d.get_temp(ui.id().with("curve_chan")))
+                    .unwrap_or(CurveChannel::Rgb);
+                ui.horizontal(|ui| {
+                    for (c, label) in [
+                        (CurveChannel::Rgb, "RGB"),
+                        (CurveChannel::Red, "Red"),
+                        (CurveChannel::Green, "Green"),
+                        (CurveChannel::Blue, "Blue"),
+                    ] {
+                        if widgets::chip(ui, chan == c, label).clicked() {
+                            chan = c;
+                            ui.data_mut(|d| d.insert_temp(ui.id().with("curve_chan"), chan));
+                        }
+                    }
+                });
+
+                match chan {
+                    CurveChannel::Rgb => {
+                        track!(curve_editor_channel(ui, &mut self.stack.tone_curve.params, chan));
+                    }
+                    CurveChannel::Red => {
+                        self.stack.rgb_curves.enabled = true;
+                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.red, chan));
+                    }
+                    CurveChannel::Green => {
+                        self.stack.rgb_curves.enabled = true;
+                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.green, chan));
+                    }
+                    CurveChannel::Blue => {
+                        self.stack.rgb_curves.enabled = true;
+                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.blue, chan));
+                    }
+                }
                 ui.horizontal(|ui| {
                     let hint = if widgets::is_touch(ui.ctx()) {
                         "tap to add · drag · double-tap to remove"
@@ -497,9 +529,20 @@ impl PhotoApp {
                     };
                     ui.label(theme::tag(hint).color(theme::TEXT_FAINT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled_ui(!is_linear, |ui| {
+                        let can_reset = match chan {
+                            CurveChannel::Rgb => self.stack.tone_curve.params != identity_nodes(),
+                            CurveChannel::Red => self.stack.rgb_curves.params.red != identity_nodes(),
+                            CurveChannel::Green => self.stack.rgb_curves.params.green != identity_nodes(),
+                            CurveChannel::Blue => self.stack.rgb_curves.params.blue != identity_nodes(),
+                        };
+                        ui.add_enabled_ui(can_reset, |ui| {
                             if widgets::chip(ui, false, "reset").clicked() {
-                                self.stack.tone_curve.params = identity_nodes();
+                                match chan {
+                                    CurveChannel::Rgb => self.stack.tone_curve.params = identity_nodes(),
+                                    CurveChannel::Red => self.stack.rgb_curves.params.red = identity_nodes(),
+                                    CurveChannel::Green => self.stack.rgb_curves.params.green = identity_nodes(),
+                                    CurveChannel::Blue => self.stack.rgb_curves.params.blue = identity_nodes(),
+                                }
                                 self.stack.curve_domain = photo_engine::CurveDomain::Display;
                                 discrete!();
                             }
@@ -968,7 +1011,7 @@ impl PhotoApp {
                 }
             }
             InspectorSectionId::Local => {
-                use photo_engine::local::{Mask, Shape, MAX_MASKS};
+                use photo_engine::local::{Mask, RangeMask, Shape, MAX_MASKS};
                 let n = self.stack.local.params.masks.len();
                 let mut add: Option<Mask> = None;
                 ui.horizontal_wrapped(|ui| {
@@ -1155,8 +1198,69 @@ impl PhotoApp {
                         .on_hover_text("Apply outside the shape instead of inside it")
                         .clicked()
                     {
-                        self.stack.local.params.masks[i].invert = !inverted;
+                        m.invert = !inverted;
                         discrete!();
+                    }
+
+                    ui.add_space(4.0);
+                    ui.label(theme::tag("Range Mask").color(theme::TEXT_DIM));
+                    let cur_mode = match m.range {
+                        RangeMask::None => 0,
+                        RangeMask::Luminance { .. } => 1,
+                        RangeMask::Color { .. } => 2,
+                    };
+                    let mut new_mode = cur_mode;
+                    ui.horizontal(|ui| {
+                        if widgets::chip(ui, cur_mode == 0, "Off").clicked() {
+                            new_mode = 0;
+                        }
+                        if widgets::chip(ui, cur_mode == 1, "Luma").clicked() {
+                            new_mode = 1;
+                        }
+                        if widgets::chip(ui, cur_mode == 2, "Color").clicked() {
+                            new_mode = 2;
+                        }
+                    });
+                    if new_mode != cur_mode {
+                        m.range = match new_mode {
+                            0 => RangeMask::None,
+                            1 => RangeMask::Luminance {
+                                range: [0.0, 1.0],
+                                feather: 0.1,
+                            },
+                            2 => RangeMask::Color {
+                                hue: 0.0,
+                                spread: 30.0,
+                                feather: 15.0,
+                            },
+                            _ => RangeMask::None,
+                        };
+                        discrete!();
+                    }
+                    match &mut m.range {
+                        RangeMask::None => {}
+                        RangeMask::Luminance { range, feather } => {
+                            let mut min_l = range[0] * 100.0;
+                            let mut max_l = range[1] * 100.0;
+                            let mut f = *feather * 100.0;
+                            let r1 = widgets::param_slider(ui, "luma min", &mut min_l, 0.0..=100.0, 0, 0.0);
+                            let r2 = widgets::param_slider(ui, "luma max", &mut max_l, 0.0..=100.0, 0, 100.0);
+                            let r3 = widgets::param_slider(ui, "feather", &mut f, 0.1..=100.0, 0, 10.0);
+                            if r1.changed() || r2.changed() || r3.changed() {
+                                range[0] = (min_l / 100.0).min(max_l / 100.0);
+                                range[1] = (max_l / 100.0).max(min_l / 100.0);
+                                *feather = f / 100.0;
+                                discrete!();
+                            }
+                        }
+                        RangeMask::Color { hue, spread, feather } => {
+                            let r1 = widgets::param_slider(ui, "target hue", hue, 0.0..=360.0, 0, 0.0);
+                            let r2 = widgets::param_slider(ui, "hue spread", spread, 1.0..=180.0, 0, 30.0);
+                            let r3 = widgets::param_slider(ui, "feather", feather, 0.1..=90.0, 0, 15.0);
+                            if r1.changed() || r2.changed() || r3.changed() {
+                                discrete!();
+                            }
+                        }
                     }
                 } else if n > 0 {
                     ui.label(theme::dim("Choose a mask to place and adjust it.").size(11.5));

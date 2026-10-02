@@ -189,7 +189,8 @@ impl RembgSession {
         let std = [0.229f32, 0.224f32, 0.225f32];
 
         // Tensor shape: [1, 3, 320, 320]
-        let mut input_data = vec![0.0f32; 1 * 3 * 320 * 320];
+        const PLANE_SIZE: usize = 320 * 320;
+        let mut input_data = vec![0.0f32; 3 * PLANE_SIZE];
         for y in 0..320 {
             for x in 0..320 {
                 let pixel = rgb.get_pixel(x as u32, y as u32);
@@ -198,9 +199,9 @@ impl RembgSession {
                 let b = (pixel[2] as f32 / 255.0 - mean[2]) / std[2];
 
                 let idx_base = y * 320 + x;
-                input_data[0 * 320 * 320 + idx_base] = r;
-                input_data[1 * 320 * 320 + idx_base] = g;
-                input_data[2 * 320 * 320 + idx_base] = b;
+                input_data[idx_base] = r;
+                input_data[PLANE_SIZE + idx_base] = g;
+                input_data[2 * PLANE_SIZE + idx_base] = b;
             }
         }
 

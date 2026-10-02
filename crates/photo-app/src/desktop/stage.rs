@@ -328,7 +328,7 @@ impl PhotoApp {
                             if let Some(p) = response.interact_pointer_pos() {
                                 if frame_now.contains(p) {
                                     let n = (p - frame_now.min) / frame_now.size();
-                                    self.pending_sample = Some(crate::Sample::TatSample(pos2(n.x, n.y), mode, p));
+                                    self.pending_sample = Some(crate::Sample::Tat(pos2(n.x, n.y), mode, p));
                                 }
                             }
                         }

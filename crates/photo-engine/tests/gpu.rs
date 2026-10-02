@@ -2180,3 +2180,35 @@ fn a_mask_reduces_noise_only_where_it_applies() {
     let (r0, r1) = (w * 3 / 4, w - 4);
     assert_eq!(region(&masked, r0, r1), region(&grainy, r0, r1));
 }
+
+#[test]
+fn gpu_export_resizing_downsamples_to_target_dimensions() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (256u32, 256u32);
+    let mut engine = photo_engine::Engine::new(&gpu.device);
+    let raster = testkit::raster_from_fn(w, h, |_, _| [0.5, 0.5, 0.5]);
+    engine
+        .load_raster(&gpu.device, &gpu.queue, raster)
+        .unwrap();
+
+    let stack = PhotoStack::default();
+    let exported = engine
+        .export_sized_in(
+            &gpu.device,
+            &gpu.queue,
+            &stack,
+            photo_engine::BitDepth::Eight,
+            photo_engine::gamut::OutputSpace::Srgb,
+            Some((128, 128)),
+        )
+        .unwrap();
+
+    let photo_engine::Exported::Eight(img) = exported else {
+        panic!("expected 8-bit exported image");
+    };
+    assert_eq!((img.width, img.height), (128, 128));
+    assert_eq!(img.rgba.len(), 128 * 128 * 4);
+    // Compare with full export: should match the center color exactly
+    let full = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert_eq!(img.rgba[0], full.rgba[0]);
+}

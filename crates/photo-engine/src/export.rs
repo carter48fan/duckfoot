@@ -246,6 +246,9 @@ pub struct ExportSettings {
     /// If None and format supports alpha (PNG, WebP, TIFF), produces transparent alpha channel.
     #[serde(default)]
     pub matte_color: Option<[u8; 3]>,
+    /// Whether to generate and embed an HDR Gain Map (ISO 21496-1 / Ultra HDR metadata).
+    #[serde(default)]
+    pub hdr_gain_map: bool,
 }
 
 impl ExportSettings {
@@ -262,6 +265,7 @@ impl ExportSettings {
             color_space: crate::gamut::OutputSpace::Srgb,
             remove_background: false,
             matte_color: None,
+            hdr_gain_map: false,
         }
     }
 
@@ -277,6 +281,120 @@ impl ExportSettings {
         } else {
             BitDepth::Eight
         }
+    }
+}
+
+/// ISO 21496-1 metadata for HDR gain map still images (Ultra HDR).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GainMapMetadata {
+    pub version: String,
+    pub gain_map_min: f32,
+    pub gain_map_max: f32,
+    pub gamma: f32,
+    pub offset_sdr: f32,
+    pub offset_hdr: f32,
+    pub hdr_capacity_min: f32,
+    pub hdr_capacity_max: f32,
+    pub base_rendition_is_sdr: bool,
+}
+
+impl Default for GainMapMetadata {
+    fn default() -> Self {
+        Self {
+            version: "1.0".to_string(),
+            gain_map_min: 0.0,
+            gain_map_max: 2.0,
+            gamma: 1.0,
+            offset_sdr: 1.0 / 64.0,
+            offset_hdr: 1.0 / 64.0,
+            hdr_capacity_min: 0.0,
+            hdr_capacity_max: 2.0,
+            base_rendition_is_sdr: true,
+        }
+    }
+}
+
+/// An HDR gain map and ISO 21496-1 metadata payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GainMap {
+    pub width: u32,
+    pub height: u32,
+    /// 8-bit grayscale luminance gain values [0..255]
+    pub data: Vec<u8>,
+    pub metadata: GainMapMetadata,
+}
+
+impl GainMap {
+    /// Compute a gain map from an SDR image (8-bit RGBA) and an HDR source (float RGB in linear light).
+    pub fn compute(
+        sdr_rgba: &[u8],
+        hdr_rgb_f32: &[f32],
+        width: u32,
+        height: u32,
+        max_headroom_stops: f32,
+    ) -> Self {
+        let metadata = GainMapMetadata {
+            gain_map_max: max_headroom_stops,
+            hdr_capacity_max: max_headroom_stops,
+            ..Default::default()
+        };
+        let mut data = Vec::with_capacity((width * height) as usize);
+        let denom = (metadata.gain_map_max - metadata.gain_map_min).max(1e-4);
+
+        for i in 0..(width * height) as usize {
+            let r_sdr = sdr_rgba[i * 4] as f32 / 255.0;
+            let g_sdr = sdr_rgba[i * 4 + 1] as f32 / 255.0;
+            let b_sdr = sdr_rgba[i * 4 + 2] as f32 / 255.0;
+            let luma_sdr = 0.2126 * r_sdr + 0.7152 * g_sdr + 0.0722 * b_sdr;
+
+            let r_hdr = hdr_rgb_f32.get(i * 3).copied().unwrap_or(r_sdr);
+            let g_hdr = hdr_rgb_f32.get(i * 3 + 1).copied().unwrap_or(g_sdr);
+            let b_hdr = hdr_rgb_f32.get(i * 3 + 2).copied().unwrap_or(b_sdr);
+            let luma_hdr = (0.2126 * r_hdr + 0.7152 * g_hdr + 0.0722 * b_hdr).max(0.0);
+
+            let gain = ((luma_hdr + metadata.offset_hdr) / (luma_sdr + metadata.offset_sdr)).log2();
+            let norm = ((gain - metadata.gain_map_min) / denom).clamp(0.0, 1.0);
+            let val = norm.powf(1.0 / metadata.gamma);
+            data.push((val * 255.0).round() as u8);
+        }
+
+        Self {
+            width,
+            height,
+            data,
+            metadata,
+        }
+    }
+
+    /// Format the ISO 21496-1 XMP metadata packet for embedding in image files.
+    pub fn iso_21496_1_xmp(&self) -> String {
+        format!(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/">
+      <hdrgm:Version>{}</hdrgm:Version>
+      <hdrgm:GainMapMin>{:.6}</hdrgm:GainMapMin>
+      <hdrgm:GainMapMax>{:.6}</hdrgm:GainMapMax>
+      <hdrgm:Gamma>{:.6}</hdrgm:Gamma>
+      <hdrgm:OffsetSDR>{:.6}</hdrgm:OffsetSDR>
+      <hdrgm:OffsetHDR>{:.6}</hdrgm:OffsetHDR>
+      <hdrgm:HDRCapacityMin>{:.6}</hdrgm:HDRCapacityMin>
+      <hdrgm:HDRCapacityMax>{:.6}</hdrgm:HDRCapacityMax>
+      <hdrgm:BaseRenditionIsSDR>{}</hdrgm:BaseRenditionIsSDR>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#,
+            self.metadata.version,
+            self.metadata.gain_map_min,
+            self.metadata.gain_map_max,
+            self.metadata.gamma,
+            self.metadata.offset_sdr,
+            self.metadata.offset_hdr,
+            self.metadata.hdr_capacity_min,
+            self.metadata.hdr_capacity_max,
+            if self.metadata.base_rendition_is_sdr { "True" } else { "False" }
+        )
     }
 }
 
@@ -1269,5 +1387,34 @@ mod tests {
         let img = noise(64, 48).resized(32, 24).unwrap();
         assert_eq!((img.width, img.height), (32, 24));
         assert_eq!(img.rgba.len(), 32 * 24 * 4);
+    }
+
+    #[test]
+    fn gain_map_computes_headroom_and_formats_iso_21496_1_xmp() {
+        // SDR image: 2 pixels. First is mid-grey, second is blown SDR white (1.0).
+        let sdr_rgba = vec![
+            128, 128, 128, 255, // mid-grey
+            255, 255, 255, 255, // 1.0 SDR white
+        ];
+        // HDR image: First pixel is mid-grey (same), second pixel is HDR specular (4.0 = +2 stops headroom).
+        let hdr_rgb = vec![
+            0.5, 0.5, 0.5,
+            4.0, 4.0, 4.0,
+        ];
+        let gm = GainMap::compute(&sdr_rgba, &hdr_rgb, 2, 1, 2.0);
+        assert_eq!(gm.width, 2);
+        assert_eq!(gm.height, 1);
+        assert_eq!(gm.data.len(), 2);
+
+        // Pixel 0 has ~0 gain (same brightness)
+        assert!(gm.data[0] < 10, "pixel 0 gain should be near 0, got {}", gm.data[0]);
+        // Pixel 1 has max gain (4x = 2 stops headroom on a 2-stop max map)
+        assert!(gm.data[1] > 240, "pixel 1 gain should be near 255, got {}", gm.data[1]);
+
+        // Verify ISO 21496-1 XMP metadata
+        let xmp = gm.iso_21496_1_xmp();
+        assert!(xmp.contains("<hdrgm:Version>1.0</hdrgm:Version>"));
+        assert!(xmp.contains("<hdrgm:GainMapMax>2.000000</hdrgm:GainMapMax>"));
+        assert!(xmp.contains("<hdrgm:BaseRenditionIsSDR>True</hdrgm:BaseRenditionIsSDR>"));
     }
 }
