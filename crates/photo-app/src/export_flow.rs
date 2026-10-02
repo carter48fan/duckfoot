@@ -35,12 +35,13 @@ impl PhotoApp {
         let (tx, rx) = mpsc::channel();
         let target = path.clone();
         let source = self.loaded_path.clone();
+        let touchups = self.cutout_studio.touchups.clone();
         std::thread::spawn(move || {
             let info = source
                 .as_deref()
                 .and_then(|p| photo_engine::read_info(&photo_engine::copies::source_file(p)));
             let outcome = exported
-                .save(&target, &settings, info.as_ref())
+                .save_with_touchups(&target, &settings, info.as_ref(), &touchups)
                 .map_err(|e| format!("{e:#}"));
             // The receiver is gone only if the app is shutting down; nothing to report to.
             let _ = tx.send(outcome);

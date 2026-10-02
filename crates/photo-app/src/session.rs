@@ -722,6 +722,7 @@ impl PhotoApp {
         self.selected_spot = None;
         self.spot_drag = None;
         self.pending_spot = None;
+        self.cutout_studio.reset_cache();
         self.sidecar_locked = false;
         self.decode_failed = false;
         let (saved, metadata, snapshots, saved_history) =

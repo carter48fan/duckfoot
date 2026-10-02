@@ -249,6 +249,9 @@ pub struct ExportSettings {
     /// Whether to generate and embed an HDR Gain Map (ISO 21496-1 / Ultra HDR metadata).
     #[serde(default)]
     pub hdr_gain_map: bool,
+    /// Fine-tuning parameters for background cutout (threshold, feather, edge shift, defringing).
+    #[serde(default)]
+    pub cutout_params: crate::rembg::CutoutParams,
 }
 
 impl ExportSettings {
@@ -266,6 +269,7 @@ impl ExportSettings {
             remove_background: false,
             matte_color: None,
             hdr_gain_map: false,
+            cutout_params: crate::rembg::CutoutParams::default(),
         }
     }
 
@@ -576,12 +580,18 @@ impl ExportedImage<u8> {
         )
     }
 
-    pub fn remove_background(&mut self, session: &crate::rembg::RembgSession, matte: Option<[u8; 3]>) -> Result<()> {
+    pub fn remove_background(
+        &mut self,
+        session: &crate::rembg::RembgSession,
+        matte: Option<[u8; 3]>,
+        params: &crate::rembg::CutoutParams,
+        touchups: &[crate::rembg::TouchupDab],
+    ) -> Result<()> {
         let (w, h) = (self.width, self.height);
         let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, self.rgba.clone())
             .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
         let dyn_img = image::DynamicImage::ImageRgba8(img);
-        let mask = session.compute_mask(&dyn_img)?;
+        let mask = session.compute_mask_with_params(&dyn_img, params, touchups)?;
 
         for y in 0..h {
             for x in 0..w {
@@ -598,6 +608,10 @@ impl ExportedImage<u8> {
                     self.rgba[idx + 3] = a;
                 }
             }
+        }
+
+        if params.defringe_white && matte.is_none() {
+            crate::rembg::defringe_rgba(&mut self.rgba, w, h, [255, 255, 255]);
         }
         Ok(())
     }
@@ -640,33 +654,57 @@ impl ExportedImage<u16> {
         )
     }
 
-    pub fn remove_background(&mut self, session: &crate::rembg::RembgSession, matte: Option<[u8; 3]>) -> Result<()> {
+    pub fn remove_background(
+        &mut self,
+        session: &crate::rembg::RembgSession,
+        matte: Option<[u8; 3]>,
+        params: &crate::rembg::CutoutParams,
+        touchups: &[crate::rembg::TouchupDab],
+    ) -> Result<()> {
         let (w, h) = (self.width, self.height);
         let eight = to_eight(&self.rgba);
         let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(w, h, eight)
             .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
         let dyn_img = image::DynamicImage::ImageRgba8(img);
-        let mask = session.compute_mask(&dyn_img)?;
+        let mask = session.compute_mask_with_params(&dyn_img, params, touchups)?;
 
         for y in 0..h {
             for x in 0..w {
                 let idx = (y * w + x) as usize * 4;
                 let a = mask.get_pixel(x, y)[0];
+                let a16 = (a as u16) << 8 | a as u16;
                 if let Some(bg) = matte {
                     let a_norm = a as f32 / 255.0;
                     let inv_a = 1.0 - a_norm;
-                    let bg_16 = [
-                        (bg[0] as f32 / 255.0) * 65535.0,
-                        (bg[1] as f32 / 255.0) * 65535.0,
-                        (bg[2] as f32 / 255.0) * 65535.0,
+                    let bg16 = [
+                        ((bg[0] as u16) << 8 | bg[0] as u16) as f32,
+                        ((bg[1] as u16) << 8 | bg[1] as u16) as f32,
+                        ((bg[2] as u16) << 8 | bg[2] as u16) as f32,
                     ];
-                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg_16[0] * inv_a).round() as u16;
-                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg_16[1] * inv_a).round() as u16;
-                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg_16[2] * inv_a).round() as u16;
-                    self.rgba[idx + 3] = 65535;
+                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg16[0] * inv_a).round() as u16;
+                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg16[1] * inv_a).round() as u16;
+                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg16[2] * inv_a).round() as u16;
+                    self.rgba[idx + 3] = u16::MAX;
                 } else {
-                    let a_16 = ((a as u32 * 65535 + 127) / 255) as u16;
-                    self.rgba[idx + 3] = a_16;
+                    self.rgba[idx + 3] = a16;
+                }
+            }
+        }
+
+        if params.defringe_white && matte.is_none() {
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = (y * w + x) as usize * 4;
+                    let a16 = self.rgba[idx + 3];
+                    if a16 > 0 && a16 < u16::MAX {
+                        let a = a16 as f32 / 65535.0;
+                        let r = (self.rgba[idx] as f32 - 65535.0 * (1.0 - a)) / a;
+                        let g = (self.rgba[idx + 1] as f32 - 65535.0 * (1.0 - a)) / a;
+                        let b = (self.rgba[idx + 2] as f32 - 65535.0 * (1.0 - a)) / a;
+                        self.rgba[idx] = r.clamp(0.0, 65535.0).round() as u16;
+                        self.rgba[idx + 1] = g.clamp(0.0, 65535.0).round() as u16;
+                        self.rgba[idx + 2] = b.clamp(0.0, 65535.0).round() as u16;
+                    }
                 }
             }
         }
@@ -689,8 +727,12 @@ impl Exported {
         }
     }
 
-    /// Resized and output-sharpened as `settings` say.
-    pub fn finished(self, settings: &ExportSettings) -> Result<Self> {
+    /// Resized and output-sharpened as `settings` say, with optional manual touch-up dabs.
+    pub fn finished_with_touchups(
+        self,
+        settings: &ExportSettings,
+        touchups: &[crate::rembg::TouchupDab],
+    ) -> Result<Self> {
         let (w, h) = settings.sizing.target(self.width(), self.height());
         let strength = settings.sharpen.strength(settings.sharpen_amount);
         let mut out = match self {
@@ -705,11 +747,30 @@ impl Exported {
             };
             let session = crate::rembg::RembgSession::auto()?;
             match &mut out {
-                Exported::Eight(i) => i.remove_background(&session, matte)?,
-                Exported::Sixteen(i) => i.remove_background(&session, matte)?,
+                Exported::Eight(i) => i.remove_background(&session, matte, &settings.cutout_params, touchups)?,
+                Exported::Sixteen(i) => i.remove_background(&session, matte, &settings.cutout_params, touchups)?,
             }
         }
         Ok(out)
+    }
+
+    /// Resized and output-sharpened as `settings` say.
+    pub fn finished(self, settings: &ExportSettings) -> Result<Self> {
+        self.finished_with_touchups(settings, &[])
+    }
+
+    /// Finish and write with touch-ups applied to background removal.
+    pub fn save_with_touchups(
+        self,
+        path: &Path,
+        settings: &ExportSettings,
+        info: Option<&PhotoInfo>,
+        touchups: &[crate::rembg::TouchupDab],
+    ) -> Result<()> {
+        match self.finished_with_touchups(settings, touchups)? {
+            Exported::Eight(i) => i.write(path, settings, info),
+            Exported::Sixteen(i) => i.write(path, settings, info),
+        }
     }
 
     /// Finish and write: what the single export and every batch recipe do.
@@ -719,10 +780,7 @@ impl Exported {
         settings: &ExportSettings,
         info: Option<&PhotoInfo>,
     ) -> Result<()> {
-        match self.finished(settings)? {
-            Exported::Eight(i) => i.write(path, settings, info),
-            Exported::Sixteen(i) => i.write(path, settings, info),
-        }
+        self.save_with_touchups(path, settings, info, &[])
     }
 }
 
