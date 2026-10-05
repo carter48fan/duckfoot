@@ -2187,9 +2187,7 @@ fn gpu_export_resizing_downsamples_to_target_dimensions() {
     let (w, h) = (256u32, 256u32);
     let mut engine = photo_engine::Engine::new(&gpu.device);
     let raster = testkit::raster_from_fn(w, h, |_, _| [0.5, 0.5, 0.5]);
-    engine
-        .load_raster(&gpu.device, &gpu.queue, raster)
-        .unwrap();
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
 
     let stack = PhotoStack::default();
     let exported = engine
@@ -2208,7 +2206,14 @@ fn gpu_export_resizing_downsamples_to_target_dimensions() {
     };
     assert_eq!((img.width, img.height), (128, 128));
     assert_eq!(img.rgba.len(), 128 * 128 * 4);
-    // Compare with full export: should match the center color exactly
+    // The same grey as the full export, give or take the 8-bit dither: each resized texel
+    // blends several dithered ones, so it can land on the neighbouring code.
     let full = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
-    assert_eq!(img.rgba[0], full.rgba[0]);
+    let off = img.rgba[0].abs_diff(full.rgba[0]);
+    assert!(
+        off <= 1,
+        "resized {} against full {}",
+        img.rgba[0],
+        full.rgba[0]
+    );
 }

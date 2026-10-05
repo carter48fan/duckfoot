@@ -1,10 +1,10 @@
 //! Interactive Cutout Studio: live background removal preview, edge fine-tuning,
 //! white halo defringing, and manual Keep/Erase touch-up brushes.
 
-use std::path::{Path, PathBuf};
 use egui::{pos2, RichText};
 use image::{DynamicImage, GenericImageView, RgbaImage};
 use photo_engine::rembg::{CutoutParams, RembgSession, TouchupDab};
+use std::path::{Path, PathBuf};
 
 use crate::theme;
 use crate::widgets::{self, Kind};
@@ -106,7 +106,10 @@ impl CutoutStudioState {
         let (w, h) = img.dimensions();
         let scale = 1400.0 / (w.max(h) as f32).max(1.0);
         let (pw, ph) = if scale < 1.0 {
-            (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1))
+            (
+                ((w as f32 * scale).round() as u32).max(1),
+                ((h as f32 * scale).round() as u32).max(1),
+            )
         } else {
             (w, h)
         };
@@ -119,18 +122,18 @@ impl CutoutStudioState {
 
         // Run neural inference for 320x320 prediction
         match RembgSession::auto() {
-            Ok(session) => {
-                match session.raw_prediction_320(&preview_img) {
-                    Ok(pred) => {
-                        self.cached_pred_320 = Some(pred);
-                        self.update_preview_texture(ctx);
-                        self.status = Some("Cutout ready. Use Keep/Erase brushes or sliders to fine-tune.".into());
-                    }
-                    Err(e) => {
-                        self.status = Some(format!("Inference failed: {e}"));
-                    }
+            Ok(session) => match session.raw_prediction_320(&preview_img) {
+                Ok(pred) => {
+                    self.cached_pred_320 = Some(pred);
+                    self.update_preview_texture(ctx);
+                    self.status = Some(
+                        "Cutout ready. Use Keep/Erase brushes or sliders to fine-tune.".into(),
+                    );
                 }
-            }
+                Err(e) => {
+                    self.status = Some(format!("Inference failed: {e}"));
+                }
+            },
             Err(e) => {
                 self.status = Some(format!("Failed to load rembg model: {e}"));
             }
@@ -194,8 +197,12 @@ impl CutoutStudioState {
         };
         let (w, h) = base_rgba.dimensions();
 
-        let Ok(session) = RembgSession::auto() else { return; };
-        let Ok(mask) = session.compute_mask_from_prediction(pred, w, h, &self.params, &self.touchups) else {
+        let Ok(session) = RembgSession::auto() else {
+            return;
+        };
+        let Ok(mask) =
+            session.compute_mask_from_prediction(pred, w, h, &self.params, &self.touchups)
+        else {
             return;
         };
 
@@ -261,20 +268,29 @@ impl CutoutStudioState {
             }
         }
 
-        let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
         if let Some(tex) = &mut self.preview_texture {
             tex.set(color_image, egui::TextureOptions::LINEAR);
         } else {
-            self.preview_texture = Some(ctx.load_texture("cutout_preview", color_image, egui::TextureOptions::LINEAR));
+            self.preview_texture =
+                Some(ctx.load_texture("cutout_preview", color_image, egui::TextureOptions::LINEAR));
         }
     }
 
     /// Add a touchup dab with explicit mode (normalized coordinates [0..1]).
-    pub fn add_touchup_with_mode(&mut self, ctx: &egui::Context, at: [f32; 2], mode: CutoutBrushMode) {
+    pub fn add_touchup_with_mode(
+        &mut self,
+        ctx: &egui::Context,
+        at: [f32; 2],
+        mode: CutoutBrushMode,
+    ) {
         if let Some(last) = self.touchups.last() {
             let dx = last.at[0] - at[0];
             let dy = last.at[1] - at[1];
-            if (dx * dx + dy * dy).sqrt() < (self.brush_radius * 0.3).max(0.004) && last.keep == (mode == CutoutBrushMode::Keep) {
+            if (dx * dx + dy * dy).sqrt() < (self.brush_radius * 0.3).max(0.004)
+                && last.keep == (mode == CutoutBrushMode::Keep)
+            {
                 return;
             }
         }
@@ -578,9 +594,11 @@ mod tests {
 
     #[test]
     fn invalidate_prediction_preserves_touchups() {
-        let mut state = CutoutStudioState::default();
-        state.cached_source_path = Some(PathBuf::from("/test/mandolin.arw"));
-        state.cached_pred_320 = Some(vec![0.5; 320 * 320]);
+        let mut state = CutoutStudioState {
+            cached_source_path: Some(PathBuf::from("/test/mandolin.arw")),
+            cached_pred_320: Some(vec![0.5; 320 * 320]),
+            ..Default::default()
+        };
         state.touchups.push(TouchupDab {
             at: [0.5, 0.5],
             radius: 0.05,
@@ -591,7 +609,11 @@ mod tests {
         state.invalidate_prediction();
         assert!(state.cached_source_path.is_none());
         assert!(state.cached_pred_320.is_none());
-        assert_eq!(state.touchups.len(), 1, "Touchups should be preserved on invalidate");
+        assert_eq!(
+            state.touchups.len(),
+            1,
+            "Touchups should be preserved on invalidate"
+        );
     }
 
     #[test]
@@ -604,7 +626,7 @@ mod tests {
         let mut img = image::RgbaImage::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                if x >= 30 && x <= 70 && y >= 20 && y <= 80 {
+                if (30..=70).contains(&x) && (20..=80).contains(&y) {
                     img.put_pixel(x, y, image::Rgba([220, 160, 40, 255]));
                 } else {
                     img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
@@ -618,6 +640,9 @@ mod tests {
         assert!(state.cached_pred_320.is_some());
         assert!(state.preview_base_rgba.is_some());
         assert!(state.preview_texture.is_some());
-        assert!(state.status.as_ref().is_some_and(|s| s.contains("Cutout ready")));
+        assert!(state
+            .status
+            .as_ref()
+            .is_some_and(|s| s.contains("Cutout ready")));
     }
 }

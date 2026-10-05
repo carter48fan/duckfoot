@@ -1334,7 +1334,11 @@ fn clear_shelf_removes_all_and_undo_restores_all() {
     app.undo_remove_from_shelf();
     assert_eq!(app.shelf.len(), 3);
     let order: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
-    assert_eq!(order, vec![a, b, c], "all photos restored back to shelf in order");
+    assert_eq!(
+        order,
+        vec![a, b, c],
+        "all photos restored back to shelf in order"
+    );
     h.settle(&mut app, Duration::from_secs(30));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -506,19 +506,35 @@ impl PhotoApp {
 
                 match chan {
                     CurveChannel::Rgb => {
-                        track!(curve_editor_channel(ui, &mut self.stack.tone_curve.params, chan));
+                        track!(curve_editor_channel(
+                            ui,
+                            &mut self.stack.tone_curve.params,
+                            chan
+                        ));
                     }
                     CurveChannel::Red => {
                         self.stack.rgb_curves.enabled = true;
-                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.red, chan));
+                        track!(curve_editor_channel(
+                            ui,
+                            &mut self.stack.rgb_curves.params.red,
+                            chan
+                        ));
                     }
                     CurveChannel::Green => {
                         self.stack.rgb_curves.enabled = true;
-                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.green, chan));
+                        track!(curve_editor_channel(
+                            ui,
+                            &mut self.stack.rgb_curves.params.green,
+                            chan
+                        ));
                     }
                     CurveChannel::Blue => {
                         self.stack.rgb_curves.enabled = true;
-                        track!(curve_editor_channel(ui, &mut self.stack.rgb_curves.params.blue, chan));
+                        track!(curve_editor_channel(
+                            ui,
+                            &mut self.stack.rgb_curves.params.blue,
+                            chan
+                        ));
                     }
                 }
                 ui.horizontal(|ui| {
@@ -531,17 +547,31 @@ impl PhotoApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_reset = match chan {
                             CurveChannel::Rgb => self.stack.tone_curve.params != identity_nodes(),
-                            CurveChannel::Red => self.stack.rgb_curves.params.red != identity_nodes(),
-                            CurveChannel::Green => self.stack.rgb_curves.params.green != identity_nodes(),
-                            CurveChannel::Blue => self.stack.rgb_curves.params.blue != identity_nodes(),
+                            CurveChannel::Red => {
+                                self.stack.rgb_curves.params.red != identity_nodes()
+                            }
+                            CurveChannel::Green => {
+                                self.stack.rgb_curves.params.green != identity_nodes()
+                            }
+                            CurveChannel::Blue => {
+                                self.stack.rgb_curves.params.blue != identity_nodes()
+                            }
                         };
                         ui.add_enabled_ui(can_reset, |ui| {
                             if widgets::chip(ui, false, "reset").clicked() {
                                 match chan {
-                                    CurveChannel::Rgb => self.stack.tone_curve.params = identity_nodes(),
-                                    CurveChannel::Red => self.stack.rgb_curves.params.red = identity_nodes(),
-                                    CurveChannel::Green => self.stack.rgb_curves.params.green = identity_nodes(),
-                                    CurveChannel::Blue => self.stack.rgb_curves.params.blue = identity_nodes(),
+                                    CurveChannel::Rgb => {
+                                        self.stack.tone_curve.params = identity_nodes()
+                                    }
+                                    CurveChannel::Red => {
+                                        self.stack.rgb_curves.params.red = identity_nodes()
+                                    }
+                                    CurveChannel::Green => {
+                                        self.stack.rgb_curves.params.green = identity_nodes()
+                                    }
+                                    CurveChannel::Blue => {
+                                        self.stack.rgb_curves.params.blue = identity_nodes()
+                                    }
                                 }
                                 self.stack.curve_domain = photo_engine::CurveDomain::Display;
                                 discrete!();
@@ -620,7 +650,8 @@ impl PhotoApp {
                             }
                         }
                     }
-                    let tat_on = self.tat_mode == Some(crate::tat::TatMode::ColorEq(self.color_eq_tab));
+                    let tat_on =
+                        self.tat_mode == Some(crate::tat::TatMode::ColorEq(self.color_eq_tab));
                     if widgets::chip(ui, tat_on, "🎯 on-photo drag")
                         .on_hover_text("Drag directly on colors in the photo to adjust their band")
                         .clicked()
@@ -1243,9 +1274,24 @@ impl PhotoApp {
                             let mut min_l = range[0] * 100.0;
                             let mut max_l = range[1] * 100.0;
                             let mut f = *feather * 100.0;
-                            let r1 = widgets::param_slider(ui, "luma min", &mut min_l, 0.0..=100.0, 0, 0.0);
-                            let r2 = widgets::param_slider(ui, "luma max", &mut max_l, 0.0..=100.0, 0, 100.0);
-                            let r3 = widgets::param_slider(ui, "feather", &mut f, 0.1..=100.0, 0, 10.0);
+                            let r1 = widgets::param_slider(
+                                ui,
+                                "luma min",
+                                &mut min_l,
+                                0.0..=100.0,
+                                0,
+                                0.0,
+                            );
+                            let r2 = widgets::param_slider(
+                                ui,
+                                "luma max",
+                                &mut max_l,
+                                0.0..=100.0,
+                                0,
+                                100.0,
+                            );
+                            let r3 =
+                                widgets::param_slider(ui, "feather", &mut f, 0.1..=100.0, 0, 10.0);
                             if r1.changed() || r2.changed() || r3.changed() {
                                 range[0] = (min_l / 100.0).min(max_l / 100.0);
                                 range[1] = (max_l / 100.0).max(min_l / 100.0);
@@ -1253,10 +1299,23 @@ impl PhotoApp {
                                 discrete!();
                             }
                         }
-                        RangeMask::Color { hue, spread, feather } => {
-                            let r1 = widgets::param_slider(ui, "target hue", hue, 0.0..=360.0, 0, 0.0);
-                            let r2 = widgets::param_slider(ui, "hue spread", spread, 1.0..=180.0, 0, 30.0);
-                            let r3 = widgets::param_slider(ui, "feather", feather, 0.1..=90.0, 0, 15.0);
+                        RangeMask::Color {
+                            hue,
+                            spread,
+                            feather,
+                        } => {
+                            let r1 =
+                                widgets::param_slider(ui, "target hue", hue, 0.0..=360.0, 0, 0.0);
+                            let r2 = widgets::param_slider(
+                                ui,
+                                "hue spread",
+                                spread,
+                                1.0..=180.0,
+                                0,
+                                30.0,
+                            );
+                            let r3 =
+                                widgets::param_slider(ui, "feather", feather, 0.1..=90.0, 0, 15.0);
                             if r1.changed() || r2.changed() || r3.changed() {
                                 discrete!();
                             }

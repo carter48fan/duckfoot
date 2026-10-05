@@ -261,7 +261,11 @@ impl Mask {
                 range: [f(range[0], 0.0, 1.0, 0.0), f(range[1], 0.0, 1.0, 1.0)],
                 feather: f(feather, 0.001, 1.0, 0.1),
             },
-            RangeMask::Color { hue, spread, feather } => RangeMask::Color {
+            RangeMask::Color {
+                hue,
+                spread,
+                feather,
+            } => RangeMask::Color {
                 hue: f(hue, 0.0, 360.0, 0.0),
                 spread: f(spread, 1.0, 180.0, 30.0),
                 feather: f(feather, 0.001, 180.0, 10.0),
@@ -281,7 +285,11 @@ impl Mask {
                 let upper = 1.0 - smoothstep(range[1], range[1] + f, lum);
                 lower * upper
             }
-            RangeMask::Color { hue, spread, feather } => {
+            RangeMask::Color {
+                hue,
+                spread,
+                feather,
+            } => {
                 let max = rgb[0].max(rgb[1]).max(rgb[2]);
                 let min = rgb[0].min(rgb[1]).min(rgb[2]);
                 let delta = max - min;

@@ -192,18 +192,42 @@ pub fn parse_cube(input: &str) -> Result<Lut3D> {
             size = Some(s);
             is_3d = false;
         } else if first.eq_ignore_ascii_case("DOMAIN_MIN") {
-            let r: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MIN r"))?.parse()?;
-            let g: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MIN g"))?.parse()?;
-            let b: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MIN b"))?.parse()?;
+            let r: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MIN r"))?
+                .parse()?;
+            let g: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MIN g"))?
+                .parse()?;
+            let b: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MIN b"))?
+                .parse()?;
             domain_min = [r, g, b];
         } else if first.eq_ignore_ascii_case("DOMAIN_MAX") {
-            let r: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MAX r"))?.parse()?;
-            let g: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MAX g"))?.parse()?;
-            let b: f32 = parts.next().ok_or_else(|| anyhow!("Missing DOMAIN_MAX b"))?.parse()?;
+            let r: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MAX r"))?
+                .parse()?;
+            let g: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MAX g"))?
+                .parse()?;
+            let b: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing DOMAIN_MAX b"))?
+                .parse()?;
             domain_max = [r, g, b];
         } else if let Ok(r) = first.parse::<f32>() {
-            let g: f32 = parts.next().ok_or_else(|| anyhow!("Missing green channel in data row: {line}"))?.parse()?;
-            let b: f32 = parts.next().ok_or_else(|| anyhow!("Missing blue channel in data row: {line}"))?.parse()?;
+            let g: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing green channel in data row: {line}"))?
+                .parse()?;
+            let b: f32 = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing blue channel in data row: {line}"))?
+                .parse()?;
             table.push([r, g, b]);
         }
     }
