@@ -570,11 +570,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_model_in_local_environment() {
-        let model = RembgModel::U2Netp;
-        let found = find_model(&model);
-        assert!(found.is_some(), "Should find u2netp.onnx in ~/.u2net");
-        println!("Found u2netp at {:?}", found.unwrap());
+    fn test_find_model_resolves_custom_path() {
+        // The search directories (~/.u2net, U2NET_HOME, ...) differ per machine, so resolve
+        // the model this repository ships instead of whatever one may be installed.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/u2netp.onnx");
+        let found = find_model(&RembgModel::Custom(path.clone()));
+        assert_eq!(found, Some(path));
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/missing.onnx");
+        assert_eq!(find_model(&RembgModel::Custom(missing)), None);
     }
 
     #[test]
