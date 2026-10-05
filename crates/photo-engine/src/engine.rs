@@ -3094,7 +3094,11 @@ fn mask_uniforms(
             RangeMask::Luminance { range, feather } => {
                 out[slot + 4] = [1.0, range[0], range[1], feather.clamp(0.001, 1.0)];
             }
-            RangeMask::Color { hue, spread, feather } => {
+            RangeMask::Color {
+                hue,
+                spread,
+                feather,
+            } => {
                 out[slot + 4] = [2.0, hue, spread, feather.clamp(0.001, 1.0)];
             }
         }

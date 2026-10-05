@@ -3,10 +3,12 @@
 //! 100% pure Rust neural network inference with zero external C++ dependencies or Python.
 //! Runs identically across Linux, Windows, macOS, and Android (aarch64).
 
-use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
-use image::{imageops::FilterType, DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, RgbaImage};
+use image::{
+    imageops::FilterType, DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, RgbaImage,
+};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tract_onnx::prelude::*;
 
 /// Predefined model types supported out of the box.
@@ -25,7 +27,10 @@ impl RembgModel {
         match self {
             Self::U2Net => "u2net.onnx",
             Self::U2Netp => "u2netp.onnx",
-            Self::Custom(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("custom.onnx"),
+            Self::Custom(p) => p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("custom.onnx"),
         }
     }
 }
@@ -89,7 +94,10 @@ pub fn find_model(model: &RembgModel) -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
-        let p = PathBuf::from(&dir).join("models").join(p.file_stem().unwrap_or_default()).join(fname);
+        let p = PathBuf::from(&dir)
+            .join("models")
+            .join(p.file_stem().unwrap_or_default())
+            .join(fname);
         if p.exists() {
             return Some(p);
         }
@@ -101,7 +109,10 @@ pub fn find_model(model: &RembgModel) -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
-        let p = PathBuf::from(&home).join(".rembg").join("models").join(fname);
+        let p = PathBuf::from(&home)
+            .join(".rembg")
+            .join("models")
+            .join(fname);
         if p.exists() {
             return Some(p);
         }
@@ -142,7 +153,10 @@ impl RembgSession {
         let model = tract_onnx::onnx()
             .model_for_path(path)
             .with_context(|| format!("Failed to load ONNX model from {:?}", path))?
-            .with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)))
+            .with_input_fact(
+                0,
+                InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)),
+            )
             .with_context(|| "Failed to configure model input shape [1, 3, 320, 320]")?
             .into_optimized()
             .with_context(|| "Failed to optimize ONNX graph")?
@@ -157,7 +171,10 @@ impl RembgSession {
         let model = tract_onnx::onnx()
             .model_for_read(&mut reader)
             .with_context(|| "Failed to load ONNX model from reader")?
-            .with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)))
+            .with_input_fact(
+                0,
+                InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)),
+            )
             .with_context(|| "Failed to configure model input shape [1, 3, 320, 320]")?
             .into_optimized()
             .with_context(|| "Failed to optimize ONNX graph")?
@@ -206,7 +223,10 @@ impl RembgSession {
         } else if model_type == RembgModel::U2Netp {
             Self::bundled()
         } else {
-            bail!("Could not find model {:?}. Ensure it is present in ~/.u2net/ or specified path.", model_type.filename());
+            bail!(
+                "Could not find model {:?}. Ensure it is present in ~/.u2net/ or specified path.",
+                model_type.filename()
+            );
         }
     }
 
@@ -248,11 +268,14 @@ impl RembgSession {
             .into_tensor();
 
         // 3. Run model inference
-        let outputs = self.model.run(tvec!(tensor.into()))
+        let outputs = self
+            .model
+            .run(tvec!(tensor.into()))
             .with_context(|| "Failed to run neural inference")?;
 
         let output_tensor = &outputs[0];
-        let view = output_tensor.to_plain_array_view::<f32>()
+        let view = output_tensor
+            .to_plain_array_view::<f32>()
             .with_context(|| "Failed to view output tensor as f32 array")?;
         let slice = view.as_slice().unwrap_or(&[]);
 
@@ -261,8 +284,12 @@ impl RembgSession {
         let mut max_val = f32::MIN;
 
         for &val in slice.iter() {
-            if val < min_val { min_val = val; }
-            if val > max_val { max_val = val; }
+            if val < min_val {
+                min_val = val;
+            }
+            if val > max_val {
+                max_val = val;
+            }
         }
 
         let range = if (max_val - min_val).abs() > 1e-6 {
@@ -314,7 +341,9 @@ impl RembgSession {
 
         // Upscale back to original image size
         let mask_dyn = DynamicImage::ImageLuma8(mask_320);
-        let mut mask_orig = mask_dyn.resize_exact(orig_w, orig_h, FilterType::CatmullRom).to_luma8();
+        let mut mask_orig = mask_dyn
+            .resize_exact(orig_w, orig_h, FilterType::CatmullRom)
+            .to_luma8();
 
         if params.edge_shift != 0 {
             morphological_shift(&mut mask_orig, params.edge_shift);
@@ -415,7 +444,11 @@ impl RembgSession {
     }
 
     /// Remove background, replacing it with a solid color matte (e.g. [255, 255, 255] for catalog white).
-    pub fn remove_background_with_matte(&self, img: &DynamicImage, matte: [u8; 3]) -> Result<RgbImage> {
+    pub fn remove_background_with_matte(
+        &self,
+        img: &DynamicImage,
+        matte: [u8; 3],
+    ) -> Result<RgbImage> {
         self.remove_background_with_params_and_matte(img, &CutoutParams::default(), &[], matte)
     }
 }
@@ -548,8 +581,9 @@ mod tests {
     fn test_u2netp_inference_pure_rust() {
         let model_path = find_model(&RembgModel::U2Netp);
         if let Some(path) = model_path {
-            let session = RembgSession::from_file(&path).expect("Model should load cleanly in tract");
-            
+            let session =
+                RembgSession::from_file(&path).expect("Model should load cleanly in tract");
+
             // Create a 100x100 synthetic test image with a white circle in center on black background
             let mut img = RgbImage::new(100, 100);
             for y in 0..100 {
@@ -565,7 +599,9 @@ mod tests {
             }
 
             let dynamic = DynamicImage::ImageRgb8(img);
-            let mask = session.compute_mask(&dynamic).expect("Inference should succeed");
+            let mask = session
+                .compute_mask(&dynamic)
+                .expect("Inference should succeed");
             assert_eq!(mask.width(), 100);
             assert_eq!(mask.height(), 100);
 
@@ -593,7 +629,9 @@ mod tests {
             }
         }
         let dynamic = DynamicImage::ImageRgb8(img);
-        let mask = session.compute_mask(&dynamic).expect("Bundled inference should succeed");
+        let mask = session
+            .compute_mask(&dynamic)
+            .expect("Bundled inference should succeed");
         assert_eq!(mask.width(), 64);
         assert_eq!(mask.height(), 64);
         assert!(mask.get_pixel(32, 32)[0] > mask.get_pixel(0, 0)[0]);
@@ -652,15 +690,14 @@ mod tests {
             edge_shift: 0,
             defringe_white: true,
         };
-        let touchups = vec![
-            TouchupDab {
-                at: [0.505, 0.865],
-                radius: 0.045,
-                hardness: 0.85,
-                keep: true,
-            },
-        ];
-        let cutout = session.remove_background_with_params(&img, &params, &touchups)
+        let touchups = vec![TouchupDab {
+            at: [0.505, 0.865],
+            radius: 0.045,
+            hardness: 0.85,
+            keep: true,
+        }];
+        let cutout = session
+            .remove_background_with_params(&img, &params, &touchups)
             .expect("Background removal should succeed");
         assert_eq!(cutout.width(), img.width());
         assert_eq!(cutout.height(), img.height());

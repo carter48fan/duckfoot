@@ -2187,9 +2187,7 @@ fn gpu_export_resizing_downsamples_to_target_dimensions() {
     let (w, h) = (256u32, 256u32);
     let mut engine = photo_engine::Engine::new(&gpu.device);
     let raster = testkit::raster_from_fn(w, h, |_, _| [0.5, 0.5, 0.5]);
-    engine
-        .load_raster(&gpu.device, &gpu.queue, raster)
-        .unwrap();
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
 
     let stack = PhotoStack::default();
     let exported = engine
