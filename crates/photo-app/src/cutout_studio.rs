@@ -594,9 +594,11 @@ mod tests {
 
     #[test]
     fn invalidate_prediction_preserves_touchups() {
-        let mut state = CutoutStudioState::default();
-        state.cached_source_path = Some(PathBuf::from("/test/mandolin.arw"));
-        state.cached_pred_320 = Some(vec![0.5; 320 * 320]);
+        let mut state = CutoutStudioState {
+            cached_source_path: Some(PathBuf::from("/test/mandolin.arw")),
+            cached_pred_320: Some(vec![0.5; 320 * 320]),
+            ..Default::default()
+        };
         state.touchups.push(TouchupDab {
             at: [0.5, 0.5],
             radius: 0.05,
@@ -624,7 +626,7 @@ mod tests {
         let mut img = image::RgbaImage::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                if x >= 30 && x <= 70 && y >= 20 && y <= 80 {
+                if (30..=70).contains(&x) && (20..=80).contains(&y) {
                     img.put_pixel(x, y, image::Rgba([220, 160, 40, 255]));
                 } else {
                     img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
