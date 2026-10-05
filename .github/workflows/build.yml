@@ -14,7 +14,10 @@ run-name: >-
 # - Linux AppImage & tarball (x86_64)
 # - Windows portable zip (x86_64)
 # - macOS app (.dmg and .zip)
-# and attaches them to the workflow run. On top of that (see the `release` job):
+# On a release run each build job attaches its files straight to a draft release, which
+# the `release` job publishes once all four are in: Releases has no storage quota, so a
+# full artifact quota can no longer stop a release. Other runs keep their builds on the
+# workflow run for a day. On top of that (see the `release` job):
 #
 # - every push to main or master auto-increments and publishes a full release
 #   with all 4 platform builds (Android APK, Linux AppImage, Windows, macOS);
@@ -32,12 +35,21 @@ on:
         required: false
         default: ""
 
+# One run per branch at a time: two pushes to main in a row would otherwise pick the same
+# auto-incremented tag and fight over its draft. A newer push waits rather than cancels,
+# so a release that has started always finishes.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.calc_version.outputs.tag }}
       version: ${{ steps.calc_version.outputs.version }}
@@ -64,7 +76,8 @@ jobs:
             IS_RELEASE="true"
           elif [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" || "$INPUT_RELEASE" == "auto" ]]; then
             # Query existing releases for latest semver tag
-            latest=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null | tr -d ' ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
+            # Drafts are a failed run's leftovers, not versions: that number is used again.
+            latest=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[] | select(.draft | not) | .tag_name' 2>/dev/null | tr -d ' ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
             if [ -z "$latest" ]; then
               latest=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | tr -d ' ' | sort -V | tail -n 1 || true)
             fi
@@ -100,9 +113,31 @@ jobs:
           echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag: $TAG (version: $VERSION, is_release: $IS_RELEASE)"
 
+      # The build jobs attach their files to this draft as each finishes; `release`
+      # publishes it. Any release already holding the tag goes first: a failed run's draft,
+      # or the published one a manual run of the same version is replacing.
+      - name: Open a draft release
+        if: steps.calc_version.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.calc_version.outputs.tag }}
+        run: |
+          set -e
+          for id in $(gh api "repos/$GH_REPO/releases" --paginate \
+                        --jq ".[] | select(.tag_name == \"$TAG\") | .id"); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh release create "$TAG" --draft --target "$GITHUB_SHA" \
+            --title "Duckfoot $TAG" --notes "Building ${GITHUB_SHA::7}…"
+
   android:
     needs: [version]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      signing: ${{ steps.name_apk.outputs.signing }}
     env:
       DUCKFOOT_KEYSTORE_BASE64: ${{ secrets.DUCKFOOT_KEYSTORE_BASE64 }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
@@ -161,27 +196,45 @@ jobs:
           DUCKFOOT_KEY_PASSWORD: ${{ secrets.DUCKFOOT_KEY_PASSWORD }}
 
       - name: Name the APK
+        id: name_apk
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk dist/duckfoot-android-arm64.apk
           if [ -n "${DUCKFOOT_KEYSTORE:-}" ]; then
-            echo "repository key" > dist/android-signing.txt
+            signing="repository key"
           else
-            echo "testing key" > dist/android-signing.txt
+            signing="testing key"
           fi
+          echo "$signing" > dist/android-signing.txt
+          echo "signing=$signing" >> "$GITHUB_OUTPUT"
+
+      - name: Attach to the draft release
+        if: needs.version.outputs.is_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -e
+          cp "dist/duckfoot-android-arm64.apk" "dist/duckfoot-$TAG-android-arm64.apk"
+          gh release upload "$TAG" "dist/duckfoot-$TAG-android-arm64.apk" --clobber
 
       - uses: actions/upload-artifact@v6
+        if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-android
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs in this same run, which publish to Releases;
-          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          # Kept the default 90 days, eight runs filled the 500 MB artifact quota; a day
+          # is long enough to download a test build, and the test-build job's hand-off.
           retention-days: 1
 
   linux:
     needs: [version]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Built against Ubuntu 22.04's glibc (2.35), so the binary also runs on older
     # distributions than the runner's own, Pop!_OS 22.04 among them.
     container: ubuntu:22.04
@@ -193,6 +246,9 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config \
             libxkbcommon-dev libwayland-dev file
+          # The container has no gh, which attaches the build to a draft release.
+          curl -sSfL https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_linux_amd64.tar.gz \
+            | tar xz -C /usr/local --strip-components=1
 
       - uses: actions/checkout@v5
 
@@ -246,18 +302,34 @@ jobs:
           (cd /tmp && ./appimagetool --appimage-extract)
           ARCH=x86_64 /tmp/squashfs-root/AppRun "$appdir" "dist/$dir.AppImage"
 
+      - name: Attach to the draft release
+        if: needs.version.outputs.is_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -e
+          cp "dist/duckfoot-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.AppImage"
+          cp "dist/duckfoot-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-linux-x86_64.tar.gz"
+          gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" --clobber
+
       - uses: actions/upload-artifact@v6
+        if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-linux-x86_64
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs in this same run, which publish to Releases;
-          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          # Kept the default 90 days, eight runs filled the 500 MB artifact quota; a day
+          # is long enough to download a test build, and the test-build job's hand-off.
           retention-days: 1
 
   windows:
     needs: [version]
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -285,18 +357,33 @@ jobs:
           } > "$dir/README.txt"
           7z a "dist/$dir.zip" "$dir"
 
+      - name: Attach to the draft release
+        if: needs.version.outputs.is_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -e
+          cp "dist/duckfoot-windows-x86_64.zip" "dist/duckfoot-$TAG-windows-x86_64.zip"
+          gh release upload "$TAG" "dist/duckfoot-$TAG-windows-x86_64.zip" --clobber
+
       - uses: actions/upload-artifact@v6
+        if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-windows-x86_64
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs in this same run, which publish to Releases;
-          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          # Kept the default 90 days, eight runs filled the 500 MB artifact quota; a day
+          # is long enough to download a test build, and the test-build job's hand-off.
           retention-days: 1
 
   macos:
     needs: [version]
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -335,15 +422,29 @@ jobs:
           hdiutil create -volname Duckfoot -srcfolder "$app" -ov -format UDZO dist/duckfoot-macos.dmg
           (cd dist && zip -r duckfoot-macos.zip Duckfoot.app)
 
+      - name: Attach to the draft release
+        if: needs.version.outputs.is_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -e
+          cp "dist/duckfoot-macos.dmg" "dist/duckfoot-$TAG-macos.dmg"
+          cp "dist/duckfoot-macos.zip" "dist/duckfoot-$TAG-macos.zip"
+          gh release upload "$TAG" "dist/duckfoot-$TAG-macos.dmg" "dist/duckfoot-$TAG-macos.zip" --clobber
+
       - uses: actions/upload-artifact@v6
+        if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-macos
           path: |
             dist/duckfoot-macos.dmg
             dist/duckfoot-macos.zip
           if-no-files-found: error
-          # Only a hand-off to the release jobs in this same run, which publish to Releases;
-          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          # Kept the default 90 days, eight runs filled the 500 MB artifact quota; a day
+          # is long enough to download a test build, and the test-build job's hand-off.
           retention-days: 1
 
   desktop-tests:
@@ -376,24 +477,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    concurrency:
-      group: release-${{ github.ref }}
-      cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      SIGNING: ${{ needs.android.outputs.signing }}
     steps:
-      - uses: actions/download-artifact@v7
-        with:
-          path: dist
-          merge-multiple: true
-
       - name: Release notes
         env:
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          case "$(cat dist/android-signing.txt 2>/dev/null)" in
+          case "$SIGNING" in
             "repository key")
               signing="The APK is signed with the repository's key, so it installs over earlier builds." ;;
             *)
@@ -408,34 +502,33 @@ jobs:
             echo "- **Linux Tarball** (\`duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz\`): Unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
             echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan."
             echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS application (\`Duckfoot.app\`). Drag to Applications folder."
+            echo
+            # What `gh release create --generate-notes` added: the changes since the last release.
+            gh api "repos/$GH_REPO/releases/generate-notes" \
+              -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" --jq .body || true
           } > notes.md
           cat notes.md
 
-      - name: Publish versioned release
+      # Every build attached its files to the draft; all four succeeded, or this job would
+      # not run. Publishing creates the tag at this commit.
+      - name: Publish the draft release
         run: |
-          mv dist/duckfoot-android-arm64.apk "dist/duckfoot-$RELEASE_TAG-android-arm64.apk"
-          mv dist/duckfoot-linux-x86_64.tar.gz "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz"
-          mv dist/duckfoot-linux-x86_64.AppImage "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage"
-          mv dist/duckfoot-windows-x86_64.zip "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip"
-          mv dist/duckfoot-macos.dmg "dist/duckfoot-$RELEASE_TAG-macos.dmg"
-          mv dist/duckfoot-macos.zip "dist/duckfoot-$RELEASE_TAG-macos.zip"
-
-          # If the release already exists, delete it so gh release create succeeds
-          gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
-          git tag -d "$RELEASE_TAG" 2>/dev/null || true
-          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" 2>/dev/null || true
-
-          gh release create "$RELEASE_TAG" \
-            "dist/duckfoot-$RELEASE_TAG-android-arm64.apk" \
-            "dist/duckfoot-$RELEASE_TAG-linux-x86_64.AppImage" \
-            "dist/duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz" \
-            "dist/duckfoot-$RELEASE_TAG-windows-x86_64.zip" \
-            "dist/duckfoot-$RELEASE_TAG-macos.dmg" \
-            "dist/duckfoot-$RELEASE_TAG-macos.zip" \
-            --target "$GITHUB_SHA" \
-            --title "Duckfoot $RELEASE_TAG" \
-            --generate-notes \
-            --notes-file notes.md
+          set -e
+          id=$(gh api "repos/$GH_REPO/releases" --paginate \
+                 --jq ".[] | select(.draft and .tag_name == \"$RELEASE_TAG\") | .id" | head -n 1)
+          if [ -z "$id" ]; then
+            echo "::error::No draft release for $RELEASE_TAG to publish."
+            exit 1
+          fi
+          # A tag of that name left on another commit (not one pushed to make this release)
+          # would otherwise be what the release points at.
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" 2>/dev/null || true
+          fi
+          gh api -X PATCH "repos/$GH_REPO/releases/$id" \
+            -F draft=false -f make_latest=true \
+            -f target_commitish="$GITHUB_SHA" -F body=@notes.md \
+            --jq .html_url
 
   # Every push to a feature branch other than main/master: that branch's rolling pre-release,
   # replaced on every push, with the APK as a plain file a phone can download and open.
