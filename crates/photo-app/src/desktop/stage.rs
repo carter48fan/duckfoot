@@ -589,24 +589,23 @@ impl PhotoApp {
                 let frame = frame_of(dest);
                 self.stage_frame = Some(frame);
                 let painter = ui.painter().with_clip_rect(rect);
+                painter.image(
+                    id,
+                    dest,
+                    egui::Rect::from_min_size(
+                        egui::pos2(region.x, region.y),
+                        egui::vec2(region.width, region.height),
+                    ),
+                    egui::Color32::WHITE,
+                );
+                // The cutout is drawn over the photo, not in place of it: its preview is
+                // ~1400px, so the kept subject is left to the stage's image, which stays
+                // sharp however far in it zooms. The preview is of the crop alone.
                 if let (true, Some(tex)) = (self.cutout_studio.open, &self.cutout_studio.preview_texture) {
                     painter.image(
                         tex.id(),
                         dest,
-                        egui::Rect::from_min_size(
-                            egui::pos2(0.0, 0.0),
-                            egui::vec2(1.0, 1.0),
-                        ),
-                        egui::Color32::WHITE,
-                    );
-                } else {
-                    painter.image(
-                        id,
-                        dest,
-                        egui::Rect::from_min_size(
-                            egui::pos2(region.x, region.y),
-                            egui::vec2(region.width, region.height),
-                        ),
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
                 }

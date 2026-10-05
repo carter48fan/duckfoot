@@ -218,56 +218,7 @@ impl CutoutStudioState {
             photo_engine::rembg::defringe_rgba(rgba.as_mut(), w, h, [255, 255, 255]);
         }
 
-        // Composite over chosen preview background mode
-        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let p = rgba.get_pixel(x, y);
-                let alpha = p[3] as f32 / 255.0;
-                let inv_a = 1.0 - alpha;
-
-                let (r, g, b, a_out) = match self.preview_mode {
-                    CutoutPreviewMode::Checkerboard => {
-                        // 16px checkerboard pattern
-                        let check = ((x / 16) + (y / 16)) % 2 == 0;
-                        let bg = if check { 220.0 } else { 160.0 };
-                        (
-                            (p[0] as f32 * alpha + bg * inv_a).round() as u8,
-                            (p[1] as f32 * alpha + bg * inv_a).round() as u8,
-                            (p[2] as f32 * alpha + bg * inv_a).round() as u8,
-                            255,
-                        )
-                    }
-                    CutoutPreviewMode::CatalogWhite => (
-                        (p[0] as f32 * alpha + 255.0 * inv_a).round() as u8,
-                        (p[1] as f32 * alpha + 255.0 * inv_a).round() as u8,
-                        (p[2] as f32 * alpha + 255.0 * inv_a).round() as u8,
-                        255,
-                    ),
-                    CutoutPreviewMode::Black => (
-                        (p[0] as f32 * alpha).round() as u8,
-                        (p[1] as f32 * alpha).round() as u8,
-                        (p[2] as f32 * alpha).round() as u8,
-                        255,
-                    ),
-                    CutoutPreviewMode::Rubylith => {
-                        // Red mask overlay on background
-                        (
-                            (p[0] as f32 * alpha + 220.0 * inv_a * 0.75).round() as u8,
-                            (p[1] as f32 * alpha + 30.0 * inv_a * 0.75).round() as u8,
-                            (p[2] as f32 * alpha + 30.0 * inv_a * 0.75).round() as u8,
-                            255,
-                        )
-                    }
-                };
-
-                pixels.push(r);
-                pixels.push(g);
-                pixels.push(b);
-                pixels.push(a_out);
-            }
-        }
-
+        let pixels = overlay_pixels(&rgba, self.preview_mode);
         let color_image =
             egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
         if let Some(tex) = &mut self.preview_texture {
@@ -542,9 +493,65 @@ impl CutoutStudioState {
     }
 }
 
+/// The preview as an overlay for the stage's own image of the photo: each pixel the cutout
+/// drops or softens is composited over `mode`'s backdrop, and each pixel it keeps whole is
+/// left transparent. The stage's image re-renders sharper as it zooms in and this one is
+/// fixed at about 1400px, so the kept subject shows through at full detail.
+///
+/// Defringing only touches the softened pixels, so it shows here too.
+fn overlay_pixels(rgba: &RgbaImage, mode: CutoutPreviewMode) -> Vec<u8> {
+    let (w, h) = rgba.dimensions();
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let p = rgba.get_pixel(x, y);
+            if p[3] == 255 {
+                pixels.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let alpha = p[3] as f32 / 255.0;
+            let inv_a = 1.0 - alpha;
+            let over = |bg: [f32; 3]| {
+                [0, 1, 2].map(|c| (p[c] as f32 * alpha + bg[c] * inv_a).round() as u8)
+            };
+            let [r, g, b] = match mode {
+                CutoutPreviewMode::Checkerboard => {
+                    // 16px checkerboard pattern
+                    let check = ((x / 16) + (y / 16)) % 2 == 0;
+                    let bg = if check { 220.0 } else { 160.0 };
+                    over([bg; 3])
+                }
+                CutoutPreviewMode::CatalogWhite => over([255.0; 3]),
+                CutoutPreviewMode::Black => over([0.0; 3]),
+                // Red mask overlay on background
+                CutoutPreviewMode::Rubylith => over([220.0 * 0.75, 30.0 * 0.75, 30.0 * 0.75]),
+            };
+            pixels.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    pixels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_shows_the_photo_through_what_the_cutout_keeps() {
+        let mut rgba = RgbaImage::new(3, 1);
+        rgba.put_pixel(0, 0, image::Rgba([10, 20, 30, 255])); // kept
+        rgba.put_pixel(1, 0, image::Rgba([10, 20, 30, 0])); // dropped
+        rgba.put_pixel(2, 0, image::Rgba([100, 100, 100, 128])); // edge
+        let px = overlay_pixels(&rgba, CutoutPreviewMode::CatalogWhite);
+        assert_eq!(&px[0..4], &[0, 0, 0, 0], "a kept pixel is the stage's");
+        assert_eq!(
+            &px[4..8],
+            &[255, 255, 255, 255],
+            "a dropped pixel is the backdrop"
+        );
+        // 100·0.502 + 255·0.498 ≈ 177, opaque.
+        assert_eq!(&px[8..12], &[177, 177, 177, 255]);
+    }
 
     #[test]
     fn default_state_has_white_defringe_enabled() {
