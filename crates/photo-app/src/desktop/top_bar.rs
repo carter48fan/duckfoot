@@ -79,14 +79,23 @@ impl PhotoApp {
 
                         let cutout_active = self.cutout_studio.open;
                         let cutout_ready = self.loaded_path.is_some();
-                        let cutout_btn = ui.add_enabled_ui(cutout_ready, |ui| {
-                            widgets::button(
-                                ui,
-                                if cutout_active { Kind::Primary } else { Kind::Secondary },
-                                "✂ Cutout",
-                                0.0,
-                            ).on_hover_text("Open Cutout Studio for background removal & touch-up")
-                        }).inner;
+                        let cutout_btn = ui
+                            .add_enabled_ui(cutout_ready, |ui| {
+                                widgets::button(
+                                    ui,
+                                    if cutout_active {
+                                        Kind::Primary
+                                    } else {
+                                        Kind::Secondary
+                                    },
+                                    "✂ Cutout",
+                                    0.0,
+                                )
+                                .on_hover_text(
+                                    "Open Cutout Studio for background removal & touch-up",
+                                )
+                            })
+                            .inner;
                         if cutout_btn.clicked() {
                             self.cutout_studio.open = !self.cutout_studio.open;
                         }

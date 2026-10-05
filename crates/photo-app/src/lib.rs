@@ -19,8 +19,8 @@ pub mod tonemap_3d;
 pub mod widgets;
 
 pub mod crop_tool;
-pub mod cutout_studio;
 mod curve_editor;
+pub mod cutout_studio;
 mod desktop;
 mod display;
 mod export_flow;
@@ -38,8 +38,8 @@ mod parts;
 pub mod paste;
 mod requests;
 mod session;
-pub mod user_presets;
 pub mod tat;
+pub mod user_presets;
 mod view;
 
 use curve_editor::*;
@@ -503,7 +503,13 @@ impl SidecarState {
     }
 }
 
-type ShelfDisplayCache = Option<(usize, dam::FilterState, Option<std::path::PathBuf>, bool, Vec<usize>)>;
+type ShelfDisplayCache = Option<(
+    usize,
+    dam::FilterState,
+    Option<std::path::PathBuf>,
+    bool,
+    Vec<usize>,
+)>;
 
 pub struct PhotoApp {
     engine: Engine,
@@ -1144,30 +1150,41 @@ impl PhotoApp {
                     None => Err("Not enough straight lines in the photo to go by"),
                 }),
             Sample::Tat(p, mode, cursor) => {
-                let res = self.engine.sample_color_at(device, queue, &self.stack, (p.x, p.y));
+                let res = self
+                    .engine
+                    .sample_color_at(device, queue, &self.stack, (p.x, p.y));
                 match res {
                     Ok(Some(rgb)) => {
                         let (hue, _sat, _luma) = tat::rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
                         let band_name = tat::hue_to_band(hue);
                         let initial_val = match mode {
-                            tat::TatMode::ColorEq(ColorEqTab::Hue) => {
-                                self.stack.color_eq.params.bands().into_iter()
-                                    .find(|(n, _)| *n == band_name)
-                                    .map(|(_, b)| b.hue)
-                                    .unwrap_or(0.0)
-                            }
-                            tat::TatMode::ColorEq(ColorEqTab::Saturation) => {
-                                self.stack.color_eq.params.bands().into_iter()
-                                    .find(|(n, _)| *n == band_name)
-                                    .map(|(_, b)| b.saturation)
-                                    .unwrap_or(0.0)
-                            }
-                            tat::TatMode::ColorEq(ColorEqTab::Luminance) => {
-                                self.stack.color_eq.params.bands().into_iter()
-                                    .find(|(n, _)| *n == band_name)
-                                    .map(|(_, b)| b.luminance)
-                                    .unwrap_or(0.0)
-                            }
+                            tat::TatMode::ColorEq(ColorEqTab::Hue) => self
+                                .stack
+                                .color_eq
+                                .params
+                                .bands()
+                                .into_iter()
+                                .find(|(n, _)| *n == band_name)
+                                .map(|(_, b)| b.hue)
+                                .unwrap_or(0.0),
+                            tat::TatMode::ColorEq(ColorEqTab::Saturation) => self
+                                .stack
+                                .color_eq
+                                .params
+                                .bands()
+                                .into_iter()
+                                .find(|(n, _)| *n == band_name)
+                                .map(|(_, b)| b.saturation)
+                                .unwrap_or(0.0),
+                            tat::TatMode::ColorEq(ColorEqTab::Luminance) => self
+                                .stack
+                                .color_eq
+                                .params
+                                .bands()
+                                .into_iter()
+                                .find(|(n, _)| *n == band_name)
+                                .map(|(_, b)| b.luminance)
+                                .unwrap_or(0.0),
                         };
                         self.stack.color_eq.enabled = true;
                         self.tat_drag = Some(tat::TatDrag {

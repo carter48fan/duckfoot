@@ -228,7 +228,8 @@ pub(crate) fn curve_editor_channel(
             .map(|(_, n)| *n)
     };
     let samples = ui.data_mut(|d| {
-        let cache = d.get_temp_mut_or_default::<CurveSamples>(response.id.with(chan_key).with("samples"));
+        let cache =
+            d.get_temp_mut_or_default::<CurveSamples>(response.id.with(chan_key).with("samples"));
         if cache.values.is_empty() || !cache.nodes.iter().copied().eq(shown()) {
             cache.nodes = shown().collect();
             let lut = photo_engine::curve::build_lut(&cache.nodes);

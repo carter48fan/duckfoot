@@ -397,7 +397,11 @@ impl GainMap {
             self.metadata.offset_hdr,
             self.metadata.hdr_capacity_min,
             self.metadata.hdr_capacity_max,
-            if self.metadata.base_rendition_is_sdr { "True" } else { "False" }
+            if self.metadata.base_rendition_is_sdr {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 }
@@ -600,9 +604,12 @@ impl ExportedImage<u8> {
                 if let Some(bg) = matte {
                     let a_norm = a as f32 / 255.0;
                     let inv_a = 1.0 - a_norm;
-                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg[0] as f32 * inv_a).round() as u8;
-                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg[1] as f32 * inv_a).round() as u8;
-                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg[2] as f32 * inv_a).round() as u8;
+                    self.rgba[idx] =
+                        (self.rgba[idx] as f32 * a_norm + bg[0] as f32 * inv_a).round() as u8;
+                    self.rgba[idx + 1] =
+                        (self.rgba[idx + 1] as f32 * a_norm + bg[1] as f32 * inv_a).round() as u8;
+                    self.rgba[idx + 2] =
+                        (self.rgba[idx + 2] as f32 * a_norm + bg[2] as f32 * inv_a).round() as u8;
                     self.rgba[idx + 3] = 255;
                 } else {
                     self.rgba[idx + 3] = a;
@@ -681,9 +688,12 @@ impl ExportedImage<u16> {
                         ((bg[1] as u16) << 8 | bg[1] as u16) as f32,
                         ((bg[2] as u16) << 8 | bg[2] as u16) as f32,
                     ];
-                    self.rgba[idx] = (self.rgba[idx] as f32 * a_norm + bg16[0] * inv_a).round() as u16;
-                    self.rgba[idx + 1] = (self.rgba[idx + 1] as f32 * a_norm + bg16[1] * inv_a).round() as u16;
-                    self.rgba[idx + 2] = (self.rgba[idx + 2] as f32 * a_norm + bg16[2] * inv_a).round() as u16;
+                    self.rgba[idx] =
+                        (self.rgba[idx] as f32 * a_norm + bg16[0] * inv_a).round() as u16;
+                    self.rgba[idx + 1] =
+                        (self.rgba[idx + 1] as f32 * a_norm + bg16[1] * inv_a).round() as u16;
+                    self.rgba[idx + 2] =
+                        (self.rgba[idx + 2] as f32 * a_norm + bg16[2] * inv_a).round() as u16;
                     self.rgba[idx + 3] = u16::MAX;
                 } else {
                     self.rgba[idx + 3] = a16;
@@ -747,8 +757,12 @@ impl Exported {
             };
             let session = crate::rembg::RembgSession::auto()?;
             match &mut out {
-                Exported::Eight(i) => i.remove_background(&session, matte, &settings.cutout_params, touchups)?,
-                Exported::Sixteen(i) => i.remove_background(&session, matte, &settings.cutout_params, touchups)?,
+                Exported::Eight(i) => {
+                    i.remove_background(&session, matte, &settings.cutout_params, touchups)?
+                }
+                Exported::Sixteen(i) => {
+                    i.remove_background(&session, matte, &settings.cutout_params, touchups)?
+                }
             }
         }
         Ok(out)
@@ -1455,19 +1469,24 @@ mod tests {
             255, 255, 255, 255, // 1.0 SDR white
         ];
         // HDR image: First pixel is mid-grey (same), second pixel is HDR specular (4.0 = +2 stops headroom).
-        let hdr_rgb = vec![
-            0.5, 0.5, 0.5,
-            4.0, 4.0, 4.0,
-        ];
+        let hdr_rgb = vec![0.5, 0.5, 0.5, 4.0, 4.0, 4.0];
         let gm = GainMap::compute(&sdr_rgba, &hdr_rgb, 2, 1, 2.0);
         assert_eq!(gm.width, 2);
         assert_eq!(gm.height, 1);
         assert_eq!(gm.data.len(), 2);
 
         // Pixel 0 has ~0 gain (same brightness)
-        assert!(gm.data[0] < 10, "pixel 0 gain should be near 0, got {}", gm.data[0]);
+        assert!(
+            gm.data[0] < 10,
+            "pixel 0 gain should be near 0, got {}",
+            gm.data[0]
+        );
         // Pixel 1 has max gain (4x = 2 stops headroom on a 2-stop max map)
-        assert!(gm.data[1] > 240, "pixel 1 gain should be near 255, got {}", gm.data[1]);
+        assert!(
+            gm.data[1] > 240,
+            "pixel 1 gain should be near 255, got {}",
+            gm.data[1]
+        );
 
         // Verify ISO 21496-1 XMP metadata
         let xmp = gm.iso_21496_1_xmp();

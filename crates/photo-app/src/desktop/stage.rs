@@ -1117,11 +1117,7 @@ impl PhotoApp {
     /// Prepare Cutout Studio with the current photo: renders an interactive ~1400px base image
     /// directly from the GPU engine using the current stack edits (exposure, white balance, tone curve, crop),
     /// falling back to raw embedded preview or raster file loader if the GPU engine is not ready.
-    pub(crate) fn prepare_cutout_studio(
-        &mut self,
-        ctx: &egui::Context,
-        gpu: &Gpu,
-    ) {
+    pub(crate) fn prepare_cutout_studio(&mut self, ctx: &egui::Context, gpu: &Gpu) {
         let Some(path) = self.loaded_path.clone() else {
             return;
         };
