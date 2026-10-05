@@ -175,9 +175,9 @@ jobs:
           name: duckfoot-android
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs, which publish to Releases (no quota);
-          # kept for the default 90 days they filled the artifact storage quota.
-          retention-days: 3
+          # Only a hand-off to the release jobs in this same run, which publish to Releases;
+          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          retention-days: 1
 
   linux:
     needs: [version]
@@ -251,9 +251,9 @@ jobs:
           name: duckfoot-linux-x86_64
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs, which publish to Releases (no quota);
-          # kept for the default 90 days they filled the artifact storage quota.
-          retention-days: 3
+          # Only a hand-off to the release jobs in this same run, which publish to Releases;
+          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          retention-days: 1
 
   windows:
     needs: [version]
@@ -290,9 +290,9 @@ jobs:
           name: duckfoot-windows-x86_64
           path: dist/
           if-no-files-found: error
-          # Only a hand-off to the release jobs, which publish to Releases (no quota);
-          # kept for the default 90 days they filled the artifact storage quota.
-          retention-days: 3
+          # Only a hand-off to the release jobs in this same run, which publish to Releases;
+          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          retention-days: 1
 
   macos:
     needs: [version]
@@ -342,9 +342,9 @@ jobs:
             dist/duckfoot-macos.dmg
             dist/duckfoot-macos.zip
           if-no-files-found: error
-          # Only a hand-off to the release jobs, which publish to Releases (no quota);
-          # kept for the default 90 days they filled the artifact storage quota.
-          retention-days: 3
+          # Only a hand-off to the release jobs in this same run, which publish to Releases;
+          # kept the default 90 days, eight runs filled the 500 MB artifact quota.
+          retention-days: 1
 
   desktop-tests:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
