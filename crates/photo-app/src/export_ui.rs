@@ -243,16 +243,7 @@ pub(crate) fn settings_editor(
             0.50,
         );
         let mut shift_f = s.cutout_params.edge_shift as f32;
-        if widgets::param_slider(
-            ui,
-            "edge shift",
-            &mut shift_f,
-            -10.0..=10.0,
-            0,
-            0.0,
-        )
-        .changed()
-        {
+        if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0).changed() {
             s.cutout_params.edge_shift = shift_f.round() as i32;
         }
     }

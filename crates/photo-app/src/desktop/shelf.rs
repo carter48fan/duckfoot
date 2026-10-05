@@ -51,7 +51,8 @@ impl PhotoApp {
                             self.pick_and_shelve(ui.ctx());
                         }
                         if !self.shelf.is_empty()
-                            && widgets::icon(ui, "🗑", false, "Remove all photos from the shelf").clicked()
+                            && widgets::icon(ui, "🗑", false, "Remove all photos from the shelf")
+                                .clicked()
                         {
                             self.clear_shelf();
                         }
