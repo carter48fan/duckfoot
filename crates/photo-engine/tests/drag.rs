@@ -64,6 +64,12 @@ fn a_slider_drag_makes_nothing_on_the_gpu() {
     // Denoise renders a pre-pass of its own, which a drag must redraw, not rebuild.
     stack.denoise.enabled = true;
     stack.denoise.params.luminance = 0.3;
+    // A Remove spot's fill is made once, when placed: a drag of anything else reuses it.
+    stack.heal.enabled = true;
+    stack.heal.params.spots.push(photo_engine::heal::Spot {
+        mode: photo_engine::heal::Mode::Remove,
+        ..photo_engine::heal::Spot::new([0.5, 0.5], [0.2, 0.5], 0.05)
+    });
     let frame = |engine: &mut Engine, stack: &PhotoStack| {
         engine.render(&device, &queue, stack, Some(0.5));
         engine.poll_histogram(&device, &queue);

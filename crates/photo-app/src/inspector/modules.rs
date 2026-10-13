@@ -1018,6 +1018,15 @@ impl PhotoApp {
                         {
                             set_mode = Some(Mode::Clone);
                         }
+                        if widgets::chip(ui, mode == Mode::Remove, "remove")
+                            .on_hover_text(
+                                "Fill it from the ground around it, with no source: for \
+                                 wires, signs and small objects. A large spot fills softer",
+                            )
+                            .clicked()
+                        {
+                            set_mode = Some(Mode::Remove);
+                        }
                         if widgets::chip(ui, false, "delete").clicked() {
                             delete = true;
                         }

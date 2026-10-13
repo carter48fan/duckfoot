@@ -225,7 +225,11 @@ impl PhotoApp {
                             mapping.to_screen(at).distance(p) <= r * long * per_px + slack
                         };
                         if let Some(i) = selected {
-                            if let Some(s) = spots.get(i) {
+                            // A Remove spot has no source to drag.
+                            if let Some(s) = spots
+                                .get(i)
+                                .filter(|s| s.mode != photo_engine::heal::Mode::Remove)
+                            {
                                 if within(s.src, s.radius) {
                                     return Some((i, true));
                                 }
@@ -791,7 +795,7 @@ impl PhotoApp {
                         let colour = if chosen { theme::ACCENT } else { theme::TEXT_HI };
                         painter.circle_stroke(dst, r, dark);
                         painter.circle_stroke(dst, r, Stroke::new(1.5, colour));
-                        if chosen {
+                        if chosen && spot.mode != photo_engine::heal::Mode::Remove {
                             let src = mapping.to_screen(spot.src);
                             let soft = Stroke::new(1.2, colour.linear_multiply(0.7));
                             painter.circle_stroke(src, r, dark);

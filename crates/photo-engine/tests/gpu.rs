@@ -1746,6 +1746,59 @@ fn the_scopes_do_not_measure_the_mask_wash() {
 }
 
 #[test]
+fn a_removed_spot_is_filled_from_the_ground_around_it_with_no_source() {
+    use photo_engine::heal::{Mode, Spot};
+    let gpu = gpu_or_skip!();
+    // Stripes, and a dark blot across them: a fill has to continue the stripes, which no
+    // single source shifted in brightness would.
+    let (w, h) = (192u32, 128u32);
+    let stripe = |x: u32| {
+        if (x / 6).is_multiple_of(2) {
+            0.15
+        } else {
+            0.45
+        }
+    };
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let blot = ((x as f32 - 96.0).powi(2) + (y as f32 - 64.0).powi(2)).sqrt() < 9.0;
+        [if blot { 0.01 } else { stripe(x) }; 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    stack.heal.enabled = true;
+    // The source is nowhere useful: a Remove spot must not read it.
+    stack.heal.params.spots.push(Spot {
+        mode: Mode::Remove,
+        feather: 0.05,
+        ..Spot::new(
+            [96.5 / w as f32, 64.5 / h as f32],
+            [0.0, 0.0],
+            11.0 / w as f32,
+        )
+    });
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    // Inside where the blot was, each column has its stripe's value back.
+    let mut wrong = 0;
+    for x in 90..103u32 {
+        for y in 58..71u32 {
+            let got = grey_at(&out, x, y)[1];
+            if (got - stripe(x)).abs() > 0.08 {
+                wrong += 1;
+            }
+        }
+    }
+    assert!(
+        wrong <= 8,
+        "{wrong} of 169 pixels inside the blot are not their stripe's"
+    );
+
+    // The fill is made once: rendering again, or moving another slider, reuses it.
+    let again = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(again.rgba == out.rgba, "the fill changed between renders");
+}
+
+#[test]
 fn a_healed_spot_takes_the_ground_around_it_and_clone_copies_its_source() {
     use photo_engine::heal::{Mode, Spot};
     let gpu = gpu_or_skip!();

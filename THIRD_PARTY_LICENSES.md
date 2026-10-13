@@ -43,8 +43,9 @@ Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/Open
 ## LightCraft Code Attribution (MIT)
 
 Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft): the XMP
-reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vendored as
-`crates/vendor/lc-heif` (see its VENDORED.md):
+reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder and content-aware
+fill, vendored as `crates/vendor/lc-heif` and `crates/vendor/lc-inpaint` (see their VENDORED.md;
+the fill was ported by LightCraft from PhotoCraft, under the same licence):
 - Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
 - LightCraft is licensed MIT OR Apache-2.0; Duckfoot uses it under the terms of the MIT License.
 

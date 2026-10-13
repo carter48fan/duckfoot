@@ -6,6 +6,7 @@ members = [
     "crates/duckfoot",
     "crates/duckfoot-android",
     "crates/vendor/lc-heif",
+    "crates/vendor/lc-inpaint",
 ]
 
 [workspace.package]

@@ -65,6 +65,8 @@ struct Adjust {
                              // z = 1 for the dust view, w = heal spots in use
     // Spot heal (W-02), two vec4 each: destination xy, source xy (sensor px); radius (px),
     // feather, mode (0 heal, 1 clone), the sensor level its surroundings are measured at.
+    // A Remove spot: destination xy, its fill window's corner (px); radius, feather, mode
+    // 2 + its atlas slot, sensor px per fill texel.
     spots:      array<vec4<f32>, 64>,
     // Keystone (W-07): a homography's rows; [0].w = its unit (px), [1].w = 1 when on.
     persp:      array<vec4<f32>, 3>,
@@ -116,6 +118,19 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 // The screen's own profile (W-14): Rec.2020 encoded with the sRGB curve → what the screen
 // is sent.
 @group(0) @binding(7) var screen_table: texture_3d<f32>;
+// Remove spots' fills (`heal.rs`): 4 × 4 slots of FILL_TILE texels, in the sensor's units.
+@group(0) @binding(8) var fills: texture_2d<f32>;
+const FILL_TILE: f32 = 256.0;
+const FILL_ATLAS: f32 = 1024.0;
+
+// A Remove spot's fill at `p` (sensor px): its slot (mode - 2) holds the window whose corner
+// is a.zw, at b.w sensor px a texel. Held inside the slot, so a neighbour never bleeds in.
+fn fill_at(p: vec2<f32>, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    let slot = u32(b.z - 2.0 + 0.5);
+    let corner = vec2<f32>(f32(slot % 4u), f32(slot / 4u)) * FILL_TILE;
+    let at = clamp((p - a.zw) / b.w, vec2<f32>(0.5), vec2<f32>(FILL_TILE - 0.5));
+    return textureSampleLevel(fills, sensor_sampler, (corner + at) / FILL_ATLAS, 0.0);
+}
 const PROOF_SIZE: f32 = 33.0;
 
 // `sensor` at absolute sensor level `level`. The denoised copy the preview reads is made
@@ -475,6 +490,10 @@ fn spot_sample(p: vec2<f32>, lod: f32) -> vec4<f32> {
             continue;
         }
         let w = 1.0 - smoothstep(1.0 - b.y, 1.0, d);
+        if (b.z > 1.5) {
+            s = mix(s, fill_at(p, a, b), w);
+            continue;
+        }
         var taken = tap((p - a.xy + a.zw) / u.sizes.zw, lod);
         if (b.z < 0.5) {
             let level = max(b.w, lod);
@@ -501,6 +520,10 @@ fn spot_sample_fast(p: vec2<f32>, lod: f32) -> vec4<f32> {
             continue;
         }
         let w = 1.0 - smoothstep(1.0 - b.y, 1.0, d);
+        if (b.z > 1.5) {
+            s = mix(s, fill_at(p, a, b), w);
+            continue;
+        }
         let taken = tap((p - a.xy + a.zw) / u.sizes.zw, lod);
         s = mix(s, taken, w);
     }
