@@ -176,7 +176,8 @@ struct AdjustUniforms {
     /// The working space's luminance weights (xyz); w = 1 for the wide working space.
     luma_w: [f32; 4],
     /// Working → output linear RGB, rows (xyz); [0].w = the output's gamma (0 for the
-    /// sRGB curve), [1].w = 1 when the output's primaries are not the working space's.
+    /// sRGB curve), [1].w = 1 when the output's primaries are not the working space's,
+    /// [2].w = 1 to finish through the screen table.
     out_m: [[f32; 4]; 3],
     /// Proofing: the proof's space → the screen's, rows; [0].w = 1 while proofing against
     /// a space, 2 while proofing through the printer table, [1].w = 1 to mark what the
@@ -207,6 +208,8 @@ pub struct Proof {
 struct Target {
     out: crate::gamut::Screen,
     proof: Option<Proof>,
+    /// Encode for `out` (Rec.2020 and the sRGB curve) and then through the screen table.
+    screen_table: bool,
 }
 
 pub struct LoadedImage {
@@ -504,6 +507,10 @@ pub struct Engine {
     proof_table: wgpu::Texture,
     proof_table_view: wgpu::TextureView,
     proof_table_loaded: bool,
+    /// The screen's own profile (W-14), baked the same way, and whether one is loaded.
+    screen_table: wgpu::Texture,
+    screen_table_view: wgpu::TextureView,
+    screen_table_loaded: bool,
     sensor_sampler: wgpu::Sampler,
     // The curves the LUT was last baked from, `None` where that curve was disabled. Keyed on
     // what is actually baked, so toggling a curve off rebuilds the LUT rather than leaving
@@ -927,6 +934,16 @@ impl Engine {
             ],
         });
 
+        let table_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+            count: None,
+        };
         let adjust_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("adjust bgl"),
             entries: &[
@@ -984,17 +1001,9 @@ impl Engine {
                     },
                     count: None,
                 },
-                // The printer proof table.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                // The printer proof table, and the screen's.
+                table_entry(6),
+                table_entry(7),
             ],
         });
         let denoise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1163,23 +1172,28 @@ impl Engine {
             view_formats: &[],
         });
         let lut_view = lut_texture.create_view(&Default::default());
-        let proof_side = crate::proof::SIZE as u32;
-        let proof_table = device.make_texture(&wgpu::TextureDescriptor {
-            label: Some("printer proof table"),
-            size: wgpu::Extent3d {
-                width: proof_side,
-                height: proof_side,
-                depth_or_array_layers: proof_side,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            // Filterable in core WebGPU, so the shader interpolates between samples.
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let table_3d = |label| {
+            let side = crate::proof::SIZE as u32;
+            device.make_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: side,
+                    height: side,
+                    depth_or_array_layers: side,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                // Filterable in core WebGPU, so the shader interpolates between samples.
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let proof_table = table_3d("printer proof table");
         let proof_table_view = proof_table.create_view(&Default::default());
+        let screen_table = table_3d("screen profile table");
+        let screen_table_view = screen_table.create_view(&Default::default());
 
         let hist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("histogram"),
@@ -1285,6 +1299,9 @@ impl Engine {
             proof_table,
             proof_table_view,
             proof_table_loaded: false,
+            screen_table,
+            screen_table_view,
+            screen_table_loaded: false,
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1336,31 +1353,24 @@ impl Engine {
         queue: &wgpu::Queue,
         table: Option<&crate::proof::ProofTable>,
     ) {
-        let Some(table) = table else {
-            self.proof_table_loaded = false;
-            return;
-        };
-        let side = crate::proof::SIZE as u32;
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.proof_table,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&table.texels),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(side * 8),
-                rows_per_image: Some(side),
-            },
-            wgpu::Extent3d {
-                width: side,
-                height: side,
-                depth_or_array_layers: side,
-            },
-        );
-        self.proof_table_loaded = true;
+        self.proof_table_loaded = table.is_some();
+        if let Some(table) = table {
+            write_table(queue, &self.proof_table, table);
+        }
+    }
+
+    /// The screen's own profile, baked by `ProofTable::bake_screen`, for the preview to
+    /// finish through instead of the screen's matrix and curve (`None` goes back to them).
+    /// Exports never use it.
+    pub fn set_screen_table(
+        &mut self,
+        queue: &wgpu::Queue,
+        table: Option<&crate::proof::ProofTable>,
+    ) {
+        self.screen_table_loaded = table.is_some();
+        if let Some(table) = table {
+            write_table(queue, &self.screen_table, table);
+        }
     }
 
     /// Wash local mask `index` (of the stack's masks) red on the preview, to show where it
@@ -1486,6 +1496,10 @@ impl Engine {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(&self.proof_table_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.screen_table_view),
                 },
             ],
         })
@@ -2198,6 +2212,7 @@ impl Engine {
         let target = Target {
             out: crate::gamut::Screen::of(space),
             proof: None,
+            screen_table: false,
         };
         self.write_uniforms(queue, stack, None, sizes, true, !deep, target);
 
@@ -2422,9 +2437,25 @@ impl Engine {
             (out_size, target, level, base),
             false,
             true,
-            Target {
-                out: self.screen,
-                proof: self.proof,
+            if self.screen_table_loaded {
+                // The table's input: Rec.2020, encoded with the sRGB curve.
+                Target {
+                    out: crate::gamut::Screen {
+                        from_srgb: crate::gamut::convert(
+                            &crate::gamut::SRGB,
+                            &crate::gamut::REC2020,
+                        ),
+                        gamma: None,
+                    },
+                    proof: self.proof,
+                    screen_table: true,
+                }
+            } else {
+                Target {
+                    out: self.screen,
+                    proof: self.proof,
+                    screen_table: false,
+                }
             },
         );
         let Some(image) = &self.image else { return };
@@ -2766,7 +2797,12 @@ impl Engine {
                         to_out[1][2],
                         f32::from(converts),
                     ],
-                    [to_out[2][0], to_out[2][1], to_out[2][2], 0.0],
+                    [
+                        to_out[2][0],
+                        to_out[2][1],
+                        to_out[2][2],
+                        f32::from(ends.screen_table),
+                    ],
                 ],
                 proof_m: {
                     let m = proof_to_screen;
@@ -3346,6 +3382,30 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+/// A baked 3D table into its texture.
+fn write_table(queue: &wgpu::Queue, texture: &wgpu::Texture, table: &crate::proof::ProofTable) {
+    let side = crate::proof::SIZE as u32;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&table.texels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(side * 8),
+            rows_per_image: Some(side),
+        },
+        wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: side,
+        },
+    );
 }
 
 fn fullscreen_pipeline(

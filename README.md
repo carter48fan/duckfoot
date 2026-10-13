@@ -518,7 +518,7 @@ png encode+write  205 ms
 
 - **Fuji X-Trans demosaicing** is implemented in WGSL; exotic sensors (Foveon, float RAW) are refused loudly with `@stub`.
 - **Soft proofing** proofs against the export's colour space, and through a printer's ICC profile (CMYK or RGB, LUT-based, via `moxcms`) chosen from the stage toolbar's `printer…` chip, relative colorimetric or perceptual, optionally simulating the paper's white. Profiles moxcms misreads (v4 lut16 tables over an XYZ connection space, such as Ghostscript's `ps_cmyk.icc`) are refused rather than proofed wrong.
-- **Display colour management** supports sRGB, Display P3, Adobe RGB, and custom monitor ICC profiles via settings; OS colord/ColorSync auto-detection is planned.
+- **Display colour management** supports sRGB, Display P3, Adobe RGB, and the monitor's own ICC profile via settings, matrix or LUT-based (DisplayCAL's default), applied exactly through a baked 3D table rather than a fitted gamma. OS colord/ColorSync auto-detection is planned, and the phone draws in sRGB.
 
 ---
 

@@ -4,28 +4,58 @@
 use crate::*;
 use photo_engine::engine::Proof;
 use photo_engine::gamut::{OutputSpace, Screen};
-use photo_engine::proof::{Intent, Printing, ProofTable};
+use photo_engine::proof::{Intent, Monitor, Printing, ProofTable};
+use std::sync::Arc;
 
 /// A printer profile to proof through: read once when chosen, and baked into the engine's
 /// table again whenever the export's space or the screen it is baked for changes.
 pub(crate) struct Printer {
     icc: Vec<u8>,
     name: String,
-    baked_for: Option<(OutputSpace, Screen, Printing)>,
+    /// The export's space, the screen (`screen_rev`) and the printing it was baked for.
+    baked_for: Option<(OutputSpace, u64, Printing)>,
+}
+
+/// The monitor's own profile (W-14), when the screen is a profile file that bakes: its
+/// bytes, for the printer proof to end on, and its table, for the preview to finish
+/// through.
+pub(crate) struct ScreenProfile {
+    icc: Arc<[u8]>,
+    table: ProofTable,
 }
 
 impl PhotoApp {
-    /// Work out the screen the settings name, once, when they change: a profile file
-    /// that reads wins; one that does not falls back to the named space and says why.
+    /// Work out the screen the settings name, once, when they change. A profile file is
+    /// baked through moxcms, so any monitor profile (LUT-based included) is shown as it
+    /// says; its matrix and curve, where it has them, stand in for it where a table cannot
+    /// (the phone). One that does not read falls back to the named space and says why.
     pub(crate) fn refresh_screen(&mut self) {
         let named = self.settings.display.map_or(Screen::SRGB, Screen::of);
         self.screen_note = None;
+        self.screen_profile = None;
+        self.screen_rev += 1;
         self.screen = match &self.settings.display_icc {
-            Some(path) => match std::fs::read(path)
-                .map_err(|e| e.to_string())
-                .and_then(|b| Screen::from_icc(&b).map_err(str::to_string))
-            {
-                Ok(screen) => screen,
+            Some(path) => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let matrix = Screen::from_icc(&bytes);
+                    match ProofTable::bake_screen(&bytes) {
+                        Ok(table) => {
+                            self.screen_profile = Some(ScreenProfile {
+                                icc: bytes.into(),
+                                table,
+                            });
+                            matrix.unwrap_or(named)
+                        }
+                        Err(table_e) => match matrix {
+                            Ok(screen) => screen,
+                            Err(e) => {
+                                self.screen_note =
+                                    Some(format!("{}: {e}; {table_e:#}", file_name(path)));
+                                named
+                            }
+                        },
+                    }
+                }
                 Err(e) => {
                     self.screen_note = Some(format!("{}: {e}", file_name(path)));
                     named
@@ -33,6 +63,14 @@ impl PhotoApp {
             },
             None => named,
         };
+    }
+
+    /// The screen a printer proof ends on: the monitor's profile if it has one baked.
+    fn monitor(&self) -> Monitor {
+        match &self.screen_profile {
+            Some(p) => Monitor::Profile(p.icc.clone()),
+            None => Monitor::Matrix(self.screen),
+        }
     }
 
     /// Read the printer profile the settings name, once, when it changes. One that does
@@ -47,7 +85,8 @@ impl PhotoApp {
             .map_err(|e| e.to_string())
             .and_then(|icc| {
                 // A trial bake: a profile is only kept if it can be proofed through.
-                ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB)
+                let monitor = Monitor::Matrix(Screen::SRGB);
+                ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), &monitor)
                     .map(|_| icc)
                     .map_err(|e| format!("{e:#}"))
             });
@@ -90,9 +129,11 @@ impl PhotoApp {
 
     /// Tell the engine about a changed screen or proof, and re-render for it.
     pub(crate) fn sync_display(&mut self, gpu: &Gpu) {
-        if self.screen != self.shown_screen {
+        if self.screen_rev != self.shown_screen_rev {
             self.engine.set_screen(self.screen);
-            self.shown_screen = self.screen;
+            let table = self.screen_profile.as_ref().map(|p| &p.table);
+            self.engine.set_screen_table(gpu.queue, table);
+            self.shown_screen_rev = self.screen_rev;
             self.needs_render = true;
         }
         let proof = self.wanted_proof();
@@ -111,14 +152,15 @@ impl PhotoApp {
     fn sync_printer_table(&mut self, gpu: &Gpu) {
         let space = self.export_settings.color_space;
         let printing = self.settings.proof_printing;
-        let key = (space, self.screen, printing);
+        let key = (space, self.screen_rev, printing);
+        let monitor = self.monitor();
         let Some(printer) = &mut self.printer else {
             return;
         };
         if printer.baked_for == Some(key) {
             return;
         }
-        match ProofTable::bake(space, &printer.icc, printing, self.screen) {
+        match ProofTable::bake(space, &printer.icc, printing, &monitor) {
             Ok(table) => {
                 self.engine.set_proof_table(gpu.queue, Some(&table));
                 printer.baked_for = Some(key);

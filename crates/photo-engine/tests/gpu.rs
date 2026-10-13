@@ -2210,6 +2210,63 @@ fn a_printer_proof_shows_the_file_through_its_table() {
 }
 
 #[test]
+fn the_screens_own_profile_finishes_the_preview_and_never_the_export() {
+    let gpu = gpu_or_skip!();
+    use photo_engine::gamut::OutputSpace;
+    use photo_engine::proof::ProofTable;
+    let patches = [[0.2f32, 0.02, 0.02], [0.214, 0.214, 0.214], [0.4, 0.6, 0.9]];
+    let raster = testkit::raster_from_fn(24, 8, |x, _| patches[(x / 8) as usize]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let stack = PhotoStack::default();
+    let centres = |px: &[u8], w: u32| -> Vec<[u8; 3]> {
+        (0..3)
+            .map(|i| {
+                let at = ((4 * w + i * 8 + 4) * 4) as usize;
+                [px[at], px[at + 1], px[at + 2]]
+            })
+            .collect()
+    };
+    let (w, _, plain) = preview(gpu, &mut engine, &stack, 0);
+    let plain = centres(&plain, w);
+    let exported = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+
+    // sRGB's own profile, through moxcms and the table: what the sRGB screen shows.
+    let srgb = ProofTable::bake_screen(OutputSpace::Srgb.icc()).unwrap();
+    engine.set_screen_table(&gpu.queue, Some(&srgb));
+    let (_, _, through) = preview(gpu, &mut engine, &stack, 0);
+    for (got, want) in centres(&through, w).into_iter().zip(&plain) {
+        assert!(
+            (0..3).all(|c| got[c].abs_diff(want[c]) <= 2),
+            "sRGB's profile showed {want:?} as {got:?}"
+        );
+    }
+
+    // A table that inverts shows in the preview and not in the export.
+    engine.set_screen_table(
+        &gpu.queue,
+        Some(&ProofTable::from_fn(|[r, g, b]| {
+            [1.0 - r, 1.0 - g, 1.0 - b, 0.0]
+        })),
+    );
+    let (_, _, inverted) = preview(gpu, &mut engine, &stack, 0);
+    assert_ne!(
+        centres(&inverted, w),
+        plain,
+        "the screen table was not used"
+    );
+    let again = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(
+        again.rgba == exported.rgba,
+        "the screen table reached the export"
+    );
+
+    engine.set_screen_table(&gpu.queue, None);
+    let (_, _, after) = preview(gpu, &mut engine, &stack, 0);
+    assert_eq!(centres(&after, w), plain);
+}
+
+#[test]
 fn auto_upright_levels_a_tilted_facade_from_the_sensor() {
     let gpu = gpu_or_skip!();
     let (w, h) = (480u32, 360u32);

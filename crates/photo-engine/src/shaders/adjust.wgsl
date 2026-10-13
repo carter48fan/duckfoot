@@ -71,7 +71,8 @@ struct Adjust {
     // W-09: the working space's luminance weights; w = 1 when it is wide (Rec.2020).
     luma_w:     vec4<f32>,
     // Working → output linear, rows; [0].w = the output's gamma (0: the sRGB curve),
-    // [1].w = 1 when the output's primaries differ from the working space's.
+    // [1].w = 1 when the output's primaries differ from the working space's, [2].w = 1 to
+    // finish through the screen table (the output is then Rec.2020 and the sRGB curve).
     out_m:      array<vec4<f32>, 3>,
     // W-10: the proof's space → the screen's; [0].w = 1 while proofing against a space,
     // 2 through the printer table, [1].w = 1 to mark what the proof cannot hold, [2].w =
@@ -112,6 +113,9 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 // The printer proof (`proof.rs`): the proof space's encoded RGB → the screen's, A = 1 where
 // the printer loses the colour.
 @group(0) @binding(6) var proof_table: texture_3d<f32>;
+// The screen's own profile (W-14): Rec.2020 encoded with the sRGB curve → what the screen
+// is sent.
+@group(0) @binding(7) var screen_table: texture_3d<f32>;
 const PROOF_SIZE: f32 = 33.0;
 
 // `sensor` at absolute sensor level `level`. The denoised copy the preview reads is made
@@ -285,6 +289,9 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
         let printed = textureSampleLevel(proof_table, sensor_sampler, at, 0.0);
         e = printed.rgb;
         outside = printed.a > 0.5;
+    } else if (u.out_m[2].w > 0.5) {
+        let at = linear_to_srgb(c) * ((PROOF_SIZE - 1.0) / PROOF_SIZE) + vec3<f32>(0.5 / PROOF_SIZE);
+        e = textureSampleLevel(screen_table, sensor_sampler, at, 0.0).rgb;
     } else if (u.out_m[0].w > 0.0) {
         e = pow(c, vec3<f32>(1.0 / u.out_m[0].w));
     } else {

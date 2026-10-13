@@ -55,6 +55,16 @@ pub struct Printing {
     pub paper: bool,
 }
 
+/// The screen a table's colours end on: as a matrix and a curve, which every named space
+/// and a simple monitor profile are, or through the monitor's own ICC profile, which may
+/// be built from lookup tables (as DisplayCAL's are by default) or have curves no power
+/// law matches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Monitor {
+    Matrix(Screen),
+    Profile(std::sync::Arc<[u8]>),
+}
+
 /// A baked proof: `SIZE`³ RGBA texels, red fastest, as half-float bits ready for a 3D
 /// texture. RGB is what the screen should show; A is 1 where the printer loses the colour.
 #[derive(Clone, PartialEq)]
@@ -76,17 +86,43 @@ impl ProofTable {
         export: OutputSpace,
         printer_icc: &[u8],
         printing: Printing,
-        screen: Screen,
+        monitor: &Monitor,
     ) -> Result<Self> {
-        std::panic::catch_unwind(|| Self::bake_unguarded(export, printer_icc, printing, screen))
+        std::panic::catch_unwind(|| Self::bake_unguarded(export, printer_icc, printing, monitor))
             .unwrap_or_else(|_| bail!("the profile could not be read"))
+    }
+
+    /// Bake the screen's own profile (W-14): Rec.2020, encoded with the sRGB curve (so the
+    /// samples sit evenly to the eye), → what the monitor's profile says to send it. Alpha
+    /// is unused. Like a printer's, the profile is a file the user picked.
+    pub fn bake_screen(monitor_icc: &[u8]) -> Result<Self> {
+        std::panic::catch_unwind(|| Self::bake_screen_unguarded(monitor_icc))
+            .unwrap_or_else(|_| bail!("the profile could not be read"))
+    }
+
+    fn bake_screen_unguarded(monitor_icc: &[u8]) -> Result<Self> {
+        let leg = MonitorLeg::new(&Monitor::Profile(monitor_icc.into()))?;
+        let n = SIZE * SIZE * SIZE;
+        let linear: Vec<f32> = grid().into_iter().map(srgb_to_linear).collect();
+        let shown = leg.encode(&linear)?;
+        // The monitor's white is what relative colorimetric sends Rec.2020's white to; one
+        // that comes back otherwise is a profile the CMM misreads.
+        let white = &shown[(n - 1) * 3..];
+        if white.iter().any(|v| (v - 1.0).abs() > 0.02) {
+            bail!("this profile's white is not read correctly here ({white:.2?})");
+        }
+        let mut texels = Vec::with_capacity(n * 4);
+        for s in shown.chunks_exact(3) {
+            texels.extend([s[0], s[1], s[2], 0.0].into_iter().map(half::f16::from_f32));
+        }
+        Ok(Self { texels })
     }
 
     fn bake_unguarded(
         export: OutputSpace,
         printer_icc: &[u8],
         printing: Printing,
-        screen: Screen,
+        monitor: &Monitor,
     ) -> Result<Self> {
         let printer = ColorProfile::new_from_slice(printer_icc)
             .map_err(|e| anyhow::anyhow!("{e:?}"))
@@ -174,15 +210,7 @@ impl ProofTable {
             .context("export → screen")?;
 
         let n = SIZE * SIZE * SIZE;
-        let step = 1.0 / (SIZE - 1) as f32;
-        let mut grid = Vec::with_capacity(n * 3);
-        for b in 0..SIZE {
-            for g in 0..SIZE {
-                for r in 0..SIZE {
-                    grid.extend([r as f32 * step, g as f32 * step, b as f32 * step]);
-                }
-            }
-        }
+        let grid = grid();
         let print = |to: &dyn moxcms::TransformExecutor<f32>,
                      from: &dyn moxcms::TransformExecutor<f32>|
          -> Result<Vec<f32>> {
@@ -201,8 +229,6 @@ impl ProofTable {
         let mut wanted = vec![0.0f32; n * 3];
         unprinted.transform(&grid, &mut wanted).map_err(cms)?;
 
-        // The printer's black: the darkest it shows a neutral, which the warning allows for
-        // (relative colorimetric maps paper white to white but cannot go below its black).
         // Relative colorimetric brings the file's white back as white whatever the paper,
         // so a white that comes back grey is a profile the CMM misreads. moxcms 0.8 and 0.9
         // do with v4 lut16 (mft2) tables over an XYZ connection space, Ghostscript's
@@ -218,6 +244,8 @@ impl ProofTable {
                  L* {white:.0}); proof it in another application"
             );
         }
+        // The printer's black: the darkest it shows a neutral, which the warning allows for
+        // (relative colorimetric maps paper white to white but cannot go below its black).
         let black_l = {
             let mut black = [0.0f32; 3];
             let mut k = vec![0.0f32; layout.channels()];
@@ -226,21 +254,20 @@ impl ProofTable {
             lab(black)[0].clamp(0.0, 50.0)
         };
 
-        let to_screen = compose(&screen.from_srgb, &convert(&REC2020, &SRGB));
-        let encode = |v: f32| match screen.gamma {
-            Some(g) => v.max(0.0).powf(1.0 / g),
-            None => linear_to_srgb(v),
-        };
+        let mut shown = shown;
+        if let Some(m) = &paper {
+            for s in shown.chunks_exact_mut(3) {
+                s.copy_from_slice(&mul(m, [s[0], s[1], s[2]]));
+            }
+        }
+        let shown = MonitorLeg::new(monitor)?.encode(&shown)?;
         let mut texels = Vec::with_capacity(n * 4);
-        for ((p, w), s) in printed
+        for ((p, w), shown) in printed
             .chunks_exact(3)
             .zip(wanted.chunks_exact(3))
             .zip(shown.chunks_exact(3))
         {
             let p = [p[0], p[1], p[2]];
-            let s = [s[0], s[1], s[2]];
-            let s = paper.as_ref().map_or(s, |m| mul(m, s));
-            let shown = mul(&to_screen, s).map(|v| encode(v.clamp(0.0, 1.0)));
             let (lp, mut lw) = (lab(p), lab([w[0], w[1], w[2]]));
             // Relative colorimetric keeps every lightness the printer reaches and clips
             // the rest to its black, which is the paper's limit rather than a lost colour.
@@ -266,8 +293,9 @@ impl ProofTable {
                 intent: Intent::Perceptual,
                 paper: true,
             },
-            Screen::SRGB,
+            &Monitor::Matrix(Screen::SRGB),
         )
+        .or_else(|_| Self::bake_screen_unguarded(printer_icc))
     }
 
     /// A table from a function of the encoded input, for tests of the shader's sampling.
@@ -291,6 +319,96 @@ impl ProofTable {
         let i = rgb.map(|v| (v.clamp(0.0, 1.0) * (SIZE - 1) as f32).round() as usize);
         let at = ((i[2] * SIZE + i[1]) * SIZE + i[0]) * 4;
         std::array::from_fn(|c| self.texels[at + c].to_f32())
+    }
+}
+
+/// The table's input grid, red fastest, each axis 0..1.
+fn grid() -> Vec<f32> {
+    let step = 1.0 / (SIZE - 1) as f32;
+    let mut grid = Vec::with_capacity(SIZE * SIZE * SIZE * 3);
+    for b in 0..SIZE {
+        for g in 0..SIZE {
+            for r in 0..SIZE {
+                grid.extend([r as f32 * step, g as f32 * step, b as f32 * step]);
+            }
+        }
+    }
+    grid
+}
+
+/// Linear Rec.2020 → what the screen is sent, 0..1.
+enum MonitorLeg {
+    Matrix(crate::gamut::Mat3, Option<f32>),
+    Profile(std::sync::Arc<moxcms::TransformF32Executor>),
+}
+
+impl MonitorLeg {
+    fn new(monitor: &Monitor) -> Result<Self> {
+        Ok(match monitor {
+            Monitor::Matrix(screen) => Self::Matrix(
+                compose(&screen.from_srgb, &convert(&REC2020, &SRGB)),
+                screen.gamma,
+            ),
+            Monitor::Profile(icc) => {
+                let screen = ColorProfile::new_from_slice(icc)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))
+                    .context("reading the monitor profile")?;
+                if screen.color_space != DataColorSpace::Rgb {
+                    bail!("a {:?} profile is not a monitor's", screen.color_space);
+                }
+                if matches!(
+                    screen.profile_class,
+                    ProfileClass::DeviceLink | ProfileClass::Abstract | ProfileClass::Named
+                ) {
+                    bail!("a {:?} profile cannot be shown on", screen.profile_class);
+                }
+                let options = TransformOptions {
+                    rendering_intent: RenderingIntent::RelativeColorimetric,
+                    prefer_fixed_point: false,
+                    ..Default::default()
+                };
+                Self::Profile(
+                    linear_rec2020()
+                        .create_transform_f32(Layout::Rgb, &screen, Layout::Rgb, options)
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))
+                        .context("Rec.2020 → the monitor")?,
+                )
+            }
+        })
+    }
+
+    fn encode(&self, linear: &[f32]) -> Result<Vec<f32>> {
+        match self {
+            Self::Matrix(m, gamma) => Ok(linear
+                .chunks_exact(3)
+                .flat_map(|c| {
+                    mul(m, [c[0], c[1], c[2]]).map(|v| {
+                        let v = v.clamp(0.0, 1.0);
+                        match gamma {
+                            Some(g) => v.powf(1.0 / g),
+                            None => linear_to_srgb(v),
+                        }
+                    })
+                })
+                .collect()),
+            Self::Profile(t) => {
+                // The CMM is given in-range values: what the screen cannot show is clipped
+                // first, as the matrix path does.
+                let src: Vec<f32> = linear.iter().map(|v| v.clamp(0.0, 1.0)).collect();
+                let mut out = vec![0.0f32; src.len()];
+                t.transform(&src, &mut out)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                Ok(out.into_iter().map(|v| v.clamp(0.0, 1.0)).collect())
+            }
+        }
+    }
+}
+
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -389,7 +507,7 @@ mod tests {
             OutputSpace::Srgb,
             OutputSpace::Srgb.icc(),
             Printing::default(),
-            Screen::SRGB,
+            &Monitor::Matrix(Screen::SRGB),
         )
         .unwrap();
         for rgb in [
@@ -412,8 +530,13 @@ mod tests {
     #[test]
     fn a_press_keeps_paper_white_and_neutrals_and_loses_saturated_blue() {
         let Some(icc) = press() else { return };
-        let t =
-            ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB).unwrap();
+        let t = ProofTable::bake(
+            OutputSpace::Srgb,
+            &icc,
+            Printing::default(),
+            &Monitor::Matrix(Screen::SRGB),
+        )
+        .unwrap();
         let [r, g, b, warn] = t.at([1.0, 1.0, 1.0]);
         assert!(
             r > 0.99 && g > 0.99 && b > 0.99 && warn == 0.0,
@@ -440,8 +563,15 @@ mod tests {
     #[test]
     fn simulating_the_paper_dims_its_white_and_perceptual_keeps_the_warning() {
         let Some(icc) = press() else { return };
-        let bake =
-            |printing| ProofTable::bake(OutputSpace::Srgb, &icc, printing, Screen::SRGB).unwrap();
+        let bake = |printing| {
+            ProofTable::bake(
+                OutputSpace::Srgb,
+                &icc,
+                printing,
+                &Monitor::Matrix(Screen::SRGB),
+            )
+            .unwrap()
+        };
         let plain = bake(Printing::default());
         let paper = bake(Printing {
             paper: true,
@@ -471,8 +601,13 @@ mod tests {
         let Some(icc) = installed("/usr/share/color/icc/ghostscript/ps_cmyk.icc") else {
             return;
         };
-        let e = ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB)
-            .unwrap_err();
+        let e = ProofTable::bake(
+            OutputSpace::Srgb,
+            &icc,
+            Printing::default(),
+            &Monitor::Matrix(Screen::SRGB),
+        )
+        .unwrap_err();
         assert!(format!("{e:#}").contains("not read correctly"), "{e:#}");
     }
 
@@ -496,7 +631,13 @@ mod tests {
                 intent,
                 ..Printing::default()
             };
-            ProofTable::bake(OutputSpace::Srgb, &icc, printing, Screen::SRGB).unwrap()
+            ProofTable::bake(
+                OutputSpace::Srgb,
+                &icc,
+                printing,
+                &Monitor::Matrix(Screen::SRGB),
+            )
+            .unwrap()
         };
         let (plain, perceptual) = (bake(Intent::RelativeColorimetric), bake(Intent::Perceptual));
         let moved = perceptual
@@ -518,6 +659,68 @@ mod tests {
     }
 
     #[test]
+    fn a_monitor_profile_shows_what_its_matrix_and_curve_do() {
+        // Profiles the matrix path reads exactly: through moxcms they must agree with it.
+        for space in OutputSpace::ALL {
+            let table = ProofTable::bake_screen(space.icc()).unwrap();
+            let leg = MonitorLeg::new(&Monitor::Matrix(Screen::of(space))).unwrap();
+            for rgb in [
+                [0.0, 0.0, 0.0],
+                [0.5, 0.5, 0.5],
+                [0.75, 0.25, 0.125],
+                [1.0; 3],
+            ] {
+                let want = leg.encode(&rgb.map(srgb_to_linear)).unwrap();
+                let got = table.at(rgb);
+                for c in 0..3 {
+                    assert!(
+                        (got[c] - want[c]).abs() < 3.0 / 255.0,
+                        "{space:?} {rgb:?}: {got:?}, the matrix says {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_printer_proof_ends_on_the_monitors_own_profile() {
+        let Some(icc) = press() else { return };
+        let p3 = OutputSpace::DisplayP3;
+        let by_matrix = ProofTable::bake(
+            OutputSpace::Srgb,
+            &icc,
+            Printing::default(),
+            &Monitor::Matrix(Screen::of(p3)),
+        )
+        .unwrap();
+        let by_profile = ProofTable::bake(
+            OutputSpace::Srgb,
+            &icc,
+            Printing::default(),
+            &Monitor::Profile(p3.icc().into()),
+        )
+        .unwrap();
+        for rgb in [[0.5; 3], [0.8, 0.6, 0.5], [0.2, 0.4, 0.8]] {
+            let (a, b) = (by_matrix.at(rgb), by_profile.at(rgb));
+            assert!(
+                (0..3).all(|c| (a[c] - b[c]).abs() < 3.0 / 255.0),
+                "{rgb:?}: {a:?} {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monitor_profile_that_is_not_one_is_refused() {
+        assert!(ProofTable::bake_screen(b"nope").is_err());
+        if let Some(cmyk) = press() {
+            assert!(
+                ProofTable::bake_screen(&cmyk).is_err(),
+                "a press profile was a screen"
+            );
+        }
+    }
+
+    #[test]
     fn the_shader_samples_the_table_at_its_size() {
         let wgsl = include_str!("shaders/adjust.wgsl");
         let want = format!("const PROOF_SIZE: f32 = {SIZE}.0;");
@@ -530,7 +733,7 @@ mod tests {
             OutputSpace::Srgb,
             b"not a profile",
             Printing::default(),
-            Screen::SRGB
+            &Monitor::Matrix(Screen::SRGB)
         )
         .is_err());
     }
