@@ -1746,6 +1746,32 @@ fn the_scopes_do_not_measure_the_mask_wash() {
 }
 
 #[test]
+fn a_linear_dng_opens_as_its_raw_would_neutral_and_in_order() {
+    let gpu = gpu_or_skip!();
+    let bytes =
+        photo_engine::testkit::synth_linear_dng(96, 32, |x| 0.05 + 0.6 * x as f32 / 95.0).unwrap();
+    use photo_engine::RawDecoder;
+    let cfa = photo_engine::RawlerBackend.decode_bytes(&bytes).unwrap();
+    let mut engine = Engine::new(&gpu.device);
+    engine.load(&gpu.device, &gpu.queue, cfa).unwrap();
+    let out = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    assert_eq!((out.width, out.height), (96, 32));
+    let mut last = -1.0f32;
+    for x in [4u32, 30, 60, 90] {
+        let [r, g, b] = grey_at(&out, x, 16);
+        // The cast is the as-shot white's to undo: grey comes out grey.
+        assert!(
+            (r - g).abs() < 0.03 && (b - g).abs() < 0.03,
+            "x {x}: {r} {g} {b}"
+        );
+        assert!(g > last, "the ramp does not rise at x {x}");
+        last = g;
+    }
+}
+
+#[test]
 fn a_removed_spot_is_filled_from_the_ground_around_it_with_no_source() {
     use photo_engine::heal::{Mode, Spot};
     let gpu = gpu_or_skip!();

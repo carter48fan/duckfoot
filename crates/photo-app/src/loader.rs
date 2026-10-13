@@ -541,6 +541,42 @@ fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
     decode_raw(path).ok().map(|cfa| thumbnail(&cfa))
 }
 
+/// [`thumbnail`] of a linear DNG, whose RGB is already normalised: sampled per cell,
+/// balanced, and through the camera's matrix to sRGB, like a mosaic's.
+fn linear_thumbnail(cfa: &CfaImage, rgb: &[f32]) -> egui::ColorImage {
+    let (w, h) = (cfa.width as usize, cfa.height as usize);
+    let cell = w.max(h).div_ceil(THUMB_SIDE).max(1);
+    let (tw, th) = ((w / cell).max(1), (h / cell).max(1));
+    let m = cfa.cam_to_srgb;
+    let encode = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        let e = if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        (e * 255.0).round() as u8
+    };
+    let mut pixels = Vec::with_capacity(tw * th);
+    for ty in 0..th {
+        for tx in 0..tw {
+            let (x, y) = (tx * cell + cell / 2, ty * cell + cell / 2);
+            let at = (y.min(h - 1) * w + x.min(w - 1)) * 3;
+            let c: [f32; 3] =
+                std::array::from_fn(|i| rgb.get(at + i).copied().unwrap_or(0.0) * cfa.wb[i]);
+            let s: [f32; 3] =
+                std::array::from_fn(|r| m[r][0] * c[0] + m[r][1] * c[1] + m[r][2] * c[2]);
+            pixels.push(egui::Color32::from_rgb(
+                encode(s[0]),
+                encode(s[1]),
+                encode(s[2]),
+            ));
+        }
+    }
+    let image = egui::ColorImage::new([tw, th], pixels);
+    orient(image, &cfa.orientation)
+}
+
 /// A camera preview as an egui image, shrunk to `side` on its long edge if given, and
 /// turned the way the camera says to view it.
 fn preview_image(preview: Preview, side: Option<usize>) -> egui::ColorImage {
@@ -588,6 +624,9 @@ fn to_color_image(img: &image::DynamicImage) -> egui::ColorImage {
 /// balanced, highlights kept neutral where the sensor clipped, converted with the camera's
 /// matrix, then oriented the way the camera says.
 fn thumbnail(cfa: &CfaImage) -> egui::ColorImage {
+    if let Some(rgb) = &cfa.linear {
+        return linear_thumbnail(cfa, rgb);
+    }
     let (w, h) = (cfa.width as usize, cfa.height as usize);
     // Whole 2×2 quads per cell, so every cell sees all three colours.
     let cell = w.max(h).div_ceil(THUMB_SIDE).max(2).next_multiple_of(2);
