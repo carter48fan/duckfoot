@@ -248,16 +248,6 @@ pub(crate) fn settings_editor(
         }
     }
 
-    row_label(ui, "Dynamic Range");
-    ui.horizontal_wrapped(|ui| {
-        if widgets::chip(ui, s.hdr_gain_map, "HDR Gain Map (ISO 21496-1)")
-            .on_hover_text("Embed ISO 21496-1 / Ultra HDR metadata for extended highlight headroom on HDR screens")
-            .clicked()
-        {
-            s.hdr_gain_map = !s.hdr_gain_map;
-        }
-    });
-
     ui.label(
         RichText::new(summary(s, source))
             .family(theme::mono_bold())
@@ -300,9 +290,6 @@ pub(crate) fn summary(s: &ExportSettings, source: Option<(u32, u32)>) -> String 
         } else {
             parts.push("rembg cutout".into());
         }
-    }
-    if s.hdr_gain_map {
-        parts.push("Ultra HDR gain map".into());
     }
     parts.push(match s.metadata {
         MetadataPolicy::All if s.strip_location => "metadata, no location".into(),
