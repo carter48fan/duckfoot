@@ -73,8 +73,9 @@ struct Adjust {
     // Working → output linear, rows; [0].w = the output's gamma (0: the sRGB curve),
     // [1].w = 1 when the output's primaries differ from the working space's.
     out_m:      array<vec4<f32>, 3>,
-    // W-10: the proof's space → the screen's; [0].w = 1 while proofing, [1].w = 1 to
-    // mark what the proof cannot hold.
+    // W-10: the proof's space → the screen's; [0].w = 1 while proofing against a space,
+    // 2 through the printer table, [1].w = 1 to mark what the proof cannot hold, [2].w =
+    // the proof space's gamma (0: the sRGB curve), which the table's input is encoded with.
     proof_m:    array<vec4<f32>, 3>,
 }
 
@@ -108,6 +109,10 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 @group(0) @binding(4) var original: texture_2d<f32>;
 // Brush masks' coverage, one layer each, in sensor space.
 @group(0) @binding(5) var brushes: texture_2d_array<f32>;
+// The printer proof (`proof.rs`): the proof space's encoded RGB → the screen's, A = 1 where
+// the printer loses the colour.
+@group(0) @binding(6) var proof_table: texture_3d<f32>;
+const PROOF_SIZE: f32 = 33.0;
 
 // `sensor` at absolute sensor level `level`. The denoised copy the preview reads is made
 // only from the preview's level down, and is bound with that level as its level 0.
@@ -252,13 +257,14 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
         c = vec3<f32>(dot(u.out_m[0].xyz, c), dot(u.out_m[1].xyz, c), dot(u.out_m[2].xyz, c));
     }
     let proofing = u.proof_m[0].w > 0.5;
+    let printer = u.proof_m[0].w > 1.5;
     var outside = false;
     if (u.luma_w.w > 0.5 || proofing) {
         let s = gamut_scale(c, y);
         outside = s < 0.97;
         c = vec3<f32>(y) + (c - vec3<f32>(y)) * s;
     }
-    if (proofing) {
+    if (proofing && !printer) {
         // What the proof holds, as the screen shows it (a wide proof on a narrower screen
         // is brought in again).
         c = vec3<f32>(dot(u.proof_m[0].xyz, c), dot(u.proof_m[1].xyz, c), dot(u.proof_m[2].xyz, c));
@@ -266,7 +272,20 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
     }
     c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
     var e: vec3<f32>;
-    if (u.out_m[0].w > 0.0) {
+    if (printer) {
+        // The file as written (encoded in the proof's space), through the printer to the
+        // screen: one trilinear lookup, at texel centres.
+        var file: vec3<f32>;
+        if (u.proof_m[2].w > 0.0) {
+            file = pow(c, vec3<f32>(1.0 / u.proof_m[2].w));
+        } else {
+            file = linear_to_srgb(c);
+        }
+        let at = file * ((PROOF_SIZE - 1.0) / PROOF_SIZE) + vec3<f32>(0.5 / PROOF_SIZE);
+        let printed = textureSampleLevel(proof_table, sensor_sampler, at, 0.0);
+        e = printed.rgb;
+        outside = printed.a > 0.5;
+    } else if (u.out_m[0].w > 0.0) {
         e = pow(c, vec3<f32>(1.0 / u.out_m[0].w));
     } else {
         e = linear_to_srgb(c);

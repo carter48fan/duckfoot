@@ -178,8 +178,10 @@ struct AdjustUniforms {
     /// Working → output linear RGB, rows (xyz); [0].w = the output's gamma (0 for the
     /// sRGB curve), [1].w = 1 when the output's primaries are not the working space's.
     out_m: [[f32; 4]; 3],
-    /// Proofing: the proof's space → the screen's, rows; [0].w = 1 while proofing,
-    /// [1].w = 1 to mark what the proof cannot hold.
+    /// Proofing: the proof's space → the screen's, rows; [0].w = 1 while proofing against
+    /// a space, 2 while proofing through the printer table, [1].w = 1 to mark what the
+    /// proof cannot hold, [2].w = the proof space's gamma (0: the sRGB curve), which the
+    /// printer table's input is encoded with.
     proof_m: [[f32; 4]; 3],
 }
 
@@ -191,10 +193,13 @@ struct ResizeUniforms {
 }
 
 /// A soft proof: the space proofed against, and whether to mark what it cannot hold.
+/// With `printer`, the file written in `space` is then shown as printed, through the table
+/// given to [`Engine::set_proof_table`] (proofing falls back to `space` alone until one is).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Proof {
     pub space: crate::gamut::Screen,
     pub warn: bool,
+    pub printer: bool,
 }
 
 /// Where a render ends: the space and curve it is encoded for, and a proof on the way.
@@ -495,6 +500,10 @@ pub struct Engine {
     denoise_bgl: wgpu::BindGroupLayout,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
+    /// The printer proof (W-10), baked by `proof::ProofTable`, and whether one is loaded.
+    proof_table: wgpu::Texture,
+    proof_table_view: wgpu::TextureView,
+    proof_table_loaded: bool,
     sensor_sampler: wgpu::Sampler,
     // The curves the LUT was last baked from, `None` where that curve was disabled. Keyed on
     // what is actually baked, so toggling a curve off rebuilds the LUT rather than leaving
@@ -975,6 +984,17 @@ impl Engine {
                     },
                     count: None,
                 },
+                // The printer proof table.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let denoise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1143,6 +1163,23 @@ impl Engine {
             view_formats: &[],
         });
         let lut_view = lut_texture.create_view(&Default::default());
+        let proof_side = crate::proof::SIZE as u32;
+        let proof_table = device.make_texture(&wgpu::TextureDescriptor {
+            label: Some("printer proof table"),
+            size: wgpu::Extent3d {
+                width: proof_side,
+                height: proof_side,
+                depth_or_array_layers: proof_side,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            // Filterable in core WebGPU, so the shader interpolates between samples.
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let proof_table_view = proof_table.create_view(&Default::default());
 
         let hist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("histogram"),
@@ -1245,6 +1282,9 @@ impl Engine {
             denoise_bgl,
             lut_texture,
             lut_view,
+            proof_table,
+            proof_table_view,
+            proof_table_loaded: false,
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1287,6 +1327,40 @@ impl Engine {
     /// brought in as the export will bring them, and with `warn`, shown grey.
     pub fn set_proof(&mut self, proof: Option<Proof>) {
         self.proof = proof;
+    }
+
+    /// The printer proof a [`Proof`] with `printer` shows through, baked for this screen
+    /// (`None` unloads it). Written into a table made once, so changing it makes nothing.
+    pub fn set_proof_table(
+        &mut self,
+        queue: &wgpu::Queue,
+        table: Option<&crate::proof::ProofTable>,
+    ) {
+        let Some(table) = table else {
+            self.proof_table_loaded = false;
+            return;
+        };
+        let side = crate::proof::SIZE as u32;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.proof_table,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&table.texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(side * 8),
+                rows_per_image: Some(side),
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: side,
+            },
+        );
+        self.proof_table_loaded = true;
     }
 
     /// Wash local mask `index` (of the stack's masks) red on the preview, to show where it
@@ -1408,6 +1482,10 @@ impl Engine {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(brushes),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.proof_table_view),
                 },
             ],
         })
@@ -2692,11 +2770,17 @@ impl Engine {
                 ],
                 proof_m: {
                     let m = proof_to_screen;
-                    let (on, warn) = ends.proof.map_or((0.0, 0.0), |p| (1.0, f32::from(p.warn)));
+                    let table = self.proof_table_loaded;
+                    let (on, warn) = ends.proof.map_or((0.0, 0.0), |p| {
+                        (
+                            if p.printer && table { 2.0 } else { 1.0 },
+                            f32::from(p.warn),
+                        )
+                    });
                     [
                         [m[0][0], m[0][1], m[0][2], on],
                         [m[1][0], m[1][1], m[1][2], warn],
-                        [m[2][0], m[2][1], m[2][2], 0.0],
+                        [m[2][0], m[2][1], m[2][2], first.gamma.unwrap_or(0.0)],
                     ]
                 },
             }),

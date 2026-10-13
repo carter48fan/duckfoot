@@ -51,6 +51,9 @@ pub struct Settings {
     /// (which wins while it reads).
     pub display: Option<photo_engine::gamut::OutputSpace>,
     pub display_icc: Option<PathBuf>,
+    /// The printer profile soft proofing goes through (W-10), if one is chosen.
+    #[serde(default)]
+    pub proof_icc: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -79,6 +82,7 @@ impl Default for Settings {
             watched_folders: Vec::new(),
             display: None,
             display_icc: None,
+            proof_icc: None,
         }
     }
 }

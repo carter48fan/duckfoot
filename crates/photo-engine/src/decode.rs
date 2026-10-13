@@ -1179,9 +1179,11 @@ pub mod fuzzing {
         let _ = RawlerBackend.decode_bytes(bytes);
     }
 
-    /// A display's ICC profile, as the user picks one (W-14).
+    /// A display's ICC profile, as the user picks one (W-14), or a printer's (W-10). The
+    /// bake is called unguarded, so a panic in moxcms is found rather than caught.
     pub fn icc(bytes: &[u8]) {
         let _ = crate::icc::MatrixTrc::parse(bytes);
+        let _ = crate::proof::ProofTable::fuzz_bake(bytes);
     }
 
     /// A sidecar's text.

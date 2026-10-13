@@ -32,6 +32,8 @@ pub enum Request {
     Share { path: PathBuf },
     /// The monitor's ICC profile (W-14).
     DisplayProfile { from: Option<PathBuf> },
+    /// A printer's ICC profile, to soft proof through (W-10).
+    PrinterProfile { from: Option<PathBuf> },
 }
 
 /// The user's answer to a [`Request`]. A cancelled picker produces nothing.
@@ -45,6 +47,7 @@ pub enum Response {
     ImportPreset(PathBuf),
     ExportPreset(PathBuf),
     DisplayProfile(PathBuf),
+    PrinterProfile(PathBuf),
     /// The system is short of memory: give back what can be made again.
     LowMemory,
     /// Progress or a problem to show in the status bar.
@@ -196,6 +199,10 @@ fn ask(request: Request) -> Option<Response> {
             .add_filter("ICC profile", &["icc", "icm"])
             .pick_file()
             .map(Response::DisplayProfile),
+        Request::PrinterProfile { from } => start(from)
+            .add_filter("ICC profile", &["icc", "icm"])
+            .pick_file()
+            .map(Response::PrinterProfile),
     }
 }
 

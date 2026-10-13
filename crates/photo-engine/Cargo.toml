@@ -30,6 +30,9 @@ jpeg-decoder = { version = "0.3", default-features = false }
 webp = { version = "0.3", default-features = false }
 kamadak-exif = "0.6"
 tract-onnx = "0.23"
+# Baking printer proofs (W-10): a CMM for LUT-based ICC profiles. Already in the tree
+# through image, at the same version.
+moxcms = "0.8"
 
 [dev-dependencies]
 # The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.

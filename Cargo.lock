@@ -3091,6 +3091,7 @@ dependencies = [
  "log",
  "memchr",
  "miniz_oxide 0.8.9",
+ "moxcms",
  "pollster 1.0.1",
  "rawler",
  "rawloader",

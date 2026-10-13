@@ -319,8 +319,9 @@ impl Platform for AndroidPlatform {
                 }
             }
             Request::ImportPreset { .. } => self.pick(PICK_PRESET),
-            // The phone's screen is drawn as sRGB; there is no profile to choose.
-            Request::DisplayProfile { .. } => {}
+            // The phone's screen is drawn as sRGB; there is no profile to choose. Nor is
+            // there a proof to print through: the proof chips are the desktop's.
+            Request::DisplayProfile { .. } | Request::PrinterProfile { .. } => {}
         }
     }
 

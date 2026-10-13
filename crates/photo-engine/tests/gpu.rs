@@ -2094,6 +2094,7 @@ fn a_wide_screen_shows_the_file_and_a_proof_marks_what_srgb_loses() {
     engine.set_proof(Some(Proof {
         space: Screen::SRGB,
         warn: true,
+        printer: false,
     }));
     let (_, _, proofed) = preview(gpu, &mut engine, &stack, 0);
     assert_eq!(
@@ -2109,6 +2110,7 @@ fn a_wide_screen_shows_the_file_and_a_proof_marks_what_srgb_loses() {
     engine.set_proof(Some(Proof {
         space: Screen::SRGB,
         warn: false,
+        printer: false,
     }));
     let (_, _, proofed) = preview(gpu, &mut engine, &stack, 0);
     let g = at(&proofed, 6);
@@ -2116,6 +2118,95 @@ fn a_wide_screen_shows_the_file_and_a_proof_marks_what_srgb_loses() {
         g[0] > green[0] + 10,
         "the proof shows the green as sRGB brings it in: {g:?}"
     );
+}
+
+#[test]
+fn a_printer_proof_shows_the_file_through_its_table() {
+    let gpu = gpu_or_skip!();
+    use photo_engine::engine::Proof;
+    use photo_engine::gamut::Screen;
+    use photo_engine::proof::ProofTable;
+    // Three patches: a dark red, mid grey and a light blue, as linear sRGB.
+    let patches = [[0.2f32, 0.02, 0.02], [0.214, 0.214, 0.214], [0.4, 0.6, 0.9]];
+    let raster = testkit::raster_from_fn(24, 8, |x, _| patches[(x / 8) as usize]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let stack = PhotoStack::default();
+    let centres = |px: &[u8], w: u32| -> Vec<[u8; 3]> {
+        (0..3)
+            .map(|i| {
+                let at = ((4 * w + i * 8 + 4) * 4) as usize;
+                [px[at], px[at + 1], px[at + 2]]
+            })
+            .collect()
+    };
+    let (w, _, plain) = preview(gpu, &mut engine, &stack, 0);
+    let plain = centres(&plain, w);
+    let printer = |warn| {
+        Some(Proof {
+            space: Screen::SRGB,
+            warn,
+            printer: true,
+        })
+    };
+
+    // Asked for before a table is loaded, the proof is against sRGB alone: unchanged.
+    engine.set_proof(printer(false));
+    let (_, _, before) = preview(gpu, &mut engine, &stack, 0);
+    assert_eq!(
+        centres(&before, w),
+        plain,
+        "a proof with no table changed the preview"
+    );
+
+    // The identity table shows the file as it is, interpolation and all.
+    engine.set_proof_table(
+        &gpu.queue,
+        Some(&ProofTable::from_fn(|[r, g, b]| [r, g, b, 0.0])),
+    );
+    let (_, _, same) = preview(gpu, &mut engine, &stack, 0);
+    for (got, want) in centres(&same, w).into_iter().zip(&plain) {
+        assert!(
+            (0..3).all(|c| got[c].abs_diff(want[c]) <= 1),
+            "the identity table showed {want:?} as {got:?}"
+        );
+    }
+
+    // A table that inverts, warning about what was dark: the shader reads the file's
+    // encoded value, not the linear one, and marks what the table marks.
+    engine.set_proof_table(
+        &gpu.queue,
+        Some(&ProofTable::from_fn(|[r, g, b]| {
+            [1.0 - r, 1.0 - g, 1.0 - b, if g < 0.25 { 1.0 } else { 0.0 }]
+        })),
+    );
+    let (_, _, inverted) = preview(gpu, &mut engine, &stack, 0);
+    let inverted = centres(&inverted, w);
+    for (&got, want) in inverted.iter().zip(&plain) {
+        assert!(
+            (0..3).all(|c| got[c].abs_diff(255 - want[c]) <= 1),
+            "the inverting table showed {want:?} as {got:?}"
+        );
+    }
+    engine.set_proof(printer(true));
+    let (_, _, warned) = preview(gpu, &mut engine, &stack, 0);
+    let warned = centres(&warned, w);
+    assert_eq!(
+        warned[0],
+        [128, 128, 128],
+        "the colour the table marks was not greyed"
+    );
+    assert_eq!(
+        warned[1..],
+        inverted[1..],
+        "a colour the table keeps was greyed"
+    );
+
+    // Unloading the table goes back to proofing against the space.
+    engine.set_proof_table(&gpu.queue, None);
+    engine.set_proof(printer(false));
+    let (_, _, after) = preview(gpu, &mut engine, &stack, 0);
+    assert_eq!(centres(&after, w), plain);
 }
 
 #[test]
