@@ -273,7 +273,9 @@ jobs:
           cp target/release/duckfoot "$dir/"
           strip "$dir/duckfoot"
           cp LICENSE "$dir/"
+          cp THIRD_PARTY_LICENSES.txt "$dir/"
           cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
+
           {
             echo "Duckfoot for Linux (x86_64), built from ${GITHUB_SHA}."
             echo
@@ -295,7 +297,9 @@ jobs:
           cp brand/duckfoot.desktop "$appdir/"
           cp brand/duckfoot.desktop "$appdir/usr/share/applications/"
           cp brand/AppRun "$appdir/AppRun"
+          cp THIRD_PARTY_LICENSES.txt "$appdir/"
           chmod +x "$appdir/AppRun"
+
 
           curl -sL -o /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
           chmod +x /tmp/appimagetool
@@ -313,7 +317,10 @@ jobs:
           set -e
           cp "dist/duckfoot-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.AppImage"
           cp "dist/duckfoot-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-linux-x86_64.tar.gz"
-          gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" --clobber
+          # Package complete corresponding source code archive (LGPL-2.1 / DEC-1 compliance)
+          git archive --format=tar.gz --prefix="duckfoot-$TAG/" -o "dist/duckfoot-$TAG-source.tar.gz" HEAD
+          gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-source.tar.gz" --clobber
+
 
       - uses: actions/upload-artifact@v6
         if: needs.version.outputs.is_release != 'true'
@@ -348,7 +355,9 @@ jobs:
           mkdir -p "$dir" dist
           cp target/release/duckfoot.exe "$dir/"
           cp LICENSE "$dir/"
+          cp THIRD_PARTY_LICENSES.txt "$dir/"
           cp crates/photo-app/assets/fonts/OFL-*.txt "$dir/"
+
           {
             echo "Duckfoot for Windows (x86_64), built from ${GITHUB_SHA}."
             echo
@@ -402,6 +411,9 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/duckfoot "$app/Contents/MacOS/duckfoot"
           cp brand/duckfoot-1024.png "$app/Contents/Resources/duckfoot.png"
+          cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+          cp THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+
           version="${{ needs.version.outputs.version }}"
           cat > "$app/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
@@ -500,8 +512,10 @@ jobs:
             echo "- **Android APK** (\`duckfoot-$RELEASE_TAG-android-arm64.apk\`): Android 11+, Vulkan GPU, arm64. Open on phone or \`adb install -r\`. $signing"
             echo "- **Linux AppImage** (\`duckfoot-$RELEASE_TAG-linux-x86_64.AppImage\`): Standalone executable AppImage. Run \`chmod +x\` and execute."
             echo "- **Linux Tarball** (\`duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz\`): Unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
-            echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan."
-            echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS application (\`Duckfoot.app\`). Drag to Applications folder."
+            echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan. (Experimental / Developer Signed)"
+            echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS application (\`Duckfoot.app\`). Drag to Applications folder. (Experimental / Developer Signed)"
+            echo "- **Source Code** (\`duckfoot-$RELEASE_TAG-source.tar.gz\`): Complete corresponding source code archive (LGPL-2.1 compliance)."
+
             echo
             # What `gh release create --generate-notes` added: the changes since the last release.
             gh api "repos/$GH_REPO/releases/generate-notes" \
