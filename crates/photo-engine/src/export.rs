@@ -43,10 +43,22 @@ pub enum ExportFormat {
     Tiff,
     /// Lossy at any quality below 100, lossless at 100.
     Webp,
+    /// AV1 still, sRGB only: its encoder tags every file sRGB and carries no ICC profile.
+    Avif,
+    /// JPEG XL: lossy below quality 100, lossless at 100 (and always in Adobe RGB, which
+    /// its lossy mode cannot describe); 8 or 16 bits.
+    Jxl,
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 4] = [Self::Jpeg, Self::Png, Self::Tiff, Self::Webp];
+    pub const ALL: [ExportFormat; 6] = [
+        Self::Jpeg,
+        Self::Png,
+        Self::Tiff,
+        Self::Webp,
+        Self::Avif,
+        Self::Jxl,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -54,6 +66,8 @@ impl ExportFormat {
             Self::Png => "png",
             Self::Tiff => "tif",
             Self::Webp => "webp",
+            Self::Avif => "avif",
+            Self::Jxl => "jxl",
         }
     }
 
@@ -63,17 +77,29 @@ impl ExportFormat {
             Self::Png => "PNG",
             Self::Tiff => "TIFF",
             Self::Webp => "WebP",
+            Self::Avif => "AVIF",
+            Self::Jxl => "JPEG XL",
         }
     }
 
     /// Whether the quality setting means anything for this format.
     pub fn is_lossy(self) -> bool {
-        matches!(self, Self::Jpeg | Self::Webp)
+        matches!(self, Self::Jpeg | Self::Webp | Self::Avif | Self::Jxl)
+    }
+
+    /// Whether quality 100 means lossless rather than merely the best lossy.
+    pub fn lossless_at_100(self) -> bool {
+        matches!(self, Self::Webp | Self::Jxl)
     }
 
     /// Whether it can hold 16 bits a channel.
     pub fn has_16_bit(self) -> bool {
-        matches!(self, Self::Png | Self::Tiff)
+        matches!(self, Self::Png | Self::Tiff | Self::Jxl)
+    }
+
+    /// Whether a file of it can say it is in `space`.
+    pub fn holds(self, space: crate::gamut::OutputSpace) -> bool {
+        self != Self::Avif || space == crate::gamut::OutputSpace::Srgb
     }
 
     /// Picks the encoder from the filename the user chose.
@@ -90,12 +116,14 @@ impl ExportFormat {
             Some("jpg" | "jpeg") => Ok(Self::Jpeg),
             Some("tif" | "tiff") => Ok(Self::Tiff),
             Some("webp") => Ok(Self::Webp),
+            Some("avif") => Ok(Self::Avif),
+            Some("jxl") => Ok(Self::Jxl),
             Some(other) => bail!(
-                "{}: cannot export .{other} — choose .jpg, .png, .tif or .webp",
+                "{}: cannot export .{other} — choose .jpg, .png, .tif, .webp, .avif or .jxl",
                 path.display()
             ),
             None => bail!(
-                "{}: no file extension — choose .jpg, .png, .tif or .webp",
+                "{}: no file extension — choose .jpg, .png, .tif, .webp, .avif or .jxl",
                 path.display()
             ),
         }
@@ -287,6 +315,16 @@ impl ExportSettings {
             self.depth
         } else {
             BitDepth::Eight
+        }
+    }
+
+    /// The colour space the file will really be in: sRGB where the format holds no other,
+    /// so a recipe saved with one is written correctly rather than mislabelled.
+    pub fn effective_space(&self) -> crate::gamut::OutputSpace {
+        if self.format.holds(self.color_space) {
+            self.color_space
+        } else {
+            crate::gamut::OutputSpace::Srgb
         }
     }
 }
@@ -841,7 +879,8 @@ fn encode<W: Write + Seek>(
     );
     let exif = exif_out::block(&fields);
     let xmp = xmp_for(info, settings.metadata);
-    let icc = settings.color_space.icc().to_vec();
+    let space = settings.effective_space();
+    let icc = space.icc().to_vec();
     // JPEG and WebP are 8-bit formats whatever was asked.
     let eight_owned;
     let eight: Option<&[u8]> = match samples {
@@ -917,8 +956,122 @@ fn encode<W: Write + Seek>(
                 xmp.as_deref(),
             )?)?;
         }
+        ExportFormat::Avif => {
+            let px = eight.expect("AVIF is written from 8-bit samples");
+            out.write_all(&encode_avif(px, w, h, quality, exif.as_deref())?)?;
+        }
+        ExportFormat::Jxl => {
+            // Its lossy mode names its colour encoding, and Adobe RGB is not one it can name.
+            let lossless = quality >= 100 || space == crate::gamut::OutputSpace::AdobeRgb;
+            let pixels = match (eight, samples) {
+                (Some(px), _) => JxlPixels::Eight(px),
+                (None, Samples::Sixteen(px)) => JxlPixels::Sixteen(px),
+                (None, Samples::Eight(_)) => unreachable!("eight is Some for 8-bit samples"),
+            };
+            let meta = JxlMeta {
+                space,
+                icc: &icc,
+                exif: exif.as_deref(),
+                xmp: xmp.as_deref(),
+            };
+            out.write_all(&encode_jxl(pixels, w, h, quality, lossless, &meta)?)?;
+        }
     }
     Ok(())
+}
+
+/// How long rav1e looks for a smaller file: 1 (slowest) to 10. 6 writes a 24 MP photo in
+/// seconds rather than minutes, a few percent larger than the slowest search.
+const AVIF_SPEED: u8 = 6;
+
+/// AVIF from RGBA8, through ravif (4:4:4, 10-bit AV1, tagged sRGB). EXIF goes in its own
+/// item; the muxer has no place for XMP or an ICC profile, which is why AVIF is sRGB only.
+fn encode_avif(px: &[u8], w: u32, h: u32, quality: u8, exif: Option<&[u8]>) -> Result<Vec<u8>> {
+    let pixels: Vec<ravif::RGBA8> = px
+        .chunks_exact(4)
+        .map(|c| ravif::RGBA8::new(c[0], c[1], c[2], c[3]))
+        .collect();
+    let q = f32::from(quality.clamp(1, 100));
+    let mut enc = ravif::Encoder::new()
+        .with_quality(q)
+        .with_alpha_quality(q)
+        .with_speed(AVIF_SPEED);
+    if let Some(exif) = exif {
+        enc = enc.with_exif(exif);
+    }
+    let img = ravif::Img::new(pixels.as_slice(), w as usize, h as usize);
+    // rav1e is mature, but an export that fails must never take the app with it.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enc.encode_rgba(img)))
+        .map_err(|_| anyhow!("the AVIF encoder failed"))?
+        .map(|r| r.avif_file)
+        .map_err(|e| anyhow!("AVIF: {e}"))
+}
+
+enum JxlPixels<'a> {
+    Eight(&'a [u8]),
+    Sixteen(&'a [u16]),
+}
+
+struct JxlMeta<'a> {
+    space: crate::gamut::OutputSpace,
+    icc: &'a [u8],
+    exif: Option<&'a [u8]>,
+    xmp: Option<&'a str>,
+}
+
+/// JPEG XL from RGBA samples through jixel. Lossy files declare their colour encoding
+/// (sRGB or Display P3) and lossless ones carry the ICC profile; EXIF and XMP go in boxes
+/// of their own. Alpha is kept only when some pixel is not opaque. As LightCraft does,
+/// jixel runs under catch_unwind: it asserts internally.
+fn encode_jxl(
+    pixels: JxlPixels,
+    w: u32,
+    h: u32,
+    quality: u8,
+    lossless: bool,
+    meta: &JxlMeta,
+) -> Result<Vec<u8>> {
+    use crate::gamut::OutputSpace;
+    use jixel::{ColorEncoding, EncodeConfig, Speed};
+    let colour = match meta.space {
+        OutputSpace::DisplayP3 => ColorEncoding::display_p3(),
+        OutputSpace::Srgb | OutputSpace::AdobeRgb => ColorEncoding::srgb(),
+    };
+    let mut c = EncodeConfig::default()
+        .with_quality(f32::from(quality.clamp(1, 100)))
+        .with_color_encoding(colour)
+        .with_lossless(lossless)
+        .with_speed(Speed::Fast);
+    if lossless && !meta.icc.is_empty() {
+        c = c.with_icc_profile(meta.icc.to_vec());
+    }
+    if let Some(exif) = meta.exif {
+        c = c.with_exif(exif.to_vec());
+    }
+    if let Some(xmp) = meta.xmp {
+        c = c.with_xmp(xmp.as_bytes().to_vec());
+    }
+    /// The samples as jixel takes them: RGB, or RGBA where alpha says something.
+    fn channels<T: Copy + PartialEq>(rgba: &[T], opaque: T) -> (Vec<T>, bool) {
+        let alpha = rgba.chunks_exact(4).any(|p| p[3] != opaque);
+        let n = if alpha { 4 } else { 3 };
+        let v = rgba.chunks_exact(4).flat_map(|p| p[..n].to_vec()).collect();
+        (v, alpha)
+    }
+    let (w, h) = (w as usize, h as usize);
+    let run = || match pixels {
+        JxlPixels::Eight(px) => match channels(px, u8::MAX) {
+            (v, false) => jixel::encode_image(&v, w, h, &c),
+            (v, true) => jixel::encode_image_with_alpha(&v, w, h, &c),
+        },
+        JxlPixels::Sixteen(px) => match channels(px, u16::MAX) {
+            (v, false) => jixel::encode_image_16bit(&v, w, h, &c),
+            (v, true) => jixel::encode_image_with_alpha_16bit(&v, w, h, &c),
+        },
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .map_err(|_| anyhow!("the JPEG XL encoder failed"))?
+        .map_err(|e| anyhow!("JPEG XL: {e}"))
 }
 
 /// TIFF through the `tiff` crate itself, which `image`'s encoder wraps: that is what can
@@ -1267,6 +1420,147 @@ mod tests {
     }
 
     /// Deterministic noise, which is what makes JPEG quality show in the bytes.
+    /// The formats `image` and kamadak-exif read back, which the tests below that decode
+    /// an export, or read its EXIF, go through. AVIF and JPEG XL have tests of their own.
+    const DECODABLE: [ExportFormat; 4] = [
+        ExportFormat::Jpeg,
+        ExportFormat::Png,
+        ExportFormat::Tiff,
+        ExportFormat::Webp,
+    ];
+
+    /// Every box at the top level of an ISOBMFF file (AVIF, HEIF) or inside `parent`'s
+    /// body: type and body.
+    fn boxes(b: &[u8]) -> Vec<([u8; 4], &[u8])> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at + 8 <= b.len() {
+            let size = u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+            let kind: [u8; 4] = b[at + 4..at + 8].try_into().unwrap();
+            if size < 8 || at + size > b.len() {
+                break;
+            }
+            out.push((kind, &b[at + 8..at + size]));
+            at += size;
+        }
+        out
+    }
+
+    #[test]
+    fn an_avif_export_is_an_srgb_avif_with_its_exif() {
+        let img = noise(40, 30);
+        // Asked for in P3: AVIF cannot say so, so it is rendered and written as sRGB.
+        let settings = ExportSettings {
+            color_space: crate::gamut::OutputSpace::DisplayP3,
+            ..ExportSettings::new(ExportFormat::Avif)
+        };
+        assert_eq!(settings.effective_space(), crate::gamut::OutputSpace::Srgb);
+        let bytes = encoded(&img, &settings);
+        let top = boxes(&bytes);
+        let (_, ftyp) = top.iter().find(|(k, _)| k == b"ftyp").expect("no ftyp");
+        assert_eq!(&ftyp[..4], b"avif");
+        let (_, meta) = top.iter().find(|(k, _)| k == b"meta").expect("no meta");
+        // `meta` is a full box: four bytes of version and flags before its children.
+        let meta = boxes(&meta[4..]);
+        let (_, iprp) = meta.iter().find(|(k, _)| k == b"iprp").expect("no iprp");
+        let (_, ipco) = boxes(iprp)
+            .into_iter()
+            .find(|(k, _)| k == b"ipco")
+            .expect("no ipco");
+        let props = boxes(ipco);
+        let (_, ispe) = props.iter().find(|(k, _)| k == b"ispe").expect("no ispe");
+        let wh = (
+            u32::from_be_bytes(ispe[4..8].try_into().unwrap()),
+            u32::from_be_bytes(ispe[8..12].try_into().unwrap()),
+        );
+        assert_eq!(wh, (40, 30));
+        assert!(
+            props.iter().any(|(k, _)| k == b"av1C"),
+            "no AV1 configuration"
+        );
+        // The muxer leaves `colr` out when it would only state the defaults (BT.709
+        // primaries, the sRGB curve), which the AV1 sequence header states too; if it is
+        // there it must say sRGB.
+        if let Some((_, colr)) = props.iter().find(|(k, _)| k == b"colr") {
+            assert_eq!(&colr[..4], b"nclx");
+            assert_eq!(u16::from_be_bytes([colr[4], colr[5]]), 1);
+            assert_eq!(u16::from_be_bytes([colr[6], colr[7]]), 13);
+        }
+        assert!(
+            memchr::memmem::find(&bytes, b"ILCE-7M4").is_some(),
+            "the EXIF item is missing"
+        );
+    }
+
+    fn decode_jxl(bytes: &[u8]) -> (jxl_oxide::JxlImage, Vec<f32>) {
+        let image = jxl_oxide::JxlImage::builder()
+            .read(std::io::Cursor::new(bytes))
+            .unwrap();
+        let px = image
+            .render_frame(0)
+            .unwrap()
+            .image_all_channels()
+            .buf()
+            .to_vec();
+        (image, px)
+    }
+
+    #[test]
+    fn a_jpeg_xl_export_reads_back_lossy_and_lossless() {
+        let img = noise(40, 30);
+        let lossy = encoded(&img, &ExportSettings::new(ExportFormat::Jxl));
+        let (image, px) = decode_jxl(&lossy);
+        assert_eq!((image.width(), image.height()), (40, 30));
+        assert_eq!(
+            px.len(),
+            40 * 30 * 3,
+            "an opaque image grew an alpha channel"
+        );
+        assert!(
+            memchr::memmem::find(&lossy, b"ILCE-7M4").is_some(),
+            "no EXIF box"
+        );
+        // Lossless at quality 100: every sample back exactly.
+        let settings = ExportSettings {
+            quality: 100,
+            ..ExportSettings::new(ExportFormat::Jxl)
+        };
+        let (_, px) = decode_jxl(&encoded(&img, &settings));
+        let want: Vec<f32> = img
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| p[..3].iter().map(|&v| f32::from(v) / 255.0))
+            .collect();
+        assert!(
+            px.iter()
+                .zip(&want)
+                .all(|(a, b)| (a - b).abs() < 0.5 / 255.0),
+            "lossless JPEG XL changed samples"
+        );
+    }
+
+    #[test]
+    fn a_jpeg_xl_export_says_its_colour_space() {
+        let img = noise(16, 16);
+        let p3 = ExportSettings {
+            color_space: crate::gamut::OutputSpace::DisplayP3,
+            ..ExportSettings::new(ExportFormat::Jxl)
+        };
+        let (image, _) = decode_jxl(&encoded(&img, &p3));
+        let header = format!("{:?}", image.image_header().metadata.colour_encoding);
+        assert!(header.contains("P3"), "a P3 export declared {header}");
+        // Adobe RGB, which the lossy mode cannot name, is written lossless with its profile.
+        let adobe = ExportSettings {
+            color_space: crate::gamut::OutputSpace::AdobeRgb,
+            ..ExportSettings::new(ExportFormat::Jxl)
+        };
+        let (image, _) = decode_jxl(&encoded(&img, &adobe));
+        assert_eq!(
+            image.original_icc(),
+            Some(crate::gamut::OutputSpace::AdobeRgb.icc())
+        );
+    }
+
     fn noise(width: u32, height: u32) -> ExportedImage {
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         let rgba = (0..width * height)
@@ -1415,7 +1709,7 @@ mod tests {
             catalog: Some(marks.clone()),
             ..sample_info()
         };
-        for format in ExportFormat::ALL {
+        for format in DECODABLE {
             let at = |policy| {
                 let settings = ExportSettings {
                     metadata: policy,
@@ -1458,7 +1752,7 @@ mod tests {
     #[test]
     fn every_format_carries_the_exif_and_the_colour_profile() {
         let img = noise(40, 30);
-        for (i, format) in ExportFormat::ALL.into_iter().enumerate() {
+        for (i, format) in DECODABLE.into_iter().enumerate() {
             // Each format in a different space, so every profile goes out in some file.
             let space = crate::gamut::OutputSpace::ALL[i % 3];
             let settings = ExportSettings {

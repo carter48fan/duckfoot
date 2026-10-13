@@ -180,6 +180,8 @@ fn ask(request: Request) -> Option<Response> {
             .add_filter("PNG", &["png"])
             .add_filter("TIFF", &["tif", "tiff"])
             .add_filter("WebP", &["webp"])
+            .add_filter("AVIF", &["avif"])
+            .add_filter("JPEG XL", &["jxl"])
             .set_directory(dir)
             .set_file_name(name)
             .save_file()

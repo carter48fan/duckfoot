@@ -295,7 +295,7 @@ fn process_single_job(
         queue,
         &job.stack,
         settings.effective_depth(),
-        settings.color_space,
+        settings.effective_space(),
     )?;
 
     // 3. Size, sharpen and encode it, through the same path the single export uses.

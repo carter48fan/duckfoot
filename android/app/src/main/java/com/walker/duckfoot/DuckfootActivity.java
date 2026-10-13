@@ -181,6 +181,8 @@ public class DuckfootActivity extends NativeActivity {
         if (lower.endsWith(".png")) return "image/png";
         if (lower.endsWith(".webp")) return "image/webp";
         if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+        if (lower.endsWith(".avif")) return "image/avif";
+        if (lower.endsWith(".jxl")) return "image/jxl";
         return "image/jpeg";
     }
 

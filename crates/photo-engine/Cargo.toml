@@ -38,6 +38,12 @@ moxcms = "0.8"
 quick-xml = "0.41"
 # The CRC of the PNG chunk an export's XMP goes in. Already in the tree through png.
 crc32fast = "1"
+# AVIF export: rav1e through ravif, pure Rust (BSD-2/BSD-3). Without rav1e's "asm", which needs
+# nasm, a non-Rust tool.
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
+# JPEG XL export: a pure-Rust port of libjxl-tiny (BSD-3-Clause OR Apache-2.0). Pinned, as
+# LightCraft pins it: young, and its output is checked against jxl-oxide in the tests.
+jixel = "=0.3.4"
 
 # HEIF/HEIC (iPhone) stills: vendored from LightCraft, pure Rust. Optional, as HEVC is patented
 # in some places (see crates/vendor/lc-heif/VENDORED.md).
@@ -48,6 +54,8 @@ heif = ["dep:lc-heif"]
 
 [dev-dependencies]
 lc-heif = { path = "../vendor/lc-heif", features = ["testdata"] }
+# Decoding the JPEG XL exports back in the tests (pure Rust).
+jxl-oxide = { version = "0.12", default-features = false }
 # The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.
 # Counters: tests/drag.rs counts what is alive on the GPU through a drag (invariant 6).
 wgpu = { workspace = true, features = ["noop", "counters"] }

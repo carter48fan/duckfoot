@@ -98,7 +98,7 @@ pub(crate) fn settings_editor(
     }
     if s.format.is_lossy() {
         let mut q = f32::from(s.quality);
-        let tip = if s.format == ExportFormat::Webp {
+        let tip = if s.format.lossless_at_100() {
             "quality (100 = lossless)"
         } else {
             "quality"
@@ -120,10 +120,25 @@ pub(crate) fn settings_editor(
 
     row_label(ui, "Colour space");
     use photo_engine::gamut::OutputSpace;
-    if let Some(c) = chips(ui, s.color_space, OutputSpace::ALL.map(|c| (c, c.label()))) {
+    let format = s.format;
+    let spaces = OutputSpace::ALL
+        .into_iter()
+        .filter(|c| format.holds(*c))
+        .map(|c| (c, c.label()));
+    if let Some(c) = chips(ui, s.effective_space(), spaces) {
         s.color_space = c;
     }
-    if s.color_space != OutputSpace::Srgb {
+    if s.format == ExportFormat::Avif {
+        ui.label(
+            theme::tag("AVIF is written in sRGB: its encoder can tag no other space")
+                .color(theme::TEXT_FAINT),
+        );
+    } else if s.format == ExportFormat::Jxl && s.color_space == OutputSpace::AdobeRgb {
+        ui.label(
+            theme::tag("written lossless: JPEG XL's lossy mode cannot describe Adobe RGB")
+                .color(theme::TEXT_FAINT),
+        );
+    } else if s.color_space != OutputSpace::Srgb {
         ui.label(
             theme::tag(
                 "for screens and print that manage colour; the web and most apps assume sRGB",
@@ -277,7 +292,7 @@ pub(crate) fn summary(s: &ExportSettings, source: Option<(u32, u32)>) -> String 
         BitDepth::Eight => "8-bit",
         BitDepth::Sixteen => "16-bit",
     };
-    parts.push(format!("{bits} {}", s.color_space.label()));
+    parts.push(format!("{bits} {}", s.effective_space().label()));
     if s.sharpen != SharpenFor::Off {
         parts.push(format!(
             "{} sharpening",
