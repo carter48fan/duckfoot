@@ -488,6 +488,7 @@ DESIGN.md invariant 8.
 | **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
 | **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |
 | **Params** | Spot Heal, Clone & Remove | Working | Up to 32 circular sensor-space spots: heal/clone from a draggable source, or remove (content-aware PatchMatch fill from the vendored `lc-inpaint`, up to 16 at once; a spot of radius over ~42 px is filled at a coarser level of the sensor, so softer) |
+| **Params** | Look (`.cube`) | Working | A 3D or 1D `.cube` LUT (Resolve/Adobe) applied to the photo as an sRGB screen shows it, mixed in by amount; above-white and out-of-sRGB values pass through unclipped; read by the engine so batch export applies it too |
 | **AI Studio** | `CutoutStudio` (rembg) | Working | Pure-Rust `tract-onnx` neural inference (`u2netp.onnx`), alpha matting, defringing & touch-ups |
 | **Colour** | Wide-gamut working space | Working | Linear Rec.2020 working space; sRGB, Display P3, and Adobe RGB exports with embedded ICC profiles |
 | **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |

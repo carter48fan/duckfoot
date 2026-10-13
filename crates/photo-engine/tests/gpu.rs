@@ -1772,6 +1772,71 @@ fn a_linear_dng_opens_as_its_raw_would_neutral_and_in_order() {
 }
 
 #[test]
+fn a_look_runs_its_cube_over_the_photo_by_its_amount() {
+    let gpu = gpu_or_skip!();
+    // A 2³ .cube that inverts: every channel to 1 - itself, in display values.
+    let dir = std::env::temp_dir().join(format!("duckfoot-look-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cube = dir.join("invert.cube");
+    let mut text = String::from("TITLE \"invert\"\nLUT_3D_SIZE 2\n");
+    for b in [1.0, 0.0] {
+        for g in [1.0, 0.0] {
+            for r in [1.0, 0.0] {
+                text.push_str(&format!("{r} {g} {b}\n"));
+            }
+        }
+    }
+    // Red fastest: lattice (0,0,0) first, which the inversion sends to white.
+    std::fs::write(&cube, &text).unwrap();
+
+    // 25% grey and a highlight at three times white.
+    let quarter = testkit::srgb_to_linear(64);
+    let raster = testkit::raster_from_fn(16, 8, |x, _| if x < 8 { [quarter; 3] } else { [3.0; 3] });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    let shown = |engine: &mut Engine, stack: &PhotoStack| {
+        let (w, _, px) = preview(gpu, engine, stack, 0);
+        let at = |x: u32| ((4 * w + x) * 4) as usize;
+        (px[at(4)], px[at(12)])
+    };
+    let (plain, _) = shown(&mut engine, &stack);
+
+    stack.look.enabled = true;
+    stack.look.params.path = Some(cube.to_string_lossy().into_owned());
+    let (inverted, highlight) = shown(&mut engine, &stack);
+    assert!(engine.look_loaded());
+    // Above white the look passes what it cannot hold: still white, not inverted to black.
+    assert_eq!(
+        highlight, 255,
+        "a highlight above white went through the look"
+    );
+    assert!(
+        inverted.abs_diff(255 - plain) <= 3,
+        "25% grey ({plain}) through the inverting look showed {inverted}"
+    );
+    let export = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(
+        export.rgba[(4 * 16 + 4) * 4].abs_diff(inverted) <= 2,
+        "the export's look differs from the preview's"
+    );
+
+    stack.look.params.amount = 0.5;
+    let (half, _) = shown(&mut engine, &stack);
+    assert!(
+        half > plain.min(inverted) && half < plain.max(inverted),
+        "half the look ({half}) is not between none ({plain}) and all ({inverted})"
+    );
+
+    // A file that is not there: nothing applied, and the engine says so.
+    stack.look.params.path = Some(dir.join("gone.cube").to_string_lossy().into_owned());
+    let (gone, _) = shown(&mut engine, &stack);
+    assert!(!engine.look_loaded());
+    assert_eq!(gone, plain);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_removed_spot_is_filled_from_the_ground_around_it_with_no_source() {
     use photo_engine::heal::{Mode, Spot};
     let gpu = gpu_or_skip!();

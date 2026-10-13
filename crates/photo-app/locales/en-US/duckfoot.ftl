@@ -74,6 +74,8 @@ module-local = local adjustments
 module-short-local = local
 module-heal = spot heal
 module-short-heal = heal
+module-look = look (.cube)
+module-short-look = look
 
 ## What the file says about a photo (the Info band and the phone's info card)
 

@@ -112,6 +112,7 @@ pub enum InspectorSectionId {
     Vignette,
     Local,
     Heal,
+    Look,
 }
 
 impl InspectorSectionId {
@@ -135,6 +136,7 @@ impl InspectorSectionId {
             Self::Vignette,
             Self::Local,
             Self::Heal,
+            Self::Look,
         ]
     }
 }

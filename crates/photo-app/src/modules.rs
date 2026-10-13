@@ -118,6 +118,7 @@ module_table! {
     Vignette => vignette;
     Local => local;
     Heal => heal;
+    Look => look;
 }
 
 /// What changed between two adjacent undo states, for the History list.

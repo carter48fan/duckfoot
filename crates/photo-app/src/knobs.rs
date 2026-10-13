@@ -199,6 +199,8 @@ const VIBRANCE: &[Knob] = &[
 
 const SHARPEN: &[Knob] = &[knob!("amount", 0.0, 2.0, 2, sharpen.params.amount)];
 
+const LOOK: &[Knob] = &[knob!("amount", 0.0, 1.0, 2, look.params.amount)];
+
 const VIGNETTE: &[Knob] = &[
     knob!("amount", -1.0, 1.0, 2, vignette.params.amount),
     knob!("radius", 0.1, 1.5, 2, vignette.params.radius),
@@ -222,6 +224,7 @@ pub fn knobs(id: InspectorSectionId) -> &'static [Knob] {
         I::Vibrance => VIBRANCE,
         I::Sharpen => SHARPEN,
         I::Vignette => VIGNETTE,
+        I::Look => LOOK,
         I::Scope | I::ToneCurve | I::ColorEq | I::ColorBalance | I::Local | I::Heal => &[],
     }
 }

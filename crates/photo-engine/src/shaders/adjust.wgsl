@@ -23,7 +23,8 @@ struct Adjust {
     gain:       vec4<f32>,
     offset:     vec4<f32>,
     flags:      vec4<u32>,   // x = enabled bitmask, y = 1 if the curve works on display values,
-                             // z = 1 to dither for an 8-bit target
+                             // z = 1 to dither for an 8-bit target, w = the look's
+                             // amount, as f32 bits
     sizes:      vec4<f32>,   // xy = output size, zw = sensor size
     orient:     vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
     turns:      vec4<u32>,   // x = quarter turns clockwise
@@ -97,6 +98,7 @@ const FLAG_COLOR_EQ: u32 = 2048u;
 const FLAG_LENS:     u32 = 4096u;
 const FLAG_LOCAL:    u32 = 16384u;
 const FLAG_HEAL:     u32 = 32768u;
+const FLAG_LOOK:     u32 = 65536u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -120,6 +122,31 @@ const FLAG_NAN_PAINT: u32 = 0x80000000u;
 @group(0) @binding(7) var screen_table: texture_3d<f32>;
 // Remove spots' fills (`heal.rs`): 4 × 4 slots of FILL_TILE texels, in the sensor's units.
 @group(0) @binding(8) var fills: texture_2d<f32>;
+// The Look module's `.cube`, baked: sRGB-encoded sRGB in, the look out (`lut3d.rs`).
+@group(0) @binding(9) var look_table: texture_3d<f32>;
+// Linear sRGB → Rec.2020 (BT.2087), column by column: the look's way back, the inverse of
+// REC2020_TO_SRGB (with the colour EQ, below).
+const SRGB_TO_REC2020 = mat3x3<f32>(vec3<f32>(0.6274039, 0.0690973, 0.0163914), vec3<f32>(0.3292830, 0.9195404, 0.0880133), vec3<f32>(0.0433131, 0.0113623, 0.8955953));
+
+// The look: the photo as an sRGB display shows it, through the table, and back into the
+// working space, mixed in by its amount (flags.w, f32 bits). What lies outside the
+// table's 0..1 (above white, or outside sRGB) passes through as it was, so no highlight
+// is clipped to the table's white.
+fn look(c: vec3<f32>) -> vec3<f32> {
+    let wide = u.luma_w.w > 0.5;
+    var s = c;
+    if (wide) {
+        s = REC2020_TO_SRGB * c;
+    }
+    let inside = clamp(s, vec3<f32>(0.0), vec3<f32>(1.0));
+    let at = linear_to_srgb(inside) * ((PROOF_SIZE - 1.0) / PROOF_SIZE) + vec3<f32>(0.5 / PROOF_SIZE);
+    let e = textureSampleLevel(look_table, sensor_sampler, at, 0.0).rgb;
+    var out = vec3<f32>(srgb_to_linear1(e.r), srgb_to_linear1(e.g), srgb_to_linear1(e.b)) + (s - inside);
+    if (wide) {
+        out = SRGB_TO_REC2020 * out;
+    }
+    return mix(c, out, bitcast<f32>(u.flags.w));
+}
 const FILL_TILE: f32 = 256.0;
 const FILL_ATLAS: f32 = 1024.0;
 
@@ -1093,6 +1120,11 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             balance_channel(c.g, u.lift.g, u.gamma.g, u.gain.g, u.offset.g),
             balance_channel(c.b, u.lift.b, u.gamma.b, u.gain.b, u.offset.b),
         );
+        bad = bad || not_finite(c);
+    }
+
+    if (enabled(FLAG_LOOK)) {
+        c = look(c);
         bad = bad || not_finite(c);
     }
 

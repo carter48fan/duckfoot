@@ -943,6 +943,53 @@ impl PhotoApp {
                     ));
                 }
             }
+            InspectorSectionId::Look => {
+                let path = self.stack.look.params.path.clone();
+                let (mut pick, mut clear) = (false, false);
+                ui.horizontal_wrapped(|ui| {
+                    pick = widgets::chip(ui, false, ".cube file…")
+                        .on_hover_text(
+                            "A 3D LUT look (.cube, as Resolve and most LUT packs write \
+                             them), applied to the photo as an sRGB screen shows it",
+                        )
+                        .clicked();
+                    if path.is_some() {
+                        clear = widgets::chip(ui, false, "clear").clicked();
+                    }
+                });
+                let note = match &path {
+                    None => "no look chosen".to_string(),
+                    Some(p) => {
+                        let name = file_name(std::path::Path::new(p));
+                        if self.stack.look.enabled && !self.engine.look_loaded() {
+                            format!("{name} could not be read")
+                        } else {
+                            name
+                        }
+                    }
+                };
+                ui.label(theme::tag(note).color(theme::TEXT_FAINT));
+                let p = &mut self.stack.look.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "amount",
+                    &mut p.amount,
+                    0.0..=1.0,
+                    2,
+                    1.0
+                ));
+                if clear {
+                    self.stack.look.params.path = None;
+                    discrete!();
+                }
+                if pick {
+                    let from = path
+                        .as_deref()
+                        .and_then(|p| std::path::Path::new(p).parent())
+                        .map(std::path::PathBuf::from);
+                    self.request(ui.ctx(), platform::Request::LookFile { from });
+                }
+            }
             InspectorSectionId::Heal => {
                 use photo_engine::heal::{Mode, MAX_SPOTS};
                 let n = self.stack.heal.params.spots.len();

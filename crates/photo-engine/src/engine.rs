@@ -75,6 +75,8 @@ pub const DEEP_OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16F
 /// Linear camera RGB, half float, with the reconstructed-highlight neutral in alpha
 /// (demosaic_rcd.wgsl). 16 bits is the point: 8 would quantise the headroom that makes
 /// highlight recovery possible at all.
+/// The Look module's bit (`params::flags::LOOK`), masked off while no table is loaded.
+const LOOK_FLAG: u32 = 65536;
 const SENSOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The intermediate green plane. Half float is ample — it only has to carry one channel
@@ -531,6 +533,12 @@ pub struct Engine {
     proof_table: wgpu::Texture,
     proof_table_view: wgpu::TextureView,
     proof_table_loaded: bool,
+    /// The Look module's `.cube`, baked (`lut3d::Lut3D::bake`), the file it was baked from,
+    /// and whether it read.
+    look_table: wgpu::Texture,
+    look_table_view: wgpu::TextureView,
+    look_path: Option<String>,
+    look_loaded: bool,
     /// Remove spots' fills, a slot each (`heal::FILL_SLOTS` of `heal::FILL_TILE` texels).
     fill_atlas: wgpu::Texture,
     fill_atlas_view: wgpu::TextureView,
@@ -1095,6 +1103,8 @@ impl Engine {
                 // The printer proof table, and the screen's.
                 table_entry(6),
                 table_entry(7),
+                // The Look module's table.
+                table_entry(9),
                 // Remove spots' fills.
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
@@ -1296,6 +1306,8 @@ impl Engine {
         let proof_table_view = proof_table.create_view(&Default::default());
         let screen_table = table_3d("screen profile table");
         let screen_table_view = screen_table.create_view(&Default::default());
+        let look_table = table_3d("look table");
+        let look_table_view = look_table.create_view(&Default::default());
         let fill_atlas = device.make_texture(&wgpu::TextureDescriptor {
             label: Some("remove fill atlas"),
             size: wgpu::Extent3d {
@@ -1421,6 +1433,10 @@ impl Engine {
             screen_table_loaded: false,
             fill_atlas,
             fill_atlas_view,
+            look_table,
+            look_table_view,
+            look_path: None,
+            look_loaded: false,
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1624,6 +1640,10 @@ impl Engine {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(&self.fill_atlas_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&self.look_table_view),
+                },
             ],
         })
     }
@@ -1761,6 +1781,39 @@ impl Engine {
 
     /// Bring the preview's denoised copy in line with `stack` and the preview level: made
     /// when Denoise turns on or changes, dropped when it turns off.
+    /// Read and bake the Look module's `.cube` when the file it names changes. Read here,
+    /// not by the app, so every engine (the batch exporter's too) applies the same look.
+    /// A file that does not read is logged and leaves the look off.
+    fn sync_look(&mut self, queue: &wgpu::Queue, stack: &PhotoStack) {
+        let wanted = stack
+            .look
+            .enabled
+            .then(|| stack.look.params.path.clone())
+            .flatten();
+        if wanted == self.look_path {
+            return;
+        }
+        self.look_loaded = false;
+        if let Some(path) = &wanted {
+            match std::fs::read_to_string(path)
+                .map_err(anyhow::Error::from)
+                .and_then(|text| crate::lut3d::parse_cube(&text))
+            {
+                Ok(lut) => {
+                    write_table(queue, &self.look_table, &lut.bake());
+                    self.look_loaded = true;
+                }
+                Err(e) => log::warn!("the look {path} could not be used: {e:#}"),
+            }
+        }
+        self.look_path = wanted;
+    }
+
+    /// Whether the Look module's file read, so the look is being applied.
+    pub fn look_loaded(&self) -> bool {
+        self.look_loaded
+    }
+
     /// Fill the Remove spots that are new or have moved, each into its atlas slot. A fill
     /// is kept as long as its spot stays put, so only placing or moving one costs a fill.
     fn sync_fills(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
@@ -2460,6 +2513,7 @@ impl Engine {
             image.brushes.sync(queue, &brush_layers(stack));
         }
         self.sync_fills(device, queue, stack);
+        self.sync_look(queue, stack);
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
@@ -2696,6 +2750,7 @@ impl Engine {
         }
         self.sync_denoise(device, queue, stack);
         self.sync_fills(device, queue, stack);
+        self.sync_look(queue, stack);
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
@@ -2905,10 +2960,12 @@ impl Engine {
                 gain: cb.gain.to_array(),
                 offset: cb.offset.to_array(),
                 flags: [
-                    stack.bitmask() | if self.nan_paint { NAN_PAINT } else { 0 },
+                    // The look's flag only while its table holds it.
+                    (stack.bitmask() & if self.look_loaded { !0 } else { !LOOK_FLAG })
+                        | if self.nan_paint { NAN_PAINT } else { 0 },
                     (stack.curve_domain == crate::params::CurveDomain::Display) as u32,
                     dither as u32,
-                    0,
+                    stack.look.params.amount.clamp(0.0, 1.0).to_bits(),
                 ],
                 sizes: [
                     out_size.0 as f32,
