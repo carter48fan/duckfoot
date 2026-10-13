@@ -615,7 +615,11 @@ pub struct PhotoApp {
     /// what the engine was last told.
     screen: photo_engine::gamut::Screen,
     screen_note: Option<String>,
-    shown_screen: photo_engine::gamut::Screen,
+    /// The monitor's own profile, baked, when the screen is a profile file that bakes.
+    screen_profile: Option<display::ScreenProfile>,
+    /// Counts each change of screen, so what was baked or shown for one can tell.
+    screen_rev: u64,
+    shown_screen_rev: u64,
     /// Soft proofing against the export's colour space (W-10), with the gamut warning.
     pub proofing: bool,
     pub proof_warn: bool,
@@ -876,7 +880,9 @@ impl PhotoApp {
             history_labels: (0, Vec::new()),
             screen: photo_engine::gamut::Screen::SRGB,
             screen_note: None,
-            shown_screen: photo_engine::gamut::Screen::SRGB,
+            screen_profile: None,
+            screen_rev: 0,
+            shown_screen_rev: 0,
             proofing: false,
             proof_warn: true,
             shown_proof: None,
