@@ -3108,3 +3108,95 @@ fn every_bar_sits_on_one_line() {
         found.len()
     );
 }
+
+/// A batch of `n` small PNGs, each exported to PNG in `out`.
+fn batch_jobs(dir: &std::path::Path, n: usize) -> Vec<photo_app::batch::ExportJob> {
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    (0..n)
+        .map(|i| {
+            let src = dir.join(format!("in{i}.png"));
+            image::RgbImage::from_fn(32, 24, |x, y| {
+                image::Rgb([x as u8 * 8, y as u8 * 10, i as u8])
+            })
+            .save(&src)
+            .unwrap();
+            let mut recipe = photo_app::batch::ExportRecipe::default_recipes().remove(0);
+            recipe.settings = photo_engine::ExportSettings::new(photo_engine::ExportFormat::Png);
+            recipe.subfolder = None;
+            photo_app::batch::ExportJob {
+                source_path: src,
+                stack: photo_engine::PhotoStack::default(),
+                crop: photo_engine::Crop::default(),
+                output_path: out.join(format!("out{i}.png")),
+                recipe,
+            }
+        })
+        .collect()
+}
+
+fn finish(q: &mut photo_app::batch::ExportQueue) -> photo_app::batch::ExportStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(done) = q.take_finished() {
+            return done;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the batch never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_batch_writes_every_photo_and_a_cancel_stops_it_early() {
+    use photo_app::batch::{ExportQueue, ExportStatus};
+    let h = Headless::new();
+    let dir = std::env::temp_dir().join(format!("duckfoot-batch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut q = ExportQueue::new(h.device.clone(), h.queue.clone());
+
+    q.start_batch(batch_jobs(&dir, 6));
+    match finish(&mut q) {
+        ExportStatus::Finished {
+            total,
+            success,
+            errors,
+        } => {
+            assert_eq!((total, success), (6, 6), "{errors:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    for i in 0..6 {
+        assert!(
+            dir.join(format!("out/out{i}.png")).is_file(),
+            "out{i}.png missing"
+        );
+    }
+
+    let more = dir.join("more");
+    std::fs::create_dir_all(&more).unwrap();
+    q.start_batch(batch_jobs(&more, 60));
+    q.cancel();
+    match finish(&mut q) {
+        ExportStatus::Finished {
+            total,
+            success,
+            errors,
+        } => {
+            assert_eq!(total, 60);
+            assert!(success < 60, "a cancel stopped nothing");
+            assert!(
+                errors.is_empty(),
+                "a cancel was reported as failures: {errors:?}"
+            );
+            // What was written is whole, and nothing else was.
+            let written = std::fs::read_dir(more.join("out")).unwrap().count();
+            assert_eq!(written, success, "files left that no photo finished");
+        }
+        other => panic!("{other:?}"),
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
