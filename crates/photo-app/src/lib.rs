@@ -473,6 +473,8 @@ pub(crate) enum NoticeAction {
     CancelScan,
     /// Show the skipped tour again on the next launch.
     TourAgain,
+    /// Draw an edit saved before the current colour math with it.
+    UpdateRendering,
 }
 
 impl NoticeAction {
@@ -482,6 +484,7 @@ impl NoticeAction {
             NoticeAction::Share => "share",
             NoticeAction::CancelScan => "cancel",
             NoticeAction::TourAgain => "next launch",
+            NoticeAction::UpdateRendering => "update",
             _ => "undo",
         }
     }
@@ -1390,12 +1393,28 @@ impl PhotoApp {
         Some((msg.as_str(), self.status_action, left))
     }
 
+    /// The notice up now and whether it has a button, for tests.
+    #[doc(hidden)]
+    pub fn notice_for_tests(&self) -> Option<(String, Option<&'static str>)> {
+        self.live_notice()
+            .map(|(m, a, _)| (m.to_string(), a.map(NoticeAction::label)))
+    }
+
+    /// Press the notice's button, for tests.
+    #[doc(hidden)]
+    pub fn press_notice_for_tests(&mut self) {
+        if let Some((_, Some(action), _)) = self.live_notice() {
+            self.run_notice_action(action);
+        }
+    }
+
     pub(crate) fn run_notice_action(&mut self, action: NoticeAction) {
         match action {
             NoticeAction::PasteToAll => self.undo_paste_to_all(),
             NoticeAction::Remove => self.undo_remove_from_shelf(),
             NoticeAction::DeleteSnapshot => self.undo_delete_snapshot(),
             NoticeAction::CancelScan => self.cancel_reading(),
+            NoticeAction::UpdateRendering => self.update_rendering(),
             NoticeAction::TourAgain => {
                 self.settings.tour_again = true;
                 self.save_settings();

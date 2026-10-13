@@ -3200,3 +3200,50 @@ fn a_batch_writes_every_photo_and_a_cancel_stops_it_early() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn an_edit_from_before_v2_offers_the_update_and_it_can_be_undone() {
+    use photo_engine::params::Rendering;
+    let h = Headless::new();
+    let dir = std::env::temp_dir().join(format!("duckfoot-v1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("old.png");
+    image::RgbImage::from_pixel(16, 16, image::Rgb([120, 90, 60]))
+        .save(&photo)
+        .unwrap();
+    // A sidecar as an earlier build wrote it: no `rendering`.
+    let mut stack = serde_json::to_value(photo_engine::PhotoStack::default()).unwrap();
+    stack.as_object_mut().unwrap().remove("rendering");
+    let old: photo_engine::PhotoStack = serde_json::from_value(stack).unwrap();
+    photo_engine::save_sidecar(&photo, &old).unwrap();
+
+    let mut app = quiet_app(&h);
+    app.open_path(&h.gpu(), photo.clone());
+    assert_eq!(app.stack().rendering, Rendering::V1);
+    let (msg, button) = app.notice_for_tests().expect("no notice for an old edit");
+    assert!(msg.contains("older colour math"), "{msg}");
+    assert_eq!(button, Some("update"));
+
+    app.press_notice_for_tests();
+    assert_eq!(app.stack().rendering, Rendering::V2);
+    assert!(app.undo());
+    assert_eq!(
+        app.stack().rendering,
+        Rendering::V1,
+        "the update is not one undo step"
+    );
+
+    // A new edit says nothing.
+    let fresh = dir.join("new.png");
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+        .save(&fresh)
+        .unwrap();
+    app.open_path(&h.gpu(), fresh);
+    assert!(
+        app.notice_for_tests()
+            .is_none_or(|(m, _)| !m.contains("older colour math")),
+        "a new edit was offered the update"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
