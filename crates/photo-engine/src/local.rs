@@ -43,6 +43,60 @@ impl Dab {
     }
 }
 
+/// A brush mask's dabs, shared: every undo step holds the stack, and a mask's thousands of
+/// dabs are copied only when that mask is painted on (copy on write), not into each step.
+/// Written to a sidecar exactly as a plain list of dabs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<Dab>", into = "Vec<Dab>")]
+pub struct Dabs(std::sync::Arc<Vec<Dab>>);
+
+impl Dabs {
+    pub fn push(&mut self, dab: Dab) {
+        std::sync::Arc::make_mut(&mut self.0).push(dab);
+    }
+
+    pub fn clear(&mut self) {
+        if !self.0.is_empty() {
+            self.0 = Default::default();
+        }
+    }
+
+    pub fn as_slice(&self) -> &[Dab] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Dabs {
+    type Target = [Dab];
+    fn deref(&self) -> &[Dab] {
+        &self.0
+    }
+}
+
+impl PartialEq for Dabs {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl FromIterator<Dab> for Dabs {
+    fn from_iter<I: IntoIterator<Item = Dab>>(iter: I) -> Self {
+        Self(std::sync::Arc::new(iter.into_iter().collect()))
+    }
+}
+
+impl From<Vec<Dab>> for Dabs {
+    fn from(v: Vec<Dab>) -> Self {
+        Self(std::sync::Arc::new(v))
+    }
+}
+
+impl From<Dabs> for Vec<Dab> {
+    fn from(d: Dabs) -> Self {
+        std::sync::Arc::try_unwrap(d.0).unwrap_or_else(|shared| (*shared).clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
     /// Full effect at `from`, none at `to`, fading between: a graduated filter.
@@ -56,7 +110,7 @@ pub enum Shape {
         feather: f32,
     },
     /// Painted: where the dabs cover, in the order they were laid down.
-    Brush { dabs: Vec<Dab> },
+    Brush { dabs: Dabs },
 }
 
 /// What a mask does where it applies. Sliders are -100..=100 except exposure, in stops.
@@ -145,7 +199,9 @@ impl Mask {
 
     pub fn brush() -> Self {
         Self {
-            shape: Shape::Brush { dabs: Vec::new() },
+            shape: Shape::Brush {
+                dabs: Dabs::default(),
+            },
             invert: false,
             on: true,
             adjust: Adjust::default(),
@@ -211,7 +267,8 @@ impl Mask {
         self.shape = match self.shape {
             Shape::Brush { dabs } => Shape::Brush {
                 dabs: dabs
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|d| {
                         d.at.iter()
                             .chain([&d.radius, &d.hardness])
@@ -434,7 +491,7 @@ mod tests {
         };
         let mut m = Mask::brush();
         m.shape = Shape::Brush {
-            dabs: vec![dab(0.3, false), dab(0.35, false)],
+            dabs: vec![dab(0.3, false), dab(0.35, false)].into(),
         };
         let s = (1000, 500);
         assert_eq!(m.weight([0.3, 0.5], s), 1.0);
@@ -508,5 +565,34 @@ mod tests {
         assert_eq!(m.range_factor([0.0, 1.0, 0.0]), 1.0);
         // Pure red: hue 0° -> completely out of range
         assert_eq!(m.range_factor([1.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn an_undo_step_shares_its_dabs_until_they_are_painted_on() {
+        let dab = |x: f32| Dab {
+            at: [x, 0.5],
+            radius: 0.02,
+            hardness: 0.5,
+            erase: false,
+        };
+        let painted: Dabs = (0..5000).map(|i| dab(i as f32 / 5000.0)).collect();
+        let step = painted.clone();
+        // A snapshot is a pointer, not 5000 dabs.
+        assert!(std::sync::Arc::ptr_eq(&painted.0, &step.0));
+        let mut live = step.clone();
+        live.push(dab(0.9));
+        assert_eq!(
+            (step.len(), live.len()),
+            (5000, 5001),
+            "painting reached the snapshot"
+        );
+        // Written as the plain list it always was.
+        let as_list: Vec<Dab> = step.to_vec();
+        assert_eq!(
+            serde_json::to_string(&step).unwrap(),
+            serde_json::to_string(&as_list).unwrap()
+        );
+        let back: Dabs = serde_json::from_str(&serde_json::to_string(&as_list).unwrap()).unwrap();
+        assert_eq!(back, step);
     }
 }
