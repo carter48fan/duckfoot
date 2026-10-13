@@ -75,6 +75,7 @@ pub fn mosaic_from_fn(
         make: "synthetic".into(),
         model: "testkit".into(),
         warp: None,
+        linear: None,
     }
 }
 
@@ -265,6 +266,105 @@ pub fn synth_dng_with(
         prev.preview(&preview, 0.9)?;
         prev.finalize()?;
         dng.thumbnail(&preview)?;
+        dng.load_base_tags(&raw)?;
+        dng.close()?;
+    }
+    Ok(buf.into_inner())
+}
+
+/// A synthetic linear DNG (three components a pixel, as Apple ProRAW and Lightroom's HDR
+/// merges write): a horizontal ramp of grey under a warm cast, `value(x)` of white in
+/// every channel before the cast, with the A7 IV's matrix and an as-shot white that
+/// neutralises the cast.
+pub fn synth_linear_dng(
+    width: usize,
+    height: usize,
+    value: impl Fn(usize) -> f32,
+) -> Result<Vec<u8>> {
+    synth_linear(width, height, value, false)
+}
+
+/// [`synth_linear_dng`] with 32-bit float samples, white at 1.0 and nothing clipped above
+/// it, as an HDR merge holds them.
+pub fn synth_float_dng(
+    width: usize,
+    height: usize,
+    value: impl Fn(usize) -> f32,
+) -> Result<Vec<u8>> {
+    synth_linear(width, height, value, true)
+}
+
+fn synth_linear(
+    width: usize,
+    height: usize,
+    value: impl Fn(usize) -> f32,
+    float: bool,
+) -> Result<Vec<u8>> {
+    let (black, white) = if float {
+        (0u16, 1u16)
+    } else {
+        (256u16, 16383u16)
+    };
+    let cast = [1.0 / 2.4, 1.0, 1.0 / 1.6];
+    let samples: Vec<f32> = (0..height)
+        .flat_map(|_| {
+            (0..width)
+                .flat_map(|x| cast.map(|c| black as f32 + value(x) * c * (white - black) as f32))
+        })
+        .collect();
+    let data = if float {
+        RawImageData::Float(samples)
+    } else {
+        RawImageData::Integer(
+            samples
+                .into_iter()
+                .map(|v| v.round().clamp(0.0, white as f32) as u16)
+                .collect(),
+        )
+    };
+    let mut color_matrix = HashMap::new();
+    color_matrix.insert(
+        Illuminant::D65,
+        vec![
+            0.7460, -0.2365, -0.0588, -0.5687, 1.3442, 0.2474, -0.0624, 0.1156, 0.6584,
+        ],
+    );
+    let raw = RawImage {
+        camera: Camera::default(),
+        make: "Apple".into(),
+        model: "iPhone".into(),
+        clean_make: "Apple".into(),
+        clean_model: "iPhone".into(),
+        width,
+        height,
+        cpp: 3,
+        bps: if float { 32 } else { 14 },
+        wb_coeffs: [2.4, 1.0, 1.6, f32::NAN],
+        whitelevel: WhiteLevel::new(vec![white as u32; 3]),
+        blacklevel: BlackLevel::new(&[black, black, black], 1, 1, 3),
+        xyz_to_cam: [[0.0; 3]; 4],
+        photometric: RawPhotometricInterpretation::LinearRaw,
+        active_area: None,
+        crop_area: None,
+        blackareas: Vec::new(),
+        orientation: rawler::Orientation::Normal,
+        data,
+        color_matrix,
+        dng_tags: HashMap::new(),
+        fuji_rotation_width: None,
+    };
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut dng = DngWriter::new(&mut buf, DNG_VERSION_V1_4)?;
+        let mut sub = dng.subframe(0);
+        sub.raw_image(
+            &raw,
+            CropMode::Best,
+            DngCompression::Uncompressed,
+            DngPhotometricConversion::Original,
+            1,
+        )?;
+        sub.finalize()?;
         dng.load_base_tags(&raw)?;
         dng.close()?;
     }

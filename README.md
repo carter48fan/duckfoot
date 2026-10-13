@@ -487,7 +487,7 @@ DESIGN.md invariant 8.
 | **Params** | Lens Correction | Working | Distortion, TCA, vignetting via bundled Lensfun database and DNG opcodes |
 | **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
 | **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |
-| **Params** | Spot Heal, Clone & Remove | Working | Up to 32 circular sensor-space spots: heal/clone from a draggable source, or remove (content-aware PatchMatch fill from the vendored `lc-inpaint`, up to 16 at once; spots wider than ~40 px at full resolution are filled at a coarser level, so softer) |
+| **Params** | Spot Heal, Clone & Remove | Working | Up to 32 circular sensor-space spots: heal/clone from a draggable source, or remove (content-aware PatchMatch fill from the vendored `lc-inpaint`, up to 16 at once; a spot of radius over ~42 px is filled at a coarser level of the sensor, so softer) |
 | **AI Studio** | `CutoutStudio` (rembg) | Working | Pure-Rust `tract-onnx` neural inference (`u2netp.onnx`), alpha matting, defringing & touch-ups |
 | **Colour** | Wide-gamut working space | Working | Linear Rec.2020 working space; sRGB, Display P3, and Adobe RGB exports with embedded ICC profiles |
 | **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |
@@ -527,7 +527,7 @@ png encode+write  205 ms
 
 ### Known gaps and caveats
 
-- **Fuji X-Trans demosaicing** is implemented in WGSL; exotic sensors (Foveon, float RAW) are refused loudly with `@stub`.
+- **Fuji X-Trans demosaicing** is implemented in WGSL. Linear DNGs (Apple ProRAW, HDR merges; integer or float, range above white kept) open without demosaicing. Still refused loudly with `@stub`: float mosaics, Canon sRAW/mRAW (its white balance through rawler's YCbCr conversion is unverified), and four-colour or unknown CFAs. JPEG XL-compressed DNG 1.7 (newer ProRAW) goes through rawler's own jxl-oxide decoder; no real ProRAW file has been tried yet, only synthetic linear and float DNGs.
 - **Soft proofing** proofs against the export's colour space, and through a printer's ICC profile (CMYK or RGB, LUT-based, via `moxcms`) chosen from the stage toolbar's `printer…` chip, relative colorimetric or perceptual, optionally simulating the paper's white. Profiles moxcms misreads (v4 lut16 tables over an XYZ connection space, such as Ghostscript's `ps_cmyk.icc`) are refused rather than proofed wrong.
 - **Display colour management** supports sRGB, Display P3, Adobe RGB, and the monitor's own ICC profile via settings, matrix or LUT-based (DisplayCAL's default), applied exactly through a baked 3D table rather than a fitted gamma. OS colord/ColorSync auto-detection is planned, and the phone draws in sRGB.
 

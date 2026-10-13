@@ -697,6 +697,9 @@ pub fn upload_cfa(
         height: cfa.height,
         depth_or_array_layers: 1,
     };
+    if let Some(rgb) = &cfa.linear {
+        return upload_linear(device, queue, &cfa, rgb, extent);
+    }
     let texture = scoped(device, "uploading the mosaic", || {
         let texture = pool.take(extent).unwrap_or_else(|| {
             device.make_texture(&wgpu::TextureDescriptor {
@@ -745,6 +748,67 @@ pub fn upload_cfa(
         lens_profile: None,
         make: cfa.make,
         model: cfa.model,
+    })
+}
+
+/// A linear DNG's RGB as the sensor texture's level 0 (no demosaic), with a RAW's colour:
+/// its white balance, matrices and orientation-as-an-edit, as a mosaic would have.
+fn upload_linear(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    cfa: &CfaImage,
+    rgb: &[f32],
+    extent: wgpu::Extent3d,
+) -> Result<UploadedImage> {
+    if rgb.len() < extent.width as usize * extent.height as usize * 3 {
+        bail!("the linear image is short of its size");
+    }
+    // A = 0, the reconstruction neutral a raster carries too.
+    let texels: Vec<half::f16> = rgb
+        .chunks_exact(3)
+        .flat_map(|p| [p[0], p[1], p[2], 0.0].map(half::f16::from_f32))
+        .collect();
+    let texture = scoped(device, "uploading the image", || {
+        let texture = device.make_texture(&wgpu::TextureDescriptor {
+            label: Some("linear dng upload"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SENSOR_FORMAT,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(extent.width * 8),
+                rows_per_image: Some(extent.height),
+            },
+            extent,
+        );
+        texture
+    })?;
+    Ok(UploadedImage {
+        pixels: UploadedPixels::Linear { texture },
+        extent,
+        geometry: Geometry::default(),
+        orientation: cfa.orientation,
+        wb: cfa.wb,
+        cam_to_srgb: cfa.cam_to_srgb,
+        cam_profiled: cfa.cam_profiled.unwrap_or(cfa.cam_to_srgb),
+        white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
+        warp: cfa.warp,
+        lens_profile: None,
+        make: cfa.make.clone(),
+        model: cfa.model.clone(),
     })
 }
 

@@ -55,6 +55,12 @@ pub struct CfaImage {
     /// The distortion (and colour fringing) correction the file carries for itself, as a
     /// DNG's WarpRectilinear: applied as the photo is drawn, like its colour matrix.
     pub warp: Option<crate::lens::FileWarp>,
+    /// A sensor already demosaiced (a linear DNG: Apple ProRAW, a Lightroom HDR merge):
+    /// `width * height * 3` camera RGB values, black subtracted and scaled so the white
+    /// level is 1.0, above it where a float file holds more. `data` is then empty and
+    /// `cfa`, `black` and `white` mean nothing; the colour fields mean what they do for a
+    /// mosaic.
+    pub linear: Option<Vec<f32>>,
 }
 
 /// A colour filter array's repeating tile: a 2×2 Bayer tile, or Fuji's 6×6 X-Trans.
@@ -631,6 +637,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             make: raw.make.clone(),
             model: raw.model.clone(),
             warp: None,
+            linear: None,
         },
         wb_missing,
         area: None,
@@ -745,6 +752,17 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
     let mut raw = rawler::decode(raw_source, &RawDecodeParams::default())
         .map_err(|e| anyhow!("not a supported RAW file (rawler): {e:?}"))?;
 
+    // A linear DNG. Canon's sRAW/mRAW comes out of rawler with three components too, but
+    // through its own YCbCr conversion, whose white balance this has not been checked
+    // against, so it is still refused below.
+    if raw.cpp == 3
+        && matches!(
+            raw.photometric,
+            rawler::rawimage::RawPhotometricInterpretation::LinearRaw
+        )
+    {
+        return linear_rawler(raw);
+    }
     if raw.cpp != 1 {
         bail!(
             "{} {}: {} components per pixel — non-mosaic sensors are not supported yet (@stub)",
@@ -870,9 +888,98 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             make,
             model,
             warp: None,
+            linear: None,
         },
         wb_missing,
         area: Some(area),
+    })
+}
+
+/// A linear DNG (three components a pixel: ProRAW, an HDR merge), already demosaiced: its
+/// samples cropped and normalised into [`CfaImage::linear`], its colour read as a mosaic's.
+fn linear_rawler(mut raw: rawler::RawImage) -> Result<Decoded> {
+    let (samples, float): (Vec<f32>, bool) =
+        match std::mem::replace(&mut raw.data, rawler::RawImageData::Integer(Vec::new())) {
+            rawler::RawImageData::Integer(d) => (d.into_iter().map(f32::from).collect(), false),
+            rawler::RawImageData::Float(d) => (d, true),
+        };
+    let (src_w, src_h) = (raw.width, raw.height);
+    if samples.len() < src_w * src_h * 3 {
+        bail!(
+            "truncated linear DNG: {} samples for {src_w}×{src_h}×3",
+            samples.len()
+        );
+    }
+    let crop = raw.crop_area.or(raw.active_area);
+    let (cl, ct, width, height) = match crop {
+        Some(r) if !r.is_empty() && r.p.x + r.d.w <= src_w && r.p.y + r.d.h <= src_h => {
+            (r.p.x, r.p.y, r.d.w, r.d.h)
+        }
+        _ => (0, 0, src_w, src_h),
+    };
+    if width == 0 || height == 0 {
+        bail!("empty linear DNG after crop: {width}x{height}");
+    }
+    let per = |v: &[f32], c: usize, default: f32| match v.len() {
+        0 => default,
+        n if n >= 3 => v[c],
+        _ => v[0],
+    };
+    let (blacks, whites) = (raw.blacklevel.as_vec(), raw.whitelevel.as_vec());
+    // Integer samples run to the white level; a float file's run to 1.0 (DNG's default for
+    // floating point, where rawler's own default would be 2^32 - 1).
+    let black: [f32; 3] = std::array::from_fn(|c| per(&blacks, c, 0.0));
+    let white: [f32; 3] = std::array::from_fn(|c| {
+        let w = if float { 1.0 } else { per(&whites, c, 65535.0) };
+        if w > black[c] {
+            w
+        } else {
+            black[c] + 1.0
+        }
+    });
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(width * height * 3)
+        .map_err(|_| anyhow!("no memory for a {width}×{height} linear DNG"))?;
+    for y in ct..ct + height {
+        let row = &samples[(y * src_w + cl) * 3..(y * src_w + cl + width) * 3];
+        for px in row.chunks_exact(3) {
+            for c in 0..3 {
+                let v = (px[c] - black[c]) / (white[c] - black[c]);
+                rgb.push(if v.is_finite() { v.max(0.0) } else { 0.0 });
+            }
+        }
+    }
+
+    let xyz_to_cam = extract_xyz_to_cam_rawler(&raw);
+    let wb_missing = raw.wb_coeffs[..3]
+        .iter()
+        .any(|c| !c.is_finite() || *c <= 0.0);
+    let mut wb = neutral_multipliers(&raw.wb_coeffs);
+    if wb_missing {
+        wb = daylight_multipliers(&xyz_to_cam).unwrap_or(wb);
+    }
+    let pick = |clean: String, raw: String| if clean.is_empty() { raw } else { clean };
+    Ok(Decoded {
+        cfa: CfaImage {
+            data: Vec::new(),
+            width: width as u32,
+            height: height as u32,
+            cfa: CfaPattern::bayer([0, 1, 1, 2]),
+            black: [0.0; 4],
+            white: [1.0; 4],
+            wb,
+            cam_to_srgb: cam_to_srgb(&xyz_to_cam),
+            cam_profiled: None,
+            daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
+            orientation: orientation_geometry_rawler(raw.orientation),
+            make: pick(raw.clean_make, raw.make),
+            model: pick(raw.clean_model, raw.model),
+            warp: None,
+            linear: Some(rgb),
+        },
+        wb_missing,
+        // No mosaic for the gain opcodes to act on.
+        area: None,
     })
 }
 
@@ -2668,5 +2775,53 @@ mod tests {
             let sum: f32 = row.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4, "row sum is {sum}");
         }
+    }
+
+    #[test]
+    fn a_linear_dng_is_read_as_rgb_with_its_raws_colour() {
+        // 0.1 .. 0.9 of white across, under a cast the as-shot white undoes.
+        let ramp = |x: usize| 0.1 + 0.8 * x as f32 / 63.0;
+        let bytes = crate::testkit::synth_linear_dng(64, 16, ramp).unwrap();
+        let img = RawlerBackend.decode_bytes(&bytes).unwrap();
+        let rgb = img.linear.as_ref().expect("read as a mosaic");
+        assert!(img.data.is_empty());
+        assert_eq!((img.width, img.height), (64, 16));
+        assert_eq!(rgb.len(), 64 * 16 * 3);
+        for x in [0usize, 31, 63] {
+            let px = &rgb[(5 * 64 + x) * 3..][..3];
+            // Back to the ramp's value once the white balance is applied.
+            for (c, (v, wb)) in px.iter().zip(img.wb).enumerate() {
+                let balanced = v * wb;
+                assert!(
+                    (balanced - ramp(x)).abs() < 0.01,
+                    "x {x} c {c}: {balanced} for {}",
+                    ramp(x)
+                );
+            }
+        }
+        assert_eq!(img.model, "iPhone");
+        assert_ne!(
+            img.cam_to_srgb,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+    }
+
+    #[test]
+    fn a_float_dng_keeps_what_is_above_white() {
+        // An HDR merge: up to three times white, none of it clipped.
+        let ramp = |x: usize| 3.0 * x as f32 / 63.0;
+        let bytes = crate::testkit::synth_float_dng(64, 8, ramp).unwrap();
+        let img = RawlerBackend.decode_bytes(&bytes).unwrap();
+        let rgb = img
+            .linear
+            .as_ref()
+            .expect("a float DNG was refused or read as a mosaic");
+        let g = |x: usize| rgb[(2 * 64 + x) * 3 + 1] * img.wb[1];
+        assert!(
+            (g(63) - 3.0).abs() < 0.01,
+            "three times white came back as {}",
+            g(63)
+        );
+        assert!((g(21) - 1.0).abs() < 0.01, "white came back as {}", g(21));
     }
 }
