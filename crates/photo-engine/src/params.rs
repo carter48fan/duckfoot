@@ -878,20 +878,31 @@ impl PhotoStack {
         }
         .sanitised();
 
-        const MAX_NODES: usize = 64;
-        let nodes = &mut s.tone_curve.params;
-        nodes.truncate(MAX_NODES);
-        for n in nodes.iter_mut() {
-            n.x = finite_or(n.x, 0.0).clamp(0.0, 1.0);
-            n.y = finite_or(n.y, 0.0).clamp(0.0, 1.0);
-        }
-        nodes.sort_by(|a, b| a.x.total_cmp(&b.x));
-        if nodes.len() < 2 {
-            *nodes = crate::curve::identity_nodes();
+        // The master curve and each of the RGB ones: a hand-edited file's NaN node would
+        // otherwise reach the LUT, and from there every pixel.
+        clean_curve(&mut s.tone_curve.params);
+        let rgb = &mut s.rgb_curves.params;
+        for nodes in [&mut rgb.red, &mut rgb.green, &mut rgb.blue] {
+            clean_curve(nodes);
         }
         s.local.params = s.local.params.sanitised();
         s.heal.params = s.heal.params.sanitised();
         s
+    }
+}
+
+/// A curve's nodes as the pipeline can bake them: at most 64, finite, in 0..1, in order,
+/// and at least two (else the identity).
+fn clean_curve(nodes: &mut Vec<CurveNode>) {
+    const MAX_NODES: usize = 64;
+    nodes.truncate(MAX_NODES);
+    for n in nodes.iter_mut() {
+        n.x = finite_or(n.x, 0.0).clamp(0.0, 1.0);
+        n.y = finite_or(n.y, 0.0).clamp(0.0, 1.0);
+    }
+    nodes.sort_by(|a, b| a.x.total_cmp(&b.x));
+    if nodes.len() < 2 {
+        *nodes = crate::curve::identity_nodes();
     }
 }
 
@@ -1136,6 +1147,20 @@ mod tests {
         assert_eq!(deserialized.ev, 1.5);
         assert_eq!(deserialized.mode, ExposureMode::ClassicLinear);
         assert_eq!(deserialized.rolloff, 0.0);
+    }
+
+    #[test]
+    fn every_curve_is_sanitised_the_rgb_ones_too() {
+        let mut s = PhotoStack::default();
+        s.rgb_curves.params.red = vec![CurveNode::new(f32::NAN, 2.0), CurveNode::new(0.5, -1.0)];
+        s.rgb_curves.params.blue = vec![CurveNode::new(0.3, 0.3)];
+        let clean = s.sanitised();
+        let red = &clean.rgb_curves.params.red;
+        assert!(red
+            .iter()
+            .all(|n| (0.0..=1.0).contains(&n.x) && (0.0..=1.0).contains(&n.y)));
+        assert!(red.windows(2).all(|w| w[0].x <= w[1].x));
+        assert_eq!(clean.rgb_curves.params.blue, crate::curve::identity_nodes());
     }
 
     #[test]
