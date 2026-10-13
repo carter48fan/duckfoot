@@ -16,6 +16,7 @@ pub mod export;
 pub mod fsio;
 pub mod gamut;
 pub mod heal;
+pub mod heif;
 pub mod histogram;
 pub mod icc;
 pub mod keystone;
@@ -76,7 +77,13 @@ pub const RAW_EXTENSIONS: &[&str] = &[
 ];
 
 /// File extensions for standard raster formats supported directly.
+#[cfg(not(feature = "heif"))]
 pub const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "webp"];
+/// With HEIF: iPhones' `.heic`, the generic `.heif`, and the `.hif` some cameras write.
+#[cfg(feature = "heif")]
+pub const RASTER_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif", "hif",
+];
 
 /// Extensions for a RAW-only file-dialog filter, in both cases.
 pub fn raw_dialog_extensions() -> Vec<String> {

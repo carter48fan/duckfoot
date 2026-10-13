@@ -28,3 +28,8 @@ pollster = "1"
 env_logger = "0.11"
 egui-winit = { workspace = true, features = ["accesskit"] }
 rfd = "0.17"
+
+[features]
+# HEIF/HEIC stills; off by default, as HEVC is patented in some places
+# (crates/vendor/lc-heif/VENDORED.md).
+heif = ["photo-app/heif", "photo-engine/heif"]

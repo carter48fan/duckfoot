@@ -507,6 +507,12 @@ fn wake(repaint: &Mutex<Option<egui::Context>>) {
 fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
     if is_raster_path(path) {
         let bytes = fs::read(path).ok()?;
+        if photo_engine::heif::is_heif(&bytes) {
+            // Its own thumbnail (an iPhone's is 320 px), else the whole photo, shrunk.
+            let preview = photo_engine::heif::thumbnail(&bytes, THUMB_SIDE as u32)
+                .or_else(|| photo_engine::heif::preview(&bytes))?;
+            return Some(preview_image(preview, Some(THUMB_SIDE)));
+        }
         // A JPEG is decoded at reduced size in the DCT, like a RAW's preview is; a 24 MP
         // camera JPEG decoded at full size and then shrunk is ~10× the work.
         if let Some((width, height, rgb)) = decode_jpeg_scaled(&bytes, THUMB_SIDE as u32) {

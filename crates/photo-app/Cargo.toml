@@ -27,3 +27,8 @@ rfd = "0.17"
 wgpu = { workspace = true, features = ["noop"] }
 rawler.workspace = true
 pollster = "1"
+
+[features]
+# HEIF/HEIC stills; off by default, as HEVC is patented in some places
+# (crates/vendor/lc-heif/VENDORED.md).
+heif = ["photo-engine/heif"]

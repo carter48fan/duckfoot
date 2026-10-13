@@ -39,7 +39,15 @@ quick-xml = "0.41"
 # The CRC of the PNG chunk an export's XMP goes in. Already in the tree through png.
 crc32fast = "1"
 
+# HEIF/HEIC (iPhone) stills: vendored from LightCraft, pure Rust. Optional, as HEVC is patented
+# in some places (see crates/vendor/lc-heif/VENDORED.md).
+lc-heif = { path = "../vendor/lc-heif", optional = true }
+
+[features]
+heif = ["dep:lc-heif"]
+
 [dev-dependencies]
+lc-heif = { path = "../vendor/lc-heif", features = ["testdata"] }
 # The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.
 # Counters: tests/drag.rs counts what is alive on the GPU through a drag (invariant 6).
 wgpu = { workspace = true, features = ["noop", "counters"] }

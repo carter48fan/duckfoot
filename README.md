@@ -24,6 +24,13 @@ Or launch empty and use **Open RAW…** in the top bar:
 cargo run --release
 ```
 
+iPhone and Mac photos (HEIF/HEIC) open in a build with the `heif` feature, which is off by
+default because HEVC is patented in some places (`crates/vendor/lc-heif/VENDORED.md`):
+
+```bash
+cargo run --release --features heif
+```
+
 **Use `--release`.** A debug build of pixel code is roughly two orders of magnitude slower
 and will feel broken. `Cargo.toml` already forces `opt-level = 3` on dependencies even in
 dev profile, but the workspace crates themselves are only lightly optimised in debug.
@@ -486,6 +493,7 @@ DESIGN.md invariant 8.
 | **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |
 | **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits; banded readback for 100MP+ sensors; EXIF, ICC profiles. HDR gain map export is not built yet |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON v2 sidecars, atomic write, persistent undo history |
+| **HEIF** | `heif::open`, feature `heif` | Working (opt-in) | iPhone/Mac HEIC stills through the vendored pure-Rust `lc-heif` (from LightCraft): grids, 8–10 bit, ICC or `nclx` P3, container rotation/crop, embedded thumbnails. 4:2:2/4:4:4 camera HIF and HDR (PQ/HLG) are refused |
 | **XMP** | `xmp::seed_metadata`, `xmp::packet`, `xmp::merge` | Working | Ratings, labels and keywords read from Lightroom/darktable `.xmp` sidecars and embedded XMP, written into every export, and (opt-in, Customize) kept in step with an existing `.xmp` sidecar without touching the rest of it |
 | **App** | inspector, undo/redo | Working | Snapshot undo, per-photo persistent history, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Scatter, 2D Plot |

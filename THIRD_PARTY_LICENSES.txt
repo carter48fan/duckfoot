@@ -42,8 +42,9 @@ Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/Open
 
 ## LightCraft Code Attribution (MIT)
 
-Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft), the XMP
-reader and merge in `crates/photo-engine/src/xmp.rs`:
+Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft): the XMP
+reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vendored as
+`crates/vendor/lc-heif` (see its VENDORED.md):
 - Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
 - LightCraft is licensed MIT OR Apache-2.0; Duckfoot uses it under the terms of the MIT License.
 
@@ -218,6 +219,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`:
 | `harfrust` | `0.12.0` | MIT | [https://github.com/harfbuzz/harfrust](https://github.com/harfbuzz/harfrust) |
 | `hashbrown` | `0.16.1` | MIT OR Apache-2.0 | [https://github.com/rust-lang/hashbrown](https://github.com/rust-lang/hashbrown) |
 | `hashbrown` | `0.17.1` | MIT OR Apache-2.0 | [https://github.com/rust-lang/hashbrown](https://github.com/rust-lang/hashbrown) |
+| `heic-rs` | `0.1.4` | MIT OR Apache-2.0 | [https://github.com/tbraun96/heic-rs](https://github.com/tbraun96/heic-rs) |
 | `hermit-abi` | `0.5.3` | MIT OR Apache-2.0 | [https://github.com/hermit-os/hermit-rs](https://github.com/hermit-os/hermit-rs) |
 | `hex` | `0.4.3` | MIT OR Apache-2.0 | [https://github.com/KokaKiwi/rust-hex](https://github.com/KokaKiwi/rust-hex) |
 | `iana-time-zone` | `0.1.65` | MIT OR Apache-2.0 | [https://github.com/strawlab/iana-time-zone](https://github.com/strawlab/iana-time-zone) |

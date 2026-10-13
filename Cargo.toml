@@ -5,6 +5,7 @@ members = [
     "crates/photo-app",
     "crates/duckfoot",
     "crates/duckfoot-android",
+    "crates/vendor/lc-heif",
 ]
 
 [workspace.package]
