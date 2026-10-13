@@ -4,6 +4,15 @@
 use crate::*;
 use photo_engine::engine::Proof;
 use photo_engine::gamut::{OutputSpace, Screen};
+use photo_engine::proof::{Intent, ProofTable};
+
+/// A printer profile to proof through: read once when chosen, and baked into the engine's
+/// table again whenever the export's space or the screen it is baked for changes.
+pub(crate) struct Printer {
+    icc: Vec<u8>,
+    name: String,
+    baked_for: Option<(OutputSpace, Screen)>,
+}
 
 impl PhotoApp {
     /// Work out the screen the settings name, once, when they change: a profile file
@@ -26,28 +35,101 @@ impl PhotoApp {
         };
     }
 
+    /// Read the printer profile the settings name, once, when it changes. One that does
+    /// not bake is dropped, and the note says why.
+    pub(crate) fn refresh_printer(&mut self) {
+        self.printer = None;
+        self.printer_note = None;
+        let Some(path) = &self.settings.proof_icc else {
+            return;
+        };
+        let read = std::fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|icc| {
+                // A trial bake: a profile is only kept if it can be proofed through.
+                ProofTable::bake(OutputSpace::Srgb, &icc, Intent::default(), Screen::SRGB)
+                    .map(|_| icc)
+                    .map_err(|e| format!("{e:#}"))
+            });
+        match read {
+            Ok(icc) => {
+                self.printer = Some(Printer {
+                    icc,
+                    name: file_name(path),
+                    baked_for: None,
+                })
+            }
+            Err(e) => self.printer_note = Some(format!("{}: {e}", file_name(path))),
+        }
+    }
+
+    /// The printer profile the picker answered with.
+    pub(crate) fn use_printer_profile(&mut self, path: PathBuf) {
+        self.settings.proof_icc = Some(path);
+        self.refresh_printer();
+        self.save_settings();
+        match (&self.printer_note, &self.printer) {
+            (Some(problem), _) => self.error = Some(format!("Could not use it: {problem}")),
+            (None, Some(p)) => {
+                self.proofing = true;
+                self.set_status(format!("Proofing as printed through {}", p.name));
+            }
+            (None, None) => {}
+        }
+    }
+
     /// The proof the preview should show, if it is proofing: against the colour space
-    /// the export will be written in.
+    /// the export will be written in, and through the printer if one is chosen.
     pub(crate) fn wanted_proof(&self) -> Option<Proof> {
         self.proofing.then(|| Proof {
             space: Screen::of(self.export_settings.color_space),
             warn: self.proof_warn,
+            printer: self.printer.is_some(),
         })
     }
 
     /// Tell the engine about a changed screen or proof, and re-render for it.
-    pub(crate) fn sync_display(&mut self) {
+    pub(crate) fn sync_display(&mut self, gpu: &Gpu) {
         if self.screen != self.shown_screen {
             self.engine.set_screen(self.screen);
             self.shown_screen = self.screen;
             self.needs_render = true;
         }
         let proof = self.wanted_proof();
+        if proof.is_some_and(|p| p.printer) {
+            self.sync_printer_table(gpu);
+        }
         if proof != self.shown_proof {
             self.engine.set_proof(proof);
             self.shown_proof = proof;
             self.needs_render = true;
         }
+    }
+
+    /// Bake the printer's table for the export's space and this screen, if it is not
+    /// already baked for them (about 20 ms, so only when one of them changes).
+    fn sync_printer_table(&mut self, gpu: &Gpu) {
+        let space = self.export_settings.color_space;
+        let key = (space, self.screen);
+        let Some(printer) = &mut self.printer else {
+            return;
+        };
+        if printer.baked_for == Some(key) {
+            return;
+        }
+        match ProofTable::bake(space, &printer.icc, Intent::default(), self.screen) {
+            Ok(table) => {
+                self.engine.set_proof_table(gpu.queue, Some(&table));
+                printer.baked_for = Some(key);
+            }
+            Err(e) => {
+                // Proofing carries on against the space alone.
+                self.printer_note = Some(format!("{}: {e:#}", printer.name));
+                self.printer = None;
+                self.engine.set_proof_table(gpu.queue, None);
+            }
+        }
+        self.needs_render = true;
     }
 
     /// Customize's screen row: what the monitor shows, so the preview's colours are its.
@@ -116,12 +198,51 @@ impl PhotoApp {
         {
             self.proofing = !self.proofing;
         }
-        if self.proofing
-            && widgets::chip(ui, self.proof_warn, "gamut")
-                .on_hover_text(format!("Grey where {space} cannot hold the colour"))
-                .clicked()
+        if !self.proofing {
+            return;
+        }
+        let cannot = match &self.printer {
+            Some(p) => format!("Grey where printing through {} loses the colour", p.name),
+            None => format!("Grey where {space} cannot hold the colour"),
+        };
+        if widgets::chip(ui, self.proof_warn, "gamut")
+            .on_hover_text(cannot)
+            .clicked()
         {
             self.proof_warn = !self.proof_warn;
+        }
+        match &self.printer {
+            Some(p) => {
+                let hover = format!(
+                    "Shown as the {space} export will print through {}. Click to stop",
+                    p.name
+                );
+                if widgets::chip(ui, true, &p.name)
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    self.settings.proof_icc = None;
+                    self.refresh_printer();
+                    self.save_settings();
+                }
+            }
+            None => {
+                let hover = match &self.printer_note {
+                    Some(problem) => format!("Could not use the last one: {problem}"),
+                    None => "Proof as printed: the printer and paper's ICC profile".into(),
+                };
+                if widgets::chip(ui, false, "printer…")
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    let from = self
+                        .settings
+                        .proof_icc
+                        .as_ref()
+                        .and_then(|p| p.parent().map(PathBuf::from));
+                    self.request(ui.ctx(), platform::Request::PrinterProfile { from });
+                }
+            }
         }
     }
 }

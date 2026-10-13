@@ -620,6 +620,10 @@ pub struct PhotoApp {
     pub proofing: bool,
     pub proof_warn: bool,
     shown_proof: Option<photo_engine::engine::Proof>,
+    /// The printer profile the proof goes through, if one is chosen and reads, and why
+    /// the chosen one could not be used.
+    printer: Option<display::Printer>,
+    printer_note: Option<String>,
     /// The user's own presets, as their files say (W-04).
     pub user_presets: Vec<(PathBuf, user_presets::UserPreset)>,
     /// The name being typed for a preset about to be saved.
@@ -876,6 +880,8 @@ impl PhotoApp {
             proofing: false,
             proof_warn: true,
             shown_proof: None,
+            printer: None,
+            printer_note: None,
             user_presets: Vec::new(),
             preset_draft: None,
             exporting_preset: None,
@@ -1013,6 +1019,7 @@ impl PhotoApp {
         self.saved_filters = s.saved_filters;
         // Settings already hold the screen; the matrix is worked out from them once.
         self.refresh_screen();
+        self.refresh_printer();
         // Read on the loader's thread; each is watched once its listing is back.
         for dir in s.watched_folders {
             self.scans_pending += 1;
@@ -1445,7 +1452,7 @@ impl PhotoApp {
             self.shown_mask = shown;
             self.needs_render = true;
         }
-        self.sync_display();
+        self.sync_display(gpu);
         if self.dust_view != self.shown_dust {
             self.engine.set_dust_view(self.dust_view);
             self.shown_dust = self.dust_view;
