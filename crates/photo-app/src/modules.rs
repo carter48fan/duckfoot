@@ -168,8 +168,10 @@ mod tests {
                 || key == "geometry"
                 || key == "curve_domain"
                 || key == "rgb_curves"
-                // Not a module: the space every module works in (W-09).
-                || key == "working_space";
+                // Not modules: the space every module works in (W-09), and the version
+                // of the colour math an edit is drawn with.
+                || key == "working_space"
+                || key == "rendering";
             assert!(covered, "PhotoStack::{key} has no row in the module table");
         }
         assert_eq!(PIPELINE_FIELDS.len(), PIPELINE_MODULES.len());

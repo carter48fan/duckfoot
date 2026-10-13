@@ -43,6 +43,9 @@ pub struct CfaImage {
     /// matrices interpolated for the white it was shot under (W-09). Used by the wide
     /// working space only, so an edit made before keeps the colour it had.
     pub cam_profiled: Option<[[f32; 3]; 3]>,
+    /// `cam_profiled` as `params::Rendering::V2` draws it (a DNG's AnalogBalance and
+    /// CameraCalibration honoured); `None` where it is the same.
+    pub cam_profiled_v2: Option<[[f32; 3]; 3]>,
     /// Multipliers that neutralise a D65 white, green = 1. The normalisation of
     /// `cam_to_srgb` discards the camera's response to daylight, and kelvin cannot be
     /// read off a white balance without it (`temperature::WhiteScale`).
@@ -452,6 +455,7 @@ fn with_dng_colour(mut img: Decoded, bytes: &[u8]) -> CfaImage {
             Some(fm) => forward_to_srgb(&fm),
             None => cam_to_srgb(&dng.xyz_to_cam),
         });
+        img.cfa.cam_profiled_v2 = Some(dng.profiled_v2);
     }
     img.cfa
 }
@@ -632,6 +636,7 @@ fn decode_reader(reader: &mut dyn Read) -> Result<Decoded> {
             wb,
             cam_to_srgb: cam_to_srgb(&raw.xyz_to_cam),
             cam_profiled: None,
+            cam_profiled_v2: None,
             daylight_wb: daylight_multipliers(&raw.xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry(raw.orientation),
             make: raw.make.clone(),
@@ -883,6 +888,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             wb,
             cam_to_srgb: cam_to_srgb(&xyz_to_cam),
             cam_profiled: None,
+            cam_profiled_v2: None,
             daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry_rawler(raw.orientation),
             make,
@@ -970,6 +976,7 @@ fn linear_rawler(mut raw: rawler::RawImage) -> Result<Decoded> {
             wb,
             cam_to_srgb: cam_to_srgb(&xyz_to_cam),
             cam_profiled: None,
+            cam_profiled_v2: None,
             daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
             orientation: orientation_geometry_rawler(raw.orientation),
             make: pick(raw.clean_make, raw.make),
@@ -1326,7 +1333,15 @@ mod dng {
         pub xyz_to_cam: [[f32; 3]; 4],
         /// ForwardMatrix, interpolated the same way, if the file has one.
         pub forward: Option<[[f32; 3]; 3]>,
+        /// Camera → linear sRGB as `params::Rendering::V2` draws it: the DNG spec's model
+        /// with AnalogBalance (AB) and CameraCalibration (CC) on both paths. With a
+        /// ForwardMatrix, `FM · D · (AB·CC)⁻¹`, D the reference neutral's inverse; without,
+        /// from XYZ → camera = `AB · CC · CM`. Applied after the white balance, as
+        /// `cam_profiled` is.
+        pub profiled_v2: [[f32; 3]; 3],
     }
+
+    const ANALOG_BALANCE: u16 = 0xC627;
 
     const AS_SHOT_NEUTRAL: u16 = 0xC628;
     const FORWARD_MATRIX_1: u16 = 0xC714;
@@ -1612,10 +1627,59 @@ mod dng {
             (w, [g / n[0] as f32, 1.0, g / n[2] as f32])
         };
         let (xyz_to_cam, forward) = at(w);
+
+        // V2: AnalogBalance too, and both on the ForwardMatrix path.
+        let ab = tiff
+            .find(ANALOG_BALANCE)
+            .and_then(|v| Some([*v.first()? as f32, *v.get(1)? as f32, *v.get(2)? as f32]))
+            .filter(|v| v.iter().all(|x| x.is_finite() && *x > 0.0))
+            .unwrap_or([1.0; 3]);
+        let ab = [[ab[0], 0.0, 0.0], [0.0, ab[1], 0.0], [0.0, 0.0, ab[2]]];
+        let abcc = {
+            let cc = {
+                let pick = |a: Option<[[f32; 3]; 3]>, b: Option<[[f32; 3]; 3]>| match (a, b, dual) {
+                    (Some(a), Some(b), Some(_)) => Some(lerp(&a, &b, w)),
+                    (a, b, _) => a.or(b),
+                };
+                pick(cc1, cc2).unwrap_or(identity)
+            };
+            super::mul3(&ab, &cc)
+        };
+        // The camera's neutral as shot, which `wb` (green = 1) is the inverse of.
+        let neutral = wb.map(|m| 1.0 / m);
+        let profiled_v2 = match forward {
+            Some(fm) => {
+                let inv = super::invert3(&abcc).unwrap_or(identity);
+                let reference = super::mul3v(&inv, neutral.map(f64::from));
+                let d = reference.map(|v| if v > 0.0 { 1.0 / v as f32 } else { 1.0 });
+                let d = [[d[0], 0.0, 0.0], [0.0, d[1], 0.0], [0.0, 0.0, d[2]]];
+                // The shader balances before the matrix: undo that, so the spec's D does it.
+                let unbalance = [
+                    [neutral[0], 0.0, 0.0],
+                    [0.0, neutral[1], 0.0],
+                    [0.0, 0.0, neutral[2]],
+                ];
+                let cam_to_xyz = super::mul3(&fm, &super::mul3(&d, &super::mul3(&inv, &unbalance)));
+                super::forward_to_srgb(&cam_to_xyz)
+            }
+            None => {
+                let cm = {
+                    let pick =
+                        |a: Option<[[f32; 3]; 3]>, b: Option<[[f32; 3]; 3]>| match (a, b, dual) {
+                            (Some(a), Some(b), Some(_)) => Some(lerp(&a, &b, w)),
+                            (a, b, _) => a.or(b),
+                        };
+                    pick(cm1, cm2).unwrap_or(identity)
+                };
+                let m = super::mul3(&abcc, &cm);
+                super::cam_to_srgb(&[m[0], m[1], m[2], [0.0; 3]])
+            }
+        };
         Some(Colour {
             wb,
             xyz_to_cam: [xyz_to_cam[0], xyz_to_cam[1], xyz_to_cam[2], [0.0; 3]],
             forward,
+            profiled_v2,
         })
     }
 
@@ -1972,6 +2036,55 @@ mod tests {
 
     fn flat(m: &[[f32; 3]; 3]) -> Vec<f32> {
         m.iter().flatten().copied().collect()
+    }
+
+    #[test]
+    fn rendering_v2_reads_analog_balance_and_calibration_on_the_forward_path() {
+        // XYZ → camera that is sRGB's own, a ForwardMatrix that undoes it, and a neutral.
+        let srgb_to_xyz = invert3(&XYZ_TO_SRGB).unwrap();
+        let d50 = mul3(&invert3(&BRADFORD_D50_TO_D65).unwrap(), &srgb_to_xyz);
+        let base = vec![
+            (0xC621, flat(&XYZ_TO_SRGB)),
+            (0xC65A, vec![21.0]),
+            (0xC714, flat(&d50)),
+            (0xC628, vec![0.5, 1.0, 0.7]),
+        ];
+        let plain = dng::colour(&dng_tags(&base)).unwrap();
+        let v1 = forward_to_srgb(&plain.forward.unwrap());
+        // Identity AnalogBalance and no CameraCalibration: V2 is V1.
+        for (a, b) in plain.profiled_v2.iter().flatten().zip(v1.iter().flatten()) {
+            assert!((a - b).abs() < 1e-4, "{:?} vs {v1:?}", plain.profiled_v2);
+        }
+        // A diagonal AB · CC cancels against the reference neutral on this path (the white
+        // balance absorbs it), as the spec's model says; a calibration that mixes channels
+        // does not. With one, V2 differs, and still takes the as-shot neutral to a neutral.
+        let mut diagonal = base.clone();
+        diagonal.push((0xC627, vec![1.05, 1.0, 0.95]));
+        let d = dng::colour(&dng_tags(&diagonal)).unwrap();
+        for (a, b) in d.profiled_v2.iter().flatten().zip(v1.iter().flatten()) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "a diagonal AnalogBalance changed the matrix"
+            );
+        }
+        let mut tagged = diagonal.clone();
+        tagged.push((
+            0xC623,
+            vec![1.05, 0.03, 0.0, 0.02, 1.0, -0.01, 0.0, 0.04, 0.95],
+        ));
+        let c = dng::colour(&dng_tags(&tagged)).unwrap();
+        assert!(c
+            .profiled_v2
+            .iter()
+            .flatten()
+            .zip(v1.iter().flatten())
+            .any(|(a, b)| (a - b).abs() > 0.01));
+        for row in c.profiled_v2 {
+            assert!(
+                (row.iter().sum::<f32>() - 1.0).abs() < 1e-3,
+                "a neutral is not kept neutral: {row:?}"
+            );
+        }
     }
 
     /// A reproducible stream of mutations: the same seeds fail the same way on every run.

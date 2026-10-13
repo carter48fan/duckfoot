@@ -1836,6 +1836,61 @@ fn a_look_runs_its_cube_over_the_photo_by_its_amount() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A patch rendered under each version of the colour math, back in linear sRGB.
+fn under(gpu: &Gpu, stack: &PhotoStack, patch: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let at = |rendering| {
+        let stack = PhotoStack {
+            rendering,
+            ..stack.clone()
+        };
+        render_patches(gpu, &stack, &[patch])[0].map(testkit::srgb_to_linear)
+    };
+    (
+        at(photo_engine::params::Rendering::V1),
+        at(photo_engine::params::Rendering::V2),
+    )
+}
+
+#[test]
+fn v2_rolls_a_bright_colour_off_without_turning_its_hue() {
+    let gpu = gpu_or_skip!();
+    let mut stack = PhotoStack::default();
+    // Modern roll-off, and an orange the shoulder has to compress.
+    stack.exposure.params.mode = photo_engine::params::ExposureMode::ModernSoft;
+    stack.exposure.params.rolloff = 1.0;
+    // Past the shoulder's knee in Rec.2020 (red about 1.0 there), under white overall.
+    let orange = [1.3, 0.55, 0.05];
+    let (v1, v2) = under(gpu, &stack, orange);
+    let (want, h1, h2) = (hue(orange), hue(v1), hue(v2));
+    assert!((h2 - want).abs() < 2.0, "V2 turned {want}° to {h2}°");
+    assert!(
+        (h1 - want).abs() > (h2 - want).abs() + 1.0,
+        "V1 {h1}°, V2 {h2}°, from {want}°"
+    );
+}
+
+#[test]
+fn v2_keeps_a_light_above_white_red_where_v1_sends_it_to_white() {
+    let gpu = gpu_or_skip!();
+    // Luminance near white: V1 brings it in towards that grey; V2 keeps it red.
+    let red = [3.0, 0.3, 0.25];
+    let (v1, v2) = under(gpu, &PhotoStack::default(), red);
+    let saturation = |c: [f32; 3]| {
+        let (hi, lo) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+        (hi - lo) / hi.max(1e-6)
+    };
+    assert!(saturation(v1) < 0.25, "V1 kept {v1:?} coloured");
+    assert!(
+        saturation(v2) > saturation(v1) + 0.3,
+        "V2 {v2:?} is not much redder than V1 {v1:?}"
+    );
+    assert!(
+        (hue(v2) - hue(red)).abs() < 6.0,
+        "V2 turned red to {}°",
+        hue(v2)
+    );
+}
+
 #[test]
 fn a_removed_spot_is_filled_from_the_ground_around_it_with_no_source() {
     use photo_engine::heal::{Mode, Spot};

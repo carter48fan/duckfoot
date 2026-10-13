@@ -613,6 +613,26 @@ impl ColorEq {
     }
 }
 
+/// Which version of the pipeline's colour math an edit is drawn with. Fixes that change how
+/// a photo looks go in under a new version, so an edit saved before them is drawn as it
+/// was: a sidecar without the field is `V1`, and every new edit `V2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Rendering {
+    /// As edits were drawn up to 0.2.0.
+    V1,
+    /// Highlights rolled off by their brightest channel, keeping their hue; colours above
+    /// white faded to white over two stops rather than sent to grey; a DNG's AnalogBalance
+    /// and CameraCalibration honoured on the ForwardMatrix path.
+    #[default]
+    V2,
+}
+
+impl Rendering {
+    pub fn legacy() -> Self {
+        Self::V1
+    }
+}
+
 /// A creative look from a `.cube` LUT (Resolve, Adobe and most LUT packs): applied to the
 /// photo as an sRGB display would show it, which is what such files are made for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -697,6 +717,9 @@ pub struct PhotoStack {
     /// and keeps it, so its look does not change; every new edit is wide.
     #[serde(default = "crate::gamut::WorkingSpace::legacy")]
     pub working_space: crate::gamut::WorkingSpace,
+    /// The colour math's version (see [`Rendering`]); not a module.
+    #[serde(default = "Rendering::legacy")]
+    pub rendering: Rendering,
     pub filmic: Module<Filmic>,
     pub color_balance: Module<ColorBalance>,
     #[serde(default)]
@@ -740,6 +763,7 @@ impl Default for PhotoStack {
             rgb_curves: Module::new(false, crate::curve::RgbCurves::default()),
             curve_domain: CurveDomain::Display,
             working_space: crate::gamut::WorkingSpace::Rec2020,
+            rendering: Rendering::V2,
             filmic: Module::new(
                 false,
                 Filmic {
@@ -793,6 +817,7 @@ pub(crate) mod flags {
     pub const LOCAL: u32 = 16384;
     pub const HEAL: u32 = 32768;
     pub const LOOK: u32 = 65536;
+    pub const RENDER_V2: u32 = 131072;
 }
 
 impl PhotoStack {
@@ -848,6 +873,9 @@ impl PhotoStack {
         }
         if self.look.enabled && self.look.params.path.is_some() && self.look.params.amount > 0.0 {
             m |= flags::LOOK;
+        }
+        if self.rendering == Rendering::V2 {
+            m |= flags::RENDER_V2;
         }
         m
     }
@@ -1147,6 +1175,17 @@ mod tests {
         assert_eq!(deserialized.ev, 1.5);
         assert_eq!(deserialized.mode, ExposureMode::ClassicLinear);
         assert_eq!(deserialized.rolloff, 0.0);
+    }
+
+    #[test]
+    fn an_edit_saved_before_rendering_v2_is_drawn_as_it_was() {
+        let mut json = serde_json::to_value(PhotoStack::default()).unwrap();
+        assert_eq!(json["rendering"], "V2");
+        json.as_object_mut().unwrap().remove("rendering");
+        let old: PhotoStack = serde_json::from_value(json).unwrap();
+        assert_eq!(old.rendering, Rendering::V1);
+        assert_eq!(old.bitmask() & flags::RENDER_V2, 0);
+        assert_ne!(PhotoStack::default().bitmask() & flags::RENDER_V2, 0);
     }
 
     #[test]

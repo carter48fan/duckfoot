@@ -231,6 +231,8 @@ pub struct LoadedImage {
     /// Camera → linear sRGB for the wide working space: the DNG's own profile where it
     /// has one (W-09), else `cam_to_srgb`.
     cam_profiled: [[f32; 3]; 3],
+    /// The same as `params::Rendering::V2` draws it.
+    cam_profiled_v2: [[f32; 3]; 3],
     white_scale: WhiteScale,
     /// The file's own distortion correction, if it carries one.
     warp: Option<FileWarp>,
@@ -629,6 +631,7 @@ pub struct UploadedImage {
     /// Camera → linear sRGB for the wide working space: the DNG's own profile where it
     /// has one (W-09), else `cam_to_srgb`.
     cam_profiled: [[f32; 3]; 3],
+    cam_profiled_v2: [[f32; 3]; 3],
     white_scale: WhiteScale,
     warp: Option<FileWarp>,
     /// The lens's profile, by name, if the loader found one (see `lensfun::for_photo`).
@@ -751,6 +754,10 @@ pub fn upload_cfa(
         wb: cfa.wb,
         cam_to_srgb: cfa.cam_to_srgb,
         cam_profiled: cfa.cam_profiled.unwrap_or(cfa.cam_to_srgb),
+        cam_profiled_v2: cfa
+            .cam_profiled_v2
+            .or(cfa.cam_profiled)
+            .unwrap_or(cfa.cam_to_srgb),
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
         lens_profile: None,
@@ -812,6 +819,10 @@ fn upload_linear(
         wb: cfa.wb,
         cam_to_srgb: cfa.cam_to_srgb,
         cam_profiled: cfa.cam_profiled.unwrap_or(cfa.cam_to_srgb),
+        cam_profiled_v2: cfa
+            .cam_profiled_v2
+            .or(cfa.cam_profiled)
+            .unwrap_or(cfa.cam_to_srgb),
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
         lens_profile: None,
@@ -869,6 +880,7 @@ pub fn upload_raster(
         wb: [1.0, 1.0, 1.0],
         cam_to_srgb: raster.cam_to_srgb,
         cam_profiled: raster.cam_to_srgb,
+        cam_profiled_v2: raster.cam_to_srgb,
         white_scale: WhiteScale::srgb(),
         warp: None,
         lens_profile: None,
@@ -2080,6 +2092,7 @@ impl Engine {
             wb,
             cam_to_srgb,
             cam_profiled,
+            cam_profiled_v2,
             white_scale,
             warp,
             lens_profile,
@@ -2295,6 +2308,7 @@ impl Engine {
             wb,
             cam_to_srgb,
             cam_profiled,
+            cam_profiled_v2,
             white_scale,
             warp,
             lens_profile,
@@ -2916,7 +2930,10 @@ impl Engine {
             crate::gamut::WorkingSpace::Srgb => image.cam_to_srgb,
             crate::gamut::WorkingSpace::Rec2020 => crate::gamut::compose(
                 &crate::gamut::convert(&crate::gamut::SRGB, &working),
-                &image.cam_profiled,
+                match stack.rendering {
+                    crate::params::Rendering::V1 => &image.cam_profiled,
+                    crate::params::Rendering::V2 => &image.cam_profiled_v2,
+                },
             ),
         };
         // Working → the proof's space if there is one, else the output's; then, proofing,

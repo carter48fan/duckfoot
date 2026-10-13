@@ -99,6 +99,8 @@ const FLAG_LENS:     u32 = 4096u;
 const FLAG_LOCAL:    u32 = 16384u;
 const FLAG_HEAL:     u32 = 32768u;
 const FLAG_LOOK:     u32 = 65536u;
+// The colour math of `params::Rendering::V2`: off for an edit saved before it.
+const FLAG_RENDER_V2: u32 = 131072u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -305,16 +307,33 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
     let proofing = u.proof_m[0].w > 0.5;
     let printer = u.proof_m[0].w > 1.5;
     var outside = false;
+    var y_fit = y;
+    let hi = max(c.r, max(c.g, c.b));
+    if (enabled(FLAG_RENDER_V2) && hi > 1.0 && y > 0.0) {
+        // A colour a channel of which is past white. V1 brings it in towards the grey of
+        // its own luminance, which is right for a mid-tone outside the gamut but sends
+        // anything at or past white straight to grey. V2 goes over, as the luminance nears
+        // white, to keeping its hue and saturation under white and fading it to white as
+        // its luminance goes from white to one stop past, so a bright red light (whose
+        // luminance is far below its red) stays red while a blown, nearly neutral
+        // highlight is white; past white it is all that.
+        let kept = vec3<f32>(y) + (c - vec3<f32>(y)) * gamut_scale(c, y);
+        let fade = smoothstep(1.0, 2.0, y);
+        let dimmed = mix(c / hi, vec3<f32>(1.0), fade);
+        let t = select(smoothstep(0.5, 1.0, y), 1.0, y >= 1.0);
+        c = mix(kept, dimmed, t);
+        y_fit = mix(y, y / hi + (1.0 - y / hi) * fade, t);
+    }
     if (u.luma_w.w > 0.5 || proofing) {
-        let s = gamut_scale(c, y);
+        let s = gamut_scale(c, y_fit);
         outside = s < 0.97;
-        c = vec3<f32>(y) + (c - vec3<f32>(y)) * s;
+        c = vec3<f32>(y_fit) + (c - vec3<f32>(y_fit)) * s;
     }
     if (proofing && !printer) {
         // What the proof holds, as the screen shows it (a wide proof on a narrower screen
         // is brought in again).
         c = vec3<f32>(dot(u.proof_m[0].xyz, c), dot(u.proof_m[1].xyz, c), dot(u.proof_m[2].xyz, c));
-        c = vec3<f32>(y) + (c - vec3<f32>(y)) * gamut_scale(c, y);
+        c = vec3<f32>(y_fit) + (c - vec3<f32>(y_fit)) * gamut_scale(c, y_fit);
     }
     c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
     var e: vec3<f32>;
@@ -844,6 +863,24 @@ fn apply_exposure_with_rolloff(c: vec3<f32>, gain: f32, black: f32, rolloff: f32
     return select(scaled, vec3<f32>(threshold) + compressed, scaled > vec3<f32>(threshold));
 }
 
+// The same roll-off, measured on the brightest channel and applied to all three in
+// proportion (as Filmic does), so a bright saturated colour keeps its hue: rolled off a
+// channel at a time, the brightest is held back most and an orange sunset drifts yellow.
+fn apply_exposure_keeping_hue(c: vec3<f32>, gain: f32, black: f32, rolloff: f32, tau: f32) -> vec3<f32> {
+    let scaled = max(vec3<f32>(0.0), (c - vec3<f32>(black)) * gain);
+    if (rolloff <= 0.001) {
+        return scaled;
+    }
+    let threshold = max(tau, 0.1);
+    let peak = max(scaled.r, max(scaled.g, scaled.b));
+    if (peak <= threshold) {
+        return scaled;
+    }
+    let over = peak - threshold;
+    let rolled = threshold + over / (1.0 + over * rolloff);
+    return scaled * (rolled / peak);
+}
+
 fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
     let h = (hsv.x % 360.0 + 360.0) % 360.0;
     let s = clamp(hsv.y, 0.0, 1.0);
@@ -1043,7 +1080,11 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_EXPOSURE)) {
-        c = apply_exposure_with_rolloff(c, u.exposure.x, u.exposure.y, u.exposure.z, u.exposure.w);
+        if (enabled(FLAG_RENDER_V2)) {
+            c = apply_exposure_keeping_hue(c, u.exposure.x, u.exposure.y, u.exposure.z, u.exposure.w);
+        } else {
+            c = apply_exposure_with_rolloff(c, u.exposure.x, u.exposure.y, u.exposure.z, u.exposure.w);
+        }
         bad = bad || not_finite(c);
     }
 
