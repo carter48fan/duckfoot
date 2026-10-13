@@ -827,6 +827,26 @@ impl PhotoApp {
         self.cropping = false;
         self.crop_drag = None;
         self.needs_render = true;
+        // An edit saved before the current colour math is drawn as it was; say so, and
+        // offer the update rather than making it.
+        if self.stack.rendering != photo_engine::params::Rendering::V2 {
+            self.set_status_undoable(
+                "This edit uses the older colour math (highlights, very bright colours)",
+                NoticeAction::UpdateRendering,
+            );
+        }
+    }
+
+    /// Draw the open edit with the current colour math (`params::Rendering::V2`): one
+    /// undo step, so it can be taken back.
+    pub(crate) fn update_rendering(&mut self) {
+        if !self.can_edit() || self.stack.rendering == photo_engine::params::Rendering::V2 {
+            return;
+        }
+        self.history.checkpoint(&self.stack);
+        self.stack.rendering = photo_engine::params::Rendering::V2;
+        self.needs_render = true;
+        self.set_status("Updated to the current colour math (undo to go back)");
     }
 
     /// The camera's orientation for the open photo is now known. It is what "no edits"
