@@ -1688,7 +1688,7 @@ fn a_brushed_mask_applies_where_it_was_painted_and_erasing_takes_it_back() {
         .collect();
     let mut mask = Mask::brush();
     mask.shape = Shape::Brush {
-        dabs: stroke.clone(),
+        dabs: stroke.clone().into(),
     };
     mask.adjust.exposure = 1.0;
     stack.local.enabled = true;
