@@ -6,7 +6,7 @@
 > Linux verified; Android arm64 APK builds in CI; Windows and macOS run test suites in CI.
 > Audio and Video are architectural designs for Barrels 2 & 3 — see [DESIGN.md](./DESIGN.md).**
 >
-> The legacy TypeScript codebase (`apps/` and `packages/`) has been completely removed. Duckfoot is 100% native Rust on wgpu.
+> The legacy TypeScript codebase (`apps/` and `packages/`) has been completely removed. Duckfoot is native Rust on wgpu. Three dependencies compile non-Rust code: libwebp (C, for WebP export), tract-linalg's assembly matrix kernels (the cutout model), and wayland-backend on Linux.
 
 
 ---
