@@ -302,6 +302,6 @@ fn process_single_job(
     if let Some(parent) = job.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let info = photo_engine::read_info(&file);
+    let info = photo_engine::read_export_info(&job.source_path);
     exported.save(&job.output_path, settings, info.as_ref())
 }

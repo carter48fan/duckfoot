@@ -840,6 +840,7 @@ fn encode<W: Write + Seek>(
         &exif_out::now(),
     );
     let exif = exif_out::block(&fields);
+    let xmp = xmp_for(info, settings.metadata);
     let icc = settings.color_space.icc().to_vec();
     // JPEG and WebP are 8-bit formats whatever was asked.
     let eight_owned;
@@ -853,7 +854,10 @@ fn encode<W: Write + Seek>(
     };
     match settings.format {
         ExportFormat::Png => {
-            let mut enc = image::codecs::png::PngEncoder::new(out);
+            // Written to memory first when there is XMP to add: `image` cannot write the
+            // chunk that holds it.
+            let mut png = Vec::new();
+            let mut enc = image::codecs::png::PngEncoder::new(&mut png);
             enc.set_icc_profile(icc)
                 .map_err(|e| anyhow!("PNG colour profile: {e}"))?;
             if let Some(exif) = exif {
@@ -870,22 +874,31 @@ fn encode<W: Write + Seek>(
                 )?,
                 (None, Samples::Eight(_)) => unreachable!("eight is Some for 8-bit samples"),
             }
+            match &xmp {
+                Some(xmp) => out.write_all(&png_with_xmp(&png, xmp)?)?,
+                None => out.write_all(&png)?,
+            }
         }
-        ExportFormat::Tiff => write_tiff(out, w, h, samples, &fields, &icc)?,
+        ExportFormat::Tiff => write_tiff(out, w, h, samples, &fields, &icc, xmp.as_deref())?,
         ExportFormat::Jpeg => {
             let px = eight.expect("JPEG is always 8-bit");
             // JPEG has no alpha. The encoder reads each pixel as RGB, so the alpha —
             // always an opaque 255 here — is dropped without an RGB copy of the frame.
             let view = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(w, h, px)
                 .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(out, quality);
+            let mut jpeg = Vec::new();
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality);
             enc.set_icc_profile(icc)
                 .map_err(|e| anyhow!("JPEG colour profile: {e}"))?;
             if let Some(exif) = exif {
                 enc.set_exif_metadata(exif)
                     .map_err(|e| anyhow!("JPEG EXIF: {e}"))?;
             }
-            enc.encode_image(&view)?
+            enc.encode_image(&view)?;
+            match &xmp {
+                Some(xmp) => out.write_all(&jpeg_with_xmp(&jpeg, xmp)?)?,
+                None => out.write_all(&jpeg)?,
+            }
         }
         ExportFormat::Webp => {
             let px = eight.expect("WebP is always 8-bit");
@@ -897,7 +910,12 @@ fn encode<W: Write + Seek>(
             } else {
                 encoder.encode(f32::from(quality))
             };
-            out.write_all(&webp_with_metadata(&bytes, &icc, exif.as_deref())?)?;
+            out.write_all(&webp_with_metadata(
+                &bytes,
+                &icc,
+                exif.as_deref(),
+                xmp.as_deref(),
+            )?)?;
         }
     }
     Ok(())
@@ -912,6 +930,7 @@ fn write_tiff<W: Write + Seek>(
     samples: Samples,
     fields: &exif_out::Fields,
     icc: &[u8],
+    xmp: Option<&str>,
 ) -> Result<()> {
     use tiff::encoder::{colortype, DirectoryEncoder, Rational, TiffEncoder, TiffKind};
     use tiff::tags::Tag;
@@ -957,6 +976,10 @@ fn write_tiff<W: Write + Seek>(
             for (tag, value) in &fields.ifd0 {
                 put(dir, *tag, value)?;
             }
+            if let Some(xmp) = xmp {
+                // XMLPacket (700), BYTE, as TIFF/EP and Adobe's XMP Part 3 have it.
+                dir.write_tag(Tag::Unknown(700), xmp.as_bytes())?;
+            }
             if let Some(at) = exif_at {
                 dir.write_tag(Tag::ExifDirectory, at)?;
             }
@@ -975,7 +998,12 @@ fn write_tiff<W: Write + Seek>(
 
 /// A simple WebP file (VP8 or VP8L) rewrapped as an extended one carrying the colour
 /// profile and EXIF: VP8X first, ICCP before the image, EXIF after it.
-fn webp_with_metadata(file: &[u8], icc: &[u8], exif: Option<&[u8]>) -> Result<Vec<u8>> {
+fn webp_with_metadata(
+    file: &[u8],
+    icc: &[u8],
+    exif: Option<&[u8]>,
+    xmp: Option<&str>,
+) -> Result<Vec<u8>> {
     if file.len() < 12 || &file[0..4] != b"RIFF" || &file[8..12] != b"WEBP" {
         bail!("libwebp returned something that is not a WebP file");
     }
@@ -1017,7 +1045,10 @@ fn webp_with_metadata(file: &[u8], icc: &[u8], exif: Option<&[u8]>) -> Result<Ve
     }
 
     let mut vp8x = vec![0u8; 10];
-    vp8x[0] = 0x20 | if alpha { 0x10 } else { 0 } | if exif.is_some() { 0x08 } else { 0 };
+    vp8x[0] = 0x20
+        | if alpha { 0x10 } else { 0 }
+        | if exif.is_some() { 0x08 } else { 0 }
+        | if xmp.is_some() { 0x04 } else { 0 };
     vp8x[4..7].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
     vp8x[7..10].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
 
@@ -1033,16 +1064,106 @@ fn webp_with_metadata(file: &[u8], icc: &[u8], exif: Option<&[u8]>) -> Result<Ve
     chunk(b"VP8X", &vp8x);
     chunk(b"ICCP", icc);
     for (id, data) in &chunks {
-        if !matches!(id, b"VP8X" | b"ICCP" | b"EXIF") {
+        if !matches!(id, b"VP8X" | b"ICCP" | b"EXIF" | b"XMP ") {
             chunk(id, data);
         }
     }
     if let Some(exif) = exif {
         chunk(b"EXIF", exif);
     }
+    if let Some(xmp) = xmp {
+        chunk(b"XMP ", xmp.as_bytes());
+    }
     let mut out = b"RIFF".to_vec();
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// The XMP an export carries under `policy`: the photo's rating, label and keywords (all
+/// metadata only) and its credit (all, or copyright only), or nothing.
+fn xmp_for(info: Option<&PhotoInfo>, policy: MetadataPolicy) -> Option<String> {
+    let info = info?;
+    fn credit(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    let marks = match policy {
+        MetadataPolicy::None => return None,
+        MetadataPolicy::CopyrightOnly => None,
+        MetadataPolicy::All => info.catalog.as_ref(),
+    };
+    crate::xmp::packet(&crate::xmp::ExportXmp {
+        marks,
+        creator: credit(&info.artist),
+        rights: credit(&info.copyright),
+    })
+}
+
+/// The namespace that opens a JPEG's XMP segment (APP1), NUL included.
+const JPEG_XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// A JPEG with `xmp` in an APP1 segment after its other application segments (EXIF and
+/// ICC among them). A packet too big for one segment is left out: extended XMP, which
+/// splits one across several, is more than a rating and keywords ever need.
+fn jpeg_with_xmp(jpeg: &[u8], xmp: &str) -> Result<Vec<u8>> {
+    let len = 2 + JPEG_XMP.len() + xmp.len();
+    if len > usize::from(u16::MAX) {
+        log::warn!(
+            "the export's XMP is {} bytes, more than a JPEG segment holds; left out",
+            xmp.len()
+        );
+        return Ok(jpeg.to_vec());
+    }
+    if jpeg.get(..2) != Some(&[0xFF, 0xD8]) {
+        bail!("the JPEG encoder wrote something that is not a JPEG");
+    }
+    let mut at = 2;
+    while let (Some(&0xFF), Some(&m)) = (jpeg.get(at), jpeg.get(at + 1)) {
+        if !(0xE0..=0xEF).contains(&m) {
+            break;
+        }
+        let seg = jpeg
+            .get(at + 2..at + 4)
+            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+            .ok_or_else(|| anyhow!("truncated JPEG segment"))?;
+        at += 2 + seg;
+    }
+    let at = at.min(jpeg.len());
+    let mut out = Vec::with_capacity(jpeg.len() + len + 2);
+    out.extend_from_slice(&jpeg[..at]);
+    out.extend_from_slice(&[0xFF, 0xE1]);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    out.extend_from_slice(JPEG_XMP);
+    out.extend_from_slice(xmp.as_bytes());
+    out.extend_from_slice(&jpeg[at..]);
+    Ok(out)
+}
+
+/// A PNG with `xmp` in an `iTXt` chunk keyed `XML:com.adobe.xmp`, uncompressed, before
+/// the image data, as Adobe's XMP Part 3 has it.
+fn png_with_xmp(png: &[u8], xmp: &str) -> Result<Vec<u8>> {
+    let mut at = 8;
+    while at + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into()?) as usize;
+        if &png[at + 4..at + 8] == b"IDAT" {
+            break;
+        }
+        at += 12 + len;
+    }
+    if png.get(..8) != Some(b"\x89PNG\r\n\x1a\n".as_slice()) || at + 8 > png.len() {
+        bail!("the PNG encoder wrote something that is not a PNG");
+    }
+    let mut data = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+    data.extend_from_slice(xmp.as_bytes());
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"iTXt");
+    chunk.extend_from_slice(&data);
+    let crc = crc32fast::hash(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = Vec::with_capacity(png.len() + chunk.len());
+    out.extend_from_slice(&png[..at]);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[at..]);
     Ok(out)
 }
 
@@ -1279,6 +1400,59 @@ mod tests {
         img.encode(settings, Some(&sample_info()), &mut out)
             .unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn every_format_carries_the_photos_marks_as_xmp_and_still_reads() {
+        let img = noise(40, 30);
+        let mut marks = crate::sidecar::AssetMetadata {
+            rating: 4,
+            color_label: Some("red".into()),
+            ..Default::default()
+        };
+        marks.add_keywords("harbour, boats");
+        let info = PhotoInfo {
+            catalog: Some(marks.clone()),
+            ..sample_info()
+        };
+        for format in ExportFormat::ALL {
+            let at = |policy| {
+                let settings = ExportSettings {
+                    metadata: policy,
+                    ..ExportSettings::new(format)
+                };
+                let mut out = std::io::Cursor::new(Vec::new());
+                img.encode(&settings, Some(&info), &mut out).unwrap();
+                out.into_inner()
+            };
+            let all = at(MetadataPolicy::All);
+            // The file is still one: it decodes (a PNG's chunk CRCs checked), EXIF and all.
+            image::load_from_memory(&all).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            exif::Reader::new()
+                .read_from_container(&mut std::io::Cursor::new(&all))
+                .unwrap_or_else(|e| panic!("{format:?}: no EXIF beside the XMP ({e})"));
+            let x = crate::xmp::find_packet(&all).unwrap_or_else(|| panic!("{format:?}: no XMP"));
+            assert_eq!(x.marks().as_ref(), Some(&marks), "{format:?}");
+            assert_eq!(
+                x.properties
+                    .get("dc:rights")
+                    .and_then(|v| v.first())
+                    .map(String::as_str),
+                Some("(c) 2026 A. Photographer"),
+                "{format:?}"
+            );
+            // Copyright only: the credit, not the marks.
+            let credit = crate::xmp::find_packet(&at(MetadataPolicy::CopyrightOnly)).unwrap();
+            assert!(
+                credit.marks().is_none(),
+                "{format:?}: marks under copyright only"
+            );
+            assert!(credit.properties.contains_key("dc:rights"), "{format:?}");
+            assert!(
+                crate::xmp::find_packet(&at(MetadataPolicy::None)).is_none(),
+                "{format:?}: XMP under no metadata"
+            );
+        }
     }
 
     #[test]

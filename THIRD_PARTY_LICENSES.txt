@@ -40,6 +40,13 @@ Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/Open
 - Copyright (c) 2026 OpenCut
 - Used under the terms of the MIT License.
 
+## LightCraft Code Attribution (MIT)
+
+Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft), the XMP
+reader and merge in `crates/photo-engine/src/xmp.rs`:
+- Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
+- LightCraft is licensed MIT OR Apache-2.0; Duckfoot uses it under the terms of the MIT License.
+
 ## Rust Crate Dependencies Registry
 
 | Package | Version | License | Repository / Homepage |

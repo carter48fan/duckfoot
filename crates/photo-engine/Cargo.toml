@@ -33,6 +33,11 @@ tract-onnx = "0.23"
 # Baking printer proofs (W-10): a CMM for LUT-based ICC profiles. Already in the tree
 # through image, at the same version.
 moxcms = "0.8"
+# Reading and writing XMP (ratings, labels, keywords other apps share). Already in the
+# tree through wayland-scanner, at the same version.
+quick-xml = "0.41"
+# The CRC of the PNG chunk an export's XMP goes in. Already in the tree through png.
+crc32fast = "1"
 
 [dev-dependencies]
 # The no-op backend: a real Device for tests of CPU-side wgpu validation, with no GPU.

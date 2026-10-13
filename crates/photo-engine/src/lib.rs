@@ -33,6 +33,7 @@ pub mod sidecar;
 pub mod temperature;
 #[doc(hidden)]
 pub mod testkit;
+pub mod xmp;
 
 pub use curve::{build_lut, build_lut_4channel, identity_nodes, CurveNode, RgbCurves};
 pub use decode::{
@@ -51,7 +52,9 @@ pub use export::{
 pub use histogram::Histogram;
 pub use lens::{FileWarp, LensModel};
 pub use lut3d::{parse_cube, Lut3D};
-pub use metadata::{file_date_compact, read_info, read_raster_info, read_raw_info, PhotoInfo};
+pub use metadata::{
+    file_date_compact, read_export_info, read_info, read_raster_info, read_raw_info, PhotoInfo,
+};
 pub use params::{
     Clarity, ColorBalance, ColorBand, ColorEq, Crop, CurveDomain, Dehaze, Denoise, Exposure,
     ExposureMode, Filmic, Geometry, Lens, Module, PhotoStack, Rgb, Sharpen, Tonal, Vibrance,

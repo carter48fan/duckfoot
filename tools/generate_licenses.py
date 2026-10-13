@@ -50,6 +50,14 @@ Duckfoot includes distilled lens and camera calibration tables derived from the 
 - Detailed notice: `crates/photo-engine/data/LENSFUN-NOTICE.md`.
 """
 
+LIGHTCRAFT_NOTICE = """## LightCraft Code Attribution (MIT)
+
+Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft), the XMP
+reader and merge in `crates/photo-engine/src/xmp.rs`:
+- Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
+- LightCraft is licensed MIT OR Apache-2.0; Duckfoot uses it under the terms of the MIT License.
+"""
+
 OPENCUT_NOTICE = """## OpenCut Code Attribution (MIT)
 
 Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/OpenCut):
@@ -530,6 +538,7 @@ def main():
     lines.append(FONTS_NOTICE)
     lines.append(LENSFUN_NOTICE)
     lines.append(OPENCUT_NOTICE)
+    lines.append(LIGHTCRAFT_NOTICE)
 
     lines.append("## Rust Crate Dependencies Registry\n")
     lines.append(

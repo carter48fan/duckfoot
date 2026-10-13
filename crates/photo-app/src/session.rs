@@ -128,6 +128,12 @@ impl PhotoApp {
                 self.error = Some(format!("Could not save to {}: {e:#}", file_name(p)));
             }
         }
+        // A virtual copy's marks are its own; the file's .xmp follows the original.
+        if self.settings.xmp_sidecars && photo_engine::copies::parse(p).is_none() {
+            if let Err(e) = photo_engine::xmp::update_sidecar(p, &metadata) {
+                self.error = Some(format!("Could not update the .xmp sidecar: {e:#}"));
+            }
+        }
         self.bump_shelf_epoch();
     }
 
@@ -948,7 +954,7 @@ impl PhotoApp {
                 loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_pending.remove(&path);
                     if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
-                        item.info = info;
+                        item.info = info.map(|i| *i);
                     }
                     if let Some(image) = image {
                         let name = format!("thumb:{}", path.display());

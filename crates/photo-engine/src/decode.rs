@@ -1186,6 +1186,18 @@ pub mod fuzzing {
         let _ = crate::proof::ProofTable::fuzz_bake(bytes);
     }
 
+    /// Another application's XMP: read for its marks, and merged into, as an .xmp sidecar
+    /// beside a photo is.
+    pub fn xmp(bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if let Ok(x) = crate::xmp::parse(text) {
+                let _ = x.marks();
+            }
+            let _ = crate::xmp::merge(text, &crate::sidecar::AssetMetadata::default());
+        }
+        let _ = crate::xmp::find_packet(bytes);
+    }
+
     /// A sidecar's text.
     pub fn sidecar(bytes: &[u8]) {
         if let Ok(text) = std::str::from_utf8(bytes) {

@@ -209,7 +209,15 @@ impl ShelfFacts {
     pub fn read(path: &std::path::Path) -> Self {
         let (metadata, has_sidecar) = match photo_engine::load_sidecar_full(path) {
             Ok(Some(sc)) => (sc.metadata, true),
-            _ => (
+            // No sidecar of its own: the marks another app left (its .xmp sidecar, or the
+            // file's own XMP) are where it starts. A sidecar that cannot be read is not
+            // absent, so it is not seeded over.
+            Ok(None) => (
+                photo_engine::xmp::seed_metadata(&photo_engine::copies::source_file(path))
+                    .unwrap_or_default(),
+                false,
+            ),
+            Err(_) => (
                 photo_engine::AssetMetadata::default(),
                 find_sidecar(path).is_some(),
             ),

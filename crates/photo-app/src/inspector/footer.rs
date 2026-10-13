@@ -8,6 +8,17 @@ impl PhotoApp {
         ui.add_space(6.0);
         self.screen_row(ui);
         ui.add_space(6.0);
+        if widgets::chip(ui, self.settings.xmp_sidecars, "update .xmp sidecars")
+            .on_hover_text(
+                "Write ratings, labels and keywords into the .xmp sidecar Lightroom or \
+                 darktable keeps beside a photo, leaving the rest of it alone. None is made",
+            )
+            .clicked()
+        {
+            self.settings.xmp_sidecars = !self.settings.xmp_sidecars;
+            self.save_settings();
+        }
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, Kind::Secondary, "Reset order", 0.0)
                 .on_hover_text("Restore the default pipeline order")

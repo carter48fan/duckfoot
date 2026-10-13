@@ -57,6 +57,10 @@ pub struct Settings {
     /// The intent printed with, and whether the paper's white is simulated.
     #[serde(default)]
     pub proof_printing: photo_engine::proof::Printing,
+    /// Keep the rating, label and keywords of an .xmp sidecar another app left beside a
+    /// photo in step with Duckfoot's. None is ever made.
+    #[serde(default)]
+    pub xmp_sidecars: bool,
 }
 
 impl Default for Settings {
@@ -87,6 +91,7 @@ impl Default for Settings {
             display_icc: None,
             proof_icc: None,
             proof_printing: photo_engine::proof::Printing::default(),
+            xmp_sidecars: false,
         }
     }
 }

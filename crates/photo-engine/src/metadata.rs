@@ -29,6 +29,9 @@ pub struct PhotoInfo {
     pub copyright: Option<String>,
     /// How the camera meant the frame to be viewed.
     pub orientation: Geometry,
+    /// The photo's rating, label and keywords from its sidecar, for an export's XMP.
+    /// Not read from the file: [`read_export_info`] adds them.
+    pub catalog: Option<crate::sidecar::AssetMetadata>,
 }
 
 impl PhotoInfo {
@@ -83,6 +86,24 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// The metadata of any photo the app opens: RAW through rawler, JPEG/PNG/TIFF/WebP
 /// through their EXIF block. `None` if there is none to read.
+/// What an export of the photo at `path` (a virtual copy's own path included) says about
+/// it: its file's EXIF, and the marks its sidecar holds.
+pub fn read_export_info(path: &Path) -> Option<PhotoInfo> {
+    let catalog = crate::sidecar::load_sidecar_full(path)
+        .ok()
+        .flatten()
+        .map(|s| s.metadata);
+    let info = read_info(&crate::copies::source_file(path));
+    match (info, catalog) {
+        (Some(info), catalog) => Some(PhotoInfo { catalog, ..info }),
+        (None, Some(catalog)) => Some(PhotoInfo {
+            catalog: Some(catalog),
+            ..Default::default()
+        }),
+        (None, None) => None,
+    }
+}
+
 pub fn read_info(path: &Path) -> Option<PhotoInfo> {
     if crate::is_raster_path(path) {
         read_raster_info(path)
@@ -150,6 +171,8 @@ pub fn read_raster_info(path: &Path) -> Option<PhotoInfo> {
         orientation: uint(Tag::Orientation)
             .map(|o| crate::decode::orientation_from_exif(o as u16))
             .unwrap_or_default(),
+
+        catalog: None,
     })
 }
 
@@ -201,6 +224,7 @@ fn raw_info(path: &Path) -> Option<PhotoInfo> {
             .orientation
             .map(crate::decode::orientation_from_exif)
             .unwrap_or_default(),
+        catalog: None,
     })
 }
 
