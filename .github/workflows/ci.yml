@@ -34,6 +34,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - run: cargo test --workspace --locked
+      # HEIF is off by default (HEVC patents), so its code is tested with it on as well.
+      - run: cargo test --locked -p photo-engine --features heif --lib
 
       # The pixel tests, on Mesa's software Vulkan: the only tests in which shaders
       # actually run. Required, so a missing driver fails rather than silently skipping.

@@ -21,3 +21,8 @@ winit = { workspace = true, features = ["android-native-activity"] }
 jni = "0.21"
 anyhow.workspace = true
 android_logger = "0.15"
+
+[features]
+# HEIF/HEIC stills; off by default, as HEVC is patented in some places
+# (crates/vendor/lc-heif/VENDORED.md).
+heif = ["photo-app/heif", "photo-engine/heif"]

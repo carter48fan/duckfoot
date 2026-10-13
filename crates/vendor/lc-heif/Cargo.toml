@@ -1,0 +1,20 @@
+[package]
+# Vendored from LightCraft's crates/heif (storytold/lightcraft b3d392b4), MIT OR Apache-2.0,
+# Copyright (c) 2026 ArtCraft Team and the LightCraft contributors. See VENDORED.md.
+name = "lc-heif"
+version = "0.7.1"
+description = "HEIF/HEIC still-image decoder (heic-rs for the container and HEVC, libheif-matching colour conversion, panic-guarded), vendored from LightCraft"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+# Pure Rust, no unsafe. Pinned exactly, as LightCraft pins it: a young, single-owner crate that
+# parses untrusted files; moving the pin is a reviewed change (re-run this crate's tests).
+heic-rs = { version = "=0.1.4", default-features = false, features = ["std", "parallel"] }
+rayon = "1"
+
+[features]
+# `lc_heif::testdata`: lossless synthetic HEIF files, for the tests of the crates above.
+testdata = []

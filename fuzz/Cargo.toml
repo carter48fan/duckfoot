@@ -16,7 +16,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-photo-engine = { path = "../crates/photo-engine" }
+# With HEIF, so the raster target fuzzes the HEIF decoder too (a young crate, on hostile files).
+photo-engine = { path = "../crates/photo-engine", features = ["heif"] }
 photo-app = { path = "../crates/photo-app" }
 
 [workspace]

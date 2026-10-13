@@ -170,23 +170,28 @@ pub fn decode_raster(bytes: &[u8]) -> Result<RasterImage> {
     use image::ImageDecoder;
     use rayon::prelude::*;
 
-    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .context("reading raster image format")?
-        .into_decoder()
-        .context("decoding raster image format")?;
-    let (w, h) = decoder.dimensions();
-    check_pixels(u64::from(w), u64::from(h))?;
+    let (img, icc, orientation) = if crate::heif::is_heif(bytes) {
+        // Turned and cropped by the container already; its EXIF orientation only echoes it.
+        let (img, icc) = crate::heif::open(bytes)?;
+        (img, icc, Geometry::default())
+    } else {
+        let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .context("reading raster image format")?
+            .into_decoder()
+            .context("decoding raster image format")?;
+        let (w, h) = decoder.dimensions();
+        check_pixels(u64::from(w), u64::from(h))?;
+        let icc = decoder.icc_profile().ok().flatten();
+        let img =
+            image::DynamicImage::from_decoder(decoder).context("decoding raster image format")?;
+        (img, icc, raster_orientation(bytes))
+    };
     // A profile that cannot be read is sRGB's fault-tolerant default, as every browser
     // treats it; one that is sRGB takes the fast path below.
-    let profile = decoder
-        .icc_profile()
-        .ok()
-        .flatten()
+    let profile = icc
         .and_then(|icc| crate::icc::MatrixTrc::parse(&icc))
         .filter(|p| !p.is_srgb());
-    let img = image::DynamicImage::from_decoder(decoder).context("decoding raster image format")?;
-    let orientation = raster_orientation(bytes);
     let (width, height) = (img.width(), img.height());
     let srgb_curve = |c: f32| {
         if c <= 0.04045 {
