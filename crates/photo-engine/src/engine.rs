@@ -2562,8 +2562,20 @@ impl Engine {
         } else {
             (OUTPUT_FORMAT, &self.adjust_pipeline)
         };
-        // Rendered whole, once: the adjust pass reads neighbourhoods (clarity, dehaze,
-        // sharpen), so it cannot be split into bands without seams. Only the copy is.
+        // The crop is not baked into the texture, so export is where it becomes real: only
+        // the region the user framed is drawn. See `params::Crop` for why it is not in the
+        // shader.
+        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
+        let texel = format.block_copy_size(None).unwrap_or(4);
+        let resizing =
+            target_size.is_some_and(|(tw, th)| (tw < rect.2 || th < rect.3) && tw > 0 && th > 0);
+        if !resizing {
+            let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
+            let pixels =
+                self.render_bands(device, queue, image, sensor, pipeline, format, rect, texel)?;
+            return Ok((rect.2, rect.3, pixels));
+        }
+        // Resized on the GPU (the cutout studio's small render): drawn whole, then scaled.
         let full = scoped(device, "export render", || {
             let full = output_texture_as(device, out_w, out_h, format);
             let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
@@ -2588,11 +2600,7 @@ impl Engine {
             full
         })?;
 
-        // The crop is not baked into the texture, so export is where it becomes real: copy
-        // only the region the user framed. See `params::Crop` for why it is not in the shader.
-        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
         let (rx, ry, rw, rh) = rect;
-        let texel = format.block_copy_size(None).unwrap_or(4);
 
         if let Some((tw, th)) = target_size {
             if (tw < rw || th < rh) && tw > 0 && th > 0 {
@@ -2670,6 +2678,71 @@ impl Engine {
             self.export_band_bytes(device),
         )?;
         Ok((rw, rh, pixels))
+    }
+
+    /// The export's `rect` of the output, drawn and read back one band of rows at a time
+    /// through a single band-sized target, so the GPU never holds more of the frame than
+    /// a band (`export_band_bytes`): a 100 MP 16-bit export held 800 MB drawn whole. Every
+    /// pixel the adjust pass draws depends on its own position and the sensor alone, never
+    /// on its neighbours in the target, so bands meet without seams; the shader is told
+    /// where each band sits (`split.yz`). The uniforms are the export's, written already.
+    #[allow(clippy::too_many_arguments)]
+    fn render_bands(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &LoadedImage,
+        sensor: &wgpu::TextureView,
+        pipeline: &wgpu::RenderPipeline,
+        format: wgpu::TextureFormat,
+        (rx, ry, rw, rh): (u32, u32, u32, u32),
+        texel: u32,
+    ) -> Result<Vec<u8>> {
+        let band_bytes = self.export_band_bytes(device);
+        let stride = crate::export::padded_row_bytes(rw, texel) as u64;
+        let band_rows = (band_bytes / stride)
+            .clamp(1, rh.max(1) as u64)
+            .min(device.limits().max_texture_dimension_2d as u64) as u32;
+        let band = scoped(device, "export render", || {
+            output_texture_as(device, rw, band_rows, format)
+        })?;
+        let band_view = band.create_view(&Default::default());
+        let bind = self.adjust_bind(
+            device,
+            sensor,
+            &image.sensor_view,
+            &image.brushes.view,
+            &self.export_buffer,
+        );
+        let origin_at = std::mem::offset_of!(AdjustUniforms, split) as u64 + 4;
+        let mut out = Vec::new();
+        out.try_reserve_exact(rw as usize * rh as usize * texel as usize)
+            .map_err(|_| anyhow::anyhow!("no memory for a {rw}×{rh} export"))?;
+        let mut y = 0;
+        while y < rh {
+            let rows = band_rows.min(rh - y);
+            let origin = [rx as f32, (ry + y) as f32];
+            queue.write_buffer(
+                &self.export_buffer,
+                origin_at,
+                bytemuck::cast_slice(&origin),
+            );
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("export band encoder"),
+            });
+            draw_fullscreen(&mut encoder, "export band", pipeline, &bind, &band_view);
+            queue.submit([encoder.finish()]);
+            out.extend(read_back(
+                device,
+                queue,
+                &band,
+                (0, 0, rw, rows),
+                texel,
+                band_bytes,
+            )?);
+            y += rows;
+        }
+        Ok(out)
     }
 
     /// Choose the preview resolution: 1/2^level of full, clamped to what the sensor mip
