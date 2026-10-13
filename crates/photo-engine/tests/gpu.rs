@@ -696,6 +696,46 @@ fn a_curve_node_moves_the_display_value_it_sits_on() {
 }
 
 #[test]
+fn toggling_curves_renders_what_a_fresh_engine_does() {
+    let gpu = gpu_or_skip!();
+    // The curve LUT is cached on the engine, so every state is rendered on one engine and
+    // compared with a fresh one, which has no cache to go stale.
+    let half = testkit::srgb_to_linear(128);
+    let raster = testkit::raster_from_fn(8, 8, |_, _| [half; 3]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut cached = |stack: &PhotoStack| {
+        let out = engine.export(&gpu.device, &gpu.queue, stack).unwrap();
+        let at = ((4 * out.width + 4) * 4) as usize;
+        [out.rgba[at], out.rgba[at + 1], out.rgba[at + 2]]
+    };
+
+    let mut stack = PhotoStack::default();
+    stack.tone_curve.params = vec![
+        photo_engine::CurveNode::new(0.0, 0.0),
+        photo_engine::CurveNode::new(0.5, 0.6),
+        photo_engine::CurveNode::new(1.0, 1.0),
+    ];
+    stack.rgb_curves.params.red = vec![
+        photo_engine::CurveNode::new(0.0, 0.0),
+        photo_engine::CurveNode::new(0.5, 0.3),
+        photo_engine::CurveNode::new(1.0, 1.0),
+    ];
+
+    // Master only, both, RGB turned back off, then master off with RGB still on.
+    for (master, rgb) in [(true, false), (true, true), (true, false), (false, true)] {
+        stack.tone_curve.enabled = master;
+        stack.rgb_curves.enabled = rgb;
+        let fresh = render_patches(gpu, &stack, &[[half; 3]])[0];
+        assert_eq!(
+            cached(&stack),
+            fresh,
+            "master {master}, rgb {rgb}: the cached LUT renders differently from a fresh one"
+        );
+    }
+}
+
+#[test]
 fn a_uniform_colour_is_uniform_out_to_the_frame_edge() {
     let gpu = gpu_or_skip!();
     // One colour everywhere. Every pixel, edge and corner included, must come out as the

@@ -52,9 +52,12 @@ impl Default for RgbCurves {
 /// - Row 1: Red channel curve
 /// - Row 2: Green channel curve
 /// - Row 3: Blue channel curve
-pub fn build_lut_4channel(combined: &[CurveNode], rgb: Option<&RgbCurves>) -> Vec<f32> {
+///
+/// The shader applies all four rows whenever either curve module is on, so a disabled
+/// curve (`None`) must bake to identity rows rather than its stored nodes.
+pub fn build_lut_4channel(combined: Option<&[CurveNode]>, rgb: Option<&RgbCurves>) -> Vec<f32> {
     let mut out = Vec::with_capacity(LUT_SIZE * 4);
-    out.extend(build_lut(combined));
+    out.extend(build_lut(combined.unwrap_or(&identity_nodes())));
     if let Some(c) = rgb {
         out.extend(build_lut(&c.red));
         out.extend(build_lut(&c.green));
@@ -200,7 +203,7 @@ mod tests {
             blue: vec![CurveNode::new(0.0, 0.4), CurveNode::new(1.0, 0.6)],
         };
 
-        let lut = build_lut_4channel(&master, Some(&rgb));
+        let lut = build_lut_4channel(Some(&master), Some(&rgb));
         assert_eq!(lut.len(), LUT_SIZE * 4);
 
         // Row 0: master
@@ -218,5 +221,27 @@ mod tests {
         // Row 3: blue
         assert!((lut[3 * LUT_SIZE] - 0.4).abs() < 1e-3);
         assert!((lut[4 * LUT_SIZE - 1] - 0.6).abs() < 1e-3);
+    }
+
+    #[test]
+    fn build_lut_4channel_bakes_disabled_curves_as_identity() {
+        let master = vec![CurveNode::new(0.0, 0.2), CurveNode::new(1.0, 0.8)];
+        let rgb = RgbCurves {
+            red: vec![CurveNode::new(0.0, 0.1), CurveNode::new(1.0, 0.9)],
+            ..RgbCurves::default()
+        };
+        let ident = build_lut(&identity_nodes());
+
+        // Master off, RGB on: row 0 must not carry the master's stored nodes.
+        let lut = build_lut_4channel(None, Some(&rgb));
+        assert_eq!(&lut[..LUT_SIZE], &ident[..]);
+        assert!((lut[LUT_SIZE] - 0.1).abs() < 1e-3);
+
+        // Master on, RGB off: rows 1-3 are identity.
+        let lut = build_lut_4channel(Some(&master), None);
+        assert!((lut[0] - 0.2).abs() < 1e-3);
+        for row in 1..4 {
+            assert_eq!(&lut[row * LUT_SIZE..(row + 1) * LUT_SIZE], &ident[..]);
+        }
     }
 }

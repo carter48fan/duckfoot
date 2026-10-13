@@ -487,8 +487,11 @@ pub struct Engine {
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
     sensor_sampler: wgpu::Sampler,
-    cached_curve: Vec<CurveNode>,
-    cached_rgb_curves: crate::curve::RgbCurves,
+    // The curves the LUT was last baked from, `None` where that curve was disabled. Keyed on
+    // what is actually baked, so toggling a curve off rebuilds the LUT rather than leaving
+    // its old rows in place.
+    cached_curve: Option<Vec<CurveNode>>,
+    cached_rgb_curves: Option<crate::curve::RgbCurves>,
     image: Option<LoadedImage>,
 
     resize_pipeline: wgpu::RenderPipeline,
@@ -1234,8 +1237,8 @@ impl Engine {
             lut_texture,
             lut_view,
             sensor_sampler,
-            cached_curve: Vec::new(),
-            cached_rgb_curves: crate::curve::RgbCurves::default(),
+            cached_curve: None,
+            cached_rgb_curves: None,
             image: None,
             resize_pipeline,
             deep_resize_pipeline,
@@ -2396,14 +2399,12 @@ impl Engine {
             self.mask_overlay,
         );
 
-        if (stack.tone_curve.enabled || stack.rgb_curves.enabled)
-            && (self.cached_curve != stack.tone_curve.params
-                || self.cached_rgb_curves != stack.rgb_curves.params)
+        let master = stack.tone_curve.enabled.then_some(&stack.tone_curve.params);
+        let rgb = stack.rgb_curves.enabled.then_some(&stack.rgb_curves.params);
+        if (master.is_some() || rgb.is_some())
+            && (self.cached_curve.as_ref() != master || self.cached_rgb_curves.as_ref() != rgb)
         {
-            let lut = build_lut_4channel(
-                &stack.tone_curve.params,
-                stack.rgb_curves.enabled.then_some(&stack.rgb_curves.params),
-            );
+            let lut = build_lut_4channel(master.map(Vec::as_slice), rgb);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.lut_texture,
@@ -2423,8 +2424,8 @@ impl Engine {
                     depth_or_array_layers: 1,
                 },
             );
-            self.cached_curve = stack.tone_curve.params.clone();
-            self.cached_rgb_curves = stack.rgb_curves.params.clone();
+            self.cached_curve = master.cloned();
+            self.cached_rgb_curves = rgb.cloned();
         }
 
         let g = stack.geometry;
