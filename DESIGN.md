@@ -77,17 +77,15 @@ makes the Android bootstrap a small file instead of a fork.
 
 ```
   FILE ──► decode (CPU, once per image)
-              │  rawloader → u16 CFA mosaic + metadata
+              │  rawler (rawloader fallback) → u16 CFA mosaic + metadata
               ▼
         upload (once)  ──►  MOSAIC TEXTURE   R16Uint, immutable
                                   │
               ┌───────────────────┘
               ▼
-        PASS 1a demosaic green    ──►  GREEN PLANE     R16Float
-              │                         directional (Hamilton-Adams)
-              ▼
-        PASS 1b demosaic red/blue ──►  SENSOR TEXTURE  RGBA16Float, immutable
-              │                         colour-difference against green
+        PASS 1  demosaic          ──►  SENSOR TEXTURE  RGBA16Float, immutable
+              │                         RCD, four passes, for Bayer;
+              │                         two passes of its own for X-Trans
               │                         linear camera-native RGB
               │                         highlight reconstruction (neutral in A)
               │
@@ -150,12 +148,13 @@ sRGB. The chain is:
 camera RGB ──[xyz_to_cam⁻¹]──► XYZ ──[Bradford]──► working space ──[OETF]──► display
 ```
 
-**As built today** the working space is linear sRGB: one `cam_to_srgb` matrix (the steps
-above, folded together, dcraw-normalised) takes camera RGB straight there, and the chain
-clamps per channel only at the very end. Saturated colours can sit outside sRGB with a
-negative channel until then, which every stage must tolerate (see the NaN guard in local
-contrast). A wide-gamut working space (linear Rec.2020) with gamut-mapped output is planned,
-and is what P3 and Adobe RGB export will need.
+**As built today** the working space is linear Rec.2020 for new edits; sidecars saved
+before it existed keep linear sRGB (`PhotoStack::working_space`). One `cam_to_srgb` matrix
+(the steps above, folded together, dcraw-normalised) takes camera RGB to sRGB primaries and
+is composed with sRGB → Rec.2020, so colours outside sRGB carry through as negative sRGB
+channels, which every stage must tolerate (see the NaN guard in local contrast). At the end,
+`finish()` converts to the output's primaries (sRGB, P3 or Adobe RGB) and brings anything
+outside them in towards the grey of its own luminance rather than clipping per channel.
 
 The previous implementation skipped this entirely and encoded camera primaries as if they
 were sRGB. Every image came out wrong in a way that looks like a bad white balance and
@@ -229,9 +228,10 @@ This recovers **colour, not detail**. Texture inside a blown highlight is gone a
 `catch_unwind`, and a failure names both reasons. rawloader goes once a real-camera corpus
 shows no camera depends on it.
 
-**The LGPL-2.1 obligation is real and unresolved.** Static linking into an MIT binary
-carries a relink obligation. This must be settled before any binary is distributed. It does
-not block the PoC.
+**The LGPL-2.1 obligation is real.** Static linking into an MIT binary carries a relink
+obligation. Releases meet it by shipping the complete source with every binary
+(`duckfoot-<version>-source.tar.gz`, built by `build.yml`), so anyone can rebuild against a
+modified rawler or rawloader.
 
 ### What the decoder must not skip
 

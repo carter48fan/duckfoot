@@ -216,7 +216,7 @@ the filename and a reason in the status bar rather than silently rendering garba
 cargo test --workspace
 ```
 
-253 tests across the workspace covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
+Over 300 tests across the workspace covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
 singular-matrix fallback), white-balance normalisation, RCD and X-Trans demosaicing,
 pure-Rust ONNX inference (`u2netp.onnx`), monotone tone curve, banded 100MP+ export,
 GPU histogram computation, non-destructive geometry, sidecar persistence round-tripping,
@@ -482,7 +482,7 @@ DESIGN.md invariant 8.
 | **AI Studio** | `CutoutStudio` (rembg) | Working | Pure-Rust `tract-onnx` neural inference (`u2netp.onnx`), alpha matting, defringing & touch-ups |
 | **Colour** | Wide-gamut working space | Working | Linear Rec.2020 working space; sRGB, Display P3, and Adobe RGB exports with embedded ICC profiles |
 | **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |
-| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits; banded readback for 100MP+ sensors; EXIF, ICC profiles, and ISO 21496-1 Gain Map |
+| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits; banded readback for 100MP+ sensors; EXIF, ICC profiles. HDR gain map export is not built yet |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON v2 sidecars, atomic write, persistent undo history |
 | **App** | inspector, undo/redo | Working | Snapshot undo, per-photo persistent history, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Scatter, 2D Plot |
@@ -563,19 +563,20 @@ Checked items are done **and verified**, not merely written.
 - [ ] `crates/duckfoot-android/` bootstrap on `android-activity`
 - [ ] NDK + `cargo-ndk` + gradle harness, signed debug APK
 - [ ] Verify on a real device: texture limits, memory ceiling on a 24 MP file, suspend/resume
-- [ ] Settle the LGPL-2.1 distribution question **before** any binary ships
+- [x] Settle the LGPL-2.1 distribution question (complete source ships with every release)
 
 ### Stage 4 — Barrel 1 proper
 
 - [x] Extended pipeline modules (highlights & shadows, vibrance, capture sharpen, vignette)
-- [ ] Remaining modules (tone equaliser, local contrast, profiled denoise, lens correction)
-- [ ] Better demosaic (RCD or AHD)
+- [x] Local contrast (clarity, texture) and lens correction (lensfun profiles, DNG warp)
+- [ ] Remaining modules (tone equaliser, profiled denoise)
+- [x] Better demosaic (RCD for Bayer, two-pass X-Trans)
 - [x] The Shelf — asset list shared across barrels with multi-file ingest
 - [x] Copy stack / paste across photos
 - [x] Sidecar persistence (`.duckfoot` companion JSON files)
 - [x] Customizer drawer, module reordering, smooth scrolling, and sidebar expansion
-- [ ] Swap to `rawler` for camera coverage
-- [ ] Delete `apps/` and `packages/`
+- [x] Swap to `rawler` for camera coverage (rawloader kept as a fallback)
+- [x] Delete `apps/` and `packages/`
 
 ### Stage 5 — The other barrels
 

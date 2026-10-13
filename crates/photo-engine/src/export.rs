@@ -246,7 +246,10 @@ pub struct ExportSettings {
     /// If None and format supports alpha (PNG, WebP, TIFF), produces transparent alpha channel.
     #[serde(default)]
     pub matte_color: Option<[u8; 3]>,
-    /// Whether to generate and embed an HDR Gain Map (ISO 21496-1 / Ultra HDR metadata).
+    /// Reserved for HDR gain map export (ISO 21496-1 / Ultra HDR). Not written yet: the
+    /// pipeline has no HDR rendition to measure a gain map against (`finish()` clamps to
+    /// 0..1), so the export path ignores this and the UI does not offer it. Kept so saved
+    /// settings that carry it still load.
     #[serde(default)]
     pub hdr_gain_map: bool,
     /// Fine-tuning parameters for background cutout (threshold, feather, edge shift, defringing).
