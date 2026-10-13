@@ -61,6 +61,9 @@ fn a_slider_drag_makes_nothing_on_the_gpu() {
     let mut stack = PhotoStack::default();
     stack.tone_curve.enabled = true;
     stack.vibrance.enabled = true;
+    // Denoise renders a pre-pass of its own, which a drag must redraw, not rebuild.
+    stack.denoise.enabled = true;
+    stack.denoise.params.luminance = 0.3;
     let frame = |engine: &mut Engine, stack: &PhotoStack| {
         engine.render(&device, &queue, stack, Some(0.5));
         engine.poll_histogram(&device, &queue);
@@ -77,6 +80,7 @@ fn a_slider_drag_makes_nothing_on_the_gpu() {
         let made = photo_engine::gpu_objects_made();
         stack.exposure.params.ev = i as f32 / 30.0 - 1.0;
         stack.vibrance.params.vibrance = i as f32 / 120.0;
+        stack.denoise.params.luminance = 0.3 + i as f32 / 200.0;
         // A curve node dragged too: its LUT is written, not made again.
         stack.tone_curve.params = vec![
             CurveNode::new(0.0, 0.0),

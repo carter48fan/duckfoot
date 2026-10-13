@@ -364,6 +364,15 @@ struct Denoised {
     local: LocalDenoise,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// One pass per level written: its uniform buffer, bind group and target. Kept so a
+    /// slider drag rewrites the buffers and draws again rather than making them anew.
+    passes: Vec<DenoisePass>,
+}
+
+struct DenoisePass {
+    uniforms: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    target: wgpu::TextureView,
 }
 
 impl LoadedImage {
@@ -1420,8 +1429,24 @@ impl Engine {
         };
         let base = base.min(image.mip_levels - 1);
         let levels = image.mip_levels - base;
-        let (texture, view) = match reuse {
-            Some(d) if d.base == base => (d.texture, d.view),
+        let u = denoise_uniforms(
+            params,
+            image.mip_levels,
+            local,
+            (image.sensor_width, image.sensor_height),
+        );
+        let level_uniforms = |k: u32| {
+            let mut uniforms = u;
+            uniforms.a[0] = (base + k) as f32;
+            uniforms
+        };
+        let (texture, view, passes) = match reuse {
+            Some(d) if d.base == base => {
+                for (k, pass) in (0..levels).zip(&d.passes) {
+                    queue.write_buffer(&pass.uniforms, 0, bytemuck::bytes_of(&level_uniforms(k)));
+                }
+                (d.texture, d.view, d.passes)
+            }
             _ => {
                 let texture = scoped(device, "the denoised copy", || {
                     device.make_texture(&wgpu::TextureDescriptor {
@@ -1442,59 +1467,22 @@ impl Engine {
                     })
                 })?;
                 let view = texture.create_view(&Default::default());
-                (texture, view)
+                let passes = (0..levels)
+                    .map(|k| self.denoise_pass(device, image, &texture, k, &level_uniforms(k)))
+                    .collect();
+                (texture, view, passes)
             }
         };
-        let u = denoise_uniforms(
-            params,
-            image.mip_levels,
-            local,
-            (image.sensor_width, image.sensor_height),
-        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("denoise encoder"),
         });
-        for k in 0..levels {
-            let mut uniforms = u;
-            uniforms.a[0] = (base + k) as f32;
-            let buffer = device.make_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("denoise params"),
-                contents: bytemuck::bytes_of(&uniforms),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("denoise bind"),
-                layout: &self.denoise_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&image.sensor_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&image.brushes.view),
-                    },
-                ],
-            });
-            let target = texture.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: k,
-                mip_level_count: Some(1),
-                ..Default::default()
-            });
+        for pass in &passes {
             draw_fullscreen(
                 &mut encoder,
                 "denoise pass",
                 &self.denoise_pipeline,
-                &bind,
-                &target,
+                &pass.bind,
+                &pass.target,
             );
         }
         queue.submit([encoder.finish()]);
@@ -1504,7 +1492,56 @@ impl Engine {
             local: local.clone(),
             texture,
             view,
+            passes,
         })
+    }
+
+    /// The denoise pass that writes level `k` of `texture`, with its uniforms set.
+    fn denoise_pass(
+        &self,
+        device: &wgpu::Device,
+        image: &LoadedImage,
+        texture: &wgpu::Texture,
+        k: u32,
+        uniforms: &DenoiseUniforms,
+    ) -> DenoisePass {
+        let buffer = device.make_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("denoise params"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("denoise bind"),
+            layout: &self.denoise_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&image.sensor_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sensor_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&image.brushes.view),
+                },
+            ],
+        });
+        let target = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: k,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        DenoisePass {
+            uniforms: buffer,
+            bind,
+            target,
+        }
     }
 
     /// Bring the preview's denoised copy in line with `stack` and the preview level: made
@@ -1525,17 +1562,24 @@ impl Engine {
         {
             return;
         }
-        let reuse = image.denoised.take().map(|(d, _)| d);
+        // The same base keeps the texture, so the adjust bind group made for it still holds.
+        let (reuse, kept_bind) = match image.denoised.take() {
+            Some((d, bind)) if d.base == base => (Some(d), Some(bind)),
+            Some((d, _)) => (Some(d), None),
+            None => (None, None),
+        };
         match self.make_denoised(device, queue, &params, &local, base, reuse) {
             Ok(d) => {
                 let Some(image) = &self.image else { return };
-                let bind = self.adjust_bind(
-                    device,
-                    &d.view,
-                    &image.sensor_view,
-                    &image.brushes.view,
-                    &self.adjust_buffer,
-                );
+                let bind = kept_bind.unwrap_or_else(|| {
+                    self.adjust_bind(
+                        device,
+                        &d.view,
+                        &image.sensor_view,
+                        &image.brushes.view,
+                        &self.adjust_buffer,
+                    )
+                });
                 if let Some(image) = &mut self.image {
                     image.denoised = Some((d, bind));
                 }
