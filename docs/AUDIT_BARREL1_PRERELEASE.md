@@ -1,3 +1,9 @@
+> **Superseded.** This audit predates commit `150ec3d8` and was not checked against the code.
+> It reports HDR gain map export as working (it was never wired to the export path; the option
+> is now hidden until it is built), and does not mention the curve LUT cache that ignored the
+> curves' on/off switches or the denoise pre-pass that allocated on every slider tick (both
+> since fixed). Read it as history; README's status table and DESIGN.md describe what runs.
+
 # 🦆 Duckfoot: Comprehensive Pre-Release Audit & Lightroom Comparative Benchmark
 **Target:** Duckfoot v0.2.0 (Barrel 1: Photo Studio & RAW Processor)  
 **Date:** October 13, 2026  

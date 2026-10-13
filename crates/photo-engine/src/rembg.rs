@@ -142,6 +142,7 @@ pub fn find_model(model: &RembgModel) -> Option<PathBuf> {
 use std::sync::Arc;
 
 /// Active background removal session loaded in pure Rust.
+#[derive(Clone)]
 pub struct RembgSession {
     model: Arc<tract_onnx::tract_core::plan::SimplePlan<TypedFact, Box<dyn TypedOp>>>,
 }
@@ -187,8 +188,21 @@ impl RembgSession {
     /// Embedded U2Netp weights (4.4 MB) bundled directly in the binary for zero-setup offline usage.
     pub const BUNDLED_U2NETP: &'static [u8] = include_bytes!("../data/u2netp.onnx");
 
-    /// Automatically find and load a supported model, falling back to embedded U2Netp if no file exists.
+    /// Automatically find and load a supported model, falling back to embedded U2Netp if no
+    /// file exists. Loaded once a run and shared after that (a clone is an `Arc`): parsing
+    /// and optimising the graph is most of a cutout's time, and a batch export with
+    /// cutouts asked for it once a photo. A model dropped in place later is used from the
+    /// next run.
     pub fn auto() -> Result<Self> {
+        static LOADED: std::sync::OnceLock<std::result::Result<RembgSession, String>> =
+            std::sync::OnceLock::new();
+        LOADED
+            .get_or_init(|| Self::load_auto().map_err(|e| format!("{e:#}")))
+            .clone()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn load_auto() -> Result<Self> {
         // 1. Prefer local full U2Net if present on disk
         if let Some(path) = find_model(&RembgModel::U2Net) {
             log::info!("Loading rembg full U2Net model from {:?}", path);
