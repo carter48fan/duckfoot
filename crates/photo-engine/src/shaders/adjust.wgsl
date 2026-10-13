@@ -28,7 +28,8 @@ struct Adjust {
     sizes:      vec4<f32>,   // xy = output size, zw = sensor size
     orient:     vec4<f32>,   // xy = cos/sin of the INVERSE straighten, zw = mirror signs
     turns:      vec4<u32>,   // x = quarter turns clockwise
-    split:      vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled
+    split:      vec4<f32>,   // x = split fraction 0.0..1.0, or < 0.0 if disabled; yz = the
+                             // target's origin in the whole output, px (export bands)
     as_shot_wb: vec4<f32>,   // xyz = as-shot camera neutral multipliers
     tonal:      vec4<f32>,   // x = highlights, y = shadows, z = whites, w = blacks
     vibrance:   vec4<f32>,   // x = vibrance, y = saturation
@@ -969,7 +970,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // The target is either the full-resolution export or a reduced preview. Everything
     // below works in full-resolution output pixels, so both compute the same image and
     // differ only in how densely it is sampled (DESIGN.md: preview and export).
-    let out_px = pos.xy * u.sizes.xy / u.dest.xy;
+    // split.yz: where this render target sits in the whole output, for an export drawn
+    // a band at a time (0 for the preview, and for a target that is the whole output).
+    let out_px = (pos.xy + u.split.yz) * u.sizes.xy / u.dest.xy;
     let lod = u.dest.z;
     // Where the point belongs on an ideal sensor, then where the lens recorded it.
     let ideal = sensor_coords(out_px);
