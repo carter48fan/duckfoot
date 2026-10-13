@@ -169,7 +169,7 @@ You can also **drag a RAW file onto the window**.
 | `W`, then click | white balance from something that should be grey |
 | **View** | |
 | `\` | before / after split |
-| `S` | soft proof: the preview in the export's colour space, or as printed through a chosen printer profile |
+| `S` | soft proof: the preview in the export's colour space |
 | `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
 | `?` or `F1` | this list of shortcuts |
 | **Library** | |
@@ -517,7 +517,7 @@ png encode+write  205 ms
 ### Known gaps and caveats
 
 - **Fuji X-Trans demosaicing** is implemented in WGSL; exotic sensors (Foveon, float RAW) are refused loudly with `@stub`.
-- **Soft proofing** proofs against the export's colour space, and through a printer's ICC profile (CMYK or RGB, LUT-based, via `moxcms`) chosen from the stage toolbar's `printer…` chip, relative colorimetric. Choosing the rendering intent and simulating paper white are not offered yet.
+- **Soft proofing** proofs against the export's colour space, and through a printer's ICC profile (CMYK or RGB, LUT-based, via `moxcms`) chosen from the stage toolbar's `printer…` chip, relative colorimetric or perceptual, optionally simulating the paper's white. Profiles moxcms misreads (v4 lut16 tables over an XYZ connection space, such as Ghostscript's `ps_cmyk.icc`) are refused rather than proofed wrong.
 - **Display colour management** supports sRGB, Display P3, Adobe RGB, and custom monitor ICC profiles via settings; OS colord/ColorSync auto-detection is planned.
 
 ---

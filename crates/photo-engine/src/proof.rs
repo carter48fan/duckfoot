@@ -32,7 +32,7 @@ pub const SIZE: usize = 33;
 const WARN_DELTA_E: f32 = 5.0;
 
 /// How colours the printer cannot reach are brought in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Intent {
     /// Colours it can print are printed as they are; the rest are clipped to its gamut.
     /// Paper white is shown as white. Photoshop's default for proofing.
@@ -41,6 +41,18 @@ pub enum Intent {
     /// The whole image is compressed into the printer's gamut, as the profile's maker
     /// chose.
     Perceptual,
+}
+
+/// How the file is printed and how the print is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Printing {
+    /// What the print driver is asked to do with colours the printer cannot reach.
+    #[serde(default)]
+    pub intent: Intent,
+    /// Show the paper as it is (its tint, and a white no brighter than it), as an absolute
+    /// colorimetric proof does, rather than as the screen's white.
+    #[serde(default)]
+    pub paper: bool,
 }
 
 /// A baked proof: `SIZE`³ RGBA texels, red fastest, as half-float bits ready for a 3D
@@ -63,17 +75,17 @@ impl ProofTable {
     pub fn bake(
         export: OutputSpace,
         printer_icc: &[u8],
-        intent: Intent,
+        printing: Printing,
         screen: Screen,
     ) -> Result<Self> {
-        std::panic::catch_unwind(|| Self::bake_unguarded(export, printer_icc, intent, screen))
+        std::panic::catch_unwind(|| Self::bake_unguarded(export, printer_icc, printing, screen))
             .unwrap_or_else(|_| bail!("the profile could not be read"))
     }
 
     fn bake_unguarded(
         export: OutputSpace,
         printer_icc: &[u8],
-        intent: Intent,
+        printing: Printing,
         screen: Screen,
     ) -> Result<Self> {
         let printer = ColorProfile::new_from_slice(printer_icc)
@@ -100,26 +112,57 @@ impl ProofTable {
             prefer_fixed_point: false,
             ..Default::default()
         };
-        let printed = match intent {
+        let printed = match printing.intent {
             Intent::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
             Intent::Perceptual => RenderingIntent::Perceptual,
         };
         let cms = |e: moxcms::CmsError| anyhow::anyhow!("{e:?}");
-        let to_printer = source
-            .create_transform_f32(Layout::Rgb, &printer, layout, options(printed))
-            .map_err(cms)
-            .context("export → printer")?;
-        // Back from ink to light: relative colorimetric, so what was printed is shown as it
-        // is, with paper white as the screen's white.
-        let from_printer = printer
-            .create_transform_f32(
-                layout,
-                &linear,
-                Layout::Rgb,
-                options(RenderingIntent::RelativeColorimetric),
-            )
-            .map_err(cms)
-            .context("printer → screen")?;
+        // A profile without a table for an intent is used through its perceptual one, as
+        // ICC says (tag 0 is the one every LUT profile has); moxcms refuses instead.
+        let colorimetric_or_perceptual = |intent, colorimetric: bool, perceptual: bool| {
+            if intent != RenderingIntent::Perceptual && !colorimetric && perceptual {
+                RenderingIntent::Perceptual
+            } else {
+                intent
+            }
+        };
+        let to_printer = |intent| {
+            let intent = colorimetric_or_perceptual(
+                intent,
+                printer.lut_b_to_a_colorimetric.is_some(),
+                printer.lut_b_to_a_perceptual.is_some(),
+            );
+            source
+                .create_transform_f32(Layout::Rgb, &printer, layout, options(intent))
+                .map_err(cms)
+                .context("export → printer")
+        };
+        let from_printer = |intent| {
+            let intent = colorimetric_or_perceptual(
+                intent,
+                printer.lut_a_to_b_colorimetric.is_some(),
+                printer.lut_a_to_b_perceptual.is_some(),
+            );
+            printer
+                .create_transform_f32(layout, &linear, Layout::Rgb, options(intent))
+                .map_err(cms)
+                .context("printer → screen")
+        };
+        // What is shown: printed with the intent asked for, and back from ink to light
+        // relative colorimetric, paper white as the screen's white. Simulating the paper is
+        // ICC's absolute colorimetric: that, scaled to the paper's own white, which moxcms
+        // 0.8 does not do itself (its absolute intent only picks the colorimetric tables).
+        let shown_to = to_printer(printed)?;
+        let shown_from = from_printer(RenderingIntent::RelativeColorimetric)?;
+        let paper = match (printing.paper, printer.media_white_point) {
+            (true, Some(w)) => Some(paper_white([w.x, w.y, w.z])),
+            (true, None) => bail!("the profile does not say what its paper's white is"),
+            (false, _) => None,
+        };
+        // What is warned about is the same whatever is shown: whether a relative
+        // colorimetric print keeps the colour, as Photoshop's gamut warning asks.
+        let warn_to = to_printer(RenderingIntent::RelativeColorimetric)?;
+        let warn_from = from_printer(RenderingIntent::RelativeColorimetric)?;
         let unprinted = source
             .create_transform_f32(
                 Layout::Rgb,
@@ -140,20 +183,46 @@ impl ProofTable {
                 }
             }
         }
-        let mut ink = vec![0.0f32; n * layout.channels()];
-        to_printer.transform(&grid, &mut ink).map_err(cms)?;
-        let mut printed = vec![0.0f32; n * 3];
-        from_printer.transform(&ink, &mut printed).map_err(cms)?;
+        let print = |to: &dyn moxcms::TransformExecutor<f32>,
+                     from: &dyn moxcms::TransformExecutor<f32>|
+         -> Result<Vec<f32>> {
+            let mut ink = vec![0.0f32; n * layout.channels()];
+            to.transform(&grid, &mut ink).map_err(cms)?;
+            let mut light = vec![0.0f32; n * 3];
+            from.transform(&ink, &mut light).map_err(cms)?;
+            Ok(light)
+        };
+        let shown = print(shown_to.as_ref(), shown_from.as_ref())?;
+        let printed = if printing == Printing::default() {
+            shown.clone()
+        } else {
+            print(warn_to.as_ref(), warn_from.as_ref())?
+        };
         let mut wanted = vec![0.0f32; n * 3];
         unprinted.transform(&grid, &mut wanted).map_err(cms)?;
 
         // The printer's black: the darkest it shows a neutral, which the warning allows for
         // (relative colorimetric maps paper white to white but cannot go below its black).
+        // Relative colorimetric brings the file's white back as white whatever the paper,
+        // so a white that comes back grey is a profile the CMM misreads. moxcms 0.8 and 0.9
+        // do with v4 lut16 (mft2) tables over an XYZ connection space, Ghostscript's
+        // ps_cmyk.icc among them: white goes to about half ink where LittleCMS gives none.
+        // Better no proof than a wrong one.
+        let white = {
+            let at = (n - 1) * 3;
+            lab([printed[at], printed[at + 1], printed[at + 2]])[0]
+        };
+        if white < 97.0 {
+            bail!(
+                "this profile's tables are not read correctly here (its white prints as \
+                 L* {white:.0}); proof it in another application"
+            );
+        }
         let black_l = {
             let mut black = [0.0f32; 3];
             let mut k = vec![0.0f32; layout.channels()];
-            to_printer.transform(&[0.0; 3], &mut k).map_err(cms)?;
-            from_printer.transform(&k, &mut black).map_err(cms)?;
+            warn_to.transform(&[0.0; 3], &mut k).map_err(cms)?;
+            warn_from.transform(&k, &mut black).map_err(cms)?;
             lab(black)[0].clamp(0.0, 50.0)
         };
 
@@ -163,9 +232,15 @@ impl ProofTable {
             None => linear_to_srgb(v),
         };
         let mut texels = Vec::with_capacity(n * 4);
-        for (p, w) in printed.chunks_exact(3).zip(wanted.chunks_exact(3)) {
+        for ((p, w), s) in printed
+            .chunks_exact(3)
+            .zip(wanted.chunks_exact(3))
+            .zip(shown.chunks_exact(3))
+        {
             let p = [p[0], p[1], p[2]];
-            let shown = mul(&to_screen, p).map(|v| encode(v.clamp(0.0, 1.0)));
+            let s = [s[0], s[1], s[2]];
+            let s = paper.as_ref().map_or(s, |m| mul(m, s));
+            let shown = mul(&to_screen, s).map(|v| encode(v.clamp(0.0, 1.0)));
             let (lp, mut lw) = (lab(p), lab([w[0], w[1], w[2]]));
             // Relative colorimetric keeps every lightness the printer reaches and clips
             // the rest to its black, which is the paper's limit rather than a lost colour.
@@ -187,7 +262,10 @@ impl ProofTable {
         Self::bake_unguarded(
             OutputSpace::Srgb,
             printer_icc,
-            Intent::default(),
+            Printing {
+                intent: Intent::Perceptual,
+                paper: true,
+            },
             Screen::SRGB,
         )
     }
@@ -230,6 +308,33 @@ fn linear_rec2020() -> ColorProfile {
     p
 }
 
+/// BT.2020 → XYZ, white normalised to Y = 1.
+const REC2020_TO_XYZ: crate::gamut::Mat3 = [
+    [0.636_958, 0.144_617, 0.168_881],
+    [0.262_700, 0.677_998, 0.059_302],
+    [0.000_000, 0.028_073, 1.060_985],
+];
+
+/// Relative → absolute colorimetric, on linear Rec.2020: the screen's white becomes the
+/// paper's, `media` being the profile's media white in the D50 connection space. A von
+/// Kries scaling in Bradford's cone space, which is how relative colorimetric adapted the
+/// paper to D50 in the first place.
+fn paper_white(media: [f64; 3]) -> crate::gamut::Mat3 {
+    const BRADFORD: crate::gamut::Mat3 = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    const D50: [f32; 3] = [0.9642, 1.0, 0.8249];
+    let media = media.map(|v| v as f32);
+    let (cone, white) = (mul(&BRADFORD, media), mul(&BRADFORD, D50));
+    let scale: crate::gamut::Mat3 = std::array::from_fn(|i| {
+        std::array::from_fn(|j| if i == j { cone[i] / white[i] } else { 0.0 })
+    });
+    let to_cone = compose(&BRADFORD, &REC2020_TO_XYZ);
+    compose(&crate::gamut::invert3(&to_cone), &compose(&scale, &to_cone))
+}
+
 fn mul(m: &crate::gamut::Mat3, v: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
 }
@@ -244,12 +349,7 @@ fn linear_to_srgb(v: f32) -> f32 {
 
 /// CIE L*a*b* (D65 white) of linear Rec.2020.
 fn lab(rgb: [f32; 3]) -> [f32; 3] {
-    // BT.2020 → XYZ, normalised to the white point.
-    const M: crate::gamut::Mat3 = [
-        [0.636_958, 0.144_617, 0.168_881],
-        [0.262_700, 0.677_998, 0.059_302],
-        [0.000_000, 0.028_073, 1.060_985],
-    ];
+    const M: crate::gamut::Mat3 = REC2020_TO_XYZ;
     const WHITE: [f32; 3] = [0.950_47, 1.0, 1.088_83];
     let xyz = mul(&M, rgb);
     let f = |t: f32| {
@@ -270,7 +370,10 @@ mod tests {
     /// A real press profile, where the machine has one (colord ships the FOGRA set); the
     /// repository carries none, as their licences do not allow redistribution in it.
     fn press() -> Option<Vec<u8>> {
-        let path = "/usr/share/color/icc/colord/FOGRA39L_coated.icc";
+        installed("/usr/share/color/icc/colord/FOGRA39L_coated.icc")
+    }
+
+    fn installed(path: &str) -> Option<Vec<u8>> {
         let bytes = std::fs::read(path).ok();
         if bytes.is_none() {
             eprintln!("{path} is not installed: skipped");
@@ -285,7 +388,7 @@ mod tests {
         let t = ProofTable::bake(
             OutputSpace::Srgb,
             OutputSpace::Srgb.icc(),
-            Intent::RelativeColorimetric,
+            Printing::default(),
             Screen::SRGB,
         )
         .unwrap();
@@ -309,13 +412,8 @@ mod tests {
     #[test]
     fn a_press_keeps_paper_white_and_neutrals_and_loses_saturated_blue() {
         let Some(icc) = press() else { return };
-        let t = ProofTable::bake(
-            OutputSpace::Srgb,
-            &icc,
-            Intent::RelativeColorimetric,
-            Screen::SRGB,
-        )
-        .unwrap();
+        let t =
+            ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB).unwrap();
         let [r, g, b, warn] = t.at([1.0, 1.0, 1.0]);
         assert!(
             r > 0.99 && g > 0.99 && b > 0.99 && warn == 0.0,
@@ -340,6 +438,86 @@ mod tests {
     }
 
     #[test]
+    fn simulating_the_paper_dims_its_white_and_perceptual_keeps_the_warning() {
+        let Some(icc) = press() else { return };
+        let bake =
+            |printing| ProofTable::bake(OutputSpace::Srgb, &icc, printing, Screen::SRGB).unwrap();
+        let plain = bake(Printing::default());
+        let paper = bake(Printing {
+            paper: true,
+            ..Printing::default()
+        });
+        let perceptual = bake(Printing {
+            intent: Intent::Perceptual,
+            ..Printing::default()
+        });
+        let [r, g, b, _] = paper.at([1.0; 3]);
+        assert!(
+            r.max(g).max(b) < 0.995,
+            "paper white was shown as screen white: {r} {g} {b}"
+        );
+        // The intent changes what is warned about for no profile. (FOGRA39's perceptual
+        // and colorimetric tables are one table, so what is shown is the same too.)
+        for rgb in [[0.0, 0.0, 1.0], [0.5; 3], [1.0, 0.0, 0.0]] {
+            assert_eq!(perceptual.at(rgb)[3], plain.at(rgb)[3], "{rgb:?}");
+            assert_eq!(paper.at(rgb)[3], plain.at(rgb)[3], "{rgb:?}");
+        }
+    }
+
+    #[test]
+    fn a_profile_the_cmm_misreads_is_refused_not_proofed_wrong() {
+        // Ghostscript's press profile: A2B0 and B2A0 alone (so perceptual stands in for
+        // relative), and lut16 over XYZ, which moxcms reads with white printing as grey.
+        let Some(icc) = installed("/usr/share/color/icc/ghostscript/ps_cmyk.icc") else {
+            return;
+        };
+        let e = ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB)
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("not read correctly"), "{e:#}");
+    }
+
+    #[test]
+    fn perceptual_reads_the_profiles_own_perceptual_table() {
+        // No installed profile has perceptual and colorimetric tables that differ, so one is
+        // made: FOGRA39 printed perceptually through GRACoL's table.
+        let (Some(fogra), Some(gracol)) = (
+            press(),
+            installed("/usr/share/color/icc/colord/GRACoL_TR006_coated.icc"),
+        ) else {
+            return;
+        };
+        let mut p = ColorProfile::new_from_slice(&fogra).unwrap();
+        p.lut_b_to_a_perceptual = ColorProfile::new_from_slice(&gracol)
+            .unwrap()
+            .lut_b_to_a_colorimetric;
+        let icc = p.encode().unwrap();
+        let bake = |intent| {
+            let printing = Printing {
+                intent,
+                ..Printing::default()
+            };
+            ProofTable::bake(OutputSpace::Srgb, &icc, printing, Screen::SRGB).unwrap()
+        };
+        let (plain, perceptual) = (bake(Intent::RelativeColorimetric), bake(Intent::Perceptual));
+        let moved = perceptual
+            .texels
+            .chunks_exact(4)
+            .zip(plain.texels.chunks_exact(4))
+            .filter(|(a, b)| (0..3).any(|c| (a[c].to_f32() - b[c].to_f32()).abs() > 0.01))
+            .count();
+        assert!(
+            moved > SIZE * SIZE * SIZE / 20,
+            "perceptual moved only {moved} colours"
+        );
+        let warns = |t: &ProofTable| t.texels.chunks_exact(4).map(|t| t[3]).collect::<Vec<_>>();
+        assert_eq!(
+            warns(&perceptual),
+            warns(&plain),
+            "the intent changed what was warned about"
+        );
+    }
+
+    #[test]
     fn the_shader_samples_the_table_at_its_size() {
         let wgsl = include_str!("shaders/adjust.wgsl");
         let want = format!("const PROOF_SIZE: f32 = {SIZE}.0;");
@@ -351,7 +529,7 @@ mod tests {
         assert!(ProofTable::bake(
             OutputSpace::Srgb,
             b"not a profile",
-            Intent::RelativeColorimetric,
+            Printing::default(),
             Screen::SRGB
         )
         .is_err());

@@ -4,14 +4,14 @@
 use crate::*;
 use photo_engine::engine::Proof;
 use photo_engine::gamut::{OutputSpace, Screen};
-use photo_engine::proof::{Intent, ProofTable};
+use photo_engine::proof::{Intent, Printing, ProofTable};
 
 /// A printer profile to proof through: read once when chosen, and baked into the engine's
 /// table again whenever the export's space or the screen it is baked for changes.
 pub(crate) struct Printer {
     icc: Vec<u8>,
     name: String,
-    baked_for: Option<(OutputSpace, Screen)>,
+    baked_for: Option<(OutputSpace, Screen, Printing)>,
 }
 
 impl PhotoApp {
@@ -47,7 +47,7 @@ impl PhotoApp {
             .map_err(|e| e.to_string())
             .and_then(|icc| {
                 // A trial bake: a profile is only kept if it can be proofed through.
-                ProofTable::bake(OutputSpace::Srgb, &icc, Intent::default(), Screen::SRGB)
+                ProofTable::bake(OutputSpace::Srgb, &icc, Printing::default(), Screen::SRGB)
                     .map(|_| icc)
                     .map_err(|e| format!("{e:#}"))
             });
@@ -110,14 +110,15 @@ impl PhotoApp {
     /// already baked for them (about 20 ms, so only when one of them changes).
     fn sync_printer_table(&mut self, gpu: &Gpu) {
         let space = self.export_settings.color_space;
-        let key = (space, self.screen);
+        let printing = self.settings.proof_printing;
+        let key = (space, self.screen, printing);
         let Some(printer) = &mut self.printer else {
             return;
         };
         if printer.baked_for == Some(key) {
             return;
         }
-        match ProofTable::bake(space, &printer.icc, Intent::default(), self.screen) {
+        match ProofTable::bake(space, &printer.icc, printing, self.screen) {
             Ok(table) => {
                 self.engine.set_proof_table(gpu.queue, Some(&table));
                 printer.baked_for = Some(key);
@@ -223,6 +224,33 @@ impl PhotoApp {
                 {
                     self.settings.proof_icc = None;
                     self.refresh_printer();
+                    self.save_settings();
+                    return;
+                }
+                let mut printing = self.settings.proof_printing;
+                let perceptual = printing.intent == Intent::Perceptual;
+                if widgets::chip(ui, perceptual, "perceptual")
+                    .on_hover_text(
+                        "Print perceptual: the whole image compressed into what the printer \
+                         holds. Off: relative colorimetric, which keeps what it can print \
+                         exactly and clips the rest",
+                    )
+                    .clicked()
+                {
+                    printing.intent = if perceptual {
+                        Intent::RelativeColorimetric
+                    } else {
+                        Intent::Perceptual
+                    };
+                }
+                if widgets::chip(ui, printing.paper, "paper")
+                    .on_hover_text("Show the paper's own white and tint, not the screen's white")
+                    .clicked()
+                {
+                    printing.paper = !printing.paper;
+                }
+                if printing != self.settings.proof_printing {
+                    self.settings.proof_printing = printing;
                     self.save_settings();
                 }
             }

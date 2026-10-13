@@ -54,6 +54,9 @@ pub struct Settings {
     /// The printer profile soft proofing goes through (W-10), if one is chosen.
     #[serde(default)]
     pub proof_icc: Option<PathBuf>,
+    /// The intent printed with, and whether the paper's white is simulated.
+    #[serde(default)]
+    pub proof_printing: photo_engine::proof::Printing,
 }
 
 impl Default for Settings {
@@ -83,6 +86,7 @@ impl Default for Settings {
             display: None,
             display_icc: None,
             proof_icc: None,
+            proof_printing: photo_engine::proof::Printing::default(),
         }
     }
 }
