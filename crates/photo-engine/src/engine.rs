@@ -259,6 +259,30 @@ pub struct LoadedImage {
     /// that reads it. Made from the preview's level down, so it costs 1/4^level of a
     /// full-resolution copy.
     denoised: Option<(Denoised, wgpu::BindGroup)>,
+    /// The Remove spots' fills, by atlas slot (the n-th Remove spot is in slot n); `None`
+    /// for one that could not be filled, which is then healed instead.
+    fills: Vec<Option<Fill>>,
+}
+
+/// A Remove spot's content-aware fill: the sensor area it was made from, which sits in its
+/// atlas slot (`fill_atlas`) at `scale` sensor pixels a texel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Fill {
+    /// The spot it was made for: its centre and radius, as bits.
+    key: [u32; 3],
+    /// The window's corner, sensor px.
+    origin: [f32; 2],
+    scale: f32,
+}
+
+impl Fill {
+    fn key(spot: &crate::heal::Spot) -> [u32; 3] {
+        [
+            spot.dst[0].to_bits(),
+            spot.dst[1].to_bits(),
+            spot.radius.to_bits(),
+        ]
+    }
 }
 
 /// Brush masks' coverage, one texture layer each, rasterised from their dabs (see
@@ -507,6 +531,9 @@ pub struct Engine {
     proof_table: wgpu::Texture,
     proof_table_view: wgpu::TextureView,
     proof_table_loaded: bool,
+    /// Remove spots' fills, a slot each (`heal::FILL_SLOTS` of `heal::FILL_TILE` texels).
+    fill_atlas: wgpu::Texture,
+    fill_atlas_view: wgpu::TextureView,
     /// The screen's own profile (W-14), baked the same way, and whether one is loaded.
     screen_table: wgpu::Texture,
     screen_table_view: wgpu::TextureView,
@@ -1004,6 +1031,17 @@ impl Engine {
                 // The printer proof table, and the screen's.
                 table_entry(6),
                 table_entry(7),
+                // Remove spots' fills.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let denoise_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1194,6 +1232,21 @@ impl Engine {
         let proof_table_view = proof_table.create_view(&Default::default());
         let screen_table = table_3d("screen profile table");
         let screen_table_view = screen_table.create_view(&Default::default());
+        let fill_atlas = device.make_texture(&wgpu::TextureDescriptor {
+            label: Some("remove fill atlas"),
+            size: wgpu::Extent3d {
+                width: crate::heal::FILL_ATLAS,
+                height: crate::heal::FILL_ATLAS,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SENSOR_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let fill_atlas_view = fill_atlas.create_view(&Default::default());
 
         let hist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("histogram"),
@@ -1302,6 +1355,8 @@ impl Engine {
             screen_table,
             screen_table_view,
             screen_table_loaded: false,
+            fill_atlas,
+            fill_atlas_view,
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1501,6 +1556,10 @@ impl Engine {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&self.screen_table_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self.fill_atlas_view),
+                },
             ],
         })
     }
@@ -1638,6 +1697,151 @@ impl Engine {
 
     /// Bring the preview's denoised copy in line with `stack` and the preview level: made
     /// when Denoise turns on or changes, dropped when it turns off.
+    /// Fill the Remove spots that are new or have moved, each into its atlas slot. A fill
+    /// is kept as long as its spot stays put, so only placing or moving one costs a fill.
+    fn sync_fills(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
+        let removes: Vec<crate::heal::Spot> = if stack.heal.enabled {
+            stack
+                .heal
+                .params
+                .spots
+                .iter()
+                .take(crate::heal::MAX_SPOTS)
+                .filter(|s| s.mode == crate::heal::Mode::Remove)
+                .take(crate::heal::FILL_SLOTS)
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let Some(image) = &self.image else { return };
+        let stale: Vec<usize> = (0..removes.len())
+            .filter(|&slot| {
+                image
+                    .fills
+                    .get(slot)
+                    .and_then(|f| f.as_ref())
+                    .map(|f| f.key)
+                    != Some(Fill::key(&removes[slot]))
+            })
+            .collect();
+        let mut made = Vec::new();
+        for slot in stale {
+            let fill = self.fill_spot(device, queue, image, &removes[slot], slot);
+            if let Err(e) = &fill {
+                log::warn!("a Remove spot could not be filled ({e:#}); healed instead");
+            }
+            made.push((slot, fill.ok()));
+        }
+        let Some(image) = &mut self.image else { return };
+        image.fills.resize(removes.len(), None);
+        for (slot, fill) in made {
+            image.fills[slot] = fill;
+        }
+    }
+
+    /// Fill `spot` from what is around it: the sensor read back around it, at the level
+    /// where that fits one atlas slot, completed by PatchMatch (lc-inpaint), and written
+    /// into slot `slot`. A small spot is filled at full resolution; a large one at a
+    /// coarser level, so its fill is softer than the photo around it.
+    fn fill_spot(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &LoadedImage,
+        spot: &crate::heal::Spot,
+        slot: usize,
+    ) -> Result<Fill> {
+        use crate::heal::{FILL_CONTEXT, FILL_TILE};
+        let (sw, sh) = (image.sensor_width, image.sensor_height);
+        let r = (spot.radius * sw.max(sh) as f32).max(1.0);
+        let side = r * FILL_CONTEXT;
+        let mut level = 0u32;
+        while level + 1 < image.mip_levels && side / (1u32 << level) as f32 > FILL_TILE as f32 {
+            level += 1;
+        }
+        let scale = (1u32 << level) as f32;
+        let (lw, lh) = ((sw >> level).max(1), (sh >> level).max(1));
+        let tile = ((side / scale).ceil() as u32)
+            .clamp(1, FILL_TILE)
+            .min(lw)
+            .min(lh);
+        let centre = [
+            spot.dst[0] * sw as f32 / scale,
+            spot.dst[1] * sh as f32 / scale,
+        ];
+        let corner = |c: f32, extent: u32| {
+            (c - tile as f32 / 2.0)
+                .round()
+                .clamp(0.0, (extent - tile) as f32) as u32
+        };
+        let (ox, oy) = (corner(centre[0], lw), corner(centre[1], lh));
+        let texels = read_back_level(
+            device,
+            queue,
+            &image.sensor,
+            level,
+            (ox, oy, tile, tile),
+            8,
+            MAX_BAND_BYTES,
+        )?;
+        // Matched in a perceptual-ish domain: in linear light, patch distances are all
+        // about the highlights.
+        let img: Vec<f32> = texels
+            .chunks_exact(2)
+            .map(|h| {
+                half::f16::from_le_bytes([h[0], h[1]])
+                    .to_f32()
+                    .max(0.0)
+                    .sqrt()
+            })
+            .collect();
+        let hole_r = r / scale * 1.02 + 0.5;
+        let n = tile as usize;
+        let hole: Vec<bool> = (0..n * n)
+            .map(|i| {
+                let dx = (i % n) as f32 + ox as f32 + 0.5 - centre[0];
+                let dy = (i / n) as f32 + oy as f32 + 0.5 - centre[1];
+                dx * dx + dy * dy <= hole_r * hole_r
+            })
+            .collect();
+        let filled = lc_inpaint::complete(n, n, 4, &img, &hole, &Default::default())
+            .unwrap_or_else(|| lc_inpaint::membrane_fill(n, n, 4, &img, &hole));
+        let bytes: Vec<u8> = filled
+            .iter()
+            .flat_map(|v| half::f16::from_f32(v * v).to_le_bytes())
+            .collect();
+        let per_row = crate::heal::FILL_ATLAS / FILL_TILE;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.fill_atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: (slot as u32 % per_row) * FILL_TILE,
+                    y: (slot as u32 / per_row) * FILL_TILE,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(tile * 8),
+                rows_per_image: Some(tile),
+            },
+            wgpu::Extent3d {
+                width: tile,
+                height: tile,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(Fill {
+            key: Fill::key(spot),
+            origin: [ox as f32 * scale, oy as f32 * scale],
+            scale,
+        })
+    }
+
     fn sync_denoise(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
         let Some(image) = &mut self.image else { return };
         let Some((params, local)) =
@@ -1989,6 +2193,7 @@ impl Engine {
             overlay: None,
             brushes,
             denoised: None,
+            fills: Vec::new(),
         });
         self.sync_overlay(device);
         Ok(())
@@ -2190,6 +2395,7 @@ impl Engine {
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
+        self.sync_fills(device, queue, stack);
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
@@ -2425,6 +2631,7 @@ impl Engine {
             image.brushes.sync(queue, &brush_layers(stack));
         }
         self.sync_denoise(device, queue, stack);
+        self.sync_fills(device, queue, stack);
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
         let level = image.preview_level;
@@ -2545,6 +2752,7 @@ impl Engine {
             stack,
             (image.sensor_width, image.sensor_height),
             image.mip_levels,
+            &image.fills,
         );
         let masks = mask_uniforms(
             stack,
@@ -3161,7 +3369,12 @@ pub(crate) fn read_back_level(
 type Overview = (Vec<[f32; 4]>, (u32, u32));
 
 /// The heal spots, packed for the shader, and how many.
-fn spot_uniforms(stack: &PhotoStack, sensor: (u32, u32), mip_levels: u32) -> ([[f32; 4]; 64], u32) {
+fn spot_uniforms(
+    stack: &PhotoStack,
+    sensor: (u32, u32),
+    mip_levels: u32,
+    fills: &[Option<Fill>],
+) -> ([[f32; 4]; 64], u32) {
     let mut out = [[0.0f32; 4]; 64];
     if !stack.heal.enabled {
         return (out, 0);
@@ -3169,8 +3382,31 @@ fn spot_uniforms(stack: &PhotoStack, sensor: (u32, u32), mip_levels: u32) -> ([[
     let (w, h) = (sensor.0 as f32, sensor.1 as f32);
     let long = w.max(h);
     let mut n = 0;
+    let mut removes = 0;
     for spot in stack.heal.params.spots.iter().take(crate::heal::MAX_SPOTS) {
         let r = (spot.radius * long).max(1.0);
+        if spot.mode == crate::heal::Mode::Remove {
+            let slot = removes;
+            removes += 1;
+            // Mode 2 + its slot, and the window it was filled from. A spot that could not
+            // be filled (or found no slot) is healed from its source instead, below.
+            if let Some(Some(fill)) = fills.get(slot) {
+                out[n * 2] = [
+                    spot.dst[0] * w,
+                    spot.dst[1] * h,
+                    fill.origin[0],
+                    fill.origin[1],
+                ];
+                out[n * 2 + 1] = [
+                    r,
+                    spot.feather.clamp(0.01, 1.0),
+                    2.0 + slot as f32,
+                    fill.scale,
+                ];
+                n += 1;
+                continue;
+            }
+        }
         // The ring is measured where a texel is about half the spot's radius.
         let level = (r * 0.5)
             .max(1.0)
@@ -3186,7 +3422,7 @@ fn spot_uniforms(stack: &PhotoStack, sensor: (u32, u32), mip_levels: u32) -> ([[
             r,
             spot.feather.clamp(0.01, 1.0),
             match spot.mode {
-                crate::heal::Mode::Heal => 0.0,
+                crate::heal::Mode::Heal | crate::heal::Mode::Remove => 0.0,
                 crate::heal::Mode::Clone => 1.0,
             },
             level,

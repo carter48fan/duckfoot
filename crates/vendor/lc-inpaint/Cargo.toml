@@ -1,0 +1,14 @@
+[package]
+# Vendored from LightCraft's crates/inpaint (storytold/lightcraft b3d392b4), MIT OR Apache-2.0,
+# Copyright (c) 2026 ArtCraft Team and the LightCraft contributors (itself ported from
+# PhotoCraft, same licence). See VENDORED.md.
+name = "lc-inpaint"
+version = "0.7.1"
+description = "Content-aware hole filling: PatchMatch completion and membrane fill, vendored from LightCraft"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+rayon = "1"

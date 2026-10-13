@@ -44,6 +44,8 @@ ravif = { version = "0.13", default-features = false, features = ["threading"] }
 # JPEG XL export: a pure-Rust port of libjxl-tiny (BSD-3-Clause OR Apache-2.0). Pinned, as
 # LightCraft pins it: young, and its output is checked against jxl-oxide in the tests.
 jixel = "=0.3.4"
+# Content-aware fill for the heal module's Remove spots: PatchMatch, vendored from LightCraft.
+lc-inpaint = { path = "../vendor/lc-inpaint" }
 
 # HEIF/HEIC (iPhone) stills: vendored from LightCraft, pure Rust. Optional, as HEVC is patented
 # in some places (see crates/vendor/lc-heif/VENDORED.md).

@@ -1,7 +1,8 @@
-//! Spot heal and clone (W-02, DEC-5): up to 32 circular spots, each covering a
+//! Spot heal, clone and remove (W-02, DEC-5): up to 32 circular spots, each covering a
 //! destination with what is at its source. Clone copies the source as it is; heal also
 //! shifts it to the brightness and colour around the destination, so a dust spot on a sky
-//! is covered by sky of the right shade. Both happen as the adjust pass samples the sensor,
+//! is covered by sky of the right shade. Remove has no source: the engine fills it from the
+//! ground around it (PatchMatch, `lc-inpaint`), once per placement, into its fill atlas. Both happen as the adjust pass samples the sensor,
 //! before every adjustment, so the spot is gone from everything downstream.
 //!
 //! Positions are sensor coordinates (0..1), radii fractions of the long side, as masks are.
@@ -10,11 +11,24 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_SPOTS: usize = 32;
 
+/// Remove spots that can be filled at once, each in a slot of the engine's fill atlas.
+pub const FILL_SLOTS: usize = 16;
+/// A slot's side, in texels: the most a Remove spot's window is filled at. A larger
+/// window is filled at a coarser level of the sensor until it fits.
+pub const FILL_TILE: u32 = 256;
+/// The atlas's side: 4 × 4 slots.
+pub const FILL_ATLAS: u32 = 1024;
+/// A Remove spot's window, in radii across: the spot and two radii of ground on every
+/// side, which is where PatchMatch looks for what to fill it with.
+pub const FILL_CONTEXT: f32 = 6.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Mode {
     #[default]
     Heal,
     Clone,
+    /// Content-aware: filled from the ground around it (PatchMatch), with no source.
+    Remove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
