@@ -156,6 +156,13 @@ channels, which every stage must tolerate (see the NaN guard in local contrast).
 `finish()` converts to the output's primaries (sRGB, P3 or Adobe RGB) and brings anything
 outside them in towards the grey of its own luminance rather than clipping per channel.
 
+Fixes that change how a photo looks are versioned like the working space, so a saved edit
+is drawn as it was: `PhotoStack::rendering` is `V1` for a sidecar without it and `V2` for
+every new edit. V2 rolls highlights off by their brightest channel (keeping their hue),
+fades colours past white to white as their luminance passes one stop over instead of sending
+them to grey, and honours a DNG's AnalogBalance and CameraCalibration on the ForwardMatrix
+path. The export's resize, which no edit's look depends on, is in linear light for all.
+
 The previous implementation skipped this entirely and encoded camera primaries as if they
 were sRGB. Every image came out wrong in a way that looks like a bad white balance and
 isn't. The matrix comes from the file — the decoder exposes `xyz_to_cam` — and applying it

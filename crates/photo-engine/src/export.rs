@@ -479,17 +479,53 @@ impl<P: Sample> ExportedImage<P> {
         (self.width as f32 * self.height as f32) / 1_000_000.0
     }
 
-    /// This image scaled to `width × height` (Lanczos), or unchanged if it already is.
-    pub fn resized(self, width: u32, height: u32) -> Result<Self>
-    where
-        image::Rgba<P>: image::Pixel<Subpixel = P>,
-    {
+    /// This image scaled to `width × height` (Lanczos), or unchanged if it already is,
+    /// its samples taken as encoded with sRGB's curve.
+    pub fn resized(self, width: u32, height: u32) -> Result<Self> {
+        self.resized_in(width, height, None)
+    }
+
+    /// [`Self::resized`], the samples encoded with a pure power `gamma` (Adobe RGB's) or,
+    /// `None`, sRGB's curve. Filtered in linear light, as light adds up: averaged as
+    /// encoded values, a fine light-and-dark pattern comes out darker than it is (a black
+    /// and white checkerboard halved to 128 rather than the 188 its light averages to).
+    /// Through linear 16-bit, which an 8-bit export loses nothing to and a 16-bit one only
+    /// in its deepest shadows, rather than floats, which would be 16 bytes a pixel.
+    pub fn resized_in(self, width: u32, height: u32, gamma: Option<f32>) -> Result<Self> {
         if (width, height) == (self.width, self.height) {
             return Ok(self);
         }
         self.check_size()?;
         let (w, h) = (self.width, self.height);
-        let img = image::ImageBuffer::<image::Rgba<P>, Vec<P>>::from_raw(w, h, self.rgba)
+        let levels = P::MAX as usize + 1;
+        let decode = |e: f32| match gamma {
+            Some(g) => e.powf(g),
+            None if e <= 0.04045 => e / 12.92,
+            None => ((e + 0.055) / 1.055).powf(2.4),
+        };
+        let encode = |l: f32| match gamma {
+            Some(g) => l.powf(1.0 / g),
+            None if l <= 0.003_130_8 => l * 12.92,
+            None => 1.055 * l.powf(1.0 / 2.4) - 0.055,
+        };
+        // Every code the samples can take, to linear 16-bit; every linear 16-bit value
+        // back to a code. Alpha is coverage, already linear: only rescaled.
+        let to_linear: Vec<u16> = (0..levels)
+            .map(|v| (decode(v as f32 / P::MAX) * 65535.0).round() as u16)
+            .collect();
+        let to_code: Vec<P> = (0..65536u32)
+            .map(|v| P::from_f32(encode(v as f32 / 65535.0) * P::MAX))
+            .collect();
+        let linear: Vec<u16> = self
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let lin = |v: P| to_linear[(v.to_f32() as usize).min(levels - 1)];
+                let a = (p[3].to_f32() / P::MAX * 65535.0).round() as u16;
+                [lin(p[0]), lin(p[1]), lin(p[2]), a]
+            })
+            .collect();
+        let img = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(w, h, linear)
             .ok_or_else(|| anyhow!("{w}x{h} does not fit the buffer"))?;
         let out = image::imageops::resize(
             &img,
@@ -497,10 +533,24 @@ impl<P: Sample> ExportedImage<P> {
             height.max(1),
             image::imageops::FilterType::Lanczos3,
         );
+        let (ow, oh) = (out.width(), out.height());
+        let rgba = out
+            .into_raw()
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = P::from_f32(f32::from(p[3]) / 65535.0 * P::MAX);
+                [
+                    to_code[usize::from(p[0])],
+                    to_code[usize::from(p[1])],
+                    to_code[usize::from(p[2])],
+                    a,
+                ]
+            })
+            .collect();
         Ok(Self {
-            width: out.width(),
-            height: out.height(),
-            rgba: out.into_raw(),
+            width: ow,
+            height: oh,
+            rgba,
         })
     }
 
@@ -786,9 +836,12 @@ impl Exported {
     ) -> Result<Self> {
         let (w, h) = settings.sizing.target(self.width(), self.height());
         let strength = settings.sharpen.strength(settings.sharpen_amount);
+        let gamma = settings.effective_space().gamma();
         let mut out = match self {
-            Exported::Eight(i) => Exported::Eight(i.resized(w, h)?.sharpened(strength)),
-            Exported::Sixteen(i) => Exported::Sixteen(i.resized(w, h)?.sharpened(strength)),
+            Exported::Eight(i) => Exported::Eight(i.resized_in(w, h, gamma)?.sharpened(strength)),
+            Exported::Sixteen(i) => {
+                Exported::Sixteen(i.resized_in(w, h, gamma)?.sharpened(strength))
+            }
         };
         if settings.remove_background {
             let matte = if settings.format == ExportFormat::Jpeg && settings.matte_color.is_none() {
@@ -1923,6 +1976,30 @@ mod tests {
         assert_eq!(old.depth, BitDepth::Eight);
         assert!(old.strip_location);
         assert_eq!(old.metadata, MetadataPolicy::All);
+    }
+
+    #[test]
+    fn a_resize_averages_light_not_codes() {
+        // A black and white checkerboard, halved: each output pixel is half white light,
+        // which sRGB encodes as about 188, not the 128 the codes average to.
+        let rgba = (0..64 * 64u32)
+            .flat_map(|i| {
+                let v = if (i % 64 + i / 64) % 2 == 0 { 255 } else { 0 };
+                [v, v, v, 255]
+            })
+            .collect();
+        let img = ExportedImage::<u8> {
+            width: 64,
+            height: 64,
+            rgba,
+        };
+        let out = img.resized(16, 16).unwrap();
+        let centre = out.rgba[(8 * 16 + 8) * 4];
+        assert!(
+            centre.abs_diff(188) <= 3,
+            "half white light came out as {centre}"
+        );
+        assert_eq!(out.rgba[(8 * 16 + 8) * 4 + 3], 255, "alpha moved");
     }
 
     #[test]
