@@ -712,8 +712,13 @@ fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
 fn range_weight(range_vec: vec4<f32>, c: vec3<f32>) -> f32 {
     let mode = range_vec.x;
     if (mode > 0.5 && mode < 1.5) {
-        // Luminance range: y = min_luma, z = max_luma, w = feather
-        let lum = clamp(luma(c), 0.0, 1.0);
+        // Luminance range: y = min_luma, z = max_luma, w = feather. V1 measured the
+        // linear light before exposure, so the range moved when exposure did and its 0..1
+        // was mostly shadow; V2 measures the exposed light as a display shows it.
+        var lum = clamp(luma(c), 0.0, 1.0);
+        if (enabled(FLAG_RENDER_V2)) {
+            lum = linear_to_srgb(vec3<f32>(clamp(luma(exposed(c)), 0.0, 1.0))).x;
+        }
         let min_l = range_vec.y;
         let max_l = range_vec.z;
         let feather = max(range_vec.w, 0.001);
@@ -721,8 +726,13 @@ fn range_weight(range_vec: vec4<f32>, c: vec3<f32>) -> f32 {
         let upper = 1.0 - smoothstep(max_l, max_l + feather, lum);
         return lower * upper;
     } else if (mode >= 1.5) {
-        // Color / Hue range: y = target_hue (0..360), z = spread (0..180), w = feather (0..180)
-        let hsv = rgb_to_hsv(c);
+        // Color / Hue range: y = target_hue (0..360), z = spread (0..180), w = feather (0..180).
+        // V2 names hues as the colour EQ does, in sRGB's primaries, so a colour has the same
+        // hue in both; V1 read them off the wide working space's raw values.
+        var hsv = rgb_to_hsv(c);
+        if (enabled(FLAG_RENDER_V2) && u.luma_w.w > 0.5) {
+            hsv = rgb_to_hsv(REC2020_TO_SRGB * c);
+        }
         let target_hue = range_vec.y;
         let spread = range_vec.z;
         let feather = max(range_vec.w, 0.001);
@@ -1042,7 +1052,17 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s_lf = spot_sample_fast(src - vec2<f32>(step, 0.0), lod);
         let s_rt = spot_sample_fast(src + vec2<f32>(step, 0.0), lod);
         let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
-        s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
+        if (enabled(FLAG_RENDER_V2)) {
+            // Held to the neighbourhood, overshooting it by at most half its own range:
+            // a halo is limited by the local contrast, and a highlight reconstructed past
+            // twice white (V1's fixed ceiling) keeps its value.
+            let lo = min(s, min(min(s_up, s_dn), min(s_lf, s_rt)));
+            let hi = max(s, max(max(s_up, s_dn), max(s_lf, s_rt)));
+            let room = (hi - lo) * 0.5;
+            s = clamp(s + laplacian * sharpen, max(lo - room, vec4<f32>(0.0)), hi + room);
+        } else {
+            s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
+        }
     }
 
     // After sharpening, whose kernel is a pixel across and would otherwise see the gain as
