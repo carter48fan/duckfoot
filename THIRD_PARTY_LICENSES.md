@@ -68,6 +68,8 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `adler32` | `1.2.0` | Zlib | [https://github.com/remram44/adler32-rs](https://github.com/remram44/adler32-rs) |
 | `ahash` | `0.8.12` | MIT OR Apache-2.0 | [https://github.com/tkaitchuck/ahash](https://github.com/tkaitchuck/ahash) |
 | `aho-corasick` | `1.1.5` | Unlicense OR MIT | [https://github.com/BurntSushi/aho-corasick](https://github.com/BurntSushi/aho-corasick) |
+| `aligned` | `0.4.3` | MIT OR Apache-2.0 | [https://github.com/rust-embedded-community/aligned](https://github.com/rust-embedded-community/aligned) |
+| `aligned-vec` | `0.6.4` | MIT | [https://github.com/sarah-ek/aligned-vec/](https://github.com/sarah-ek/aligned-vec/) |
 | `alloc-no-stdlib` | `2.0.4` | BSD-3-Clause | [https://github.com/dropbox/rust-alloc-no-stdlib](https://github.com/dropbox/rust-alloc-no-stdlib) |
 | `alloc-stdlib` | `0.2.4` | BSD-3-Clause | [https://github.com/dropbox/rust-alloc-no-stdlib](https://github.com/dropbox/rust-alloc-no-stdlib) |
 | `allocator-api2` | `0.2.21` | MIT OR Apache-2.0 | [https://github.com/zakarumych/allocator-api2](https://github.com/zakarumych/allocator-api2) |
@@ -83,9 +85,12 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `anstyle-wincon` | `3.0.11` | MIT OR Apache-2.0 | [https://github.com/rust-cli/anstyle.git](https://github.com/rust-cli/anstyle.git) |
 | `anyhow` | `1.0.104` | MIT OR Apache-2.0 | [https://github.com/dtolnay/anyhow](https://github.com/dtolnay/anyhow) |
 | `anymap3` | `1.1.0` | BlueOak-1.0.0 OR MIT OR Apache-2.0 | [https://github.com/reivilibre/anymap3](https://github.com/reivilibre/anymap3) |
+| `arbitrary` | `1.5.0` | MIT OR Apache-2.0 | [https://github.com/rust-fuzz/arbitrary/](https://github.com/rust-fuzz/arbitrary/) |
+| `arg_enum_proc_macro` | `0.3.4` | MIT | [https://github.com/lu-zero/arg_enum_proc_macro](https://github.com/lu-zero/arg_enum_proc_macro) |
 | `arrayref` | `0.3.9` | BSD-2-Clause | [https://github.com/droundy/arrayref](https://github.com/droundy/arrayref) |
 | `arrayvec` | `0.7.8` | MIT OR Apache-2.0 | [https://github.com/bluss/arrayvec](https://github.com/bluss/arrayvec) |
 | `as-raw-xcb-connection` | `1.0.1` | MIT OR Apache-2.0 | [https://github.com/psychon/as-raw-xcb-connection](https://github.com/psychon/as-raw-xcb-connection) |
+| `as-slice` | `0.2.1` | MIT OR Apache-2.0 | [https://github.com/japaric/as-slice](https://github.com/japaric/as-slice) |
 | `ash` | `0.38.0+1.3.281` | MIT OR Apache-2.0 | [https://github.com/ash-rs/ash](https://github.com/ash-rs/ash) |
 | `async-broadcast` | `0.7.2` | MIT OR Apache-2.0 | [https://github.com/smol-rs/async-broadcast](https://github.com/smol-rs/async-broadcast) |
 | `async-channel` | `2.5.0` | Apache-2.0 OR MIT | [https://github.com/smol-rs/async-channel](https://github.com/smol-rs/async-channel) |
@@ -102,6 +107,9 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `atspi-common` | `0.13.0` | Apache-2.0 OR MIT | [https://github.com/odilia-app/atspi](https://github.com/odilia-app/atspi) |
 | `atspi-proxies` | `0.13.0` | Apache-2.0 OR MIT | [https://github.com/odilia-app/atspi](https://github.com/odilia-app/atspi) |
 | `autocfg` | `1.5.1` | Apache-2.0 OR MIT | [https://github.com/cuviper/autocfg](https://github.com/cuviper/autocfg) |
+| `av-scenechange` | `0.14.1` | MIT | [https://github.com/rust-av/av-scenechange](https://github.com/rust-av/av-scenechange) |
+| `av1-grain` | `0.2.5` | BSD-2-Clause | [https://github.com/rust-av/av1-grain](https://github.com/rust-av/av1-grain) |
+| `avif-serialize` | `0.8.9` | BSD-3-Clause | [https://github.com/kornelski/avif-serialize](https://github.com/kornelski/avif-serialize) |
 | `backtrace` | `0.3.76` | MIT OR Apache-2.0 | [https://github.com/rust-lang/backtrace-rs](https://github.com/rust-lang/backtrace-rs) |
 | `bit-set` | `0.10.0` | Apache-2.0 OR MIT | [https://github.com/contain-rs/bit-set](https://github.com/contain-rs/bit-set) |
 | `bit-set` | `0.11.1` | Apache-2.0 OR MIT | [https://github.com/contain-rs/bit-vec](https://github.com/contain-rs/bit-vec) |
@@ -116,6 +124,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `borsh` | `1.8.1` | MIT OR Apache-2.0 | [https://github.com/near/borsh-rs](https://github.com/near/borsh-rs) |
 | `borsh-derive` | `1.8.1` | Apache-2.0 | [https://github.com/near/borsh-rs](https://github.com/near/borsh-rs) |
 | `brotli-decompressor` | `5.0.3` | BSD-3-Clause/MIT | [https://github.com/dropbox/rust-brotli-decompressor](https://github.com/dropbox/rust-brotli-decompressor) |
+| `built` | `0.8.1` | MIT | [https://github.com/lukaslueg/built](https://github.com/lukaslueg/built) |
 | `bumpalo` | `3.20.3` | MIT OR Apache-2.0 | [https://github.com/fitzgen/bumpalo](https://github.com/fitzgen/bumpalo) |
 | `bytemuck` | `1.25.2` | Zlib OR Apache-2.0 OR MIT | [https://github.com/Lokathor/bytemuck](https://github.com/Lokathor/bytemuck) |
 | `bytemuck_derive` | `1.12.1` | Zlib OR Apache-2.0 OR MIT | [https://github.com/Lokathor/bytemuck](https://github.com/Lokathor/bytemuck) |
@@ -176,6 +185,8 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `env_logger` | `0.11.11` | MIT OR Apache-2.0 | [https://github.com/rust-cli/env_logger](https://github.com/rust-cli/env_logger) |
 | `epaint` | `0.36.2` | MIT OR Apache-2.0 | [https://github.com/emilk/egui/tree/main/crates/epaint](https://github.com/emilk/egui/tree/main/crates/epaint) |
 | `epaint_default_fonts` | `0.36.2` | (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 | [https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts](https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts) |
+| `equator` | `0.4.2` | MIT | [https://github.com/sarah-ek/equator/](https://github.com/sarah-ek/equator/) |
+| `equator-macro` | `0.4.2` | MIT | [https://github.com/sarah-ek/equator/](https://github.com/sarah-ek/equator/) |
 | `equivalent` | `1.0.2` | Apache-2.0 OR MIT | [https://github.com/indexmap-rs/equivalent](https://github.com/indexmap-rs/equivalent) |
 | `erased-serde` | `0.4.10` | MIT OR Apache-2.0 | [https://github.com/dtolnay/erased-serde](https://github.com/dtolnay/erased-serde) |
 | `errno` | `0.3.14` | MIT OR Apache-2.0 | [https://github.com/lambda-fairy/rust-errno](https://github.com/lambda-fairy/rust-errno) |
@@ -226,7 +237,9 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `iana-time-zone-haiku` | `0.1.2` | MIT OR Apache-2.0 | [https://github.com/strawlab/iana-time-zone](https://github.com/strawlab/iana-time-zone) |
 | `image` | `0.25.10` | MIT OR Apache-2.0 | [https://github.com/image-rs/image](https://github.com/image-rs/image) |
 | `image-webp` | `0.2.4` | MIT OR Apache-2.0 | [https://github.com/image-rs/image-webp](https://github.com/image-rs/image-webp) |
+| `imgref` | `1.12.3` | CC0-1.0 OR Apache-2.0 | [https://github.com/kornelski/imgref](https://github.com/kornelski/imgref) |
 | `indexmap` | `2.14.2` | Apache-2.0 OR MIT | [https://github.com/indexmap-rs/indexmap](https://github.com/indexmap-rs/indexmap) |
+| `interpolate_name` | `0.2.4` | MIT | [https://github.com/lu-zero/interpolate_name](https://github.com/lu-zero/interpolate_name) |
 | `intl-memoizer` | `0.5.3` | Apache-2.0 OR MIT | [https://github.com/projectfluent/fluent-rs](https://github.com/projectfluent/fluent-rs) |
 | `intl_pluralrules` | `7.0.2` | Apache-2.0/MIT | [https://github.com/zbraniecki/pluralrules](https://github.com/zbraniecki/pluralrules) |
 | `inventory` | `0.3.24` | MIT OR Apache-2.0 | [https://github.com/dtolnay/inventory](https://github.com/dtolnay/inventory) |
@@ -237,6 +250,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `jiff` | `0.2.37` | Unlicense OR MIT | [https://github.com/BurntSushi/jiff](https://github.com/BurntSushi/jiff) |
 | `jiff-core` | `0.1.1` | Unlicense OR MIT | [https://github.com/BurntSushi/jiff](https://github.com/BurntSushi/jiff) |
 | `jiff-static` | `0.2.37` | Unlicense OR MIT | [https://github.com/BurntSushi/jiff](https://github.com/BurntSushi/jiff) |
+| `jixel` | `0.3.4` | BSD-3-Clause OR Apache-2.0 | [https://github.com/awxkee/jixel](https://github.com/awxkee/jixel) |
 | `jni` | `0.21.1` | MIT/Apache-2.0 | [https://github.com/jni-rs/jni-rs](https://github.com/jni-rs/jni-rs) |
 | `jni` | `0.22.4` | MIT OR Apache-2.0 | [https://github.com/jni-rs/jni-rs](https://github.com/jni-rs/jni-rs) |
 | `jni-macros` | `0.22.4` | MIT OR Apache-2.0 | [https://github.com/jni-rs/jni-rs](https://github.com/jni-rs/jni-rs) |
@@ -267,6 +281,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `libc` | `0.2.189` | MIT OR Apache-2.0 | [https://github.com/rust-lang/libc](https://github.com/rust-lang/libc) |
 | `libflate` | `2.3.2` | MIT | [https://github.com/sile/libflate](https://github.com/sile/libflate) |
 | `libflate_lz77` | `2.3.0` | MIT | [https://github.com/sile/libflate](https://github.com/sile/libflate) |
+| `libfuzzer-sys` | `0.4.13` | (MIT OR Apache-2.0) AND NCSA | [https://github.com/rust-fuzz/libfuzzer](https://github.com/rust-fuzz/libfuzzer) |
 | `libloading` | `0.8.9` | ISC | [https://github.com/nagisa/rust_libloading/](https://github.com/nagisa/rust_libloading/) |
 | `libm` | `0.2.16` | MIT | [https://github.com/rust-lang/compiler-builtins](https://github.com/rust-lang/compiler-builtins) |
 | `libredox` | `0.1.24` | MIT | [https://gitlab.redox-os.org/redox-os/libredox.git](https://gitlab.redox-os.org/redox-os/libredox.git) |
@@ -277,8 +292,10 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `litrs` | `1.0.0` | MIT OR Apache-2.0 | [https://github.com/LukasKalbertodt/litrs](https://github.com/LukasKalbertodt/litrs) |
 | `lock_api` | `0.4.14` | MIT OR Apache-2.0 | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
 | `log` | `0.4.34` | MIT OR Apache-2.0 | [https://github.com/rust-lang/log](https://github.com/rust-lang/log) |
+| `loop9` | `0.1.5` | MIT | [https://gitlab.com/kornelski/loop9.git](https://gitlab.com/kornelski/loop9.git) |
 | `maplit` | `1.0.2` | MIT/Apache-2.0 | [https://github.com/bluss/maplit](https://github.com/bluss/maplit) |
 | `matrixmultiply` | `0.3.11` | MIT/Apache-2.0 | [https://github.com/bluss/matrixmultiply/](https://github.com/bluss/matrixmultiply/) |
+| `maybe-rayon` | `0.1.1` | MIT | [https://github.com/shssoichiro/maybe-rayon](https://github.com/shssoichiro/maybe-rayon) |
 | `md5` | `0.8.1` | Apache-2.0 OR MIT | [https://github.com/stainless-steel/md5](https://github.com/stainless-steel/md5) |
 | `memchr` | `2.8.3` | Unlicense OR MIT | [https://github.com/BurntSushi/memchr](https://github.com/BurntSushi/memchr) |
 | `memmap2` | `0.9.11` | MIT OR Apache-2.0 | [https://github.com/RazrFalcon/memmap2-rs](https://github.com/RazrFalcon/memmap2-rs) |
@@ -297,13 +314,16 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `ndk` | `0.9.0` | MIT OR Apache-2.0 | [https://github.com/rust-mobile/ndk](https://github.com/rust-mobile/ndk) |
 | `ndk-context` | `0.1.1` | MIT OR Apache-2.0 | [https://github.com/rust-windowing/android-ndk-rs](https://github.com/rust-windowing/android-ndk-rs) |
 | `ndk-sys` | `0.6.0+11769913` | MIT OR Apache-2.0 | [https://github.com/rust-mobile/ndk](https://github.com/rust-mobile/ndk) |
+| `new_debug_unreachable` | `1.0.6` | MIT | [https://github.com/mbrubeck/rust-debug-unreachable](https://github.com/mbrubeck/rust-debug-unreachable) |
 | `no_std_io2` | `0.9.4` | Apache-2.0 OR MIT | [https://github.com/wcampbell0x2a/no-std-io2](https://github.com/wcampbell0x2a/no-std-io2) |
 | `nohash-hasher` | `0.2.0` | Apache-2.0 OR MIT | [https://github.com/paritytech/nohash-hasher](https://github.com/paritytech/nohash-hasher) |
 | `nom` | `8.0.0` | MIT | [https://github.com/rust-bakery/nom](https://github.com/rust-bakery/nom) |
 | `nom-language` | `0.1.0` | MIT | [https://github.com/rust-bakery/nom](https://github.com/rust-bakery/nom) |
+| `noop_proc_macro` | `0.3.0` | MIT | [https://github.com/lu-zero/noop_proc_macro](https://github.com/lu-zero/noop_proc_macro) |
 | `num` | `0.4.3` | MIT OR Apache-2.0 | [https://github.com/rust-num/num](https://github.com/rust-num/num) |
 | `num-bigint` | `0.4.8` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-bigint](https://github.com/rust-num/num-bigint) |
 | `num-complex` | `0.4.6` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-complex](https://github.com/rust-num/num-complex) |
+| `num-derive` | `0.4.2` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-derive](https://github.com/rust-num/num-derive) |
 | `num-integer` | `0.1.47` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-integer](https://github.com/rust-num/num-integer) |
 | `num-iter` | `0.1.46` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-iter](https://github.com/rust-num/num-iter) |
 | `num-rational` | `0.4.2` | MIT OR Apache-2.0 | [https://github.com/rust-num/num-rational](https://github.com/rust-num/num-rational) |
@@ -346,6 +366,8 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `parking` | `2.2.1` | Apache-2.0 OR MIT | [https://github.com/smol-rs/parking](https://github.com/smol-rs/parking) |
 | `parking_lot` | `0.12.5` | MIT OR Apache-2.0 | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
 | `parking_lot_core` | `0.9.12` | MIT OR Apache-2.0 | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
+| `paste` | `1.0.15` | MIT OR Apache-2.0 | [https://github.com/dtolnay/paste](https://github.com/dtolnay/paste) |
+| `pastey` | `0.1.1` | MIT OR Apache-2.0 | [https://github.com/as1100k/pastey](https://github.com/as1100k/pastey) |
 | `pastey` | `0.2.3` | MIT OR Apache-2.0 | [https://github.com/as1100k/pastey](https://github.com/as1100k/pastey) |
 | `peniko` | `0.6.1` | Apache-2.0 OR MIT | [https://github.com/linebender/peniko](https://github.com/linebender/peniko) |
 | `percent-encoding` | `2.3.2` | MIT OR Apache-2.0 | [https://github.com/servo/rust-url/](https://github.com/servo/rust-url/) |
@@ -366,11 +388,13 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `polycool` | `0.4.0` | MIT OR Apache-2.0 | [https://github.com/linebender/kurbo](https://github.com/linebender/kurbo) |
 | `portable-atomic` | `1.15.0` | Apache-2.0 OR MIT | [https://github.com/taiki-e/portable-atomic](https://github.com/taiki-e/portable-atomic) |
 | `portable-atomic-util` | `0.2.8` | Apache-2.0 OR MIT | [https://github.com/taiki-e/portable-atomic-util](https://github.com/taiki-e/portable-atomic-util) |
+| `ppv-lite86` | `0.2.21` | MIT OR Apache-2.0 | [https://github.com/cryptocorrosion/cryptocorrosion](https://github.com/cryptocorrosion/cryptocorrosion) |
 | `presser` | `0.3.1` | MIT OR Apache-2.0 | [https://github.com/EmbarkStudios/presser](https://github.com/EmbarkStudios/presser) |
 | `primal-check` | `0.3.4` | MIT OR Apache-2.0 | [https://github.com/huonw/primal](https://github.com/huonw/primal) |
 | `proc-macro-crate` | `3.5.0` | MIT OR Apache-2.0 | [https://github.com/bkchr/proc-macro-crate](https://github.com/bkchr/proc-macro-crate) |
 | `proc-macro2` | `1.0.107` | MIT OR Apache-2.0 | [https://github.com/dtolnay/proc-macro2](https://github.com/dtolnay/proc-macro2) |
 | `profiling` | `1.0.18` | MIT OR Apache-2.0 | [https://github.com/aclysma/profiling](https://github.com/aclysma/profiling) |
+| `profiling-procmacros` | `1.0.18` | MIT OR Apache-2.0 | [https://github.com/aclysma/profiling](https://github.com/aclysma/profiling) |
 | `prost` | `0.14.4` | Apache-2.0 | [https://github.com/tokio-rs/prost](https://github.com/tokio-rs/prost) |
 | `prost-derive` | `0.14.4` | Apache-2.0 | [https://github.com/tokio-rs/prost](https://github.com/tokio-rs/prost) |
 | `pxfm` | `0.1.30` | BSD-3-Clause OR Apache-2.0 | [https://github.com/awxkee/pxfm](https://github.com/awxkee/pxfm) |
@@ -379,10 +403,15 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `quote` | `1.0.47` | MIT OR Apache-2.0 | [https://github.com/dtolnay/quote](https://github.com/dtolnay/quote) |
 | `r-efi` | `5.3.0` | MIT OR Apache-2.0 OR LGPL-2.1-or-later | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
 | `r-efi` | `6.0.0` | MIT OR Apache-2.0 OR LGPL-2.1-or-later | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
+| `rand` | `0.9.5` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand` | `0.10.3` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
+| `rand_chacha` | `0.9.0` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
+| `rand_core` | `0.9.5` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand_core` | `0.10.1` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand_core](https://github.com/rust-random/rand_core) |
 | `rand_distr` | `0.6.0` | MIT OR Apache-2.0 | [https://github.com/rust-random/rand_distr](https://github.com/rust-random/rand_distr) |
 | `range-alloc` | `0.1.5` | MIT OR Apache-2.0 | [https://github.com/gfx-rs/range-alloc](https://github.com/gfx-rs/range-alloc) |
+| `rav1e` | `0.8.1` | BSD-2-Clause | [https://github.com/xiph/rav1e/](https://github.com/xiph/rav1e/) |
+| `ravif` | `0.13.0` | BSD-3-Clause | [https://github.com/kornelski/cavif-rs](https://github.com/kornelski/cavif-rs) |
 | `raw-window-handle` | `0.6.2` | MIT OR Apache-2.0 OR Zlib | [https://github.com/rust-windowing/raw-window-handle](https://github.com/rust-windowing/raw-window-handle) |
 | `raw-window-metal` | `1.1.0` | MIT OR Apache-2.0 | [https://github.com/rust-windowing/raw-window-metal](https://github.com/rust-windowing/raw-window-metal) |
 | `rawler` | `0.8.0` | LGPL-2.1 | [https://github.com/dnglab/dnglab](https://github.com/dnglab/dnglab) |
@@ -399,6 +428,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `regex-syntax` | `0.8.11` | MIT OR Apache-2.0 | [https://github.com/rust-lang/regex](https://github.com/rust-lang/regex) |
 | `renderdoc-sys` | `1.1.0` | MIT OR Apache-2.0 | [https://github.com/ebkalderon/renderdoc-rs](https://github.com/ebkalderon/renderdoc-rs) |
 | `rfd` | `0.17.2` | MIT | [https://github.com/PolyMeilex/rfd](https://github.com/PolyMeilex/rfd) |
+| `rgb` | `0.8.53` | MIT | [https://github.com/kornelski/rust-rgb](https://github.com/kornelski/rust-rgb) |
 | `rle-decode-fast` | `1.0.3` | MIT OR Apache-2.0 | [https://github.com/WanzenBug/rle-decode-helper](https://github.com/WanzenBug/rle-decode-helper) |
 | `rustc-demangle` | `0.1.28` | MIT/Apache-2.0 | [https://github.com/rust-lang/rustc-demangle](https://github.com/rust-lang/rustc-demangle) |
 | `rustc-hash` | `1.1.0` | Apache-2.0/MIT | [https://github.com/rust-lang-nursery/rustc-hash](https://github.com/rust-lang-nursery/rustc-hash) |
@@ -424,6 +454,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `signal-hook-registry` | `1.4.8` | MIT OR Apache-2.0 | [https://github.com/vorner/signal-hook](https://github.com/vorner/signal-hook) |
 | `simd-adler32` | `0.3.10` | MIT | [https://github.com/mcountryman/simd-adler32](https://github.com/mcountryman/simd-adler32) |
 | `simd_cesu8` | `1.2.0` | Apache-2.0 OR MIT | [https://github.com/seancroach/simd_cesu8](https://github.com/seancroach/simd_cesu8) |
+| `simd_helpers` | `0.1.0` | MIT | [https://github.com/lu-zero/simd_helpers](https://github.com/lu-zero/simd_helpers) |
 | `simdutf8` | `0.1.5` | MIT OR Apache-2.0 | [https://github.com/rusticstuff/simdutf8](https://github.com/rusticstuff/simdutf8) |
 | `siphasher` | `1.0.4` | MIT OR Apache-2.0 | [https://github.com/jedisct1/rust-siphash](https://github.com/jedisct1/rust-siphash) |
 | `skrifa` | `0.44.0` | MIT OR Apache-2.0 | [https://github.com/googlefonts/fontations](https://github.com/googlefonts/fontations) |
@@ -433,6 +464,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `smithay-client-toolkit` | `0.19.2` | MIT | [https://github.com/smithay/client-toolkit](https://github.com/smithay/client-toolkit) |
 | `smol_str` | `0.2.2` | MIT OR Apache-2.0 | [https://github.com/rust-analyzer/smol_str](https://github.com/rust-analyzer/smol_str) |
 | `spirv` | `0.4.0+sdk-1.4.341.0` | Apache-2.0 | [https://github.com/gfx-rs/rspirv](https://github.com/gfx-rs/rspirv) |
+| `stable_deref_trait` | `1.2.1` | MIT OR Apache-2.0 | [https://github.com/storyyeller/stable_deref_trait](https://github.com/storyyeller/stable_deref_trait) |
 | `static_assertions` | `1.1.0` | MIT OR Apache-2.0 | [https://github.com/nvzqz/static-assertions-rs](https://github.com/nvzqz/static-assertions-rs) |
 | `strength_reduce` | `0.2.4` | MIT OR Apache-2.0 | [http://github.com/ejmahler/strength_reduce](http://github.com/ejmahler/strength_reduce) |
 | `strict-num` | `0.1.1` | MIT | [https://github.com/RazrFalcon/strict-num](https://github.com/RazrFalcon/strict-num) |
@@ -484,6 +516,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `unicode-width` | `0.2.2` | MIT OR Apache-2.0 | [https://github.com/unicode-rs/unicode-width](https://github.com/unicode-rs/unicode-width) |
 | `utf8parse` | `0.2.2` | Apache-2.0 OR MIT | [https://github.com/alacritty/vte](https://github.com/alacritty/vte) |
 | `uuid` | `1.26.1` | Apache-2.0 OR MIT | [https://github.com/uuid-rs/uuid](https://github.com/uuid-rs/uuid) |
+| `v_frame` | `0.3.9` | BSD-2-Clause | [https://github.com/rust-av/v_frame](https://github.com/rust-av/v_frame) |
 | `vello_common` | `0.1.0` | Apache-2.0 OR MIT | [https://github.com/linebender/vello](https://github.com/linebender/vello) |
 | `vello_cpu` | `0.1.0` | Apache-2.0 OR MIT | [https://github.com/linebender/vello](https://github.com/linebender/vello) |
 | `version_check` | `0.9.5` | MIT/Apache-2.0 | [https://github.com/SergioBenitez/version_check](https://github.com/SergioBenitez/version_check) |
@@ -561,6 +594,7 @@ reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder, vend
 | `xkbcommon-dl` | `0.4.2` | MIT | [https://github.com/rust-windowing/xkbcommon-dl](https://github.com/rust-windowing/xkbcommon-dl) |
 | `xkeysym` | `0.2.1` | MIT OR Apache-2.0 OR Zlib | [https://github.com/notgull/xkeysym](https://github.com/notgull/xkeysym) |
 | `xml-rs` | `0.8.29` | MIT | [https://github.com/kornelski/xml-rs](https://github.com/kornelski/xml-rs) |
+| `y4m` | `0.8.0` | MIT | [https://github.com/image-rs/y4m.git](https://github.com/image-rs/y4m.git) |
 | `zbus` | `5.19.0` | MIT | [https://github.com/z-galaxy/zbus/](https://github.com/z-galaxy/zbus/) |
 | `zbus-lockstep` | `0.5.2` | MIT | [https://github.com/luukvanderduim/zbus-lockstep](https://github.com/luukvanderduim/zbus-lockstep) |
 | `zbus-lockstep-macros` | `0.5.2` | MIT | [https://github.com/luukvanderduim/zbus-lockstep](https://github.com/luukvanderduim/zbus-lockstep) |

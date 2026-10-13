@@ -23,7 +23,7 @@ impl PhotoApp {
             gpu.queue,
             &self.stack,
             depth,
-            settings.color_space,
+            settings.effective_space(),
         ) {
             Ok(e) => e,
             Err(e) => {

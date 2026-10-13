@@ -121,7 +121,7 @@ impl PhotoApp {
     /// the export will be written in, and through the printer if one is chosen.
     pub(crate) fn wanted_proof(&self) -> Option<Proof> {
         self.proofing.then(|| Proof {
-            space: Screen::of(self.export_settings.color_space),
+            space: Screen::of(self.export_settings.effective_space()),
             warn: self.proof_warn,
             printer: self.printer.is_some(),
         })
@@ -150,7 +150,7 @@ impl PhotoApp {
     /// Bake the printer's table for the export's space and this screen, if it is not
     /// already baked for them (about 20 ms, so only when one of them changes).
     fn sync_printer_table(&mut self, gpu: &Gpu) {
-        let space = self.export_settings.color_space;
+        let space = self.export_settings.effective_space();
         let printing = self.settings.proof_printing;
         let key = (space, self.screen_rev, printing);
         let monitor = self.monitor();
@@ -232,7 +232,7 @@ impl PhotoApp {
 
     /// The stage toolbar's proof chips: on and off (S), and the gamut warning.
     pub(crate) fn proof_chips(&mut self, ui: &mut egui::Ui) {
-        let space = self.export_settings.color_space.label();
+        let space = self.export_settings.effective_space().label();
         if widgets::chip(ui, self.proofing, "proof")
             .on_hover_text(format!(
                 "Soft proof (S): the preview as the export, in {space}, will have its colours"
