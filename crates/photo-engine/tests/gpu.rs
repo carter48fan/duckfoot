@@ -1892,6 +1892,102 @@ fn v2_keeps_a_light_above_white_red_where_v1_sends_it_to_white() {
 }
 
 #[test]
+fn v2_sharpening_keeps_a_highlight_past_twice_white() {
+    let gpu = gpu_or_skip!();
+    // Flat, so the sharpening itself does nothing: only its clamp shows, then two stops
+    // down so what it left is visible.
+    let mut stack = PhotoStack::default();
+    stack.sharpen.enabled = true;
+    stack.sharpen.params.amount = 1.0;
+    stack.exposure.params.ev = -2.0;
+    let (v1, v2) = under(gpu, &stack, [3.0; 3]);
+    assert!(
+        (v1[1] - 0.5).abs() < 0.03,
+        "V1's ceiling of twice white: {v1:?}"
+    );
+    assert!((v2[1] - 0.75).abs() < 0.03, "V2 cut the highlight: {v2:?}");
+}
+
+/// A stack with one whole-frame mask that lifts exposure by two stops where its `range`
+/// lets it.
+fn ranged(range: photo_engine::local::RangeMask) -> PhotoStack {
+    let mut stack = PhotoStack::default();
+    let mut mask = photo_engine::local::Mask::radial([0.5, 0.5], 10.0);
+    mask.adjust.exposure = 2.0;
+    mask.range = range;
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+    stack
+}
+
+#[test]
+fn v2_reads_a_luminance_range_after_exposure_and_as_displayed() {
+    let gpu = gpu_or_skip!();
+    use photo_engine::local::RangeMask;
+    // 18% grey shows as about 0.46: the range picks it out as displayed.
+    let grey = [0.18; 3];
+    let mut stack = ranged(RangeMask::Luminance {
+        range: [0.4, 0.52],
+        feather: 0.01,
+    });
+    let plain = render_patches(gpu, &PhotoStack::default(), &[grey])[0][1];
+    let lifted = |stack: &PhotoStack| {
+        let (v1, v2) = under(gpu, stack, grey);
+        (v1[1], v2[1])
+    };
+    let (v1, v2) = lifted(&stack);
+    let plain = testkit::srgb_to_linear(plain);
+    assert!(
+        v2 > plain * 2.0,
+        "V2's range missed grey as displayed: {v2} vs {plain}"
+    );
+    assert!(
+        v1 <= plain * 1.05,
+        "V1's range (linear, 0.18) should miss it: {v1}"
+    );
+    // A stop brighter, it shows as about 0.63: out of the range, in V2.
+    stack.exposure.params.ev = 1.0;
+    let (_, brighter) = lifted(&stack);
+    let one_stop = render_patches(
+        gpu,
+        &PhotoStack {
+            exposure: stack.exposure.clone(),
+            ..PhotoStack::default()
+        },
+        &[grey],
+    )[0][1];
+    assert!(
+        brighter <= testkit::srgb_to_linear(one_stop) * 1.05,
+        "V2's range did not follow the exposure"
+    );
+}
+
+#[test]
+fn v2_names_a_colour_ranges_hue_as_the_colour_eq_does() {
+    let gpu = gpu_or_skip!();
+    use photo_engine::local::RangeMask;
+    // An orange: about 13 degrees as linear sRGB names it (what the colour EQ goes by),
+    // about 21 in raw Rec.2020 values (what V1's range went by).
+    let orange = [0.3, 0.064, 0.0];
+    let stack = ranged(RangeMask::Color {
+        hue: hue(orange),
+        spread: 3.0,
+        feather: 1.0,
+    });
+    let (v1, v2) = under(gpu, &stack, orange);
+    let plain =
+        render_patches(gpu, &PhotoStack::default(), &[orange])[0].map(testkit::srgb_to_linear);
+    assert!(
+        v2[0] > plain[0] * 2.0,
+        "V2 missed the orange it was set to: {v2:?} vs {plain:?}"
+    );
+    assert!(
+        v1[0] <= plain[0] * 1.05,
+        "V1 (raw Rec.2020 hue) should miss it: {v1:?}"
+    );
+}
+
+#[test]
 fn a_removed_spot_is_filled_from_the_ground_around_it_with_no_source() {
     use photo_engine::heal::{Mode, Spot};
     let gpu = gpu_or_skip!();

@@ -160,8 +160,17 @@ Fixes that change how a photo looks are versioned like the working space, so a s
 is drawn as it was: `PhotoStack::rendering` is `V1` for a sidecar without it and `V2` for
 every new edit. V2 rolls highlights off by their brightest channel (keeping their hue),
 fades colours past white to white as their luminance passes one stop over instead of sending
-them to grey, and honours a DNG's AnalogBalance and CameraCalibration on the ForwardMatrix
-path. The export's resize, which no edit's look depends on, is in linear light for all.
+them to grey, honours a DNG's AnalogBalance and CameraCalibration on the ForwardMatrix
+path, holds sharpening to each pixel's neighbourhood (so a highlight past twice white keeps
+its value), reads a luminance range mask after exposure and as displayed, and names a
+colour range's hues as the colour EQ does (sRGB's primaries).
+
+Two things that look like inconsistencies are not. Filmic shapes its curve with the sRGB
+curve and decodes back to linear light, so mid grey is 0.18 whatever the output's curve.
+A display-domain tone curve's axis is the working space encoded with the sRGB curve, where
+the histogram is the output's: for greys they agree exactly; for saturated colours they
+differ by the primaries, which applying the curve in the output's (with its negative
+channels for out-of-gamut colours) would only trade for a worse problem. The export's resize, which no edit's look depends on, is in linear light for all.
 
 The previous implementation skipped this entirely and encoded camera primaries as if they
 were sRGB. Every image came out wrong in a way that looks like a bad white balance and
