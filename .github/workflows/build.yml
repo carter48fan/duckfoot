@@ -288,24 +288,7 @@ jobs:
           ldd "$dir/duckfoot"
           tar czf "dist/$dir.tar.gz" "$dir"
 
-          # Build AppImage
-          echo "Packaging AppImage..."
-          appdir=AppDir
-          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/256x256/apps"
-          cp "$dir/duckfoot" "$appdir/usr/bin/"
-          cp brand/duckfoot-1024.png "$appdir/duckfoot.png"
-          cp brand/duckfoot-1024.png "$appdir/usr/share/icons/hicolor/256x256/apps/duckfoot.png"
-          cp brand/duckfoot.desktop "$appdir/"
-          cp brand/duckfoot.desktop "$appdir/usr/share/applications/"
-          cp brand/AppRun "$appdir/AppRun"
-          cp THIRD_PARTY_LICENSES.txt "$appdir/"
-          chmod +x "$appdir/AppRun"
-
-
-          curl -sL -o /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-          chmod +x /tmp/appimagetool
-          (cd /tmp && ./appimagetool --appimage-extract)
-          ARCH=x86_64 /tmp/squashfs-root/AppRun "$appdir" "dist/$dir.AppImage"
+          tools/build-appimage.sh "$dir/duckfoot"
 
       - name: Attach to the draft release
         if: needs.version.outputs.is_release == 'true'
@@ -319,6 +302,7 @@ jobs:
           cp "dist/duckfoot-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.AppImage"
           cp "dist/duckfoot-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-linux-x86_64.tar.gz"
           # Package complete corresponding source code archive (LGPL-2.1 / DEC-1 compliance)
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git archive --format=tar.gz --prefix="duckfoot-$TAG/" -o "dist/duckfoot-$TAG-source.tar.gz" HEAD
           gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-source.tar.gz" --clobber
 

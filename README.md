@@ -351,6 +351,10 @@ strip target/release/duckfoot
 Ship `target/release/duckfoot`. Runtime needs a Vulkan ICD, Wayland or X11 client
 libraries, xkbcommon, and a desktop portal for the file dialog.
 
+For an AppImage, `tools/build-appimage.sh` builds and packages
+`dist/duckfoot-linux-x86_64.AppImage` (CI runs the same script). It runs on systems with
+the build machine's glibc or newer; CI builds in `ubuntu:22.04` for wider reach.
+
 For a `.desktop` entry:
 
 ```ini
