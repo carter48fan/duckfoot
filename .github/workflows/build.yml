@@ -264,7 +264,8 @@ jobs:
         with:
           key: linux
 
-      - run: cargo build --release --locked -p duckfoot
+      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package tarball and AppImage
         run: |
@@ -346,7 +347,8 @@ jobs:
         with:
           key: windows
 
-      - run: cargo build --release --locked -p duckfoot
+      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package
         shell: bash
@@ -402,7 +404,8 @@ jobs:
         with:
           key: macos
 
-      - run: cargo build --release --locked -p duckfoot
+      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package macOS app and dmg
         run: |

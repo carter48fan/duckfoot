@@ -39,7 +39,7 @@ cd "$root"
 # API 30 matches minSdk in app/build.gradle.kts.
 cargo ndk --target arm64-v8a --platform 30 \
     --output-dir android/app/src/main/jniLibs \
-    build --release -p duckfoot-android
+    build --release -p duckfoot-android --features heif
 
 mkdir -p "$root/android/app/src/main/assets"
 cp "$root/THIRD_PARTY_LICENSES.txt" "$root/android/app/src/main/assets/THIRD_PARTY_LICENSES.txt"
