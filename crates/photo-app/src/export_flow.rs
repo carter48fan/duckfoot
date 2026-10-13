@@ -37,9 +37,7 @@ impl PhotoApp {
         let source = self.loaded_path.clone();
         let touchups = self.cutout_studio.touchups.clone();
         std::thread::spawn(move || {
-            let info = source
-                .as_deref()
-                .and_then(|p| photo_engine::read_info(&photo_engine::copies::source_file(p)));
+            let info = source.as_deref().and_then(photo_engine::read_export_info);
             let outcome = exported
                 .save_with_touchups(&target, &settings, info.as_ref(), &touchups)
                 .map_err(|e| format!("{e:#}"));

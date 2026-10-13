@@ -1,5 +1,5 @@
 # Weekly fuzzing (WP5.1): every parser a hostile file reaches, ten minutes each, on a
-# nightly toolchain with cargo-fuzz; weekly rather than nightly, since seven targets cost
+# nightly toolchain with cargo-fuzz; weekly rather than nightly, since eight targets cost
 # over an hour and a half of runner time, and it can be run by hand at any time. Found inputs are attached to the run; each becomes a
 # regression test once fixed (see decode.rs's hostile-input tests). Nothing waits on it.
 name: fuzz
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tiff, embedded_jpeg, raster, raw, sidecar, preset, icc]
+        target: [tiff, embedded_jpeg, raster, raw, sidecar, preset, icc, xmp]
     steps:
       - uses: actions/checkout@v5
 

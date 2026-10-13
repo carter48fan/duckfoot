@@ -80,7 +80,8 @@ pub enum Done {
         /// knows it is no longer outstanding.
         image: Option<egui::ColorImage>,
         /// Camera, lens, exposure and the rest, read from the header on the same trip.
-        info: Option<photo_engine::PhotoInfo>,
+        /// Boxed: it is most of the variant, which every other one would be sized to.
+        info: Option<Box<photo_engine::PhotoInfo>>,
     },
 }
 
@@ -438,6 +439,7 @@ impl Loader {
                     let info = guarded(&path, || Ok(photo_engine::read_info(&file)))
                         .ok()
                         .flatten();
+                    let info = info.map(Box::new);
                     let _ = done_tx.send(Done::Thumbnail { path, image, info });
                     wake(&repaint);
                 })

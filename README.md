@@ -431,6 +431,8 @@ duckfoot/
     │   ├── src/curve.rs         #   monotone cubic tone curve → LUT
     │   ├── src/params.rs        #   the adjustment stack (plain data + serde)
     │   ├── src/sidecar.rs       #   non-destructive .duckfoot companion files
+    │   ├── src/xmp.rs           #   XMP read, export packets, safe sidecar merge
+    │   ├── src/proof.rs         #   printer and monitor ICC profiles baked to 3D tables
     │   ├── src/shaders/         #   demosaic, downsample (preview mips), adjust, histogram
     │   └── examples/            #   probe.rs, bench.rs, open_profile.rs, synth_raw.rs
     ├── photo-app/               # egui UI — no windowing dependency
@@ -484,6 +486,7 @@ DESIGN.md invariant 8.
 | **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |
 | **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits; banded readback for 100MP+ sensors; EXIF, ICC profiles. HDR gain map export is not built yet |
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON v2 sidecars, atomic write, persistent undo history |
+| **XMP** | `xmp::seed_metadata`, `xmp::packet`, `xmp::merge` | Working | Ratings, labels and keywords read from Lightroom/darktable `.xmp` sidecars and embedded XMP, written into every export, and (opt-in, Customize) kept in step with an existing `.xmp` sidecar without touching the rest of it |
 | **App** | inspector, undo/redo | Working | Snapshot undo, per-photo persistent history, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Scatter, 2D Plot |
 | **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
