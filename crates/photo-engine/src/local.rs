@@ -17,9 +17,14 @@ use serde::{Deserialize, Serialize};
 pub const MAX_MASKS: usize = 8;
 /// Dabs one brush mask keeps: a few long strokes. A sidecar stays small.
 pub const MAX_DABS: usize = 6000;
-/// The long side, in texels, of the texture a brush mask is rasterised into. Brush edges are
-/// soft, so ~6 photosites a texel on a 24 MP sensor shows no steps, and eight layers cost
-/// under 6 MB.
+/// The long side, in texels, of the texture a brush mask is rasterised into, at most (never
+/// more than the sensor's). 2048 on the desktop: about 3 photosites a texel on a 24 MP
+/// sensor, so a hard brush's edge shows no steps at 100%, for 4 MB a layer, up to eight
+/// layers, on the GPU and again for the CPU copy strokes are laid into. The phone keeps
+/// 1024, a quarter of that, where memory is shorter and 100% is rarely looked at.
+#[cfg(not(target_os = "android"))]
+pub const BRUSH_SIDE: u32 = 2048;
+#[cfg(target_os = "android")]
 pub const BRUSH_SIDE: u32 = 1024;
 
 /// One touch of the brush: a soft disc.
@@ -418,7 +423,7 @@ pub fn rasterise(buf: &mut [u8], (w, h): (u32, u32), dabs: &[Dab]) -> Option<(u3
 /// side, the sensor's aspect.
 pub fn brush_size(sensor: (u32, u32)) -> (u32, u32) {
     let (w, h) = (sensor.0.max(1) as f32, sensor.1.max(1) as f32);
-    let s = BRUSH_SIDE as f32 / w.max(h);
+    let s = (BRUSH_SIDE as f32).min(w.max(h)) / w.max(h);
     (
         ((w * s).round() as u32).max(1),
         ((h * s).round() as u32).max(1),
@@ -507,7 +512,9 @@ mod tests {
 
         // The texture holds the same coverage.
         let size = brush_size(s);
-        assert_eq!(size, (1024, 512));
+        // No finer than the sensor; on a 24 MP one, BRUSH_SIDE on the long side.
+        assert_eq!(size, (1000, 500));
+        assert_eq!(brush_size((6000, 4000)).0, BRUSH_SIDE);
         let mut buf = vec![0u8; (size.0 * size.1) as usize];
         let Shape::Brush { dabs } = &m.shape else {
             unreachable!()
