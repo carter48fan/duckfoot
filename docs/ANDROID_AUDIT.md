@@ -12,7 +12,7 @@ is lost.
 | B1 | **Done.** `photo-app` no longer depends on winit |
 | B2 | **Done, interim.** `rfd` is desktop-only behind `photo_app::platform::Platform`; Android pickers are SAF intents in `DuckfootActivity` |
 | B3 | **Interim.** Picked documents are *imported* (copied) into app-private storage, so paths and sidecars work unchanged; exports go to `Pictures/Duckfoot`. The `AssetId` / `Storage` model below is still the goal |
-| B4 | **Done.** Suspend drops only the window surface; the device and `PhotoApp` survive. Back closes crop/dialogs, then backgrounds the app. Process death still loses unsaved edits |
+| B4 | **Done.** Suspend drops only the window surface; the device and `PhotoApp` survive. Back closes crop/dialogs, then backgrounds the app. On suspend and on a low-memory warning the open photo's sidecar (with its undo history) and the session are written (`duckfoot/src/lib.rs` `suspended`, `PhotoApp::flush`), so process death loses at most a gesture still in progress, such as a crop being framed |
 | B5 | **Done, pending a device.** `crates/duckfoot-android`, `android/` (Gradle, NativeActivity subclass), `android/build-apk.sh`, and the Build workflow |
 
 | UI | **Done.** `photo-app/src/compact.rs`: the navigation-bar layout below 900 × 560 points, both orientations; touch sizes for every control. The touch-parity list below is covered except item 6 (the shelf row's hover-only remove badge, which select mode's "Remove from shelf" replaces) and item 8 (Shift-click for a second open module, which the one-at-a-time sheet makes moot) |
