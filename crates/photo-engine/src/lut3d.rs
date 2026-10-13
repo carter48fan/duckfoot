@@ -22,6 +22,15 @@ pub struct Lut3D {
 }
 
 impl Lut3D {
+    /// This LUT sampled at the engine's table size (`proof::SIZE`), whatever its own size,
+    /// domain or kind (1D or 3D), as the shader's 3D texture takes it.
+    pub fn bake(&self) -> crate::proof::ProofTable {
+        crate::proof::ProofTable::from_fn(|rgb| {
+            let [r, g, b] = self.sample(rgb);
+            [r, g, b, 0.0]
+        })
+    }
+
     /// Create an identity 3D LUT of dimension `size` (minimum 2).
     pub fn identity(size: usize) -> Self {
         let size = size.max(2);
@@ -323,5 +332,25 @@ LUT_3D_SIZE 2
 1.0 0.0 0.0
 "#;
         assert!(parse_cube(cube_data).is_err());
+    }
+
+    #[test]
+    fn a_cube_bakes_to_the_engines_table_whatever_its_size_or_kind() {
+        let id = Lut3D::identity(17).bake();
+        for rgb in [[0.0, 0.0, 0.0], [0.5, 0.25, 0.75], [1.0, 1.0, 1.0]] {
+            let [r, g, b, _] = id.at(rgb);
+            for (got, want) in [r, g, b].into_iter().zip(rgb) {
+                assert!((got - want).abs() < 2e-3, "{rgb:?} baked to {r} {g} {b}");
+            }
+        }
+        // A 1D curve that squares each channel, baked into the 3D table.
+        let mut text = String::from("LUT_1D_SIZE 5\n");
+        for i in 0..5 {
+            let v = (i as f32 / 4.0).powi(2);
+            text.push_str(&format!("{v} {v} {v}\n"));
+        }
+        let squared = parse_cube(&text).unwrap().bake();
+        let [r, ..] = squared.at([0.5, 0.0, 0.0]);
+        assert!((r - 0.25).abs() < 0.02, "half squared is {r}");
     }
 }

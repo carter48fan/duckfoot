@@ -613,6 +613,31 @@ impl ColorEq {
     }
 }
 
+/// A creative look from a `.cube` LUT (Resolve, Adobe and most LUT packs): applied to the
+/// photo as an sRGB display would show it, which is what such files are made for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Look {
+    /// The `.cube` file, as chosen. One that is missing or does not read does nothing.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// How much of it: 0 none of it, 1 all of it.
+    #[serde(default = "full_look")]
+    pub amount: f32,
+}
+
+fn full_look() -> f32 {
+    1.0
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            path: None,
+            amount: full_look(),
+        }
+    }
+}
+
 /// One module: its parameters plus whether it runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module<T> {
@@ -694,6 +719,8 @@ pub struct PhotoStack {
     pub local: Module<crate::local::Locals>,
     #[serde(default)]
     pub heal: Module<crate::heal::Spots>,
+    #[serde(default)]
+    pub look: Module<Look>,
 }
 
 impl Default for PhotoStack {
@@ -741,6 +768,7 @@ impl Default for PhotoStack {
             denoise: Module::new(false, Denoise::default()),
             local: Module::new(false, crate::local::Locals::default()),
             heal: Module::new(false, crate::heal::Spots::default()),
+            look: Module::new(false, Look::default()),
         }
     }
 }
@@ -764,6 +792,7 @@ pub(crate) mod flags {
     pub const DENOISE: u32 = 8192;
     pub const LOCAL: u32 = 16384;
     pub const HEAL: u32 = 32768;
+    pub const LOOK: u32 = 65536;
 }
 
 impl PhotoStack {
@@ -817,6 +846,9 @@ impl PhotoStack {
         if self.heal.enabled && !self.heal.params.spots.is_empty() {
             m |= flags::HEAL;
         }
+        if self.look.enabled && self.look.params.path.is_some() && self.look.params.amount > 0.0 {
+            m |= flags::LOOK;
+        }
         m
     }
 }
@@ -827,6 +859,12 @@ impl PhotoStack {
     /// brought back to something valid.
     pub fn sanitised(&self) -> Self {
         let mut s = self.clone();
+        let a = s.look.params.amount;
+        s.look.params.amount = if a.is_finite() {
+            a.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let g = &mut s.geometry;
         g.quarter_turns %= 4;
         g.straighten_deg = finite_or(g.straighten_deg, 0.0).clamp(-45.0, 45.0);

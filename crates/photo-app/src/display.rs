@@ -102,6 +102,21 @@ impl PhotoApp {
         }
     }
 
+    /// The `.cube` the Look module's picker answered with: on, and one undo step.
+    pub(crate) fn use_look_file(&mut self, path: PathBuf) {
+        if !self.can_edit() {
+            return;
+        }
+        let mut next = self.stack.clone();
+        next.look.enabled = true;
+        next.look.params.path = Some(path.to_string_lossy().into_owned());
+        if next != self.stack {
+            self.history.checkpoint(&self.stack);
+            self.stack = next;
+            self.needs_render = true;
+        }
+    }
+
     /// The printer profile the picker answered with.
     pub(crate) fn use_printer_profile(&mut self, path: PathBuf) {
         self.settings.proof_icc = Some(path);

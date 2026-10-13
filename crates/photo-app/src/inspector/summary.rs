@@ -212,6 +212,18 @@ pub(crate) fn summarise(
             };
             (text, *p != d.lens.params)
         }
+        S::Look => {
+            let p = &s.look.params;
+            let name = p
+                .path
+                .as_deref()
+                .and_then(|f| std::path::Path::new(f).file_stem())
+                .map(|n| n.to_string_lossy().into_owned());
+            match name {
+                Some(n) => (format!("{n} · {:.0}%", p.amount * 100.0), true),
+                None => ("none".to_string(), false),
+            }
+        }
         S::Heal => {
             let n = s.heal.params.spots.len();
             let text = match n {

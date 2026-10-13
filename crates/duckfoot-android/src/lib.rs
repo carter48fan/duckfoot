@@ -321,7 +321,11 @@ impl Platform for AndroidPlatform {
             Request::ImportPreset { .. } => self.pick(PICK_PRESET),
             // The phone's screen is drawn as sRGB; there is no profile to choose. Nor is
             // there a proof to print through: the proof chips are the desktop's.
-            Request::DisplayProfile { .. } | Request::PrinterProfile { .. } => {}
+            // A look's .cube is picked on the desktop; on the phone a stack that names one
+            // still applies it.
+            Request::DisplayProfile { .. }
+            | Request::PrinterProfile { .. }
+            | Request::LookFile { .. } => {}
         }
     }
 

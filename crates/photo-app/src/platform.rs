@@ -34,6 +34,8 @@ pub enum Request {
     DisplayProfile { from: Option<PathBuf> },
     /// A printer's ICC profile, to soft proof through (W-10).
     PrinterProfile { from: Option<PathBuf> },
+    /// A `.cube` LUT for the Look module.
+    LookFile { from: Option<PathBuf> },
 }
 
 /// The user's answer to a [`Request`]. A cancelled picker produces nothing.
@@ -48,6 +50,7 @@ pub enum Response {
     ExportPreset(PathBuf),
     DisplayProfile(PathBuf),
     PrinterProfile(PathBuf),
+    LookFile(PathBuf),
     /// The system is short of memory: give back what can be made again.
     LowMemory,
     /// Progress or a problem to show in the status bar.
@@ -205,6 +208,10 @@ fn ask(request: Request) -> Option<Response> {
             .add_filter("ICC profile", &["icc", "icm"])
             .pick_file()
             .map(Response::PrinterProfile),
+        Request::LookFile { from } => start(from)
+            .add_filter("3D LUT", &["cube", "CUBE"])
+            .pick_file()
+            .map(Response::LookFile),
     }
 }
 
