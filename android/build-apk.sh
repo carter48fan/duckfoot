@@ -41,7 +41,11 @@ cargo ndk --target arm64-v8a --platform 30 \
     --output-dir android/app/src/main/jniLibs \
     build --release -p duckfoot-android
 
+mkdir -p "$root/android/app/src/main/assets"
+cp "$root/THIRD_PARTY_LICENSES.txt" "$root/android/app/src/main/assets/THIRD_PARTY_LICENSES.txt"
+
 cd android
+
 ./gradlew --no-daemon "$task"
 apk="$root/android/app/build/outputs/apk/$variant/app-$variant.apk"
 

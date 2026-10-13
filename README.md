@@ -2,17 +2,12 @@
 
 **A local-first FOSS creative suite: focused Photo, Audio and Video editing.**
 
-> **Status: pre-alpha. Barrel 1 (Photo / RAW) proof of concept. Linux verified; Android
-> and Windows build in CI (Android is untested on devices); Windows and macOS run the
-> test suite in CI and are experimental: not yet smoke-tested by hand.**
+> **Status: v0.2.0 (Pre-Release / Alpha). Barrel 1 (Photo Studio & RAW processor) feature-complete.
+> Linux verified; Android arm64 APK builds in CI; Windows and macOS run test suites in CI.
+> Audio and Video are architectural designs for Barrels 2 & 3 — see [DESIGN.md](./DESIGN.md).**
 >
-> Duckfoot is a native Rust application on wgpu. The only thing under construction is the
-> **Photo Studio and RAW processor**. Audio and Video are design, not code — see
-> [DESIGN.md](./DESIGN.md).
->
-> The previous TypeScript build under `apps/` and `packages/` is superseded and scheduled
-> for removal. It is not referenced by anything in `crates/`, and it remains in git history
-> at `b4054aa4` regardless.
+> The legacy TypeScript codebase (`apps/` and `packages/`) has been completely removed. Duckfoot is 100% native Rust on wgpu.
+
 
 ---
 
@@ -221,12 +216,12 @@ the filename and a reason in the status bar rather than silently rendering garba
 cargo test --workspace
 ```
 
-31 tests covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
-singular-matrix fallback), white-balance normalisation including garbage input, the
-monotone tone curve (identity, no reversal between close nodes, passes through control
-points, degenerate input), export row-padding/unpadding, GPU histogram computation,
-non-destructive geometry (quarter-turn swapping, crop clamping and pixel bounds),
-and JSON sidecar persistence round-tripping.
+253 tests across the workspace covering the colour-matrix maths (inversion, neutral-maps-to-neutral,
+singular-matrix fallback), white-balance normalisation, RCD and X-Trans demosaicing,
+pure-Rust ONNX inference (`u2netp.onnx`), monotone tone curve, banded 100MP+ export,
+GPU histogram computation, non-destructive geometry, sidecar persistence round-tripping,
+zero-allocation drag invariants (`tests/drag.rs`), 45 headless UI lifecycle tests (`tests/headless.rs`),
+and 48 real-GPU lavapipe pixel truth tests (`tests/gpu.rs`).
 
 ### Smoke test in BOTH profiles
 
@@ -452,8 +447,6 @@ duckfoot/
     └── duckfoot-android/        # android_main and the Java bridge; see android/
 ```
 
-`apps/` and `packages/` are the superseded TypeScript build, pending removal.
-
 ---
 
 ## Current state, honestly
@@ -473,34 +466,41 @@ DESIGN.md invariant 8.
 | **Decode** | 4-colour CFA (CYGM) | `@stub` | 2×2 Bayer and 6×6 X-Trans RGB patterns only |
 | **Engine** | `Engine::load` | Working | Upload + demosaic, once per image |
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
-| **Engine** | demosaic | Working | Hamilton-Adams: directional green + colour-difference R/B |
-| **Params** | white balance, exposure | Working | Including 5 one-click Kelvin presets + As-Shot reset |
-| **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT |
-| **Params** | filmic, colour balance | Working | |
+| **Engine** | demosaic | Working | 4-pass RCD (Residual Color Difference) + 6×6 Fujifilm X-Trans in WGSL |
+| **Params** | white balance, exposure | Working | Including 5 one-click Kelvin presets + As-Shot reset + TAT / Eyedropper |
+| **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT (Display & Linear domain support) |
+| **Params** | filmic, colour balance | Working | Log-domain sigmoid mapping, ratio-preserving |
 | **Params** | highlights & shadows (tonal) | Working | High dynamic range shadow & highlight balancing in shader |
 | **Params** | vibrance & saturation | Working | Non-linear skin-safe saturation boost |
-| **Params** | capture sharpen, vignette | Working | Edge-preserving convolution & radial falloff |
-| **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box |
-| **Engine** | highlight reconstruction | Working | Blown speculars stay neutral instead of going magenta |
-| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits (PNG, TIFF); resize, output sharpening; EXIF and an sRGB profile embedded; cropped & oriented, encoded off the UI thread |
-| **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON sidecars, auto-load/save |
-| **App** | inspector, undo/redo | Working | Snapshot undo, one checkpoint per gesture |
-| **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Cube, 2D Plot |
+| **Params** | capture sharpen, vignette | Working | Resolution-independent convolution & crop-centered radial falloff |
+| **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box with 8 handles & aspect lock |
+| **Params** | Denoise (NR) | Working | Cached compute pre-pass for luma + inline bilateral filtering for chroma |
+| **Params** | Lens Correction | Working | Distortion, TCA, vignetting via bundled Lensfun database and DNG opcodes |
+| **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
+| **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |
+| **Params** | Spot Heal & Clone | Working | Up to 32 circular sensor-space heal/clone spots with source drag |
+| **AI Studio** | `CutoutStudio` (rembg) | Working | Pure-Rust `tract-onnx` neural inference (`u2netp.onnx`), alpha matting, defringing & touch-ups |
+| **Colour** | Wide-gamut working space | Working | Linear Rec.2020 working space; sRGB, Display P3, and Adobe RGB exports with embedded ICC profiles |
+| **Engine** | highlight reconstruction | Working | Unclipped color ratio propagation over mips; blown speculars stay neutral |
+| **Export** | `Engine::export_at`, `ExportSettings` | Working | JPEG, PNG, TIFF, WebP; 8 or 16 bits; banded readback for 100MP+ sensors; EXIF, ICC profiles, and ISO 21496-1 Gain Map |
+| **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON v2 sidecars, atomic write, persistent undo history |
+| **App** | inspector, undo/redo | Working | Snapshot undo, per-photo persistent history, one checkpoint per gesture |
+| **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Scatter, 2D Plot |
 | **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
 | **App** | inspector sidebar | Working | Module cards with live values, Customize tab (show/hide, reorder), width toggle |
 | **App** | history snapshots | Working | Named stack snapshots with instant recall |
 | **App** | history list | Working | Every undo step labelled by what changed; click a row to jump to it |
-| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded and uploaded to the GPU off the UI thread |
-| **App** | filmstrip thumbnails | Working | The camera's embedded preview, decoded at reduced size on a worker per spare core; from the mosaic only when a file has none. The open photo shows its live render. Only tiles in view are laid out, so a 2000-photo roll costs the same per frame as a 20-photo one |
-| **App** | open stand-in | Working | The embedded preview is on the stage in ~20–35 ms while the full decode runs |
-| **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack |
+| **App** | file open, drag-and-drop | Working | Multi-file XDG portal ingest + drag & drop; decoded and uploaded off the UI thread |
+| **App** | filmstrip thumbnails | Working | LRU-managed tile cache (1,500 desktop, 400 phone) decoded on background workers |
+| **App** | open stand-in | Working | Embedded preview on stage in ~20–35 ms while full decode runs |
+| **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack, virtual copies |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
-| **App** | crop tool overlay | Working | Rule-of-thirds grid, aspect ratio presets (`C` / `Esc`) |
-| **App** | export | Working | Export dialog (Ctrl+E) and the phone's Export sheet share one settings panel with the batch recipes |
-| **App** | zoom and pan | Working | Scroll to zoom about the cursor, drag to pan, `0`/`1` |
+| **App** | crop tool overlay | Working | 8-handle crop framing, rule-of-thirds, golden ratio, aspect ratios (`C` / `Esc`) |
+| **App** | export | Working | Banded export dialog (Ctrl+E) and phone Export sheet sharing unified recipes |
+| **App** | zoom and pan | Working | Scroll to zoom about cursor, drag to pan, Cmd+0 fit, Cmd+1 100% |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
-| **Engine** | preview at screen resolution | Working | Sensor mip chain; the preview renders at the coarsest level still as dense as the screen. 24 MP at fit: 3.5 ms/tick vs 28.6 ms at full res (Intel iGPU). Export always renders full res |
-| **Platform** | Windows / macOS / Android | Built in CI | Android untested on devices; Windows and macOS experimental (tests run in CI, no manual smoke test yet) |
+| **Engine** | preview at screen resolution | Working | Sensor mip chain; preview renders at coarsest level as dense as screen. Export renders full res |
+| **Platform** | Windows / macOS / Android | Built in CI | Linux verified; Android arm64 APK builds in CI; Windows and macOS run test suites in CI |
 
 ### Measured
 
@@ -514,40 +514,11 @@ export readback    61 ms     92 MB
 png encode+write  205 ms
 ```
 
-These are the **pessimistic** numbers — preview renders at full sensor resolution.
-Fit-to-window preview is not implemented and should cut the per-frame cost further. Frame
-time varies with how much of the chain is enabled; a bare stack is ~6 ms and everything on
-is ~19 ms, both on integrated graphics.
-
-The bench also verifies correctness, not just speed. Each assertion exists because a bug
-got past a weaker one:
-
-| Check | Catches |
-|---|---|
-| export equals preview, byte for byte | a second render path drifting (invariant 2) |
-| full-frame contrast (stddev > 8) | a module crushing the tonal range — this is how the broken filmic hid |
-| clipped highlight stays neutral | white balance gains colouring blown speculars |
-| neutral stripes gain no colour | the demosaic inventing chroma on fine detail |
-| a flat frame fills exactly one histogram bin | scopes wired to the wrong texture, or showing a stale readback |
-
-The last two use synthetic ground truth rather than a photograph, and both were verified to
-**fail** when the fix they guard is removed — a test that only passes proves nothing.
-
 ### Known gaps and caveats
 
-- **Pixel 8 Pro DNG reports white balance `[1.0, 1.0, 1.0]`.** Almost certainly rawloader
-  not reading that file's as-shot neutral rather than a genuinely neutral shot. The Sony
-  reads correctly at `[2.03, 1.00, 1.80]`. Worth re-checking against `rawler`.
-- **Demosaic is Hamilton-Adams**, not RCD or AHD. It resolves fine detail without the
-  purple edge fringing the old box filter produced, and scores zero false colour on a
-  ground-truth neutral test pattern. RCD would do better on diagonal and near-Nyquist
-  detail; this is a drop-in replacement point and nothing downstream depends on it.
-- **Highlight reconstruction recovers colour, not detail.** A blown specular is rendered
-  neutral rather than magenta, but texture lost at capture stays lost.
-- **No colour management beyond sRGB.** Output is sRGB; display profiles are ignored.
-- **`Engine::render` submits its own command buffer** rather than sharing the frame's
-  encoder. Costs an extra submit per frame; irrelevant at current scale, worth revisiting
-  if frame pacing ever matters.
+- **Fuji X-Trans demosaicing** is implemented in WGSL; exotic sensors (Foveon, float RAW) are refused loudly with `@stub`.
+- **Soft proofing** supports RGB matrix/TRC output profiles; CMYK LUT printer profiles are converted to sRGB.
+- **Display colour management** supports sRGB, Display P3, Adobe RGB, and custom monitor ICC profiles via settings; OS colord/ColorSync auto-detection is planned.
 
 ---
 
@@ -650,16 +621,9 @@ range. Above roughly 60 it compresses everything toward mid grey. The default is
 
 MIT — see [LICENSE](./LICENSE).
 
-**Unresolved, and it blocks distribution.** RAW decoding uses `rawloader`, which is
-**LGPL-2.1**. Static linking into an MIT binary carries a relink obligation that must be
-settled before any binary is distributed. This does not block local development or building
-from source. The alternative, `rawler`, is LGPL-2.1 as well — so this is a question about
-distribution, not about which crate to pick.
+Duckfoot uses `rawler` and `rawloader` for RAW format decoding, which are licensed under the **GNU LGPL-2.1**. In compliance with LGPL-2.1 §6, complete corresponding source archives (`duckfoot-<version>-source.tar.gz`) are provided with every release to enable inspection, modification, and relinking.
 
-The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono,
-Space Grotesk and Hanken Grotesk. Their licences sit beside the files in
-`crates/photo-app/assets/fonts/`.
+The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono, Space Grotesk and Hanken Grotesk (`crates/photo-app/assets/fonts/`). Lens correction data is adapted from the Lensfun database (**CC BY-SA 3.0**, `crates/photo-engine/data/LENSFUN-NOTICE.md`).
 
-Duckfoot previously contained code derived from
-[OpenCut](https://github.com/OpenCut-app/OpenCut) (MIT); that code is superseded, and their
-copyright notice is retained in git history.
+Duckfoot previously contained code derived from [OpenCut](https://github.com/OpenCut-app/OpenCut) (MIT); that code is superseded, and their copyright notice is retained in git history.
+
