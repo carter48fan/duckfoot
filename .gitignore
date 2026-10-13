@@ -4,3 +4,5 @@ target/
 .env
 .env.*
 .claude/worktrees/
+AppDir/
+duckfoot-linux-x86_64/
