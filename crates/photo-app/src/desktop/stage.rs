@@ -15,12 +15,12 @@ impl PhotoApp {
             )
             .show(ui, |ui| {
                 if let Some((path, preview)) = &self.stage_preview {
-                    if self.loading.as_ref().is_some_and(|(p, _)| p == path) {
+                    if self.loaded_path.as_ref() == Some(path) && !self.photo_on_stage() {
                         stage_preview(ui, preview, path);
                         return;
                     }
                 }
-                if self.texture_id.is_none() || self.ready_image().is_none() {
+                if !self.photo_on_stage() {
                     self.empty_stage(ui);
                     return;
                 }

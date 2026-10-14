@@ -1405,6 +1405,13 @@ impl PhotoApp {
         Some((msg.as_str(), self.status_action, left))
     }
 
+    /// The photo the stage shows a stand-in for (its thumbnail or embedded preview), for
+    /// tests.
+    #[doc(hidden)]
+    pub fn stand_in_for_tests(&self) -> Option<&std::path::Path> {
+        self.stage_preview.as_ref().map(|(p, _)| p.as_path())
+    }
+
     /// The notice up now and whether it has a button, for tests.
     #[doc(hidden)]
     pub fn notice_for_tests(&self) -> Option<(String, Option<&'static str>)> {
@@ -1588,6 +1595,8 @@ impl PhotoApp {
                     wgpu::FilterMode::Linear,
                 );
                 self.texture_id = Some(id);
+                // The photo replaces its stand-in from this frame.
+                self.stage_preview = None;
             }
         }
     }
