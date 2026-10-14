@@ -31,6 +31,23 @@ impl PhotoApp {
                 return;
             }
         };
+        let gain = if settings.wants_gain_map() {
+            match self.engine.gain_map(
+                gpu.device,
+                gpu.queue,
+                &self.stack,
+                settings.effective_space(),
+            ) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    self.export = Export::Failed(format!("the HDR gain map: {e:#}"));
+                    self.needs_render = true;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         let (tx, rx) = mpsc::channel();
         let target = path.clone();
@@ -39,7 +56,7 @@ impl PhotoApp {
         std::thread::spawn(move || {
             let info = source.as_deref().and_then(photo_engine::read_export_info);
             let outcome = exported
-                .save_with_touchups(&target, &settings, info.as_ref(), &touchups)
+                .save_with(&target, &settings, info.as_ref(), &touchups, gain.as_ref())
                 .map_err(|e| format!("{e:#}"));
             // The receiver is gone only if the app is shutting down; nothing to report to.
             let _ = tx.send(outcome);

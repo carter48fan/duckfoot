@@ -239,8 +239,7 @@ fn run_batch(
     let _ = progress_tx.send(ExportProgressMsg::Started { total });
     let cancelled = || stop.load(Ordering::SeqCst);
     let (decoded_tx, decoded_rx) = mpsc::sync_channel::<(ExportJob, anyhow::Result<Source>)>(0);
-    let (rendered_tx, rendered_rx) =
-        mpsc::sync_channel::<(ExportJob, photo_engine::Exported)>(encoders());
+    let (rendered_tx, rendered_rx) = mpsc::sync_channel::<(ExportJob, Rendered)>(encoders());
     let rendered_rx = Mutex::new(rendered_rx);
     let (done_tx, done_rx) = mpsc::channel::<(ExportJob, anyhow::Result<()>)>();
 
@@ -362,6 +361,9 @@ fn decode(job: &ExportJob) -> anyhow::Result<Source> {
     }
 }
 
+/// A rendered export, and its HDR gain map when the recipe asks for one.
+type Rendered = (photo_engine::Exported, Option<photo_engine::GainMap>);
+
 /// The full-resolution export from the shader pipeline (Invariant 2), at the recipe's
 /// depth and in its space.
 fn render(
@@ -370,26 +372,38 @@ fn render(
     engine: &mut Engine,
     source: Source,
     job: &ExportJob,
-) -> anyhow::Result<photo_engine::Exported> {
+) -> anyhow::Result<Rendered> {
     match source {
         Source::Raster(raster) => engine.load_raster(device, queue, raster)?,
         Source::Raw(cfa) => engine.load(device, queue, *cfa)?,
     }
     let settings = &job.recipe.settings;
-    engine.export_in(
+    let exported = engine.export_in(
         device,
         queue,
         &job.stack,
         settings.effective_depth(),
         settings.effective_space(),
-    )
+    )?;
+    let gain = if settings.wants_gain_map() {
+        Some(engine.gain_map(device, queue, &job.stack, settings.effective_space())?)
+    } else {
+        None
+    };
+    Ok((exported, gain))
 }
 
 /// Size, sharpen, encode and write it, through the same path the single export uses.
-fn write(exported: photo_engine::Exported, job: &ExportJob) -> anyhow::Result<()> {
+fn write((exported, gain): Rendered, job: &ExportJob) -> anyhow::Result<()> {
     if let Some(parent) = job.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let info = photo_engine::read_export_info(&job.source_path);
-    exported.save(&job.output_path, &job.recipe.settings, info.as_ref())
+    exported.save_with(
+        &job.output_path,
+        &job.recipe.settings,
+        info.as_ref(),
+        &[],
+        gain.as_ref(),
+    )
 }
