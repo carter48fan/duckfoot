@@ -1,29 +1,33 @@
-//! The phone layout: the photo fills the screen, one low sheet at a time sits under it,
-//! and a tab bar picks the sheet. It is the same app as the desktop layout — every
-//! sheet is built from the same pieces the desktop's panels are — only arranged for a
-//! small, touch-driven screen, after Snapseed.
+//! The phone layout: the photo fills the screen, and one low sheet at a time sits under it.
+//! It is the same app as the desktop layout — every sheet is built from the same pieces
+//! the desktop's panels are — only arranged for a small, touch-driven screen, after
+//! Google Photos and Snapseed.
 //!
-//! Upright, the bar runs along the bottom and the sheet rises above it, only as tall as
-//! what it holds. Turned sideways the bar becomes a rail down the right edge and the sheet
-//! opens beside it. Tapping the open tab again closes the sheet and gives the photo the
-//! whole screen.
+//! Upright, the bottom bar holds five categories and the sheet rises above it, only as
+//! tall as what it holds. Turned sideways the bar becomes a rail down the right edge and
+//! the sheet opens beside it. Tapping the open category again closes the sheet and gives
+//! the photo the whole screen.
 //!
-//! | Tab | Holds |
+//! | Where | Holds |
 //! |---|---|
-//! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
-//! | Looks | one-tap looks — sepia, mono, film… — and how strongly to apply them |
-//! | Tools | a grid of every tool, and this photo's edits as a whole; a tile opens its tool on its own: a header (back, reset, on/off), its controls, and a row stepping to the tool before or after. Removing the background is a tool, its preview on the photo |
-//! | Export | the export, its options, removing the background, share and batch export |
+//! | Crop · Light · Colour · Detail · Retouch | the Edit sheet: the chosen value over a ruler that turns it, over the category's chips ([`crate::categories`]). A chip is a value, or a tool (›) that opens in the ruler's place — the curve, colour bands and wheels, healing, masks, removing the background. Looks (one-tap looks, snapshots, history, copy & paste) is Colour's |
+//! | the top bar's ‹ | the Library: the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
+//! | the top bar's Export | the export, its options, removing the background, share and batch export |
 //!
 //! Getting around without a keyboard:
 //!
-//! - swipe the tab bar, or an empty part of any sheet but an open tool, to change tab;
-//! - inside a tool, swipe an empty part of its controls or the row under them, or tap
-//!   ‹ ›, to change tool; back returns to the grid;
-//! - swipe across the photo for the next or previous photo;
-//! - fine adjust, the clipping view and reset are in the top bar's ⋯ menu, on every tab.
+//! - tap a category, or swipe along the bar, to change category;
+//! - tap a chip, or swipe the row of chips, to choose what to change; drag the ruler to
+//!   change it, double-tap it to put it back; the ⋯ beside a value opens all its tool's
+//!   settings;
+//! - on the photo, swipe up or down to choose a value of the chosen tool and sideways to
+//!   change it; hold to see the original;
+//! - inside a tool, swipe an empty part of its controls to move to the next chip; back
+//!   returns to the ruler;
+//! - fine adjust, before / after, zoom, the clipping view and reset are in the top bar's
+//!   ⋯ menu.
 //!
-//! Opening a photo from a picker goes straight to Tools: on a phone the photo is the
+//! Opening a photo from a picker goes straight to editing: on a phone the photo is the
 //! point, and the roll is only how you got to it. The first run walks through all this
 //! (`tour`).
 
@@ -32,6 +36,7 @@ use egui::{
     pos2, vec2, Align2, Color32, CursorIcon, FontId, Margin, Painter, Rect, RichText, Sense, Stroke,
 };
 
+use crate::categories::{self, Category, Chip, CHIPS_H, RULER_H};
 use crate::presets::{self, LOOKS};
 use crate::widgets::{self, Kind};
 use crate::Gpu;
@@ -62,12 +67,6 @@ impl Tab {
             Tab::Export => crate::i18n::tr("tab-export"),
         }
     }
-
-    /// The tab `step` places along, if there is one.
-    fn offset(self, step: i32) -> Option<Tab> {
-        let i = Tab::ALL.iter().position(|t| *t == self)? as i32 + step;
-        Tab::ALL.get(usize::try_from(i).ok()?).copied()
-    }
 }
 
 /// What the Presets sheet lists: the built-in looks, this photo's snapshots, or its
@@ -78,6 +77,8 @@ pub enum PresetsView {
     Looks,
     Snapshots,
     History,
+    /// This photo's edits as a whole: revert, reset, copy and paste.
+    Edits,
 }
 
 /// The look last applied from Presets. `applied` is the stack it produced: while the
@@ -161,12 +162,10 @@ pub const NAV_RAIL: f32 = 72.0;
 /// Height of the top bar. Fixed, so everything in it can be centred on one line: a row
 /// that grows as its items arrive centres the early ones on the height it had so far.
 pub const TOP_BAR: f32 = 48.0;
-/// Height of a tool's header, and of the row under its controls that steps between tools.
+/// Height of a tool's header.
 const TOOL_BAR: f32 = 46.0;
-const STEPS_H: f32 = 44.0;
-/// The Tools grid's tiles: at least this wide, and this tall.
-const TILE_W: f32 = 84.0;
-const TILE_H: f32 = 76.0;
+/// Height of the row naming the chosen value over the ruler.
+const READOUT_H: f32 = 44.0;
 /// How far a flick must travel sideways to count.
 const SWIPE: f32 = 56.0;
 
@@ -332,13 +331,41 @@ impl PhotoApp {
                     .max_rect(row)
                     .layout(egui::Layout::left_to_right(egui::Align::Center));
                 ui.scope_builder(line, |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    widgets::brand_mark(ui, 20.0);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    // Back to the roll: Library is where a photo is chosen, so it is
+                    // "back" from the photo. Tapped from the Library, it returns.
+                    let in_library = self.compact_tab == Some(Tab::Library);
+                    if bar_icon(
+                        ui,
+                        BarIcon::Back,
+                        in_library,
+                        crate::i18n::tr("tab-library"),
+                    )
+                    .clicked()
+                    {
+                        self.compact_tab = Some(if in_library { Tab::Edit } else { Tab::Library });
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        // Right to left: redo, undo, a / b, more, zoom read left to right.
+                        // Right to left: export, redo, undo, more read left to right.
                         // The icons are painted rather than taken from the fallback font,
                         // whose arrows and squares each come at their own size and height.
+                        let exporting = self.compact_tab == Some(Tab::Export);
+                        let export = widgets::button(
+                            ui,
+                            if exporting {
+                                Kind::Secondary
+                            } else {
+                                Kind::Primary
+                            },
+                            crate::i18n::tr("tab-export"),
+                            0.0,
+                        );
+                        if export.clicked() {
+                            self.compact_tab =
+                                Some(if exporting { Tab::Edit } else { Tab::Export });
+                        }
+                        ui.add_space(4.0);
                         let can_redo = !self.history.future.is_empty();
                         let can_undo = !self.history.past.is_empty();
                         if ui
@@ -359,15 +386,6 @@ impl PhotoApp {
                         {
                             self.undo();
                         }
-                        let loaded = self.ready_image().is_some();
-                        ui.add_enabled_ui(loaded, |ui| {
-                            if bar_icon(ui, BarIcon::Split, self.split_active, "Before / after")
-                                .clicked()
-                            {
-                                self.split_active = !self.split_active;
-                                self.needs_render = true;
-                            }
-                        });
                         let open = self.compact_more_open;
                         let r = bar_icon(ui, BarIcon::More, open, "More");
                         if r.clicked() {
@@ -375,25 +393,6 @@ impl PhotoApp {
                         }
                         more = r.rect;
                         ui.add_space(4.0);
-                        ui.add_enabled_ui(loaded, |ui| {
-                            // One control for zoom: it reads the zoom, and flips fit ↔ 1:1.
-                            let percent = self.zoom_percent(self.last_panel);
-                            let at_fit = self.view.zoom <= 1.0 + 1e-3;
-                            let label = match percent {
-                                Some(p) => format!("{p:.0}%"),
-                                None => "fit".to_string(),
-                            };
-                            if widgets::chip(ui, !at_fit, &label)
-                                .on_hover_text("Fit ↔ 100%")
-                                .clicked()
-                            {
-                                if at_fit {
-                                    self.zoom_actual();
-                                } else {
-                                    self.view = View::default();
-                                }
-                            }
-                        });
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let name = self
                                 .loaded_path
@@ -443,6 +442,26 @@ impl PhotoApp {
                     .show(ui, |ui| {
                         ui.set_width(w - 12.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        if menu_row(ui, loaded, "Before / after", Some(self.split_active)).clicked()
+                        {
+                            self.split_active = !self.split_active;
+                            self.needs_render = true;
+                        }
+                        // Pinching zooms too; this is the one-tap fit ↔ 1:1.
+                        let at_fit = self.view.zoom <= 1.0 + 1e-3;
+                        let zoom = if at_fit {
+                            "Zoom to 100%"
+                        } else {
+                            "Zoom to fit"
+                        };
+                        if menu_row(ui, loaded, zoom, None).clicked() {
+                            if at_fit {
+                                self.zoom_actual();
+                            } else {
+                                self.view = View::default();
+                            }
+                            close = true;
+                        }
                         if menu_row(ui, true, "Fine adjust", Some(self.fine_adjust)).clicked() {
                             self.fine_adjust = !self.fine_adjust;
                         }
@@ -472,15 +491,16 @@ impl PhotoApp {
     /// swiping along the bar moves to the next tab that way.
     fn compact_nav(&mut self, ui: &mut egui::Ui, vertical: bool) {
         let area = ui.available_rect_before_wrap();
-        // Registered before the tabs, so a tap still reaches them.
+        // The sheet the categories are for: Edit, or Looks, which Colour lists.
+        let editing = matches!(self.compact_tab, Some(Tab::Edit | Tab::Presets));
+        // Registered before the cells, so a tap still reaches them.
         if let Some(step) = swipe(ui, area, ui.id().with("nav_swipe"), vertical) {
-            let from = self.compact_tab.unwrap_or(Tab::Edit);
-            if let Some(to) = from.offset(step) {
-                self.compact_tab = Some(to);
+            if let Some(to) = self.compact_category.offset(step) {
+                self.open_category(to);
             }
         }
-        let n = Tab::ALL.len() as f32;
-        for (i, tab) in Tab::ALL.into_iter().enumerate() {
+        let n = Category::ALL.len() as f32;
+        for (i, cat) in Category::ALL.into_iter().enumerate() {
             let i = i as f32;
             let cell = if vertical {
                 let h = area.height() / n;
@@ -492,8 +512,16 @@ impl PhotoApp {
                     vec2(w, area.height()),
                 )
             };
-            let response = ui.interact(cell, ui.id().with(("tab", tab.label())), Sense::click());
-            let open = self.compact_tab == Some(tab);
+            let response = ui.interact(cell, ui.id().with(("cat", cat.label())), Sense::click());
+            widgets::describe(ui, &response, cell, || {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Button,
+                    true,
+                    editing && self.compact_category == cat,
+                    cat.label(),
+                )
+            });
+            let open = editing && self.compact_category == cat;
             let colour = if open {
                 theme::ACCENT
             } else if response.hovered() {
@@ -514,28 +542,105 @@ impl PhotoApp {
                 };
                 painter.rect_filled(bar, 1.5, theme::ACCENT);
             }
-            let icon_centre = pos2(cell.center().x, cell.center().y - 8.0);
-            paint_tab_icon(painter, icon_centre, tab, colour);
-            painter.text(
-                pos2(cell.center().x, cell.center().y + 16.0),
-                Align2::CENTER_CENTER,
-                tab.label().to_uppercase(),
-                FontId::new(11.0, theme::mono_bold()),
-                colour,
-            );
+            categories::paint_cell(painter, cell, cat, colour);
             if response.clicked() {
-                self.compact_tab = if open { None } else { Some(tab) };
+                if open {
+                    // The open category again gives the photo the whole screen.
+                    self.compact_tab = None;
+                } else {
+                    self.open_category(cat);
+                }
             }
         }
         ui.allocate_rect(area, Sense::hover());
     }
 
+    /// Show `cat`'s chips in the Edit sheet, on the chip last chosen there, else its first
+    /// value; a tool open from another category closes.
+    pub fn open_category(&mut self, cat: Category) {
+        if self.compact_category != cat || self.current_chip().is_some_and(Chip::is_tool) {
+            self.compact_controls_open = false;
+            self.cutout_studio.open = false;
+        }
+        if self.compact_category != cat {
+            self.compact_category = cat;
+            let back = self.compact_memory[cat.index()]
+                .filter(|c| !c.is_tool())
+                .or_else(|| cat.first_knob());
+            if let Some(chip) = back {
+                self.choose_chip(chip);
+            }
+        }
+        self.compact_tab = Some(Tab::Edit);
+    }
+
+    /// What the Edit sheet is on now, if anything: a tool open, else the value the ruler
+    /// and the photo turn.
+    pub fn current_chip(&self) -> Option<Chip> {
+        if self.cutout_studio.open {
+            return Some(Chip::Cutout);
+        }
+        if self.compact_tab == Some(Tab::Presets) {
+            return Some(Chip::Looks);
+        }
+        let id = self.compact_module;
+        if self.compact_controls_open {
+            return Some(Chip::Tool(id));
+        }
+        self.photo_knob()
+            .filter(|_| !crate::knobs::knobs(id).is_empty())
+            .map(|(i, _)| Chip::Knob(id, i))
+    }
+
+    /// Go to `chip`: its value under the ruler, or its tool open in its place.
+    pub fn choose_chip(&mut self, chip: Chip) {
+        // Its category comes up with it; a value no chip names (one reached by swiping
+        // on the photo) is in its module's.
+        match Category::ALL
+            .into_iter()
+            .find(|c| c.chips().contains(&chip))
+        {
+            Some(cat) => {
+                self.compact_category = cat;
+                self.compact_memory[cat.index()] = Some(chip);
+            }
+            None => {
+                if let Some(id) = chip.module() {
+                    self.compact_category = Category::of(id);
+                }
+            }
+        }
+        self.cutout_studio.open = false;
+        self.compact_tab = Some(Tab::Edit);
+        match chip {
+            Chip::Knob(id, i) => {
+                self.compact_module = id;
+                self.compact_controls_open = false;
+                self.photo_touch.knob = Some((id, i));
+                self.focused_section = Some(id);
+            }
+            Chip::Tool(id) => {
+                self.compact_module = id;
+                self.compact_controls_open = true;
+                self.focused_section = Some(id);
+            }
+            Chip::Looks => {
+                self.compact_controls_open = false;
+                self.compact_tab = Some(Tab::Presets);
+            }
+            Chip::Cutout => {
+                self.compact_controls_open = false;
+                self.cutout_studio.open = true;
+            }
+        }
+    }
+
     /// `cap` is the most height the sheet may take; it takes less when it holds less.
     /// Returns the height its content wants, scrolled parts included in full.
     fn compact_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu, tab: Tab, cap: f32) -> f32 {
-        // Edit keeps its module strip pinned and scrolls only the controls over it; every
-        // other sheet scrolls as a whole.
-        if tab == Tab::Edit {
+        // Edit keeps its chips pinned and scrolls only what is over them; Library and
+        // Export scroll as a whole.
+        if matches!(tab, Tab::Edit | Tab::Presets) {
             return self.edit_sheet(ui, cap);
         }
         egui::ScrollArea::vertical()
@@ -547,22 +652,14 @@ impl PhotoApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
-                // An empty part of the sheet swiped sideways moves to the next tab.
-                let area = ui.clip_rect();
-                if let Some(step) = swipe(ui, area, ui.id().with("sheet_swipe"), false) {
-                    if let Some(to) = tab.offset(step) {
-                        self.compact_tab = Some(to);
-                    }
-                }
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 6.0;
                         match tab {
                             Tab::Library => self.library_sheet(ui, gpu),
-                            Tab::Presets => self.presets_sheet(ui),
                             Tab::Export => self.export_sheet(ui),
-                            Tab::Edit => unreachable!("handled above"),
+                            Tab::Edit | Tab::Presets => unreachable!("handled above"),
                         }
                     });
             })
@@ -1052,11 +1149,12 @@ impl PhotoApp {
             ui.label(theme::dim("Open a photo to try a look on it.").size(12.0));
             return;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (view, label) in [
                 (PresetsView::Looks, "looks"),
                 (PresetsView::Snapshots, "snapshots"),
                 (PresetsView::History, "history"),
+                (PresetsView::Edits, "copy & paste"),
             ] {
                 if widgets::chip(ui, self.presets_view == view, label).clicked() {
                     self.presets_view = view;
@@ -1067,6 +1165,7 @@ impl PhotoApp {
             PresetsView::Looks => self.looks_body(ui, false),
             PresetsView::Snapshots => self.phone_snapshots(ui),
             PresetsView::History => self.history_rows(ui),
+            PresetsView::Edits => self.edits_block(ui),
         }
     }
 
@@ -1363,31 +1462,247 @@ impl PhotoApp {
                 });
             return ui.cursor().top() - top;
         }
+        // The bar shows the category of a tool open, however it was reached. A value left
+        // chosen in another category does not pull it back: that category's row shows,
+        // with nothing under the ruler until one of its chips is chosen.
+        if let Some(chip) = self.current_chip().filter(|c| c.is_tool()) {
+            if !self.compact_category.chips().contains(&chip) {
+                match Category::ALL
+                    .into_iter()
+                    .find(|c| c.chips().contains(&chip))
+                {
+                    Some(cat) => self.compact_category = cat,
+                    None => {
+                        if let Some(id) = chip.module() {
+                            self.compact_category = Category::of(id);
+                        }
+                    }
+                }
+            }
+        }
         let view = if self.cutout_studio.open {
             ToolView::Cutout
         } else if self.customize_open {
             ToolView::Modules
+        } else if self.compact_tab == Some(Tab::Presets) {
+            ToolView::Looks
         } else if self.compact_controls_open {
             ToolView::Module(self.compact_module)
         } else {
-            return self.tools_grid(ui, cap);
+            return self.ruler_sheet(ui);
         };
         self.tool_frame(ui, cap, view)
     }
 
+    /// The chosen value over a ruler that turns it, over the category's chips. Nothing
+    /// scrolls: it is the same height whatever is chosen, so the photo above stays put.
+    fn ruler_sheet(&mut self, ui: &mut egui::Ui) -> f32 {
+        let top = ui.cursor().top();
+        let chip = self.current_chip().filter(|c| {
+            !c.is_tool() && c.module().map(Category::of) == Some(self.compact_category)
+        });
+        let white = self.white_scale();
+        let width = ui.available_width();
+        match chip {
+            Some(Chip::Knob(id, i)) if crate::knobs::knobs(id).get(i).is_some() => {
+                let k = &crate::knobs::knobs(id)[i];
+                let value = k.get(&self.stack, &white);
+                let home = k.get(&self.baseline, &white);
+                let range = k.range(&self.stack);
+                let changed = (value - home).abs() > (range.1 - range.0) * 1e-4;
+                let label = Chip::Knob(id, i).label();
+                let unit = Chip::Knob(id, i).unit();
+                let mut reset = false;
+                let mut more = false;
+                // `NAME      +0.27 EV      [⟲] [⋯]`
+                ui.allocate_ui_with_layout(
+                    vec2(width, READOUT_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_size(vec2(width, READOUT_H));
+                        let row = ui.max_rect();
+                        let painter = ui.painter();
+                        painter.text(
+                            pos2(row.left() + 16.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            label.to_uppercase(),
+                            FontId::new(11.5, theme::mono_bold()),
+                            theme::TEXT_DIM,
+                        );
+                        painter.text(
+                            row.center(),
+                            Align2::CENTER_CENTER,
+                            format!("{}{unit}", k.format(value)),
+                            FontId::new(20.0, theme::mono_bold()),
+                            if changed {
+                                theme::ACCENT
+                            } else {
+                                theme::TEXT_HI
+                            },
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.add_space(4.0);
+                            more =
+                                bar_icon(ui, BarIcon::More, false, "All of this tool's settings")
+                                    .clicked();
+                            reset = ui
+                                .add_enabled_ui(changed, |ui| {
+                                    bar_icon(ui, BarIcon::Reset, false, "Reset")
+                                })
+                                .inner
+                                .clicked();
+                        });
+                    },
+                );
+                let snapshot = self.stack.clone();
+                let mut started = false;
+                let mut next = None;
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 0))
+                    .show(ui, |ui| {
+                        let turned =
+                            categories::ruler(ui, label, value, range, home, self.fine_adjust);
+                        started = turned.started;
+                        next = turned.value;
+                    });
+                if reset {
+                    started = true;
+                    next = Some(home);
+                    self.photo_touch.log.reset += 1;
+                }
+                if let Some(v) = next {
+                    k.set(id, &mut self.stack, &white, v);
+                    self.focused_section = Some(id);
+                    self.needs_render = true;
+                }
+                if started {
+                    self.history.checkpoint(&snapshot);
+                }
+                if more {
+                    self.compact_controls_open = true;
+                }
+            }
+            _ => {
+                // Nothing chosen yet, or only tools to choose from: say so, at the
+                // height the value and ruler take, so the row below stays where it is.
+                let (rect, _) =
+                    ui.allocate_exact_size(vec2(width, READOUT_H + RULER_H), Sense::hover());
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "Choose a tool below",
+                    FontId::new(13.0, theme::sans_strong()),
+                    theme::TEXT_DIM,
+                );
+            }
+        }
+        self.chip_row(ui);
+        ui.cursor().top() - top
+    }
+
+    /// The open category's chips, one row to swipe along; the chosen one is filled amber
+    /// and scrolled into view when it changes.
+    fn chip_row(&mut self, ui: &mut egui::Ui) {
+        let y = ui.cursor().top();
+        ui.painter()
+            .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
+        let cat = self.compact_category;
+        let current = self.current_chip();
+        let white = self.white_scale();
+        let stack = &self.stack;
+        let baseline = &self.baseline;
+        // Whether what a chip names differs from how the photo opened.
+        let changed = |chip: Chip| match chip {
+            Chip::Knob(id, i) => crate::knobs::knobs(id).get(i).is_some_and(|k| {
+                let (lo, hi) = k.range(stack);
+                (k.get(stack, &white) - k.get(baseline, &white)).abs() > (hi - lo) * 1e-4
+            }),
+            Chip::Tool(id) => id.is_on(stack) && summarise(id, stack, baseline, &white).1,
+            Chip::Looks | Chip::Cutout => false,
+        };
+        let marks: Vec<bool> = cat.chips().iter().map(|c| changed(*c)).collect();
+        let reveal_id = ui.id().with("chip_revealed");
+        let revealed: Option<Chip> = ui.data(|d| d.get_temp::<Option<Chip>>(reveal_id)).flatten();
+        let mut picked = None;
+        // A fixed band, so the chips are centred on it whatever the scroll area adds.
+        let row = Rect::from_min_size(
+            pos2(ui.max_rect().left(), y + 1.0),
+            vec2(ui.max_rect().width(), CHIPS_H),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row), |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt(("compact_chips", cat.label()))
+                .auto_shrink([false, false])
+                .max_height(CHIPS_H)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .scroll_source(ScrollSource {
+                    drag: DragScroll::Always,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.add_space(12.0);
+                        for (chip, mark) in cat.chips().iter().zip(&marks) {
+                            let on = current == Some(*chip);
+                            let r = categories::chip(ui, chip.label(), on, *mark, chip.is_tool());
+                            if on && revealed != Some(*chip) {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() {
+                                picked = Some(*chip);
+                            }
+                        }
+                        ui.add_space(12.0);
+                    });
+                });
+        });
+        ui.advance_cursor_after_rect(row);
+        if revealed != current {
+            ui.data_mut(|d| d.insert_temp(reveal_id, current));
+        }
+        self.compact_rects.strip = row;
+        if let Some(chip) = picked {
+            // The chosen tool again closes it, back to the ruler.
+            if chip.is_tool() && current == Some(chip) {
+                self.close_tool();
+            } else {
+                self.choose_chip(chip);
+            }
+        }
+    }
+
+    /// Leave the open tool for the ruler, on its module's first value if it has one.
+    fn close_tool(&mut self) {
+        match self.current_chip() {
+            Some(Chip::Looks) => self.compact_tab = Some(Tab::Edit),
+            Some(Chip::Cutout) => self.cutout_studio.open = false,
+            _ => self.compact_controls_open = false,
+        }
+        self.customize_open = false;
+    }
+
     /// One tool open: its header, its controls (scrolled when they run past the cap), and
-    /// under a module's, the row that steps between tools.
+    /// under them its category's chips, to move on without going back.
     fn tool_frame(&mut self, ui: &mut egui::Ui, cap: f32, view: ToolView) -> f32 {
         let top = ui.cursor().top();
-        let steps = matches!(view, ToolView::Module(_));
+        let chips = !matches!(view, ToolView::Modules);
         self.tool_header(ui, view);
         let y = ui.cursor().top();
         ui.painter()
             .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
-        // The panel can be shorter than the cap on a small screen.
+        // The panel can be shorter than the cap on a small screen. What is under the
+        // controls, and the spacing either side of them, comes off what is left.
         let room = cap.min(ui.available_height() + (y - top));
-        let fixed = TOOL_BAR + if steps { STEPS_H + 1.0 } else { 0.0 } + 2.0;
-        let body_h = (room - fixed).max(80.0);
+        let gap = ui.spacing().item_spacing.y;
+        let below = if chips { CHIPS_H + 1.0 + gap } else { 0.0 };
+        let body_h = (top + room - ui.cursor().top() - below - gap - 2.0).max(80.0);
+        // Where the controls showed last frame: the swipe below keeps inside it. Its clip
+        // is laid out for the most the controls may take, and reaches over the chips
+        // when they take less.
+        let shown_id = ui.id().with(("tool_shown", view.salt()));
+        let last_shown: Option<Rect> = ui.data(|d| d.get_temp(shown_id));
         let body = egui::ScrollArea::vertical()
             .id_salt(("compact_tool", view.salt()))
             .auto_shrink([false, true])
@@ -1397,12 +1712,16 @@ impl PhotoApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
-                // A sideways flick on anything that is not a control moves tool.
-                if steps {
+                // A sideways flick on anything that is not a control moves to the next
+                // chip.
+                if chips {
                     // No lower than the body is given: the clip rect can reach past it,
                     // over the row below, once the controls scroll.
-                    let mut area = ui.clip_rect();
+                    let mut area = ui.clip_rect().intersect(ui.max_rect());
                     area.max.y = area.max.y.min(area.min.y + body_h);
+                    if let Some(last) = last_shown {
+                        area = area.intersect(last);
+                    }
                     if let Some(step) = swipe(ui, area, ui.id().with("module_swipe"), false) {
                         self.step_module(step);
                     }
@@ -1420,18 +1739,20 @@ impl PhotoApp {
                             ToolView::Module(id) => self.single_module(ui, id),
                             ToolView::Modules => self.compact_modules_list(ui),
                             ToolView::Cutout => self.cutout_controls(ui),
+                            ToolView::Looks => self.presets_sheet(ui),
                         }
                     });
             });
         let hidden = (body.content_size.y - body.inner_rect.height()).max(0.0);
-        if steps {
-            let y = ui.cursor().top();
-            ui.painter()
-                .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
-            let before = ui.cursor().top();
-            self.tool_steps(ui);
-            self.compact_rects.strip =
-                Rect::from_x_y_ranges(ui.max_rect().x_range(), before..=ui.cursor().top());
+        // No lower than where the chips begin: the scroll area's own rect can reach past
+        // the height it was given.
+        let mut shown = body.inner_rect;
+        shown.max.y = shown.max.y.min(ui.cursor().top());
+        if last_shown != Some(shown) {
+            ui.data_mut(|d| d.insert_temp(shown_id, shown));
+        }
+        if chips {
+            self.chip_row(ui);
         }
         ui.cursor().top() - top + hidden
     }
@@ -1464,6 +1785,12 @@ impl PhotoApp {
                 false,
                 true,
             ),
+            ToolView::Looks => (
+                crate::i18n::tr("tab-presets").into(),
+                "looks, snapshots, history and copy & paste".into(),
+                false,
+                true,
+            ),
         };
         let snapshot = self.stack.clone();
         let mut changed = false;
@@ -1475,12 +1802,8 @@ impl PhotoApp {
                 ui.set_min_size(vec2(width, TOOL_BAR));
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.add_space(4.0);
-                if bar_icon(ui, BarIcon::Back, false, "All tools").clicked() {
-                    match view {
-                        ToolView::Module(_) => self.compact_controls_open = false,
-                        ToolView::Modules => self.customize_open = false,
-                        ToolView::Cutout => self.cutout_studio.open = false,
-                    }
+                if bar_icon(ui, BarIcon::Back, false, "Back to the ruler").clicked() {
+                    self.close_tool();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -1536,151 +1859,6 @@ impl PhotoApp {
         }
     }
 
-    /// `‹ previous    next ›`: the tools either side of this one, thumb-sized. A swipe
-    /// along the row, or across the controls, does the same.
-    fn tool_steps(&mut self, ui: &mut egui::Ui) {
-        let ids = self.compact_ids();
-        let at = ids.iter().position(|id| *id == self.compact_module);
-        let prev = at
-            .and_then(|i| i.checked_sub(1))
-            .and_then(|i| ids.get(i))
-            .copied();
-        let next = at.and_then(|i| ids.get(i + 1)).copied();
-        let area = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), STEPS_H));
-        if let Some(step) = swipe(ui, area, ui.id().with("steps_swipe"), false) {
-            self.step_module(step);
-        }
-        let mut step = None;
-        ui.allocate_ui_with_layout(
-            area.size(),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_min_size(area.size());
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.add_space(8.0);
-                let w = ((area.width() - 32.0) / 2.0).max(60.0);
-                let label = |id: Option<InspectorSectionId>, before: bool| match id {
-                    Some(id) if before => format!("‹  {}", id.short_name()),
-                    Some(id) => format!("{}  ›", id.short_name()),
-                    None => String::new(),
-                };
-                let h = STEPS_H - 8.0;
-                if widgets::button_sized(
-                    ui,
-                    prev.is_some(),
-                    Kind::Secondary,
-                    &label(prev, true),
-                    w,
-                    h,
-                )
-                .on_hover_text("The tool before")
-                .clicked()
-                {
-                    step = Some(-1);
-                }
-                if widgets::button_sized(
-                    ui,
-                    next.is_some(),
-                    Kind::Secondary,
-                    &label(next, false),
-                    w,
-                    h,
-                )
-                .on_hover_text("The tool after")
-                .clicked()
-                {
-                    step = Some(1);
-                }
-            },
-        );
-        if let Some(step) = step {
-            self.step_module(step);
-        }
-    }
-
-    /// Every tool as a tile, then removing the background and choosing which tools show,
-    /// and under them what can be done to this photo's edits as a whole.
-    fn tools_grid(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
-        let defaults = self.baseline.clone();
-        let white = self.white_scale();
-        egui::ScrollArea::vertical()
-            .id_salt("compact_tools")
-            .auto_shrink([false, true])
-            .max_height(cap)
-            .scroll_source(ScrollSource {
-                drag: DragScroll::Always,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                // An empty part of the grid swiped sideways moves to the next tab. Only
-                // what is shown of the grid itself: the clip reaches over the side sheet's
-                // grip.
-                let area = ui.max_rect().intersect(ui.clip_rect());
-                if let Some(step) = swipe(ui, area, ui.id().with("tools_swipe"), false) {
-                    if let Some(to) = Tab::Edit.offset(step) {
-                        self.compact_tab = Some(to);
-                    }
-                }
-                egui::Frame::new()
-                    .inner_margin(Margin::symmetric(10, 10))
-                    .show(ui, |ui| {
-                        let gap = 6.0;
-                        let width = ui.available_width();
-                        let columns = ((width + gap) / (TILE_W + gap)).floor().max(3.0);
-                        let tile_w = (width - gap * (columns - 1.0)) / columns;
-                        let mut tiles: Vec<Tile> = self
-                            .compact_ids()
-                            .into_iter()
-                            .map(|id| {
-                                let (summary, modified) =
-                                    summarise(id, &self.stack, &defaults, &white);
-                                Tile {
-                                    pick: Pick::Module(id),
-                                    name: id.title().to_string(),
-                                    sub: (modified && id.is_on(&self.stack)).then_some(summary),
-                                }
-                            })
-                            .collect();
-                        tiles.push(Tile {
-                            pick: Pick::Cutout,
-                            name: "remove background".into(),
-                            sub: None,
-                        });
-                        tiles.push(Tile {
-                            pick: Pick::Modules,
-                            name: "+ tools".into(),
-                            sub: None,
-                        });
-                        let mut picked = None;
-                        for row in tiles.chunks(columns as usize) {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-                                for t in row {
-                                    if tool_tile(ui, t, tile_w).clicked() {
-                                        picked = Some(t.pick);
-                                    }
-                                }
-                            });
-                            ui.add_space(gap - ui.spacing().item_spacing.y);
-                        }
-                        match picked {
-                            Some(Pick::Module(id)) => {
-                                self.compact_module = id;
-                                self.compact_controls_open = true;
-                                self.focused_section = Some(id);
-                            }
-                            Some(Pick::Cutout) => self.cutout_studio.open = true,
-                            Some(Pick::Modules) => self.customize_open = true,
-                            None => {}
-                        }
-                        ui.add_space(10.0);
-                        self.edits_block(ui);
-                    });
-            })
-            .content_size
-            .y
-    }
-
     /// The cutout's controls in the Tools sheet, its preview on the photo above.
     fn cutout_controls(&mut self, ui: &mut egui::Ui) {
         let (changed, export) = self.cutout_studio.controls(ui);
@@ -1692,28 +1870,29 @@ impl PhotoApp {
         }
     }
 
-    /// The modules the phone's strip shows, in order.
-    fn compact_ids(&self) -> Vec<InspectorSectionId> {
-        self.compact_sections
-            .iter()
-            .filter(|s| s.visible)
-            .map(|s| s.id)
-            .collect()
-    }
-
-    /// Move to the next (`+1`) or previous (`-1`) module, stopping at the ends.
+    /// Move to the next (`+1`) or previous (`-1`) chip in the open category, stopping at
+    /// its ends. A tool stays open if the chip it lands on is one.
     pub(crate) fn step_module(&mut self, step: i32) {
-        let ids = self.compact_ids();
-        let Some(i) = ids.iter().position(|id| *id == self.compact_module) else {
+        let chips = self.compact_category.chips();
+        // A tool opened from a value's ⋯ steps on from that value's chip.
+        let at = |c: Chip| {
+            chips
+                .iter()
+                .position(|x| *x == c)
+                .or_else(|| chips.iter().position(|x| x.module() == c.module()))
+        };
+        let Some(i) = self.current_chip().and_then(at) else {
+            if let Some(first) = chips.first() {
+                self.choose_chip(*first);
+            }
             return;
         };
         let j = i as i32 + step;
-        if let Some(next) = usize::try_from(j).ok().and_then(|j| ids.get(j)) {
-            self.compact_module = *next;
-            self.compact_controls_open = true;
-            self.focused_section = Some(*next);
-            // Bring its name into view in the strip.
-            self.reveal_section = Some(*next);
+        if let Some(next) = usize::try_from(j).ok().and_then(|j| chips.get(j)) {
+            self.choose_chip(*next);
+            if let Some(id) = next.module() {
+                self.reveal_section = Some(id);
+            }
         }
     }
 
@@ -2072,31 +2251,30 @@ impl PhotoApp {
             if let Some(tab) = s.tab {
                 self.compact_tab = Some(tab);
             }
-            if s.goal.on_photo() && crate::knobs::knobs(self.compact_module).is_empty() {
-                self.compact_module = InspectorSectionId::Exposure;
-            }
-            // The photo is a tool's control, and the steps row is under a tool's controls.
+            // The photo turns a value, and the chips are under the ruler: a value it is.
             if s.goal.on_photo() || s.goal == Goal::Module {
-                self.compact_controls_open = true;
                 self.customize_open = false;
-                self.cutout_studio.open = false;
+                if !matches!(self.current_chip(), Some(Chip::Knob(..))) {
+                    self.choose_chip(Chip::Knob(InspectorSectionId::Exposure, 0));
+                }
             }
             self.tour_mark = Some(TourMark {
                 step,
                 log: self.photo_touch.log,
                 tab: self.compact_tab,
-                module: self.compact_module,
+                category: self.compact_category,
+                chip: self.current_chip(),
             });
         }
         let mark = self.tour_mark.clone().expect("set above");
         let log = self.photo_touch.log;
         let done = match s.goal {
-            Goal::Tab => self.compact_tab != mark.tab,
+            Goal::Tab => self.compact_tab != mark.tab || self.compact_category != mark.category,
             Goal::Choose => log.chose > mark.log.chose,
             Goal::Adjust => log.adjusted > mark.log.adjusted,
             Goal::Reset => log.reset > mark.log.reset,
             Goal::Hold => log.held > mark.log.held,
-            Goal::Module => self.compact_module != mark.module,
+            Goal::Module => self.current_chip() != mark.chip,
             Goal::Photo => log.stepped > mark.log.stepped,
             Goal::Done => false,
         };
@@ -2256,7 +2434,7 @@ impl PhotoApp {
         }
     }
 
-    /// Where the row stepping between tools was drawn last frame.
+    /// Where the row of chips was drawn last frame.
     pub fn strip_rect(&self) -> Rect {
         self.compact_rects.strip
     }
@@ -2293,7 +2471,7 @@ impl PhotoApp {
 enum Target {
     Nav,
     Stage,
-    /// The row under a tool's controls that steps to the next tool.
+    /// The open category's row of chips.
     Strip,
     Nothing,
 }
@@ -2324,7 +2502,8 @@ pub(crate) struct TourMark {
     step: usize,
     log: crate::on_photo::GestureLog,
     tab: Option<Tab>,
-    module: InspectorSectionId,
+    category: Category,
+    chip: Option<Chip>,
 }
 
 struct TourStep {
@@ -2413,7 +2592,6 @@ const TOUR: [TourStep; 8] = [
 enum BarIcon {
     Undo,
     Redo,
-    Split,
     Reset,
     /// Three dots: more.
     More,
@@ -2456,14 +2634,6 @@ fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::
         BarIcon::Back => {
             painter.line_segment([c + vec2(4.0, -8.0), c + vec2(-4.0, 0.0)], stroke);
             painter.line_segment([c + vec2(-4.0, 0.0), c + vec2(4.0, 8.0)], stroke);
-        }
-        // Before | after.
-        BarIcon::Split => {
-            let frame = Rect::from_center_size(c, vec2(19.0, 15.0));
-            painter.rect_stroke(frame, 1.5, stroke, egui::StrokeKind::Middle);
-            painter.vline(c.x, frame.y_range(), stroke);
-            let left = Rect::from_min_max(frame.min, pos2(c.x, frame.max.y)).shrink(2.0);
-            painter.rect_filled(left, 0.5, colour.gamma_multiply(0.45));
         }
     }
     if hovered {
@@ -2601,6 +2771,7 @@ enum ToolView {
     Module(InspectorSectionId),
     Modules,
     Cutout,
+    Looks,
 }
 
 impl ToolView {
@@ -2610,87 +2781,9 @@ impl ToolView {
             ToolView::Module(id) => format!("module {}", id.title()),
             ToolView::Modules => "modules".into(),
             ToolView::Cutout => "cutout".into(),
+            ToolView::Looks => "looks".into(),
         }
     }
-}
-
-/// What a tile in the Tools grid opens.
-#[derive(Clone, Copy)]
-enum Pick {
-    Module(InspectorSectionId),
-    Cutout,
-    Modules,
-}
-
-struct Tile {
-    pick: Pick,
-    name: String,
-    /// What the tool does to the photo now, when it does anything.
-    sub: Option<String>,
-}
-
-/// A tile in the Tools grid: the tool's name, and under it in amber what it does to the
-/// photo, when it does anything.
-fn tool_tile(ui: &mut egui::Ui, tile: &Tile, width: f32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(width, TILE_H), Sense::click());
-    widgets::describe(ui, &response, rect, || {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tile.name)
-    });
-    let painter = ui.painter();
-    let hot = response.hovered() || response.is_pointer_button_down_on();
-    let edited = tile.sub.is_some();
-    painter.rect(
-        rect,
-        8,
-        if hot { theme::BG_850 } else { theme::BG_900 },
-        Stroke::new(
-            1.0,
-            if edited {
-                theme::ACCENT.linear_multiply(0.6)
-            } else {
-                theme::BORDER
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    // Centred line by line: a name that wraps reads as one label, not as a paragraph.
-    let centred = |text: &str, font: FontId, colour: Color32, wrap: f32| {
-        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, colour, wrap);
-        job.halign = egui::Align::Center;
-        painter.layout_job(job)
-    };
-    let name = centred(
-        &tile.name,
-        FontId::new(13.0, theme::sans_strong()),
-        if edited {
-            theme::ACCENT
-        } else {
-            theme::TEXT_HI
-        },
-        rect.width() - 12.0,
-    );
-    let sub = tile.sub.as_ref().map(|s| {
-        centred(
-            s,
-            FontId::new(10.5, theme::mono_bold()),
-            theme::ACCENT,
-            rect.width() - 10.0,
-        )
-    });
-    let total = name.size().y + sub.as_ref().map_or(0.0, |g| g.size().y + 4.0);
-    let mut y = rect.center().y - total / 2.0;
-    // A centred galley's rows are laid out about x = 0.
-    let height = name.size().y;
-    painter.galley(pos2(rect.center().x, y), name, theme::TEXT_HI);
-    y += height + 4.0;
-    if let Some(g) = sub {
-        let clip = painter.with_clip_rect(rect.shrink(3.0));
-        clip.galley(pos2(rect.center().x, y), g, theme::ACCENT);
-    }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
-    response
 }
 
 /// A row in the Export sheet: a title over what it does, the whole row the target.
@@ -2810,51 +2903,6 @@ fn divider(ui: &mut egui::Ui, height: f32) {
         Rect::from_center_size(rect.center(), vec2(1.0, height * 0.5)).y_range(),
         Stroke::new(1.0, theme::BORDER_HI),
     );
-}
-
-/// A module's name in the Edit strip: short enough that several fit across a phone.
-/// The tab icons, painted rather than taken from a font: the bundled fonts have no glyph
-/// for sliders or a scope, and painted strokes match the rest of the controls.
-fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {
-    let stroke = Stroke::new(1.9, colour);
-    // Drawn at a third over the size the numbers below say.
-    let k = 1.3;
-    let vec2 = |x: f32, y: f32| egui::vec2(x * k, y * k);
-    match tab {
-        // A two-by-two grid of prints.
-        Tab::Library => {
-            for (dx, dy) in [(-5.0, -5.0), (5.0, -5.0), (-5.0, 5.0), (5.0, 5.0)] {
-                painter.rect_stroke(
-                    Rect::from_center_size(c + vec2(dx, dy), vec2(8.0, 8.0)),
-                    2.0,
-                    stroke,
-                    egui::StrokeKind::Middle,
-                );
-            }
-        }
-        // Three overlapping swatches: looks.
-        Tab::Presets => {
-            for (dx, dy) in [(-4.0, 3.0), (4.0, 3.0), (0.0, -4.0)] {
-                painter.circle_stroke(c + vec2(dx, dy), 5.5 * k, stroke);
-            }
-        }
-        // Three sliders at different settings.
-        Tab::Edit => {
-            for (row, knob) in [(-6.0, -3.0), (0.0, 4.0), (6.0, -6.0)] {
-                painter.line_segment([c + vec2(-9.0, row), c + vec2(9.0, row)], stroke);
-                painter.circle_filled(c + vec2(knob, row), 2.6 * k, colour);
-            }
-        }
-        // An arrow rising out of a tray.
-        Tab::Export => {
-            painter.line_segment([c + vec2(0.0, 4.0), c + vec2(0.0, -8.0)], stroke);
-            painter.line_segment([c + vec2(-4.0, -4.0), c + vec2(0.0, -8.0)], stroke);
-            painter.line_segment([c + vec2(4.0, -4.0), c + vec2(0.0, -8.0)], stroke);
-            painter.line_segment([c + vec2(-8.0, 2.0), c + vec2(-8.0, 8.0)], stroke);
-            painter.line_segment([c + vec2(-8.0, 8.0), c + vec2(8.0, 8.0)], stroke);
-            painter.line_segment([c + vec2(8.0, 8.0), c + vec2(8.0, 2.0)], stroke);
-        }
-    }
 }
 
 #[cfg(test)]

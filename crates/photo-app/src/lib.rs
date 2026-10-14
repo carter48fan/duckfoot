@@ -3,6 +3,7 @@
 //! The desktop and Android bootstraps both drive this same type.
 
 pub mod batch;
+pub mod categories;
 pub mod compact;
 pub mod dam;
 pub mod gesture;
@@ -783,12 +784,17 @@ pub struct PhotoApp {
     pub compact_tab: Option<compact::Tab>,
     /// The module the phone layout's Edit sheet shows.
     pub compact_module: InspectorSectionId,
+    /// The phone's bottom bar: which group of chips the Edit sheet shows.
+    pub compact_category: categories::Category,
+    /// The chip last chosen in each category, to come back to.
+    compact_memory: [Option<categories::Chip>; 5],
     /// The phone layout's Library shows its rating, flag and search filters.
     pub library_filters_open: bool,
     /// A photo was asked for from outside the Library grid (a picker, a share); when it
     /// lands the phone layout goes straight to Edit, where the photo is worked on.
     edit_when_opened: bool,
-    /// The Tools sheet shows the chosen tool on its own; off, the grid of every tool.
+    /// The Edit sheet shows the chosen tool's own controls; off, the ruler under its
+    /// category's chips.
     pub compact_controls_open: bool,
     /// The phone's top-bar menu (⋯) is open.
     compact_more_open: bool,
@@ -1005,9 +1011,11 @@ impl PhotoApp {
             touch_seen: false,
             compact_tab: Some(compact::Tab::Library),
             compact_module: InspectorSectionId::Exposure,
+            compact_category: categories::Category::Light,
+            compact_memory: [None; 5],
             library_filters_open: false,
             edit_when_opened: false,
-            compact_controls_open: true,
+            compact_controls_open: false,
             compact_more_open: false,
             compact_sheet_width: None,
             compact_sheet_fit: None,

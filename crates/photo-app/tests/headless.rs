@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use photo_app::categories::{Category, Chip};
 use photo_app::compact::Tab;
 use photo_app::dam::FolderBookmark;
 use photo_app::platform::{Platform, Request, Response};
@@ -503,9 +504,9 @@ fn tap(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, at: egui::Pos2) {
     h.frame_sized(app, size, pointer(vec![egui::Event::PointerGone]));
 }
 
-/// The centre of tab `i` of Tab::ALL.len() in the bottom bar (portrait) or right rail (landscape).
-fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
-    let n = Tab::ALL.len() as f32;
+/// The centre of category `i` in the bottom bar (portrait) or right rail (landscape).
+fn cell_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
+    let n = Category::ALL.len() as f32;
     if size.x > size.y {
         let rail = photo_app::compact::NAV_RAIL;
         let top = photo_app::compact::TOP_BAR; // under the top bar
@@ -519,9 +520,10 @@ fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
 }
 
 /// Phones get the navigation-bar layout either way up; every sheet lays out with a photo
-/// open, and the tabs open and close them.
+/// open. The bar's categories open the Edit sheet on their chips, and the top bar's back
+/// arrow is the Library.
 #[test]
-fn the_phone_layout_shows_every_sheet_and_tabs_switch_them() {
+fn the_phone_layout_shows_every_sheet_and_the_bar_picks_a_category() {
     let dir = scratch_dir("phone");
     let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
     write_dng(&a, 640, 426);
@@ -540,22 +542,45 @@ fn the_phone_layout_shows_every_sheet_and_tabs_switch_them() {
             let out = h.frame_sized(&mut app, size, Default::default());
             assert!(!out.shapes.is_empty(), "{tab:?} at {size:?} drew nothing");
         }
-        for (i, tab) in Tab::ALL.into_iter().enumerate() {
-            app.compact_tab = None;
+        for (i, cat) in Category::ALL.into_iter().enumerate() {
+            app.compact_tab = Some(Tab::Library);
             h.frame_sized(&mut app, size, Default::default());
-            tap(&h, &mut app, size, tab_centre(size, i));
-            assert_eq!(app.compact_tab, Some(tab), "tapping {tab:?} at {size:?}");
-            // Tapping the open tab again gives the stage the whole screen.
-            tap(&h, &mut app, size, tab_centre(size, i));
-            assert_eq!(app.compact_tab, None, "closing {tab:?} at {size:?}");
+            tap(&h, &mut app, size, cell_centre(size, i));
+            assert_eq!(
+                app.compact_tab,
+                Some(Tab::Edit),
+                "tapping {cat:?} at {size:?}"
+            );
+            assert_eq!(app.compact_category, cat, "tapping {cat:?} at {size:?}");
+            // Tapping the open category again gives the stage the whole screen.
+            tap(&h, &mut app, size, cell_centre(size, i));
+            assert_eq!(app.compact_tab, None, "closing {cat:?} at {size:?}");
         }
+        // The top bar's back arrow is the Library, and from there back to editing.
+        let back = egui::pos2(8.0 + 22.0, photo_app::compact::TOP_BAR / 2.0);
+        app.compact_tab = Some(Tab::Edit);
+        h.frame_sized(&mut app, size, Default::default());
+        tap(&h, &mut app, size, back);
+        assert_eq!(app.compact_tab, Some(Tab::Library), "back at {size:?}");
+        tap(&h, &mut app, size, back);
+        assert_eq!(app.compact_tab, Some(Tab::Edit), "back again at {size:?}");
     }
 
     // Every module's controls lay out alone in the Edit sheet.
     app.compact_tab = Some(Tab::Edit);
+    app.compact_controls_open = true;
     for id in photo_app::InspectorSectionId::all() {
         app.compact_module = *id;
         h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    // And every chip, under the ruler or open in its place.
+    for cat in Category::ALL {
+        for chip in cat.chips() {
+            app.choose_chip(*chip);
+            h.frame_sized(&mut app, PORTRAIT, Default::default());
+            assert_eq!(app.current_chip(), Some(*chip));
+            assert_eq!(app.compact_category, cat);
+        }
     }
     assert_eq!(app.error(), None);
     let _ = std::fs::remove_dir_all(&dir);
@@ -624,8 +649,8 @@ fn back_select_mode_and_swipe_work_without_a_keyboard() {
 }
 
 /// Upright, the sheet is only as tall as what it holds, so the photo keeps most of the
-/// screen: a tool open on its own leaves the photo over half, and even the grid of every
-/// tool, the tallest the Tools sheet gets, leaves it well over a third.
+/// screen: the ruler under its chips leaves it well over half, and a tool open in the
+/// ruler's place over half too.
 #[test]
 fn the_tools_sheet_stays_low() {
     let dir = scratch_dir("low_sheet");
@@ -640,21 +665,25 @@ fn the_tools_sheet_stays_low() {
     assert_eq!(
         app.compact_tab,
         Some(Tab::Edit),
-        "the first photo opens to Tools"
+        "the first photo opens to editing"
     );
-    assert!(!app.compact_controls_open, "…on the grid of every tool");
+    assert_eq!(
+        app.current_chip(),
+        Some(Chip::Knob(photo_app::InspectorSectionId::Exposure, 0)),
+        "…on the ruler, turning exposure"
+    );
 
     // The sheet takes its content's height a frame after the content changes.
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
-    let grid = app.stage_size().y;
+    let ruler = app.stage_size().y;
     assert!(
-        grid > PORTRAIT.y * 0.38,
-        "the grid should leave the photo over a third of the screen, got {grid}"
+        ruler > PORTRAIT.y * 0.6,
+        "the ruler should leave the photo well over half the screen, got {ruler}"
     );
 
-    app.compact_module = photo_app::InspectorSectionId::Exposure;
+    // Exposure's own controls, from the ⋯ beside its value.
     app.compact_controls_open = true;
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
@@ -877,9 +906,9 @@ fn flick(h: &Headless, app: &mut PhotoApp, y: f32, x0: f32, x1: f32) {
     h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerGone]));
 }
 
-/// Swiping moves between modules on the Edit sheet and between tabs on the nav bar; the
-/// scope and filmic start hidden on a phone and draw flat once shown; a look from Presets
-/// applies and "original" takes it off; the tour closes with back.
+/// Swiping moves between chips from an open tool and between categories on the nav bar;
+/// the scope and filmic are Light's tools and draw flat; a look from Looks applies and
+/// "original" takes it off; the tour closes with back.
 #[test]
 fn phone_swipes_presets_and_tour() {
     use photo_app::InspectorSectionId as M;
@@ -899,13 +928,13 @@ fn phone_swipes_presets_and_tour() {
         "no settings directory, so no tour on its own"
     );
 
-    // Hidden until asked for: the scope and filmic.
-    let shown = |app: &PhotoApp, id| app.compact_sections.iter().any(|s| s.id == id && s.visible);
-    assert!(!shown(&app, M::Scope) && !shown(&app, M::Filmic3D));
-    assert!(shown(&app, M::Exposure) && shown(&app, M::Tonal));
+    // The scope and filmic are tools in Light's row.
+    for id in [M::Scope, M::Filmic3D] {
+        assert!(Category::Light.chips().contains(&Chip::Tool(id)));
+    }
 
     // A flick to the left across the exposure tool's controls (below its header, where
-    // the auto tone chip leaves room) moves on to the next tool.
+    // the auto tone chip leaves room) moves on to the chip after exposure.
     app.compact_module = M::Exposure;
     app.compact_controls_open = true;
     for _ in 0..3 {
@@ -914,44 +943,40 @@ fn phone_swipes_presets_and_tour() {
     let sheet_top = app.sheet_rect().top();
     flick(&h, &mut app, sheet_top + 46.0 + 22.0, 330.0, 190.0);
     assert_eq!(
-        app.compact_module,
-        M::Tonal,
-        "a flick left is the next module"
+        app.current_chip(),
+        Some(Chip::Knob(M::Tonal, 0)),
+        "a flick left is the next chip"
     );
-    for _ in 0..3 {
-        h.frame_sized(&mut app, PORTRAIT, Default::default());
-    }
-    // Along the row under the controls, which steps between tools too.
-    let steps = app.strip_rect().center().y;
-    flick(&h, &mut app, steps, 190.0, 380.0);
-    assert_eq!(app.compact_module, M::Exposure, "a flick right goes back");
 
-    // Along the nav bar, a flick left moves one tab on.
+    // Along the nav bar, a flick left moves one category on, and right comes back.
     flick(&h, &mut app, PORTRAIT.y - 24.0, 330.0, 150.0);
-    assert_eq!(app.compact_tab, Some(Tab::Export));
-    flick(&h, &mut app, PORTRAIT.y - 24.0, 100.0, 300.0);
+    assert_eq!(app.compact_category, Category::Colour);
     assert_eq!(app.compact_tab, Some(Tab::Edit));
+    flick(&h, &mut app, PORTRAIT.y - 24.0, 100.0, 300.0);
+    assert_eq!(app.compact_category, Category::Light);
+    assert_eq!(
+        app.current_chip(),
+        Some(Chip::Knob(M::Tonal, 0)),
+        "back where it was in Light"
+    );
 
-    // Shown, the scope and filmic lay out (flat) on the phone.
-    for s in &mut app.compact_sections {
-        s.visible = true;
-    }
+    // The scope and filmic lay out (flat) on the phone.
     for id in [M::Scope, M::Filmic3D] {
-        app.compact_module = id;
+        app.choose_chip(Chip::Tool(id));
         h.frame_sized(&mut app, PORTRAIT, Default::default());
         assert_eq!(app.compact_module, id);
     }
 
-    // Presets: the second tile is the first look ("vivid"); the first is "original".
-    app.compact_tab = Some(Tab::Presets);
+    // Looks: the second tile is the first look ("vivid"); the first is "original".
+    app.choose_chip(Chip::Looks);
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     let sheet_top = app.sheet_rect().top();
-    // Under the looks / snapshots / history chips.
-    let row = sheet_top + 8.0 + 34.0 + 24.0;
+    // Under the tool's header, and the looks / snapshots / history chips.
+    let row = sheet_top + 46.0 + 4.0 + 34.0 + 4.0 + 24.0;
     let before = app.stack().clone();
-    tap(&h, &mut app, PORTRAIT, egui::pos2(12.0 + 78.0 + 36.0, row));
+    tap(&h, &mut app, PORTRAIT, egui::pos2(14.0 + 78.0 + 36.0, row));
     assert!(app.stack().vibrance.enabled, "vivid turns vibrance on");
     assert!(app.stack().vibrance.params.vibrance > 0.3);
     assert_eq!(
@@ -962,13 +987,7 @@ fn phone_swipes_presets_and_tour() {
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
-    let sheet_top = app.sheet_rect().top();
-    tap(
-        &h,
-        &mut app,
-        PORTRAIT,
-        egui::pos2(48.0, sheet_top + 8.0 + 34.0 + 24.0),
-    );
+    tap(&h, &mut app, PORTRAIT, egui::pos2(50.0, row));
     assert_eq!(app.stack(), &before, "original takes the look back off");
 
     // The tour: shown on request, closed by back.
@@ -1402,7 +1421,10 @@ fn the_stage_is_never_empty_between_photos() {
     // Forward (prepared ahead), then a jump back (decoded), then forward again.
     for (step, i) in [1, 2, 0, 3, 1].into_iter().enumerate() {
         app.open_path(&h.gpu(), photos[i].clone());
-        assert!(!app.stage_empty_for_tests(), "step {step}: empty when chosen");
+        assert!(
+            !app.stage_empty_for_tests(),
+            "step {step}: empty when chosen"
+        );
         let started = Instant::now();
         loop {
             h.frame(&mut app, Default::default());
@@ -3072,8 +3094,8 @@ fn the_tour_waits_for_each_gesture_and_keeps_clear_of_what_it_points_at() {
     // Nothing happens: it waits.
     settle(&mut app);
     assert_eq!(app.tour_step(), Some(0));
-    // A tab: on.
-    tap(&h, &mut app, PORTRAIT, tab_centre(PORTRAIT, 1));
+    // A category: on.
+    tap(&h, &mut app, PORTRAIT, cell_centre(PORTRAIT, 1));
     settle(&mut app);
     assert_eq!(app.tour_step(), Some(1));
 
@@ -3414,13 +3436,13 @@ fn the_screen_follows_the_systems_profile_for_the_monitor() {
     assert!(note.is_some_and(|n| n.contains("no profile")));
 }
 
-/// Tools as Snapseed has them: a tap on a tile opens that tool on its own, and back
-/// returns to the grid before it closes the sheet; the cutout is a tool too, and back
+/// A chip names what the ruler turns, or opens a tool in the ruler's place; back from a
+/// tool is the ruler again before it closes the sheet. The cutout is a tool too, and back
 /// closes it first.
 #[test]
-fn a_tile_opens_its_tool_and_back_returns_to_the_grid() {
+fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
     use photo_app::InspectorSectionId as M;
-    let dir = scratch_dir("tools_grid");
+    let dir = scratch_dir("chips");
     let a = dir.join("a.dng");
     write_dng(&a, 640, 426);
     let h = Headless::new();
@@ -3432,36 +3454,60 @@ fn a_tile_opens_its_tool_and_back_returns_to_the_grid() {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     assert!(!app.compact_controls_open);
+    assert_eq!(app.compact_category, Category::Light);
 
-    // The grid: four across a phone, in the strip's order.
-    let order: Vec<M> = app
-        .compact_sections
-        .iter()
-        .filter(|s| s.visible)
-        .map(|s| s.id)
-        .collect();
-    let i = order.iter().position(|id| *id == M::Exposure).unwrap();
-    let (gap, margin, tile_h) = (6.0, 10.0, 76.0);
-    let tile_w = (PORTRAIT.x - 2.0 * margin - 3.0 * gap) / 4.0;
-    let (row, col) = ((i / 4) as f32, (i % 4) as f32);
-    let top = app.sheet_rect().top();
-    let at = egui::pos2(
-        margin + col * (tile_w + gap) + tile_w / 2.0,
-        top + margin + row * (tile_h + gap) + tile_h / 2.0,
+    // Light's second chip is highlights: a tap on it puts it under the ruler.
+    let strip = app.strip_rect();
+    let exposure_w = 86.5;
+    tap(
+        &h,
+        &mut app,
+        PORTRAIT,
+        egui::pos2(
+            strip.left() + 12.0 + exposure_w + 8.0 + 40.0,
+            strip.center().y,
+        ),
     );
-    tap(&h, &mut app, PORTRAIT, at);
-    assert!(app.compact_controls_open, "the tile opens its tool");
-    assert_eq!(app.compact_module, M::Exposure);
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Tonal, 0)));
+    assert!(!app.compact_controls_open);
 
+    // Dragging the ruler to the left turns it up, and is one undo step.
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let ruler_y = strip.top() - 1.0 - photo_app::categories::RULER_H / 2.0;
+    let before = app.stack().tonal.params.highlights;
+    flick(&h, &mut app, ruler_y, 300.0, 120.0);
+    let after = app.stack().tonal.params.highlights;
+    assert!(
+        after > before + 0.05,
+        "highlights went from {before} to {after}"
+    );
+    app.undo();
+    assert_eq!(app.stack().tonal.params.highlights, before);
+
+    // A tool opens in the ruler's place; back is the ruler again, the sheet still open.
+    app.choose_chip(Chip::Tool(M::ToneCurve));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    assert!(app.compact_controls_open, "the chip opens its tool");
+    assert_eq!(app.compact_module, M::ToneCurve);
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
-    assert!(!app.compact_controls_open, "back is the grid again");
+    assert!(!app.compact_controls_open, "back is the ruler again");
     assert_eq!(
         app.compact_tab,
         Some(Tab::Edit),
         "…with the sheet still open"
     );
 
-    app.cutout_studio.open = true;
+    // Looks is Colour's, and back leaves it for the ruler too.
+    app.choose_chip(Chip::Looks);
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    assert_eq!(app.compact_tab, Some(Tab::Presets));
+    assert_eq!(app.compact_category, Category::Colour);
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert_eq!(app.compact_tab, Some(Tab::Edit));
+
+    app.choose_chip(Chip::Cutout);
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
     assert!(!app.cutout_studio.open, "back closes the cutout first");
     assert_eq!(app.compact_tab, Some(Tab::Edit));

@@ -68,14 +68,15 @@ pub(crate) enum Shown {
 
 impl PhotoApp {
     /// Whether the photo is the Edit sheet's control right now: a phone, the Edit sheet open
-    /// on a module with values to turn, and nothing else claiming the photo's touches.
+    /// on a module with values to turn (under the ruler, or its tool open), and nothing else
+    /// claiming the photo's touches.
     pub(crate) fn edits_on_photo(&self, at_fit: bool) -> bool {
         self.layout.is_compact()
             && self.compact_tab == Some(crate::compact::Tab::Edit)
-            && self.compact_controls_open
             && !self.customize_open
             && !self.cutout_studio.open
             && !knobs(self.compact_module).is_empty()
+            && crate::categories::Category::of(self.compact_module) == self.compact_category
             && at_fit
             && !self.cropping
             && !self.split_active

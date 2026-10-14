@@ -397,18 +397,20 @@ How it differs from the desktop, for now:
   dialog.
 - **Back** closes the crop tool or an open dialog first, then sends the app to the
   background. Backgrounding keeps the photo, stack and undo history.
-- **The phone layout**, after Snapseed. Below 900 × 560 points (phones either way up,
-  tablets held upright) the stage fills the screen and a tab bar opens one sheet at a
-  time: **Library · Looks · Tools · Export**. Tools is a grid of every tool; a tile opens
-  that tool on its own, with its controls, a header (back to the grid, reset, on/off)
-  and a row stepping to the tool before or after. Inside a tool the photo is its control
-  (swipe up/down to choose, left/right to change). **Remove background** is a tool too:
-  its preview is drawn on the photo, which is painted to keep or erase. Export is a list:
-  the export, its options, removing the background, share and batch. Back leaves a tool
-  for the grid before it closes the sheet. Turned sideways, the bar becomes a rail on the
-  right. What a keyboard does on the desktop has a touch control: select mode
-  (Ctrl/Shift-click), select all, **fine** and the clipping view in the top bar's ⋯ menu,
-  rating and flag chips, and a sideways swipe across the photo for the next or previous
+- **The phone layout**, after Google Photos and Snapseed. Below 900 × 560 points (phones
+  either way up, tablets held upright) the stage fills the screen. The bottom bar holds
+  five categories, **Crop · Light · Colour · Detail · Retouch**; the top bar has ‹ for the
+  Library and **Export** at the right. A category shows the chosen value over a ruler,
+  dragged to change it (double-tap puts it back), over a row of chips: each chip is a
+  value, or a tool (›) — the curve, colour EQ and balance, healing, masks, **remove
+  background**, Looks — that opens in the ruler's place with a header (back to the
+  ruler, reset, on/off). The ⋯ beside a value opens all its tool's settings. The photo
+  is a control too (swipe up/down to choose a value, left/right to change it). Back
+  leaves a tool for the ruler before it closes the sheet. Turned sideways, the bar
+  becomes a rail on the right. What a keyboard does on the desktop has a touch control:
+  select mode (Ctrl/Shift-click), select all, **fine**, before / after, zoom and the
+  clipping view in the top bar's ⋯ menu, rating and flag chips, and a sideways swipe
+  across the photo (in the Library, or with the sheet closed) for the next or previous
   one. Controls are drawn at touch size (chips 34 pt, buttons 40, icons 44).
 - Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
 
