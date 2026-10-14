@@ -1131,7 +1131,9 @@ impl PhotoApp {
         }
         // Not over a notice with a button (the older colour math's "update"): it was put up
         // when the photo was chosen, and this one only says what that already implies.
-        let offering = self.live_notice().is_some_and(|(_, action, _)| action.is_some());
+        let offering = self
+            .live_notice()
+            .is_some_and(|(_, action, _)| action.is_some());
         if self.saved_stack.is_some() && !offering {
             self.set_status(format!("Loaded sidecar for {}", file_name(&path)));
         }
