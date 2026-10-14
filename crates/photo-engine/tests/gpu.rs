@@ -2822,3 +2822,59 @@ fn gpu_a_small_export_from_a_mip_level_matches_the_full_one_shrunk() {
     }
     assert!(worst <= 3, "{worst} codes off the full export shrunk");
 }
+
+/// A Bayer scene opened both ways: whole, and progressively a band at a time.
+fn opened_both_ways(gpu: &Gpu, (w, h): (u32, u32)) -> (Engine, Engine) {
+    let scene = || testkit::cfa_from_fn(w, h, testkit::smooth_scene(w, h));
+    let mut whole = Engine::new(&gpu.device);
+    whole.load(&gpu.device, &gpu.queue, scene()).unwrap();
+    let mut sliced = Engine::new(&gpu.device);
+    sliced.set_progressive(true);
+    // A few rows a slice, so the demosaic is spread over many calls.
+    sliced.set_demosaic_slice(w as u64 * 16);
+    sliced.load(&gpu.device, &gpu.queue, scene()).unwrap();
+    (whole, sliced)
+}
+
+#[test]
+fn a_progressive_open_lands_on_the_same_pixels() {
+    let gpu = gpu_or_skip!();
+    let (mut whole, mut sliced) = opened_both_ways(gpu, (200, 136));
+    let stack = busy_stack();
+    assert!(sliced.demosaic_pending());
+
+    // Meanwhile the stage has the quick half-size picture, and never level 0.
+    let (pw, ph, _) = preview(gpu, &mut sliced, &stack, 0);
+    assert_eq!(sliced.image().unwrap().preview_level(), 1);
+    assert_eq!((pw, ph), (100, 68));
+
+    let mut slices = 1;
+    while !sliced.advance_demosaic(&gpu.device, &gpu.queue) {
+        slices += 1;
+        assert!(slices < 1000, "the demosaic never landed");
+    }
+    assert!(slices > 4, "spread over {slices} slices");
+    assert!(!sliced.demosaic_pending());
+
+    let want = whole.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    let got = sliced.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    assert!(got == want, "RCD in bands is RCD");
+    assert_eq!(
+        preview(gpu, &mut sliced, &stack, 0),
+        preview(gpu, &mut whole, &stack, 0),
+        "and the preview at full size is the same"
+    );
+}
+
+#[test]
+fn reading_full_resolution_pixels_finishes_a_progressive_open() {
+    let gpu = gpu_or_skip!();
+    let (whole, mut sliced) = opened_both_ways(gpu, (200, 136));
+    let want = whole.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    let got = sliced.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    assert!(got == want, "read before a single slice ran");
+    assert!(
+        sliced.advance_demosaic(&gpu.device, &gpu.queue),
+        "and it lands on the next call"
+    );
+}

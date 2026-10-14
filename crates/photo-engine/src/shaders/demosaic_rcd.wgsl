@@ -79,13 +79,41 @@ fn at(x: i32, y: i32) -> vec2<i32> {
 
 // The mosaic, against its photosite's own black and white. Values above 1.0 are headroom
 // the highlight reconstruction needs to see.
-@fragment
-fn fs_levels(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = vec2<i32>(pos.xy);
+fn normalised(p: vec2<i32>) -> f32 {
     let raw = f32(textureLoad(mosaic, p, 0).r);
     let c = colour_at(p.x, p.y);
     let b = u.black[c];
-    return vec4<f32>(max(raw - b, 0.0) / max(u.white[c] - b, 1.0), 0.0, 0.0, 1.0);
+    return max(raw - b, 0.0) / max(u.white[c] - b, 1.0);
+}
+
+@fragment
+fn fs_levels(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(normalised(vec2<i32>(pos.xy)), 0.0, 0.0, 1.0);
+}
+
+// A half-size picture straight from the mosaic, one pixel a Bayer quad, written into the
+// sensor's level 1 so the stage has the photo while RCD runs a slice a frame
+// (`Engine::advance_demosaic`). Where any photosite in the quad clipped it fades to the
+// neutral, as `reconstruct` does where nothing can be rebuilt; RCD's own reconstruction
+// replaces it when it lands.
+@fragment
+fn fs_quick(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let x = i32(pos.x) * 2;
+    let y = i32(pos.y) * 2;
+    var rgb = vec3<f32>(0.0);
+    var peak = 0.0;
+    for (var dy = 0; dy < 2; dy = dy + 1) {
+        for (var dx = 0; dx < 2; dx = dx + 1) {
+            let p = at(x + dx, y + dy);
+            let v = normalised(p);
+            let c = colour_at(p.x, p.y);
+            // Two greens to a quad: each is half of it.
+            rgb[c] = rgb[c] + select(v, 0.5 * v, c == 1u);
+            peak = max(peak, v);
+        }
+    }
+    let t = smoothstep(CLIP_LO, CLIP_HI, peak);
+    return vec4<f32>(rgb * (1.0 - t), rgb.g * t);
 }
 
 fn cfa(x: i32, y: i32) -> f32 {
