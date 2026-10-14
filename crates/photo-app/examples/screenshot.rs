@@ -135,6 +135,12 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(module) = module {
         app.compact_module = module?;
+        // Open on its own, as a tap on its tile in the Tools grid does.
+        app.compact_controls_open = true;
+    }
+    // DUCKFOOT_SHOT_CUTOUT=1: the phone's remove-background tool open.
+    if std::env::var_os("DUCKFOOT_SHOT_CUTOUT").is_some() {
+        app.cutout_studio.open = true;
     }
     // DUCKFOOT_SHOT_READOUT=value|list: the on-photo readout, or the list of values.
     if let Ok(what) = std::env::var("DUCKFOOT_SHOT_READOUT") {

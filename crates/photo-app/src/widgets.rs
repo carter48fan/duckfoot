@@ -150,12 +150,14 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
     let enabled = enabled && ui.is_enabled();
     let galley = ui.painter().layout_no_wrap(
         text.to_uppercase(),
-        FontId::new(sized(ui, 10.5, 11.5), theme::mono_bold()),
+        FontId::new(sized(ui, 10.5, 12.5), theme::mono_bold()),
         Color32::PLACEHOLDER,
     );
+    // On touch, big enough to see what a finger is aiming at: a hit area grown round a
+    // small chip overlaps its neighbours', and the wrong one answers.
     let size = vec2(
-        galley.size().x + sized(ui, 14.0, 16.0),
-        sized(ui, 20.0, 28.0),
+        galley.size().x + sized(ui, 14.0, 22.0),
+        sized(ui, 20.0, 34.0),
     );
     let sense = if enabled {
         Sense::click()
@@ -214,6 +216,19 @@ pub fn button_enabled(
     text: &str,
     min_width: f32,
 ) -> Response {
+    let height = sized(ui, 26.0, 40.0);
+    button_sized(ui, enabled, kind, text, min_width, height)
+}
+
+/// [`button_enabled`] at `height`: the phone's one big action on a sheet.
+pub fn button_sized(
+    ui: &mut Ui,
+    enabled: bool,
+    kind: Kind,
+    text: &str,
+    min_width: f32,
+    height: f32,
+) -> Response {
     let enabled = enabled && ui.is_enabled();
     let family = match kind {
         Kind::Primary | Kind::Accent => theme::mono_bold(),
@@ -221,12 +236,12 @@ pub fn button_enabled(
     };
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        FontId::new(11.5, family),
+        FontId::new(sized(ui, 11.5, 13.0), family),
         Color32::PLACEHOLDER,
     );
     let size = vec2(
-        (galley.size().x + sized(ui, 22.0, 24.0)).max(min_width),
-        sized(ui, 26.0, 30.0),
+        (galley.size().x + sized(ui, 22.0, 28.0)).max(min_width),
+        height,
     );
     let sense = if enabled {
         Sense::click()
@@ -260,7 +275,7 @@ pub fn button_enabled(
 /// A square icon button, ghost-styled. `glyph` must exist in egui's bundled fallback fonts.
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 26.0, 32.0)), Sense::click());
+    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 26.0, 40.0)), Sense::click());
     // The tooltip says what it does; the glyph alone would be read as "question mark".
     describe(ui, &response, rect, || {
         egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tooltip)
@@ -280,7 +295,7 @@ pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(sized(ui, 15.0, 17.0)),
+        FontId::proportional(sized(ui, 15.0, 20.0)),
         colour,
     );
     if hovered {

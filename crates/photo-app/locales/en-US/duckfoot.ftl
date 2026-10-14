@@ -6,14 +6,14 @@
 ## The phone's tabs
 
 tab-library = library
-tab-presets = presets
-tab-edit = edit
+tab-presets = looks
+tab-edit = tools
 tab-export = export
 
 ## The phone's tour
 
 tour-tabs-title = Four tabs
-tour-tabs-text = Library, Presets, Edit and Export. Swipe along this bar, or tap a tab, to move on.
+tour-tabs-text = Library, Looks, Tools and Export. Swipe along this bar, or tap a tab, to move on.
 tour-choose-title = Choose what to change
 tour-choose-text = Swipe up or down on the photo. A list of what this tool changes follows your finger.
 tour-adjust-title = Change it
@@ -23,7 +23,7 @@ tour-reset-text = Double-tap the photo to put that value back where it started.
 tour-hold-title = Compare
 tour-hold-text = Press and hold the photo to see the original. Let go to see your edit.
 tour-strip-title = Change tool
-tour-strip-text = Swipe the strip of tools sideways, or tap a name, to change tool.
+tour-strip-text = Swipe this row sideways, or tap the tool before or after, to change tool. The back arrow above shows every tool.
 tour-photo-title = Next photo
 tour-photo-text = In the Library, swipe sideways across the photo for the next one.
 tour-photo-one = With two or more photos on the shelf, a sideways swipe across the photo moves between them.
