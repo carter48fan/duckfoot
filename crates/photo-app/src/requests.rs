@@ -43,7 +43,13 @@ impl PhotoApp {
                 }
                 platform::Response::AddImages(paths) => {
                     self.remember_import_dir(paths.first().and_then(|p| p.parent()));
+                    let first = paths.first().cloned();
                     self.add_to_shelf(gpu, paths);
+                    // Switch to what was just added, as a drop does. `open_path` is a no-op
+                    // when `add_to_shelf` already opened it (nothing was open before).
+                    if let Some(first) = first {
+                        self.open_path(gpu, first);
+                    }
                 }
                 platform::Response::BrowseFolder(dir) => {
                     self.remember_import_dir(Some(&dir));
