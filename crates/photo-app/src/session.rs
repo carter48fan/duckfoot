@@ -749,6 +749,10 @@ impl PhotoApp {
             self.begin_editing(&path);
         }
         self.open_generation += 1;
+        // Its filmstrip thumbnail, at once, until something sharper comes: the stage never
+        // goes blank between photos. A prepared photo needs it too, for the frame or two
+        // before its texture is registered (`sync`), which is what takes it down.
+        self.stage_preview = self.thumbs.get(&path).map(|t| (path.clone(), t.clone()));
         // Made ready ahead: nothing to decode, nothing to wait on.
         if let Some((_, Prefetch::Ready(orientation))) = self
             .prefetch
@@ -756,7 +760,6 @@ impl PhotoApp {
         {
             if self.engine.has_prepared() {
                 self.loading = None;
-                self.stage_preview = None;
                 self.open_with(gpu, path, orientation, |engine| {
                     engine.install_prepared(gpu.device);
                     Ok(())
@@ -770,9 +773,6 @@ impl PhotoApp {
             self.engine.drop_prepared();
         }
         self.loading = Some((path.clone(), Instant::now()));
-        // Its filmstrip thumbnail, at once, until something sharper comes: the stage never
-        // goes blank between photos.
-        self.stage_preview = self.thumbs.get(&path).map(|t| (path.clone(), t.clone()));
         self.loader.open(path, self.open_generation);
     }
 
@@ -1066,6 +1066,15 @@ impl PhotoApp {
                     if let Some(image) = image {
                         let name = format!("thumb:{}", path.display());
                         let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                        // The open photo's stand-in, if it was chosen before its thumbnail
+                        // came and nothing sharper has.
+                        if self.stage_preview.is_none()
+                            && self.loaded_path.as_ref() == Some(&path)
+                            && !self.decode_failed
+                            && !self.photo_on_stage()
+                        {
+                            self.stage_preview = Some((path.clone(), texture.clone()));
+                        }
                         self.thumb_used.insert(path.clone(), self.frame_no);
                         self.thumbs.insert(path, texture);
                         let cap = self.thumb_cap();
@@ -1120,7 +1129,10 @@ impl PhotoApp {
             self.compact_tab = Some(compact::Tab::Edit);
             self.compact_controls_open = false;
         }
-        if self.saved_stack.is_some() {
+        // Not over a notice with a button (the older colour math's "update"): it was put up
+        // when the photo was chosen, and this one only says what that already implies.
+        let offering = self.live_notice().is_some_and(|(_, action, _)| action.is_some());
+        if self.saved_stack.is_some() && !offering {
             self.set_status(format!("Loaded sidecar for {}", file_name(&path)));
         }
         self.view = View::default();

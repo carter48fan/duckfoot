@@ -1387,6 +1387,38 @@ fn a_photo_stands_in_for_itself_until_its_pixels_are_on_the_stage() {
 }
 
 #[test]
+fn the_stage_is_never_empty_between_photos() {
+    let dir = scratch_dir("never-empty");
+    let photos: Vec<PathBuf> = (0..4).map(|i| dir.join(format!("{i}.dng"))).collect();
+    for p in &photos {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), photos.clone());
+    app.open_path(&h.gpu(), photos[0].clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    // Forward (prepared ahead), then a jump back (decoded), then forward again.
+    for (step, i) in [1, 2, 0, 3, 1].into_iter().enumerate() {
+        app.open_path(&h.gpu(), photos[i].clone());
+        assert!(!app.stage_empty_for_tests(), "step {step}: empty when chosen");
+        let started = Instant::now();
+        loop {
+            h.frame(&mut app, Default::default());
+            assert!(!app.stage_empty_for_tests(), "step {step}: empty mid-open");
+            if !app.is_busy() && app.is_photo_ready() {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.settle(&mut app, Duration::from_secs(30));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_next_photo_is_ready_before_it_is_chosen() {
     let dir = scratch_dir("prefetch");
     let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
@@ -3325,6 +3357,9 @@ fn an_edit_from_before_v2_offers_the_update_and_it_can_be_undone() {
     let mut app = quiet_app(&h);
     app.open_path(&h.gpu(), photo.clone());
     assert_eq!(app.stack().rendering, Rendering::V1);
+    // And still up once the photo has landed.
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.is_photo_ready());
     let (msg, button) = app.notice_for_tests().expect("no notice for an old edit");
     assert!(msg.contains("older colour math"), "{msg}");
     assert_eq!(button, Some("update"));

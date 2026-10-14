@@ -1433,6 +1433,16 @@ impl PhotoApp {
         self.stage_preview.as_ref().map(|(p, _)| p.as_path())
     }
 
+    /// The stage would show its empty state, for tests.
+    #[doc(hidden)]
+    pub fn stage_empty_for_tests(&self) -> bool {
+        !self.photo_on_stage()
+            && self
+                .stage_preview
+                .as_ref()
+                .is_none_or(|(p, _)| self.loaded_path.as_ref() != Some(p))
+    }
+
     /// The notice up now and whether it has a button, for tests.
     #[doc(hidden)]
     pub fn notice_for_tests(&self) -> Option<(String, Option<&'static str>)> {
