@@ -1008,7 +1008,8 @@ fn sliders_reset_to_the_chosen_photo_before_it_decodes() {
     // show B's saved value, and A's edit is on disk.
     app.open_path(&h.gpu(), b.clone());
     assert_eq!(app.loaded_path(), Some(b.as_path()));
-    assert!(!app.is_photo_ready(), "B has not decoded yet");
+    // B may well be on the stage already, prepared while A was looked at (see
+    // the_next_photo_is_ready_before_it_is_chosen); C, below, is the one that decodes.
     assert_eq!(app.stack().exposure.params.ev, -0.5);
     let a_disk = photo_engine::load_sidecar(&a)
         .unwrap()
@@ -1382,6 +1383,33 @@ fn a_photo_stands_in_for_itself_until_its_pixels_are_on_the_stage() {
     h.settle(&mut app, Duration::from_secs(30));
     assert!(app.is_photo_ready());
     assert_eq!(app.stand_in_for_tests(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_next_photo_is_ready_before_it_is_chosen() {
+    let dir = scratch_dir("prefetch");
+    let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone(), c.clone()]);
+    app.open_path(&h.gpu(), a.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+
+    // A step on from A: on screen on this very call, with nothing to decode.
+    app.open_path(&h.gpu(), b.clone());
+    assert!(app.is_photo_ready(), "B was prepared while A was open");
+    // C was not: it decodes.
+    app.open_path(&h.gpu(), c.clone());
+    assert!(!app.is_photo_ready());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(c.as_path()));
+    assert!(app.is_photo_ready());
+    assert_eq!(app.error(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
