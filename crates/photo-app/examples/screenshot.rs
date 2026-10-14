@@ -135,8 +135,16 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(module) = module {
         app.compact_module = module?;
-        // Open on its own, as a tap on its tile in the Tools grid does.
+        // Open in the ruler's place, as its chip (or the ⋯ beside its value) does.
         app.compact_controls_open = true;
+    }
+    // DUCKFOOT_SHOT_CATEGORY=colour: the phone's bottom bar on that category.
+    if let Ok(name) = std::env::var("DUCKFOOT_SHOT_CATEGORY") {
+        let cat = photo_app::categories::Category::ALL
+            .into_iter()
+            .find(|c| c.label() == name)
+            .ok_or_else(|| anyhow::anyhow!("unknown category {name}"))?;
+        app.open_category(cat);
     }
     // DUCKFOOT_SHOT_CUTOUT=1: the phone's remove-background tool open.
     if std::env::var_os("DUCKFOOT_SHOT_CUTOUT").is_some() {
