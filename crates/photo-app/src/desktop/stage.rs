@@ -980,29 +980,27 @@ impl PhotoApp {
                 }
 
                 if self.cutout_studio.open {
+                    let badge = if self.layout.is_compact() {
+                        "CUTOUT · paint to keep or erase"
+                    } else {
+                        "CUTOUT STUDIO · Paint on photo to Keep/Erase · Alt erases · Space+drag pans · Esc closes"
+                    };
                     hud_badge(
                         &painter,
                         pos2(framed_view.center().x, framed_view.top() + 12.0),
                         Align2::CENTER_TOP,
-                        "CUTOUT STUDIO · Paint on photo to Keep/Erase · Alt erases · Space+drag pans · Esc closes",
+                        badge,
                         theme::ACCENT,
                         theme::ACCENT,
                     );
                 }
 
-                if self.cutout_studio.open {
+                // The phone shows the studio's controls in its Tools sheet instead.
+                if self.cutout_studio.open && !self.layout.is_compact() {
                     let mut export_clicked = false;
                     self.cutout_studio.show_hud(ui.ctx(), &mut export_clicked);
                     if export_clicked {
-                        self.export_settings.format = photo_engine::ExportFormat::Png;
-                        self.export_settings.remove_background = true;
-                        self.export_settings.cutout_params = self.cutout_studio.params;
-                        self.export_settings.matte_color = if self.cutout_studio.export_matte_white {
-                            Some([255, 255, 255])
-                        } else {
-                            None
-                        };
-                        self.pick_and_export(ui.ctx());
+                        self.export_cutout(ui.ctx());
                     }
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.cutout_studio.open = false;
@@ -1115,6 +1113,20 @@ impl PhotoApp {
         if response.clicked() {
             self.pick_and_open(ui.ctx());
         }
+    }
+
+    /// Export the cutout as the studio has it: a PNG, transparent or on catalog white,
+    /// with its edge settings and touch-ups.
+    pub(crate) fn export_cutout(&mut self, ctx: &egui::Context) {
+        self.export_settings.format = photo_engine::ExportFormat::Png;
+        self.export_settings.remove_background = true;
+        self.export_settings.cutout_params = self.cutout_studio.params;
+        self.export_settings.matte_color = if self.cutout_studio.export_matte_white {
+            Some([255, 255, 255])
+        } else {
+            None
+        };
+        self.pick_and_export(ctx);
     }
 
     /// Prepare Cutout Studio with the current photo: renders an interactive ~1400px base image

@@ -777,8 +777,10 @@ pub struct PhotoApp {
     /// A photo was asked for from outside the Library grid (a picker, a share); when it
     /// lands the phone layout goes straight to Edit, where the photo is worked on.
     edit_when_opened: bool,
-    /// The Edit sheet shows the chosen module's controls; off, only the module strip.
+    /// The Tools sheet shows the chosen tool on its own; off, the grid of every tool.
     pub compact_controls_open: bool,
+    /// The phone's top-bar menu (⋯) is open.
+    compact_more_open: bool,
     /// The height the portrait sheet's content wanted last frame; it gets that, up to a cap.
     compact_sheet_fit: Option<f32>,
     /// User-adjusted width for the landscape side sheet.
@@ -984,6 +986,7 @@ impl PhotoApp {
             library_filters_open: false,
             edit_when_opened: false,
             compact_controls_open: true,
+            compact_more_open: false,
             compact_sheet_width: None,
             compact_sheet_fit: None,
             pending_step: None,

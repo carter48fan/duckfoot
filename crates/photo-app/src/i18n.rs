@@ -161,7 +161,7 @@ mod tests {
                 "{tag} does not parse"
             );
         }
-        assert_eq!(tr("tab-edit"), "edit");
+        assert_eq!(tr("tab-edit"), "tools");
         assert_eq!(
             tr_args(
                 "exported",

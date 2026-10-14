@@ -1,7 +1,7 @@
 //! The phone layout: the photo fills the screen, one low sheet at a time sits under it,
-//! and a navigation bar picks the sheet. It is the same app as the desktop layout — every
+//! and a tab bar picks the sheet. It is the same app as the desktop layout — every
 //! sheet is built from the same pieces the desktop's panels are — only arranged for a
-//! small, touch-driven screen.
+//! small, touch-driven screen, after Snapseed.
 //!
 //! Upright, the bar runs along the bottom and the sheet rises above it, only as tall as
 //! what it holds. Turned sideways the bar becomes a rail down the right edge and the sheet
@@ -11,19 +11,21 @@
 //! | Tab | Holds |
 //! |---|---|
 //! | Library | the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
-//! | Presets | one-tap looks — sepia, mono, film… — and how strongly to apply them |
-//! | Edit | the chosen module's controls over a one-line strip: turn, every module by name, and the list that chooses them |
-//! | Export | the single export and batch export |
+//! | Looks | one-tap looks — sepia, mono, film… — and how strongly to apply them |
+//! | Tools | a grid of every tool, and this photo's edits as a whole; a tile opens its tool on its own: a header (back, reset, on/off), its controls, and a row stepping to the tool before or after. Removing the background is a tool, its preview on the photo |
+//! | Export | the export, its options, removing the background, share and batch export |
 //!
 //! Getting around without a keyboard:
 //!
-//! - swipe the nav bar, or an empty part of any sheet but Edit, to change tab;
-//! - swipe an empty part of Edit's controls, or tap ‹ ›, to change module;
+//! - swipe the tab bar, or an empty part of any sheet but an open tool, to change tab;
+//! - inside a tool, swipe an empty part of its controls or the row under them, or tap
+//!   ‹ ›, to change tool; back returns to the grid;
 //! - swipe across the photo for the next or previous photo;
-//! - fine adjust and reset are in the top bar, on every tab.
+//! - fine adjust, the clipping view and reset are in the top bar's ⋯ menu, on every tab.
 //!
-//! Opening a photo from a picker goes straight to Edit: on a phone the photo is the point,
-//! and the roll is only how you got to it. The first run walks through all this (`tour`).
+//! Opening a photo from a picker goes straight to Tools: on a phone the photo is the
+//! point, and the roll is only how you got to it. The first run walks through all this
+//! (`tour`).
 
 use egui::containers::scroll_area::{DragScroll, ScrollSource};
 use egui::{
@@ -153,13 +155,18 @@ impl Layout {
     }
 }
 
-const NAV_BAR: f32 = 48.0;
+/// The tab bar's height upright, and the rail's width on its side: thumb-sized cells.
+pub const NAV_BAR: f32 = 60.0;
+pub const NAV_RAIL: f32 = 72.0;
 /// Height of the top bar. Fixed, so everything in it can be centred on one line: a row
 /// that grows as its items arrive centres the early ones on the height it had so far.
-const TOP_BAR: f32 = 40.0;
-const NAV_RAIL: f32 = 56.0;
-/// Height of the Edit sheet's module strip.
-const STRIP_H: f32 = 34.0;
+pub const TOP_BAR: f32 = 48.0;
+/// Height of a tool's header, and of the row under its controls that steps between tools.
+const TOOL_BAR: f32 = 46.0;
+const STEPS_H: f32 = 44.0;
+/// The Tools grid's tiles: at least this wide, and this tall.
+const TILE_W: f32 = 84.0;
+const TILE_H: f32 = 76.0;
 /// How far a flick must travel sideways to count.
 const SWIPE: f32 = 56.0;
 
@@ -305,14 +312,16 @@ impl PhotoApp {
         }
     }
 
-    /// The mark and the photo's name, then what is wanted from any tab: zoom, fine
-    /// adjust, reset, a / b, undo and redo. Returns where it was drawn.
+    /// The mark and the photo's name, then what is wanted from any tab: zoom, before /
+    /// after, undo and redo, and a menu (⋯) for the rest: fine adjust, the clipping view
+    /// and reset. Returns where it was drawn.
     fn compact_top_bar(&mut self, ui: &mut egui::Ui) -> Rect {
-        egui::Panel::top("compact_top")
+        let mut more = Rect::NOTHING;
+        let bar = egui::Panel::top("compact_top")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(10, 0)),
+                    .inner_margin(Margin::symmetric(8, 0)),
             )
             .resizable(false)
             .exact_size(TOP_BAR)
@@ -324,13 +333,12 @@ impl PhotoApp {
                     .layout(egui::Layout::left_to_right(egui::Align::Center));
                 ui.scope_builder(line, |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    widgets::brand_mark(ui, 18.0);
+                    widgets::brand_mark(ui, 20.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        // Right to left: redo, undo, a / b, reset, fine, zoom read left to
-                        // right. The icons are painted rather than taken from the fallback
-                        // font, whose arrows and squares each come at their own size and
-                        // height.
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        // Right to left: redo, undo, a / b, more, zoom read left to right.
+                        // The icons are painted rather than taken from the fallback font,
+                        // whose arrows and squares each come at their own size and height.
                         let can_redo = !self.history.future.is_empty();
                         let can_undo = !self.history.past.is_empty();
                         if ui
@@ -360,31 +368,18 @@ impl PhotoApp {
                                 self.needs_render = true;
                             }
                         });
-                        ui.add_enabled_ui(loaded && self.is_stack_edited(), |ui| {
-                            if bar_icon(ui, BarIcon::Reset, false, "Reset every adjustment")
-                                .clicked()
-                            {
-                                self.reset_to_default();
-                            }
-                        });
-                        if widgets::chip(ui, self.fine_adjust, "fine")
-                            .on_hover_text("Sliders move ten times finer")
-                            .clicked()
-                        {
-                            self.fine_adjust = !self.fine_adjust;
+                        let open = self.compact_more_open;
+                        let r = bar_icon(ui, BarIcon::More, open, "More");
+                        if r.clicked() {
+                            self.compact_more_open = !open;
                         }
-                        if widgets::chip(ui, self.clip_overlay, "clip")
-                            .on_hover_text("Show clipping: red where blown, blue where crushed")
-                            .clicked()
-                        {
-                            self.clip_overlay = !self.clip_overlay;
-                        }
+                        more = r.rect;
+                        ui.add_space(4.0);
                         ui.add_enabled_ui(loaded, |ui| {
                             // One control for zoom: it reads the zoom, and flips fit ↔ 1:1.
                             let percent = self.zoom_percent(self.last_panel);
                             let at_fit = self.view.zoom <= 1.0 + 1e-3;
                             let label = match percent {
-                                Some(p) if at_fit => format!("{p:.0}%"),
                                 Some(p) => format!("{p:.0}%"),
                                 None => "fit".to_string(),
                             };
@@ -409,7 +404,7 @@ impl PhotoApp {
                                 egui::Label::new(
                                     RichText::new(name)
                                         .family(theme::mono_bold())
-                                        .size(12.0)
+                                        .size(13.0)
                                         .color(theme::TEXT_HI),
                                 )
                                 .truncate(),
@@ -419,7 +414,58 @@ impl PhotoApp {
                 });
             })
             .response
-            .rect
+            .rect;
+        if self.compact_more_open {
+            self.compact_more_menu(ui.ctx(), more);
+        }
+        bar
+    }
+
+    /// The top bar's ⋯ menu: what is wanted now and then, each a full-width row.
+    fn compact_more_menu(&mut self, ctx: &egui::Context, anchor: Rect) {
+        let w = 240.0;
+        let screen = ctx.content_rect();
+        let at = pos2(
+            (anchor.right() - w).clamp(screen.left() + 8.0, screen.right() - w - 8.0),
+            anchor.bottom() + 4.0,
+        );
+        let loaded = self.ready_image().is_some();
+        let mut close = false;
+        let shown = egui::Area::new(egui::Id::new("compact_more"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme::BG_900)
+                    .stroke(Stroke::new(1.0, theme::BORDER_HI))
+                    .corner_radius(10)
+                    .inner_margin(Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(w - 12.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if menu_row(ui, true, "Fine adjust", Some(self.fine_adjust)).clicked() {
+                            self.fine_adjust = !self.fine_adjust;
+                        }
+                        if menu_row(ui, true, "Show clipping", Some(self.clip_overlay)).clicked() {
+                            self.clip_overlay = !self.clip_overlay;
+                        }
+                        let edited = loaded && self.is_stack_edited();
+                        if menu_row(ui, edited, "Reset every adjustment", None).clicked() {
+                            self.reset_to_default();
+                            close = true;
+                        }
+                    });
+            });
+        // A tap anywhere else closes it, as a menu does.
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !shown.response.rect.contains(p) && !anchor.contains(p))
+        });
+        if close || outside {
+            self.compact_more_open = false;
+        }
     }
 
     /// Four tabs, each an icon over its name. Tapping the open one closes its sheet;
@@ -461,20 +507,20 @@ impl PhotoApp {
                 let bar = if vertical {
                     Rect::from_center_size(
                         pos2(cell.left() + 1.5, cell.center().y),
-                        vec2(2.0, 24.0),
+                        vec2(3.0, 32.0),
                     )
                 } else {
-                    Rect::from_center_size(pos2(cell.center().x, cell.top() + 1.0), vec2(24.0, 2.0))
+                    Rect::from_center_size(pos2(cell.center().x, cell.top() + 1.5), vec2(32.0, 3.0))
                 };
                 painter.rect_filled(bar, 1.5, theme::ACCENT);
             }
-            let icon_centre = pos2(cell.center().x, cell.center().y - 6.0);
+            let icon_centre = pos2(cell.center().x, cell.center().y - 8.0);
             paint_tab_icon(painter, icon_centre, tab, colour);
             painter.text(
-                pos2(cell.center().x, cell.center().y + 13.0),
+                pos2(cell.center().x, cell.center().y + 16.0),
                 Align2::CENTER_CENTER,
                 tab.label().to_uppercase(),
-                FontId::new(8.5, theme::mono_bold()),
+                FontId::new(11.0, theme::mono_bold()),
                 colour,
             );
             if response.clicked() {
@@ -1297,83 +1343,353 @@ impl PhotoApp {
 
     // ── Edit ────────────────────────────────────────────────────────────────────────────
 
-    /// The chosen module's controls over a one-line strip of every module. Tapping the
-    /// chosen module again folds its controls away, leaving only the strip. Returns the
-    /// height it wants, as [`Self::compact_sheet`] does.
+    /// Tools, as Snapseed has them: a grid of every tool, and a tool chosen from it on
+    /// its own — its header, its controls, and a row that steps to the tool before or
+    /// after. Returns the height it wants, as [`Self::compact_sheet`] does.
     fn edit_sheet(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
         // Editable from the moment a photo is chosen, before it has decoded.
         let loaded = self.can_edit();
-        let body_open = !loaded || self.customize_open || self.compact_controls_open;
-        let top = ui.cursor().top();
-        // How much more the controls want than they were given this frame.
-        let mut hidden = 0.0;
-        if body_open {
-            // Under the cap with the strip and the gap before it, or at the cap the sheet
-            // would be that gap taller than its panel and run under the photo.
-            let gap = if loaded {
-                ui.spacing().item_spacing.y
-            } else {
-                0.0
-            };
-            // The panel can be shorter than the cap on a small screen.
-            let room = cap.min(ui.available_height());
-            let body_h = (room - STRIP_H - 1.0 - gap).max(80.0);
-            let body = egui::ScrollArea::vertical()
-                .id_salt("compact_edit")
-                .auto_shrink([false, true])
-                .max_height(body_h)
-                .scroll_source(ScrollSource {
-                    drag: DragScroll::Always,
-                    ..Default::default()
-                })
+        if !loaded {
+            let top = ui.cursor().top();
+            egui::Frame::new()
+                .inner_margin(Margin::symmetric(14, 12))
                 .show(ui, |ui| {
-                    // A sideways flick on anything that is not a control moves module.
-                    if loaded && !self.customize_open {
-                        // No lower than the body is given: the clip rect can reach past
-                        // it, over the strip below, once the controls scroll.
-                        let mut area = ui.clip_rect();
-                        area.max.y = area.max.y.min(area.min.y + body_h);
-                        if let Some(step) = swipe(ui, area, ui.id().with("module_swipe"), false) {
-                            self.step_module(step);
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim("Open a photo to edit it.").size(13.0));
+                        if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
+                            self.pick_and_open(ui.ctx());
                         }
-                    }
-                    egui::Frame::new()
-                        .inner_margin(Margin {
-                            left: 12,
-                            right: 12,
-                            top: 4,
-                            bottom: 6,
-                        })
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 4.0;
-                            if self.customize_open {
-                                self.compact_modules_list(ui);
-                            } else if loaded {
-                                self.single_module(ui, self.compact_module);
-                            } else {
-                                ui.horizontal(|ui| {
-                                    ui.label(theme::dim("Open a photo to edit it.").size(12.0));
-                                    if widgets::button(ui, Kind::Primary, "Open", 0.0).clicked() {
-                                        self.pick_and_open(ui.ctx());
-                                    }
-                                });
-                            }
-                        });
+                    });
                 });
-            hidden = (body.content_size.y - body.inner_rect.height()).max(0.0);
+            return ui.cursor().top() - top;
         }
-        if loaded {
-            if body_open {
-                let y = ui.cursor().top();
-                ui.painter()
-                    .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
-            }
+        let view = if self.cutout_studio.open {
+            ToolView::Cutout
+        } else if self.customize_open {
+            ToolView::Modules
+        } else if self.compact_controls_open {
+            ToolView::Module(self.compact_module)
+        } else {
+            return self.tools_grid(ui, cap);
+        };
+        self.tool_frame(ui, cap, view)
+    }
+
+    /// One tool open: its header, its controls (scrolled when they run past the cap), and
+    /// under a module's, the row that steps between tools.
+    fn tool_frame(&mut self, ui: &mut egui::Ui, cap: f32, view: ToolView) -> f32 {
+        let top = ui.cursor().top();
+        let steps = matches!(view, ToolView::Module(_));
+        self.tool_header(ui, view);
+        let y = ui.cursor().top();
+        ui.painter()
+            .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
+        // The panel can be shorter than the cap on a small screen.
+        let room = cap.min(ui.available_height() + (y - top));
+        let fixed = TOOL_BAR + if steps { STEPS_H + 1.0 } else { 0.0 } + 2.0;
+        let body_h = (room - fixed).max(80.0);
+        let body = egui::ScrollArea::vertical()
+            .id_salt(("compact_tool", view.salt()))
+            .auto_shrink([false, true])
+            .max_height(body_h)
+            .scroll_source(ScrollSource {
+                drag: DragScroll::Always,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                // A sideways flick on anything that is not a control moves tool.
+                if steps {
+                    // No lower than the body is given: the clip rect can reach past it,
+                    // over the row below, once the controls scroll.
+                    let mut area = ui.clip_rect();
+                    area.max.y = area.max.y.min(area.min.y + body_h);
+                    if let Some(step) = swipe(ui, area, ui.id().with("module_swipe"), false) {
+                        self.step_module(step);
+                    }
+                }
+                egui::Frame::new()
+                    .inner_margin(Margin {
+                        left: 14,
+                        right: 14,
+                        top: 4,
+                        bottom: 4,
+                    })
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        match view {
+                            ToolView::Module(id) => self.single_module(ui, id),
+                            ToolView::Modules => self.compact_modules_list(ui),
+                            ToolView::Cutout => self.cutout_controls(ui),
+                        }
+                    });
+            });
+        let hidden = (body.content_size.y - body.inner_rect.height()).max(0.0);
+        if steps {
+            let y = ui.cursor().top();
+            ui.painter()
+                .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
             let before = ui.cursor().top();
-            self.module_strip(ui);
+            self.tool_steps(ui);
             self.compact_rects.strip =
                 Rect::from_x_y_ranges(ui.max_rect().x_range(), before..=ui.cursor().top());
         }
         ui.cursor().top() - top + hidden
+    }
+
+    /// `[‹]  title / summary   [⟲] [on/off]`: back to every tool, what this one is and
+    /// what it does now, and putting it back. A module's switch and reset are each an undo
+    /// step.
+    fn tool_header(&mut self, ui: &mut egui::Ui, view: ToolView) {
+        let (title, summary, modified, on) = match view {
+            ToolView::Module(id) => {
+                let defaults = self.baseline.clone();
+                let white = self.white_scale();
+                let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
+                (
+                    id.title().to_string(),
+                    summary,
+                    modified,
+                    id.is_on(&self.stack),
+                )
+            }
+            ToolView::Modules => (
+                "tools".into(),
+                "which show, and in what order".into(),
+                false,
+                true,
+            ),
+            ToolView::Cutout => (
+                "remove background".into(),
+                "paint the photo to keep or erase".into(),
+                false,
+                true,
+            ),
+        };
+        let snapshot = self.stack.clone();
+        let mut changed = false;
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            vec2(width, TOOL_BAR),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(vec2(width, TOOL_BAR));
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add_space(4.0);
+                if bar_icon(ui, BarIcon::Back, false, "All tools").clicked() {
+                    match view {
+                        ToolView::Module(_) => self.compact_controls_open = false,
+                        ToolView::Modules => self.customize_open = false,
+                        ToolView::Cutout => self.cutout_studio.open = false,
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(6.0);
+                    if let ToolView::Module(id) = view {
+                        if let Some(enabled) = id.enabled_mut(&mut self.stack) {
+                            if widgets::switch(ui, enabled).changed() {
+                                changed = true;
+                            }
+                        }
+                        if modified
+                            && bar_icon(ui, BarIcon::Reset, false, "Reset this tool").clicked()
+                        {
+                            self.reset_module(id);
+                            changed = true;
+                        }
+                    }
+                    // What is left between the back arrow and the controls: the name over
+                    // what the tool does now.
+                    let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                    let painter = ui.painter().with_clip_rect(rect);
+                    let colour = if on { theme::ACCENT } else { theme::TEXT_DIM };
+                    painter.text(
+                        pos2(rect.left() + 4.0, rect.center().y - 9.0),
+                        Align2::LEFT_CENTER,
+                        &title,
+                        FontId::new(16.0, theme::sans_strong()),
+                        colour,
+                    );
+                    let sub = if !on {
+                        theme::TEXT_FAINT
+                    } else if modified {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    painter.text(
+                        pos2(rect.left() + 4.0, rect.center().y + 10.0),
+                        Align2::LEFT_CENTER,
+                        &summary,
+                        FontId::new(11.5, theme::mono_bold()),
+                        sub,
+                    );
+                });
+            },
+        );
+        if changed {
+            if let ToolView::Module(id) = view {
+                self.focused_section = Some(id);
+            }
+            self.history.checkpoint(&snapshot);
+            self.needs_render = true;
+        }
+    }
+
+    /// `‹ previous    next ›`: the tools either side of this one, thumb-sized. A swipe
+    /// along the row, or across the controls, does the same.
+    fn tool_steps(&mut self, ui: &mut egui::Ui) {
+        let ids = self.compact_ids();
+        let at = ids.iter().position(|id| *id == self.compact_module);
+        let prev = at
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| ids.get(i))
+            .copied();
+        let next = at.and_then(|i| ids.get(i + 1)).copied();
+        let area = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), STEPS_H));
+        if let Some(step) = swipe(ui, area, ui.id().with("steps_swipe"), false) {
+            self.step_module(step);
+        }
+        let mut step = None;
+        ui.allocate_ui_with_layout(
+            area.size(),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(area.size());
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.add_space(8.0);
+                let w = ((area.width() - 32.0) / 2.0).max(60.0);
+                let label = |id: Option<InspectorSectionId>, before: bool| match id {
+                    Some(id) if before => format!("‹  {}", id.short_name()),
+                    Some(id) => format!("{}  ›", id.short_name()),
+                    None => String::new(),
+                };
+                let h = STEPS_H - 8.0;
+                if widgets::button_sized(
+                    ui,
+                    prev.is_some(),
+                    Kind::Secondary,
+                    &label(prev, true),
+                    w,
+                    h,
+                )
+                .on_hover_text("The tool before")
+                .clicked()
+                {
+                    step = Some(-1);
+                }
+                if widgets::button_sized(
+                    ui,
+                    next.is_some(),
+                    Kind::Secondary,
+                    &label(next, false),
+                    w,
+                    h,
+                )
+                .on_hover_text("The tool after")
+                .clicked()
+                {
+                    step = Some(1);
+                }
+            },
+        );
+        if let Some(step) = step {
+            self.step_module(step);
+        }
+    }
+
+    /// Every tool as a tile, then removing the background and choosing which tools show,
+    /// and under them what can be done to this photo's edits as a whole.
+    fn tools_grid(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
+        let defaults = self.baseline.clone();
+        let white = self.white_scale();
+        egui::ScrollArea::vertical()
+            .id_salt("compact_tools")
+            .auto_shrink([false, true])
+            .max_height(cap)
+            .scroll_source(ScrollSource {
+                drag: DragScroll::Always,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                // An empty part of the grid swiped sideways moves to the next tab. Only
+                // what is shown of the grid itself: the clip reaches over the side sheet's
+                // grip.
+                let area = ui.max_rect().intersect(ui.clip_rect());
+                if let Some(step) = swipe(ui, area, ui.id().with("tools_swipe"), false) {
+                    if let Some(to) = Tab::Edit.offset(step) {
+                        self.compact_tab = Some(to);
+                    }
+                }
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(10, 10))
+                    .show(ui, |ui| {
+                        let gap = 6.0;
+                        let width = ui.available_width();
+                        let columns = ((width + gap) / (TILE_W + gap)).floor().max(3.0);
+                        let tile_w = (width - gap * (columns - 1.0)) / columns;
+                        let mut tiles: Vec<Tile> = self
+                            .compact_ids()
+                            .into_iter()
+                            .map(|id| {
+                                let (summary, modified) =
+                                    summarise(id, &self.stack, &defaults, &white);
+                                Tile {
+                                    pick: Pick::Module(id),
+                                    name: id.title().to_string(),
+                                    sub: (modified && id.is_on(&self.stack)).then_some(summary),
+                                }
+                            })
+                            .collect();
+                        tiles.push(Tile {
+                            pick: Pick::Cutout,
+                            name: "remove background".into(),
+                            sub: None,
+                        });
+                        tiles.push(Tile {
+                            pick: Pick::Modules,
+                            name: "+ tools".into(),
+                            sub: None,
+                        });
+                        let mut picked = None;
+                        for row in tiles.chunks(columns as usize) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                for t in row {
+                                    if tool_tile(ui, t, tile_w).clicked() {
+                                        picked = Some(t.pick);
+                                    }
+                                }
+                            });
+                            ui.add_space(gap - ui.spacing().item_spacing.y);
+                        }
+                        match picked {
+                            Some(Pick::Module(id)) => {
+                                self.compact_module = id;
+                                self.compact_controls_open = true;
+                                self.focused_section = Some(id);
+                            }
+                            Some(Pick::Cutout) => self.cutout_studio.open = true,
+                            Some(Pick::Modules) => self.customize_open = true,
+                            None => {}
+                        }
+                        ui.add_space(10.0);
+                        self.edits_block(ui);
+                    });
+            })
+            .content_size
+            .y
+    }
+
+    /// The cutout's controls in the Tools sheet, its preview on the photo above.
+    fn cutout_controls(&mut self, ui: &mut egui::Ui) {
+        let (changed, export) = self.cutout_studio.controls(ui);
+        if changed {
+            self.cutout_studio.update_preview_texture(ui.ctx());
+        }
+        if export {
+            self.export_cutout(ui.ctx());
+        }
     }
 
     /// The modules the phone's strip shows, in order.
@@ -1399,97 +1715,6 @@ impl PhotoApp {
             // Bring its name into view in the strip.
             self.reveal_section = Some(*next);
         }
-    }
-
-    /// Turn, then every module by name, then the list that chooses them — one scrolling
-    /// line.
-    fn module_strip(&mut self, ui: &mut egui::Ui) {
-        let ids = self.compact_ids();
-        if !ids.contains(&self.compact_module) {
-            if let Some(first) = ids.first() {
-                self.compact_module = *first;
-            }
-        }
-        let defaults = self.baseline.clone();
-        let white = self.white_scale();
-        egui::ScrollArea::horizontal()
-            .id_salt("compact_strip")
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .scroll_source(ScrollSource {
-                drag: DragScroll::Always,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.add_space(4.0);
-                    // Framing a crop: finishing it comes before anything else.
-                    if self.cropping {
-                        if strip_tab(ui, "apply", true, true, None).clicked() {
-                            self.apply_crop();
-                        }
-                        if strip_tab(ui, "× cancel", false, false, None).clicked() {
-                            self.cancel_crop();
-                        }
-                        divider(ui, STRIP_H);
-                        for (aspect, label) in crate::crop_tool::Aspect::CHOICES {
-                            if strip_tab(ui, label, self.crop_aspect == aspect, false, None)
-                                .clicked()
-                            {
-                                self.set_crop_aspect(aspect);
-                            }
-                        }
-                        if strip_icon(ui, "⇄", "Turn the crop's shape a quarter").clicked() {
-                            self.swap_crop_aspect();
-                        }
-                        divider(ui, STRIP_H);
-                    }
-                    if strip_icon(ui, "↶", "Turn 90° anticlockwise").clicked() {
-                        self.quick_turn(false);
-                    }
-                    if strip_icon(ui, "↷", "Turn 90° clockwise").clicked() {
-                        self.quick_turn(true);
-                    }
-                    divider(ui, STRIP_H);
-                    for id in ids {
-                        let (_, modified) = summarise(id, &self.stack, &defaults, &white);
-                        let dot = (id.is_on(&self.stack) && modified).then_some(theme::ACCENT);
-                        let chosen = self.compact_module == id && !self.customize_open;
-                        let open = chosen && self.compact_controls_open;
-                        let response = strip_tab(ui, id.short_name(), chosen, open, dot)
-                            .on_hover_text(id.title());
-                        if chosen && self.reveal_section == Some(id) {
-                            response.scroll_to_me(Some(egui::Align::Center));
-                            self.reveal_section = None;
-                        }
-                        if response.clicked() {
-                            if chosen {
-                                self.compact_controls_open = !self.compact_controls_open;
-                            } else {
-                                self.compact_module = id;
-                                self.compact_controls_open = true;
-                                self.customize_open = false;
-                            }
-                            self.focused_section = Some(id);
-                        }
-                    }
-                    divider(ui, STRIP_H);
-                    if strip_tab(
-                        ui,
-                        "＋ modules",
-                        self.customize_open,
-                        self.customize_open,
-                        None,
-                    )
-                    .on_hover_text("Choose which modules show, and their order")
-                    .clicked()
-                    {
-                        self.customize_open = !self.customize_open;
-                    }
-                    ui.add_space(8.0);
-                });
-            });
     }
 
     /// Every module with a switch for whether the strip shows it, and arrows to reorder.
@@ -1553,98 +1778,24 @@ impl PhotoApp {
         }
     }
 
-    /// One module, always open: its header, then its controls. The same checkpointing as
-    /// the desktop's pipeline, so a gesture is one undo step.
+    /// One module's controls. The same checkpointing as the desktop's pipeline, so a
+    /// gesture is one undo step; its switch and reset are in [`Self::tool_header`].
     fn single_module(&mut self, ui: &mut egui::Ui, id: InspectorSectionId) {
         let snapshot = self.stack.clone();
-        let mut changed = false;
         let mut started = false;
-        if self.compact_module_header(ui, id) {
-            changed = true;
-            started = true;
-        }
-        let mut body_changed = false;
-        self.module_body(ui, id, &mut body_changed, &mut started);
-        if body_changed {
+        let mut changed = false;
+        self.module_body(ui, id, &mut changed, &mut started);
+        if changed {
             // As on the desktop: touching a control turns its module on.
             if let Some(on) = id.enabled_mut(&mut self.stack) {
                 *on = true;
             }
-        }
-        changed |= body_changed;
-        if changed {
             self.focused_section = Some(id);
             self.needs_render = true;
         }
         if started {
             self.history.checkpoint(&snapshot);
         }
-    }
-
-    /// `[on/off]  title  summary   [⟲] [‹] [›]`. The switch is thumb-sized; ⟲ puts just this
-    /// module back and shows only once it has been changed; ‹ › step through the modules,
-    /// as a swipe does. True when the module's state changed.
-    fn compact_module_header(&mut self, ui: &mut egui::Ui, id: InspectorSectionId) -> bool {
-        let defaults = self.baseline.clone();
-        let white = self.white_scale();
-        let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
-        let on = id.is_on(&self.stack);
-        let ids = self.compact_ids();
-        let at = ids.iter().position(|i| *i == id);
-        let mut changed = false;
-        let mut step = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if let Some(enabled) = id.enabled_mut(&mut self.stack) {
-                if widgets::switch(ui, enabled).changed() {
-                    changed = true;
-                }
-            }
-            ui.label(
-                RichText::new(id.title())
-                    .family(theme::sans_strong())
-                    .size(14.0)
-                    .color(if on { theme::ACCENT } else { theme::TEXT_DIM }),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let last = at.is_some_and(|i| i + 1 >= ids.len());
-                if ui
-                    .add_enabled_ui(!last, |ui| widgets::icon(ui, "›", false, "Next module"))
-                    .inner
-                    .clicked()
-                {
-                    step = Some(1);
-                }
-                let first = at.is_none_or(|i| i == 0);
-                if ui
-                    .add_enabled_ui(!first, |ui| {
-                        widgets::icon(ui, "‹", false, "Previous module")
-                    })
-                    .inner
-                    .clicked()
-                {
-                    step = Some(-1);
-                }
-                if modified && widgets::icon(ui, "⟲", false, "Reset this module").clicked() {
-                    self.reset_module(id);
-                    changed = true;
-                }
-                ui.add_space(6.0);
-                let colour = if !on {
-                    theme::TEXT_FAINT
-                } else if modified {
-                    theme::ACCENT
-                } else {
-                    theme::TEXT_DIM
-                };
-                ui.add(egui::Label::new(theme::num(summary).size(11.0).color(colour)).truncate());
-            });
-        });
-        if let Some(step) = step {
-            self.step_module(step);
-        }
-        changed
     }
 
     /// Put one module back as the photo opened. Crop & rotate returns to the camera's
@@ -1737,113 +1888,122 @@ impl PhotoApp {
         }
     }
 
-    /// A quarter turn from the Edit strip, as one undo step.
-    fn quick_turn(&mut self, clockwise: bool) {
-        if clockwise {
-            self.geometry_edit(photo_engine::Geometry::rotate_right);
+    // ── Export ──────────────────────────────────────────────────────────────────────────
+
+    /// Export, as a short list: the one big button, then a row for each other way out —
+    /// the file's format and size, removing the background (in its own tool, where it can
+    /// be seen), sharing what was just written, and many photos at once.
+    fn export_sheet(&mut self, ui: &mut egui::Ui) {
+        let source = self.export_source_size();
+        let width = ui.available_width();
+        let busy = matches!(self.export, Export::Writing { .. });
+        let ready = self.ready_image().is_some() && !busy;
+        let cutout = self.cutout_studio.open;
+        ui.label(
+            RichText::new(crate::export_ui::summary(&self.export_settings, source))
+                .family(theme::mono_bold())
+                .size(12.0)
+                .color(theme::ACCENT),
+        );
+        let label = if cutout {
+            "Export the cutout"
         } else {
-            self.geometry_edit(photo_engine::Geometry::rotate_left);
+            "Export this photo"
+        };
+        if widgets::button_sized(ui, ready, Kind::Primary, label, width, 48.0).clicked() {
+            if cutout {
+                self.export_cutout(ui.ctx());
+            } else {
+                self.pick_and_export(ui.ctx());
+            }
+        }
+        let share = self.export_feedback(ui);
+
+        ui.add_space(4.0);
+        let options = if self.export_options_open {
+            "hide the format, size and quality"
+        } else {
+            "format, size, quality, colour and metadata"
+        };
+        if export_row(ui, true, "Options", options, self.export_options_open).clicked() {
+            self.export_options_open = !self.export_options_open;
+        }
+        if self.export_options_open {
+            egui::Frame::new()
+                .fill(theme::BG_925)
+                .corner_radius(8)
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let mut settings = self.export_settings;
+                    crate::export_ui::settings_editor_with(ui, &mut settings, source, false);
+                    self.export_settings = settings;
+                });
+        }
+        let (title, sub) = if cutout {
+            ("Remove background", "on: its preview is on the photo")
+        } else {
+            ("Remove background", "cut the subject out, with a preview")
+        };
+        if export_row(ui, self.can_edit(), title, sub, cutout).clicked() {
+            self.cutout_studio.open = true;
+            self.compact_tab = Some(Tab::Edit);
+        }
+        if let Some(path) = share {
+            if export_row(
+                ui,
+                true,
+                "Share",
+                &format!("send {} to another app", file_name(&path)),
+                false,
+            )
+            .clicked()
+            {
+                self.request(ui.ctx(), crate::platform::Request::Share { path });
+            }
+        }
+        let n = self.selection.count();
+        let sub = if n > 1 {
+            format!("the {n} photos selected in Library")
+        } else {
+            "several photos: choose them with select in Library".to_string()
+        };
+        if export_row(ui, true, "Batch export", &sub, false).clicked() {
+            self.batch_dialog_open = true;
         }
     }
 
-    // ── Export ──────────────────────────────────────────────────────────────────────────
-
-    fn export_sheet(&mut self, ui: &mut egui::Ui) {
-        self.edits_block(ui);
-        ui.add_space(8.0);
-        // What the export will be, and the settings behind it a tap away.
-        let source = self.export_source_size();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(crate::export_ui::summary(&self.export_settings, source))
-                    .family(theme::mono_bold())
-                    .size(11.0)
-                    .color(theme::ACCENT),
-            );
-            if widgets::chip(ui, self.export_options_open, "options").clicked() {
-                self.export_options_open = !self.export_options_open;
-            }
-        });
-        if self.export_options_open {
-            let mut settings = self.export_settings;
-            crate::export_ui::settings_editor(ui, &mut settings, source);
-            self.export_settings = settings;
-        }
-        let busy = matches!(self.export, Export::Writing { .. });
-        let ready = self.ready_image().is_some() && !busy;
-        let width = ui.available_width();
-        let export = ui
-            .add_enabled_ui(ready, |ui| {
-                widgets::button(ui, Kind::Primary, "Export this photo", width)
-            })
-            .inner;
-        if export.clicked() {
-            self.pick_and_export(ui.ctx());
-        }
-
-        // Real-time export feedback in the sheet
-        let mut share = None;
-        match &self.export {
-            Export::Writing { path, started, .. } => {
-                ui.horizontal(|ui| {
-                    widgets::dot(ui, theme::ACCENT);
-                    ui.label(
-                        RichText::new(format!(
-                            "writing {} ({:.1}s)…",
-                            file_name(path),
-                            started.elapsed().as_secs_f32()
-                        ))
-                        .family(theme::mono_bold())
-                        .size(11.5)
-                        .color(theme::ACCENT),
-                    );
-                });
-            }
-            Export::Done { path, seconds } => {
-                ui.horizontal(|ui| {
-                    if self.platform.can_share()
-                        && widgets::chip(ui, true, "share")
-                            .on_hover_text("Send it to another app")
-                            .clicked()
-                    {
-                        share = Some(path.clone());
-                    }
-                    widgets::dot(ui, theme::LIME);
-                    ui.label(
-                        RichText::new(format!("exported {} in {seconds:.1}s", file_name(path)))
-                            .family(theme::mono_bold())
-                            .size(11.5)
-                            .color(theme::LIME),
-                    );
-                });
-            }
-            Export::Failed(e) => {
-                ui.horizontal(|ui| {
-                    widgets::dot(ui, theme::DANGER);
-                    ui.label(
-                        RichText::new(format!("failed: {e}"))
-                            .family(theme::mono_bold())
-                            .size(11.5)
-                            .color(theme::DANGER),
-                    );
-                });
-            }
-            Export::Idle => {}
-        }
-        if let Some(path) = share {
-            self.request(ui.ctx(), crate::platform::Request::Share { path });
-        }
-
-        let n = self.selection.count();
-        let label = if n > 1 {
-            format!("Batch export {n} selected…")
-        } else {
-            "Batch export…".to_string()
+    /// How the last export went, under the button; the file just written, if it can be
+    /// shared.
+    fn export_feedback(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        let (text, colour, share) = match &self.export {
+            Export::Writing { path, started, .. } => (
+                format!(
+                    "writing {} ({:.1}s)…",
+                    file_name(path),
+                    started.elapsed().as_secs_f32()
+                ),
+                theme::ACCENT,
+                None,
+            ),
+            Export::Done { path, seconds } => (
+                format!("exported {} in {seconds:.1}s", file_name(path)),
+                theme::LIME,
+                self.platform.can_share().then(|| path.clone()),
+            ),
+            Export::Failed(e) => (format!("failed: {e}"), theme::DANGER, None),
+            Export::Idle => return None,
         };
-        if widgets::button(ui, Kind::Accent, &label, width).clicked() {
-            self.batch_dialog_open = true;
-        }
-        ui.label(theme::dim("To export several, choose them with select in Library.").size(11.5));
+        ui.horizontal_wrapped(|ui| {
+            widgets::dot(ui, colour);
+            ui.label(
+                RichText::new(text)
+                    .family(theme::mono_bold())
+                    .size(12.0)
+                    .color(colour),
+            );
+        });
+        share
     }
 
     /// One line over the stage when there is something to say: an error, a notice, or an
@@ -1914,6 +2074,12 @@ impl PhotoApp {
             }
             if s.goal.on_photo() && crate::knobs::knobs(self.compact_module).is_empty() {
                 self.compact_module = InspectorSectionId::Exposure;
+            }
+            // The photo is a tool's control, and the steps row is under a tool's controls.
+            if s.goal.on_photo() || s.goal == Goal::Module {
+                self.compact_controls_open = true;
+                self.customize_open = false;
+                self.cutout_studio.open = false;
             }
             self.tour_mark = Some(TourMark {
                 step,
@@ -2090,7 +2256,7 @@ impl PhotoApp {
         }
     }
 
-    /// Where the Edit sheet's module strip was drawn last frame.
+    /// Where the row stepping between tools was drawn last frame.
     pub fn strip_rect(&self) -> Rect {
         self.compact_rects.strip
     }
@@ -2127,7 +2293,7 @@ impl PhotoApp {
 enum Target {
     Nav,
     Stage,
-    /// The Edit sheet's module strip.
+    /// The row under a tool's controls that steps to the next tool.
     Strip,
     Nothing,
 }
@@ -2249,13 +2415,17 @@ enum BarIcon {
     Redo,
     Split,
     Reset,
+    /// Three dots: more.
+    More,
+    /// A chevron pointing left: back.
+    Back,
 }
 
-/// A top-bar icon: painted strokes in a 32 × 32 target, all one size and centred on the
+/// A top-bar icon: painted strokes in a 44 × 44 target, all one size and centred on the
 /// bar's line, as the font's glyphs are not.
 fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = widgets::allocate_control(ui, vec2(32.0, 32.0), Sense::click());
+    let (rect, response) = widgets::allocate_control(ui, vec2(44.0, 44.0), Sense::click());
     widgets::describe(ui, &response, rect, || {
         egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tip)
     });
@@ -2271,16 +2441,25 @@ fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::
         painter.rect_filled(rect, 3, theme::BG_850);
     }
     let c = rect.center();
-    let stroke = Stroke::new(1.6, colour);
+    let stroke = Stroke::new(2.0, colour);
     match icon {
         // A hook over the top, arrowhead down at the end it turns back to.
-        BarIcon::Undo => arc_arrow(painter, c + vec2(0.0, 1.5), 5.5, 30.0, -180.0, stroke),
-        BarIcon::Redo => arc_arrow(painter, c + vec2(0.0, 1.5), 5.5, 150.0, 360.0, stroke),
+        BarIcon::Undo => arc_arrow(painter, c + vec2(0.0, 2.0), 7.0, 30.0, -180.0, stroke),
+        BarIcon::Redo => arc_arrow(painter, c + vec2(0.0, 2.0), 7.0, 150.0, 360.0, stroke),
         // Most of a circle, turning back on itself.
-        BarIcon::Reset => arc_arrow(painter, c, 6.0, 200.0, -95.0, stroke),
+        BarIcon::Reset => arc_arrow(painter, c, 7.5, 200.0, -95.0, stroke),
+        BarIcon::More => {
+            for dx in [-7.0, 0.0, 7.0] {
+                painter.circle_filled(c + vec2(dx, 0.0), 2.2, colour);
+            }
+        }
+        BarIcon::Back => {
+            painter.line_segment([c + vec2(4.0, -8.0), c + vec2(-4.0, 0.0)], stroke);
+            painter.line_segment([c + vec2(-4.0, 0.0), c + vec2(4.0, 8.0)], stroke);
+        }
         // Before | after.
         BarIcon::Split => {
-            let frame = Rect::from_center_size(c, vec2(15.0, 12.0));
+            let frame = Rect::from_center_size(c, vec2(19.0, 15.0));
             painter.rect_stroke(frame, 1.5, stroke, egui::StrokeKind::Middle);
             painter.vline(c.x, frame.y_range(), stroke);
             let left = Rect::from_min_max(frame.min, pos2(c.x, frame.max.y)).shrink(2.0);
@@ -2416,81 +2595,211 @@ fn look_tile(ui: &mut egui::Ui, name: &str, swatch: [Color32; 2], chosen: bool) 
     response
 }
 
-/// A name in the Edit strip: amber when it is the chosen one, underlined while its
-/// controls are open, with a dot when the module changes the photo.
-fn strip_tab(
-    ui: &mut egui::Ui,
-    text: &str,
-    chosen: bool,
-    open: bool,
-    dot: Option<Color32>,
-) -> egui::Response {
-    let enabled = ui.is_enabled();
-    let galley = ui.painter().layout_no_wrap(
-        text.to_uppercase(),
-        FontId::new(11.0, theme::mono_bold()),
-        Color32::PLACEHOLDER,
-    );
-    let pad = 10.0;
-    let (rect, response) = widgets::allocate_control(
-        ui,
-        vec2(galley.size().x + 2.0 * pad, STRIP_H),
-        Sense::click(),
-    );
+/// What a Tools sheet shows: one module, the list of which show, or the cutout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolView {
+    Module(InspectorSectionId),
+    Modules,
+    Cutout,
+}
+
+impl ToolView {
+    /// Each its own scroll position.
+    fn salt(self) -> String {
+        match self {
+            ToolView::Module(id) => format!("module {}", id.title()),
+            ToolView::Modules => "modules".into(),
+            ToolView::Cutout => "cutout".into(),
+        }
+    }
+}
+
+/// What a tile in the Tools grid opens.
+#[derive(Clone, Copy)]
+enum Pick {
+    Module(InspectorSectionId),
+    Cutout,
+    Modules,
+}
+
+struct Tile {
+    pick: Pick,
+    name: String,
+    /// What the tool does to the photo now, when it does anything.
+    sub: Option<String>,
+}
+
+/// A tile in the Tools grid: the tool's name, and under it in amber what it does to the
+/// photo, when it does anything.
+fn tool_tile(ui: &mut egui::Ui, tile: &Tile, width: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, TILE_H), Sense::click());
     widgets::describe(ui, &response, rect, || {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, chosen, text)
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tile.name)
     });
-    let colour = if !enabled {
-        theme::TEXT_FAINT
-    } else if chosen {
-        theme::ACCENT
-    } else if response.hovered() {
-        theme::TEXT_HI
-    } else {
-        Color32::from_gray(0xa8)
-    };
     let painter = ui.painter();
-    let text_rect = Rect::from_center_size(rect.center(), galley.size());
-    painter.galley(text_rect.min, galley, colour);
-    if open {
-        let bar = Rect::from_min_max(
-            pos2(text_rect.left(), rect.bottom() - 3.0),
-            pos2(text_rect.right(), rect.bottom() - 1.0),
-        );
-        painter.rect_filled(bar, 1.0, theme::ACCENT);
+    let hot = response.hovered() || response.is_pointer_button_down_on();
+    let edited = tile.sub.is_some();
+    painter.rect(
+        rect,
+        8,
+        if hot { theme::BG_850 } else { theme::BG_900 },
+        Stroke::new(
+            1.0,
+            if edited {
+                theme::ACCENT.linear_multiply(0.6)
+            } else {
+                theme::BORDER
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    // Centred line by line: a name that wraps reads as one label, not as a paragraph.
+    let centred = |text: &str, font: FontId, colour: Color32, wrap: f32| {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, colour, wrap);
+        job.halign = egui::Align::Center;
+        painter.layout_job(job)
+    };
+    let name = centred(
+        &tile.name,
+        FontId::new(13.0, theme::sans_strong()),
+        if edited {
+            theme::ACCENT
+        } else {
+            theme::TEXT_HI
+        },
+        rect.width() - 12.0,
+    );
+    let sub = tile.sub.as_ref().map(|s| {
+        centred(
+            s,
+            FontId::new(10.5, theme::mono_bold()),
+            theme::ACCENT,
+            rect.width() - 10.0,
+        )
+    });
+    let total = name.size().y + sub.as_ref().map_or(0.0, |g| g.size().y + 4.0);
+    let mut y = rect.center().y - total / 2.0;
+    // A centred galley's rows are laid out about x = 0.
+    let height = name.size().y;
+    painter.galley(pos2(rect.center().x, y), name, theme::TEXT_HI);
+    y += height + 4.0;
+    if let Some(g) = sub {
+        let clip = painter.with_clip_rect(rect.shrink(3.0));
+        clip.galley(pos2(rect.center().x, y), g, theme::ACCENT);
     }
-    if let Some(dot) = dot {
-        painter.circle_filled(
-            pos2(text_rect.right() + 4.0, text_rect.top() + 1.0),
-            2.0,
-            dot,
-        );
-    }
-    if enabled && response.hovered() {
+    if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     response
 }
 
-/// A glyph in the Edit strip, for an action rather than a module.
-fn strip_icon(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
-    let (rect, response) = widgets::allocate_control(ui, vec2(34.0, STRIP_H), Sense::click());
-    widgets::describe(ui, &response, rect, || {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
-    });
-    let colour = if response.hovered() {
-        theme::TEXT_HI
+/// A row in the Export sheet: a title over what it does, the whole row the target.
+fn export_row(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    title: &str,
+    sub: &str,
+    on: bool,
+) -> egui::Response {
+    let enabled = enabled && ui.is_enabled();
+    let sense = if enabled {
+        Sense::click()
     } else {
-        Color32::from_gray(0xcc)
+        Sense::hover()
     };
-    ui.painter().text(
-        rect.center(),
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), sense);
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, title)
+    });
+    let painter = ui.painter();
+    let hot = enabled && (response.hovered() || response.is_pointer_button_down_on());
+    painter.rect(
+        rect,
+        8,
+        if hot { theme::BG_850 } else { theme::BG_900 },
+        Stroke::new(
+            1.0,
+            if on {
+                theme::ACCENT.linear_multiply(0.6)
+            } else {
+                theme::BORDER
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let (main, faint) = if enabled {
+        (
+            if on { theme::ACCENT } else { theme::TEXT_HI },
+            theme::TEXT_DIM,
+        )
+    } else {
+        (theme::TEXT_FAINT, theme::TEXT_FAINT)
+    };
+    let clip = painter.with_clip_rect(rect.shrink(2.0));
+    clip.text(
+        pos2(rect.left() + 14.0, rect.center().y - 9.0),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::new(14.0, theme::sans_strong()),
+        main,
+    );
+    clip.text(
+        pos2(rect.left() + 14.0, rect.center().y + 10.0),
+        Align2::LEFT_CENTER,
+        sub,
+        FontId::proportional(12.0),
+        faint,
+    );
+    clip.text(
+        pos2(rect.right() - 16.0, rect.center().y),
         Align2::CENTER_CENTER,
-        glyph,
-        FontId::proportional(17.0),
+        "›",
+        FontId::proportional(20.0),
+        faint,
+    );
+    if hot {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// A row in the top bar's ⋯ menu: its label, and a tick while it is on.
+fn menu_row(ui: &mut egui::Ui, enabled: bool, label: &str, on: Option<bool>) -> egui::Response {
+    let enabled = enabled && ui.is_enabled();
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), sense);
+    widgets::describe(ui, &response, rect, || match on {
+        Some(on) => egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, label),
+        None => egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label),
+    });
+    let painter = ui.painter();
+    if enabled && response.hovered() {
+        painter.rect_filled(rect, 6, theme::BG_850);
+    }
+    let colour = if !enabled {
+        theme::TEXT_FAINT
+    } else if on == Some(true) {
+        theme::ACCENT
+    } else {
+        theme::TEXT_HI
+    };
+    painter.text(
+        pos2(rect.left() + 12.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::new(14.0, theme::sans_strong()),
         colour,
     );
-    response.on_hover_text(tip)
+    if let Some(on) = on {
+        let box_rect =
+            Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(14.0, 14.0));
+        widgets::paint_checkbox(painter, box_rect, on, response.hovered());
+    }
+    response
 }
 
 /// A short hairline between groups in a row.
@@ -2507,14 +2816,17 @@ fn divider(ui: &mut egui::Ui, height: f32) {
 /// The tab icons, painted rather than taken from a font: the bundled fonts have no glyph
 /// for sliders or a scope, and painted strokes match the rest of the controls.
 fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {
-    let stroke = Stroke::new(1.6, colour);
+    let stroke = Stroke::new(1.9, colour);
+    // Drawn at a third over the size the numbers below say.
+    let k = 1.3;
+    let vec2 = |x: f32, y: f32| egui::vec2(x * k, y * k);
     match tab {
         // A two-by-two grid of prints.
         Tab::Library => {
             for (dx, dy) in [(-5.0, -5.0), (5.0, -5.0), (-5.0, 5.0), (5.0, 5.0)] {
                 painter.rect_stroke(
                     Rect::from_center_size(c + vec2(dx, dy), vec2(8.0, 8.0)),
-                    1.5,
+                    2.0,
                     stroke,
                     egui::StrokeKind::Middle,
                 );
@@ -2523,14 +2835,14 @@ fn paint_tab_icon(painter: &Painter, c: egui::Pos2, tab: Tab, colour: Color32) {
         // Three overlapping swatches: looks.
         Tab::Presets => {
             for (dx, dy) in [(-4.0, 3.0), (4.0, 3.0), (0.0, -4.0)] {
-                painter.circle_stroke(c + vec2(dx, dy), 5.5, stroke);
+                painter.circle_stroke(c + vec2(dx, dy), 5.5 * k, stroke);
             }
         }
         // Three sliders at different settings.
         Tab::Edit => {
             for (row, knob) in [(-6.0, -3.0), (0.0, 4.0), (6.0, -6.0)] {
                 painter.line_segment([c + vec2(-9.0, row), c + vec2(9.0, row)], stroke);
-                painter.circle_filled(c + vec2(knob, row), 2.6, colour);
+                painter.circle_filled(c + vec2(knob, row), 2.6 * k, colour);
             }
         }
         // An arrow rising out of a tray.

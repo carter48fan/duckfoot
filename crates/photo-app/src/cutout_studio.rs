@@ -284,9 +284,7 @@ impl CutoutStudioState {
         }
 
         let mut open = self.open;
-        let mut trigger_export = false;
-        let mut changed = false;
-
+        let mut outcome = (false, false);
         egui::Window::new("✂ Cutout Studio")
             .open(&mut open)
             .fade_in(false)
@@ -294,202 +292,243 @@ impl CutoutStudioState {
             .resizable(false)
             .default_width(320.0)
             .default_pos(pos2(24.0, 60.0))
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 7.0;
-
-                // ── Preview Background ──────────────────────────────────────────────────────────
-                ui.label(RichText::new("PREVIEW BACKDROP").monospace().size(10.0).color(theme::TEXT_DIM));
-                ui.horizontal_wrapped(|ui| {
-                    if widgets::chip(ui, self.preview_mode == CutoutPreviewMode::Checkerboard, "🏁 Checker").clicked() {
-                        self.preview_mode = CutoutPreviewMode::Checkerboard;
-                        changed = true;
-                    }
-                    if widgets::chip(ui, self.preview_mode == CutoutPreviewMode::CatalogWhite, "⬜ White").clicked() {
-                        self.preview_mode = CutoutPreviewMode::CatalogWhite;
-                        changed = true;
-                    }
-                    if widgets::chip(ui, self.preview_mode == CutoutPreviewMode::Black, "⬛ Black").clicked() {
-                        self.preview_mode = CutoutPreviewMode::Black;
-                        changed = true;
-                    }
-                    if widgets::chip(ui, self.preview_mode == CutoutPreviewMode::Rubylith, "🟥 Mask").clicked() {
-                        self.preview_mode = CutoutPreviewMode::Rubylith;
-                        changed = true;
-                    }
-                });
-
-                ui.separator();
-
-                // ── Edge & Halo Tuning ─────────────────────────────────────────────────────────
-                ui.label(RichText::new("EDGE & DEFRINGE TUNING").monospace().size(10.0).color(theme::TEXT_DIM));
-                if widgets::chip(
-                    ui,
-                    self.params.defringe_white,
-                    "✨ Defringe White Lightbox Halo",
-                )
-                .on_hover_text("Removes white studio background bleed from semi-transparent perimeter pixels")
-                .clicked()
-                {
-                    self.params.defringe_white = !self.params.defringe_white;
-                    changed = true;
-                }
-
-                if widgets::param_slider(
-                    ui,
-                    "threshold",
-                    &mut self.params.threshold,
-                    0.05..=0.95,
-                    2,
-                    0.50,
-                )
-                .on_hover_text("Neural net cutoff sensitivity (lower keeps more, higher erases more)")
-                .changed()
-                {
-                    changed = true;
-                }
-
-                let mut shift_f = self.params.edge_shift as f32;
-                if widgets::param_slider(
-                    ui,
-                    "edge shift",
-                    &mut shift_f,
-                    -10.0..=10.0,
-                    0,
-                    0.0,
-                )
-                .on_hover_text("Contract (negative) or expand (positive) the perimeter mask in pixels")
-                .changed()
-                {
-                    self.params.edge_shift = shift_f.round() as i32;
-                    changed = true;
-                }
-
-                if widgets::param_slider(
-                    ui,
-                    "feather",
-                    &mut self.params.feather,
-                    0.0..=10.0,
-                    1,
-                    1.0,
-                )
-                .on_hover_text("Gaussian edge feathering radius in pixels")
-                .changed()
-                {
-                    changed = true;
-                }
-
-                ui.separator();
-
-                // ── Touch-up Brush ────────────────────────────────────────────────────────────
-                ui.label(RichText::new("TOUCH-UP BRUSH").monospace().size(10.0).color(theme::TEXT_DIM));
-                ui.horizontal_wrapped(|ui| {
-                    if widgets::chip(ui, self.brush_mode == CutoutBrushMode::Keep, "✚ Keep (Restore)")
-                        .on_hover_text("Paint on stage to restore cut off parts (e.g. chrome tailpiece)")
-                        .clicked()
-                    {
-                        self.brush_mode = CutoutBrushMode::Keep;
-                    }
-                    if widgets::chip(ui, self.brush_mode == CutoutBrushMode::Erase, "➖ Erase (Remove)")
-                        .on_hover_text("Paint on stage to erase unwanted objects (e.g. guitar stand legs)")
-                        .clicked()
-                    {
-                        self.brush_mode = CutoutBrushMode::Erase;
-                    }
-                });
-
-                let mut brush_size_pct = self.brush_radius * 100.0;
-                if widgets::param_slider(
-                    ui,
-                    "brush size",
-                    &mut brush_size_pct,
-                    0.5..=20.0,
-                    1,
-                    3.5,
-                )
-                .changed()
-                {
-                    self.brush_radius = brush_size_pct / 100.0;
-                }
-
-                let mut hardness_pct = self.brush_hardness * 100.0;
-                if widgets::param_slider(
-                    ui,
-                    "hardness",
-                    &mut hardness_pct,
-                    10.0..=100.0,
-                    0,
-                    85.0,
-                )
-                .changed()
-                {
-                    self.brush_hardness = hardness_pct / 100.0;
-                }
-
-                ui.horizontal(|ui| {
-                    let has_touchups = !self.touchups.is_empty();
-                    if widgets::button_enabled(ui, has_touchups, Kind::Secondary, "↶ Undo Dab", 0.0).clicked() {
-                        self.undo_touchup(ctx);
-                    }
-                    if widgets::button_enabled(
-                        ui,
-                        has_touchups,
-                        Kind::Secondary,
-                        &format!("✕ Clear ({})", self.touchups.len()),
-                        0.0,
-                    )
-                    .clicked()
-                    {
-                        self.clear_touchups(ctx);
-                    }
-                    if widgets::button(ui, Kind::Secondary, "↻ Recompute", 0.0)
-                        .on_hover_text("Re-render base image from current exposure/edits and recompute neural mask")
-                        .clicked()
-                    {
-                        self.invalidate_prediction();
-                    }
-                });
-
-                ui.separator();
-
-                // ── Export Output ─────────────────────────────────────────────────────────────
-                ui.label(RichText::new("EXPORT OUTPUT").monospace().size(10.0).color(theme::TEXT_DIM));
-                ui.horizontal_wrapped(|ui| {
-                    if widgets::chip(ui, !self.export_matte_white, "Transparent PNG").clicked() {
-                        self.export_matte_white = false;
-                    }
-                    if widgets::chip(ui, self.export_matte_white, "Catalog White PNG").clicked() {
-                        self.export_matte_white = true;
-                    }
-                });
-
-                ui.add_space(3.0);
-                if widgets::button(ui, Kind::Primary, "💾 Export Cutout PNG…", 0.0)
-                    .on_hover_text("Save full-resolution cutout image with edge tuning and manual touch-ups applied")
-                    .clicked()
-                {
-                    trigger_export = true;
-                }
-
-                if let Some(status) = &self.status {
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(status).size(11.0).color(theme::TEXT_DIM));
-                }
-
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new("💡 Paint on image • Alt erases • Space+drag pans • Esc closes")
-                        .size(10.0)
-                        .color(theme::TEXT_FAINT),
-                );
-            });
+            .show(ctx, |ui| outcome = self.controls(ui));
 
         self.open = open;
+        let (changed, trigger_export) = outcome;
         if changed {
             self.update_preview_texture(ctx);
         }
         if trigger_export {
             *on_export_clicked = true;
         }
+    }
+
+    /// The studio's controls, wherever they are shown: the desktop's floating window, or
+    /// the phone's Tools sheet. Returns whether the preview needs remaking, and whether
+    /// export was pressed.
+    pub fn controls(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let mut trigger_export = false;
+        let mut changed = false;
+        ui.spacing_mut().item_spacing.y = 7.0;
+
+        // ── Preview Background ──────────────────────────────────────────────────────────
+        ui.label(
+            RichText::new("PREVIEW BACKDROP")
+                .monospace()
+                .size(10.0)
+                .color(theme::TEXT_DIM),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(
+                ui,
+                self.preview_mode == CutoutPreviewMode::Checkerboard,
+                "🏁 Checker",
+            )
+            .clicked()
+            {
+                self.preview_mode = CutoutPreviewMode::Checkerboard;
+                changed = true;
+            }
+            if widgets::chip(
+                ui,
+                self.preview_mode == CutoutPreviewMode::CatalogWhite,
+                "⬜ White",
+            )
+            .clicked()
+            {
+                self.preview_mode = CutoutPreviewMode::CatalogWhite;
+                changed = true;
+            }
+            if widgets::chip(
+                ui,
+                self.preview_mode == CutoutPreviewMode::Black,
+                "⬛ Black",
+            )
+            .clicked()
+            {
+                self.preview_mode = CutoutPreviewMode::Black;
+                changed = true;
+            }
+            if widgets::chip(
+                ui,
+                self.preview_mode == CutoutPreviewMode::Rubylith,
+                "🟥 Mask",
+            )
+            .clicked()
+            {
+                self.preview_mode = CutoutPreviewMode::Rubylith;
+                changed = true;
+            }
+        });
+
+        ui.separator();
+
+        // ── Edge & Halo Tuning ─────────────────────────────────────────────────────────
+        ui.label(
+            RichText::new("EDGE & DEFRINGE TUNING")
+                .monospace()
+                .size(10.0)
+                .color(theme::TEXT_DIM),
+        );
+        if widgets::chip(
+            ui,
+            self.params.defringe_white,
+            "✨ Defringe White Lightbox Halo",
+        )
+        .on_hover_text(
+            "Removes white studio background bleed from semi-transparent perimeter pixels",
+        )
+        .clicked()
+        {
+            self.params.defringe_white = !self.params.defringe_white;
+            changed = true;
+        }
+
+        if widgets::param_slider(
+            ui,
+            "threshold",
+            &mut self.params.threshold,
+            0.05..=0.95,
+            2,
+            0.50,
+        )
+        .on_hover_text("Neural net cutoff sensitivity (lower keeps more, higher erases more)")
+        .changed()
+        {
+            changed = true;
+        }
+
+        let mut shift_f = self.params.edge_shift as f32;
+        if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0)
+            .on_hover_text("Contract (negative) or expand (positive) the perimeter mask in pixels")
+            .changed()
+        {
+            self.params.edge_shift = shift_f.round() as i32;
+            changed = true;
+        }
+
+        if widgets::param_slider(ui, "feather", &mut self.params.feather, 0.0..=10.0, 1, 1.0)
+            .on_hover_text("Gaussian edge feathering radius in pixels")
+            .changed()
+        {
+            changed = true;
+        }
+
+        ui.separator();
+
+        // ── Touch-up Brush ────────────────────────────────────────────────────────────
+        ui.label(
+            RichText::new("TOUCH-UP BRUSH")
+                .monospace()
+                .size(10.0)
+                .color(theme::TEXT_DIM),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(
+                ui,
+                self.brush_mode == CutoutBrushMode::Keep,
+                "✚ Keep (Restore)",
+            )
+            .on_hover_text("Paint on stage to restore cut off parts (e.g. chrome tailpiece)")
+            .clicked()
+            {
+                self.brush_mode = CutoutBrushMode::Keep;
+            }
+            if widgets::chip(
+                ui,
+                self.brush_mode == CutoutBrushMode::Erase,
+                "➖ Erase (Remove)",
+            )
+            .on_hover_text("Paint on stage to erase unwanted objects (e.g. guitar stand legs)")
+            .clicked()
+            {
+                self.brush_mode = CutoutBrushMode::Erase;
+            }
+        });
+
+        let mut brush_size_pct = self.brush_radius * 100.0;
+        if widgets::param_slider(ui, "brush size", &mut brush_size_pct, 0.5..=20.0, 1, 3.5)
+            .changed()
+        {
+            self.brush_radius = brush_size_pct / 100.0;
+        }
+
+        let mut hardness_pct = self.brush_hardness * 100.0;
+        if widgets::param_slider(ui, "hardness", &mut hardness_pct, 10.0..=100.0, 0, 85.0).changed()
+        {
+            self.brush_hardness = hardness_pct / 100.0;
+        }
+
+        ui.horizontal(|ui| {
+            let has_touchups = !self.touchups.is_empty();
+            if widgets::button_enabled(ui, has_touchups, Kind::Secondary, "↶ Undo Dab", 0.0)
+                .clicked()
+            {
+                self.undo_touchup(ui.ctx());
+            }
+            if widgets::button_enabled(
+                ui,
+                has_touchups,
+                Kind::Secondary,
+                &format!("✕ Clear ({})", self.touchups.len()),
+                0.0,
+            )
+            .clicked()
+            {
+                self.clear_touchups(ui.ctx());
+            }
+            if widgets::button(ui, Kind::Secondary, "↻ Recompute", 0.0)
+                .on_hover_text(
+                    "Re-render base image from current exposure/edits and recompute neural mask",
+                )
+                .clicked()
+            {
+                self.invalidate_prediction();
+            }
+        });
+
+        ui.separator();
+
+        // ── Export Output ─────────────────────────────────────────────────────────────
+        ui.label(
+            RichText::new("EXPORT OUTPUT")
+                .monospace()
+                .size(10.0)
+                .color(theme::TEXT_DIM),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, !self.export_matte_white, "Transparent PNG").clicked() {
+                self.export_matte_white = false;
+            }
+            if widgets::chip(ui, self.export_matte_white, "Catalog White PNG").clicked() {
+                self.export_matte_white = true;
+            }
+        });
+
+        ui.add_space(3.0);
+        if widgets::button(ui, Kind::Primary, "💾 Export Cutout PNG…", 0.0)
+            .on_hover_text(
+                "Save full-resolution cutout image with edge tuning and manual touch-ups applied",
+            )
+            .clicked()
+        {
+            trigger_export = true;
+        }
+
+        if let Some(status) = &self.status {
+            ui.add_space(2.0);
+            ui.label(RichText::new(status).size(11.0).color(theme::TEXT_DIM));
+        }
+
+        ui.add_space(2.0);
+        let hint = if widgets::is_touch(ui.ctx()) {
+            "Paint on the photo to keep or erase • pinch to zoom"
+        } else {
+            "💡 Paint on image • Alt erases • Space+drag pans • Esc closes"
+        };
+        ui.label(RichText::new(hint).size(10.0).color(theme::TEXT_FAINT));
+        (changed, trigger_export)
     }
 }
 

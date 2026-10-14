@@ -1017,8 +1017,9 @@ impl PhotoApp {
         self.engine_path = Some(path.clone());
         self.apply_orientation(orientation);
         if std::mem::take(&mut self.edit_when_opened) {
+            // The grid of tools, to choose from.
             self.compact_tab = Some(compact::Tab::Edit);
-            self.compact_controls_open = true;
+            self.compact_controls_open = false;
         }
         if self.saved_stack.is_some() {
             self.set_status(format!("Loaded sidecar for {}", file_name(&path)));

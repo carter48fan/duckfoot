@@ -507,12 +507,12 @@ fn tap(h: &Headless, app: &mut PhotoApp, size: egui::Vec2, at: egui::Pos2) {
 fn tab_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
     let n = Tab::ALL.len() as f32;
     if size.x > size.y {
-        let rail = 56.0;
-        let top = 32.0; // under the top bar
+        let rail = photo_app::compact::NAV_RAIL;
+        let top = photo_app::compact::TOP_BAR; // under the top bar
         let cell = (size.y - top) / n;
         egui::pos2(size.x - rail / 2.0, top + cell * (i as f32 + 0.5))
     } else {
-        let bar = 48.0;
+        let bar = photo_app::compact::NAV_BAR;
         let cell = size.x / n;
         egui::pos2(cell * (i as f32 + 0.5), size.y - bar / 2.0)
     }
@@ -624,10 +624,10 @@ fn back_select_mode_and_swipe_work_without_a_keyboard() {
 }
 
 /// Upright, the sheet is only as tall as what it holds, so the photo keeps most of the
-/// screen; tapping the chosen module in the Edit strip folds its controls away, and
-/// tapping it again brings them back.
+/// screen: a tool open on its own leaves the photo over half, and even the grid of every
+/// tool, the tallest the Tools sheet gets, leaves it well over a third.
 #[test]
-fn the_edit_sheet_stays_low_and_folds_to_its_strip() {
+fn the_tools_sheet_stays_low() {
     let dir = scratch_dir("low_sheet");
     let a = dir.join("a.dng");
     write_dng(&a, 640, 426);
@@ -640,28 +640,29 @@ fn the_edit_sheet_stays_low_and_folds_to_its_strip() {
     assert_eq!(
         app.compact_tab,
         Some(Tab::Edit),
-        "the first photo opens to Edit"
+        "the first photo opens to Tools"
+    );
+    assert!(!app.compact_controls_open, "…on the grid of every tool");
+
+    // The sheet takes its content's height a frame after the content changes.
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    let grid = app.stage_size().y;
+    assert!(
+        grid > PORTRAIT.y * 0.38,
+        "the grid should leave the photo over a third of the screen, got {grid}"
     );
 
     app.compact_module = photo_app::InspectorSectionId::Exposure;
-    // The sheet takes its content's height a frame after the content changes.
+    app.compact_controls_open = true;
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     let open = app.stage_size().y;
     assert!(
         open > PORTRAIT.y * 0.5,
-        "the photo should keep over half the screen, got {open}"
-    );
-
-    app.compact_controls_open = false;
-    for _ in 0..3 {
-        h.frame_sized(&mut app, PORTRAIT, Default::default());
-    }
-    let folded = app.stage_size().y;
-    assert!(
-        folded > open + 100.0 && folded > PORTRAIT.y * 0.75,
-        "folded to its strip, the sheet should give the photo the room back: {open} → {folded}"
+        "one tool should leave the photo over half the screen, got {open}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -903,14 +904,15 @@ fn phone_swipes_presets_and_tour() {
     assert!(!shown(&app, M::Scope) && !shown(&app, M::Filmic3D));
     assert!(shown(&app, M::Exposure) && shown(&app, M::Tonal));
 
-    // A flick to the left on the exposure module's header (between its name and its
-    // summary, where there is no control) moves on to the next module.
+    // A flick to the left across the exposure tool's controls (below its header, where
+    // the auto tone chip leaves room) moves on to the next tool.
     app.compact_module = M::Exposure;
+    app.compact_controls_open = true;
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     let sheet_top = app.sheet_rect().top();
-    flick(&h, &mut app, sheet_top + 22.0, 230.0, 90.0);
+    flick(&h, &mut app, sheet_top + 46.0 + 22.0, 330.0, 190.0);
     assert_eq!(
         app.compact_module,
         M::Tonal,
@@ -919,8 +921,9 @@ fn phone_swipes_presets_and_tour() {
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
-    let sheet_top = app.sheet_rect().top();
-    flick(&h, &mut app, sheet_top + 22.0, 120.0, 300.0);
+    // Along the row under the controls, which steps between tools too.
+    let steps = app.strip_rect().center().y;
+    flick(&h, &mut app, steps, 190.0, 380.0);
     assert_eq!(app.compact_module, M::Exposure, "a flick right goes back");
 
     // Along the nav bar, a flick left moves one tab on.
@@ -2605,6 +2608,8 @@ fn the_phone_keeps_its_swipe_strips_from_the_system_back_gesture() {
     app.add_to_shelf(&h.gpu(), vec![raw.clone()]);
     h.settle(&mut app, Duration::from_secs(30));
     app.compact_tab = Some(Tab::Edit);
+    // A tool open, with the row under it that steps between tools.
+    app.compact_controls_open = true;
     for _ in 0..6 {
         h.frame_sized(&mut app, phone, Default::default());
     }
@@ -2617,7 +2622,7 @@ fn the_phone_keeps_its_swipe_strips_from_the_system_back_gesture() {
         .expect("asked once");
     let ppp = h.ctx.pixels_per_point();
     let height = (phone.y * ppp).round() as i32;
-    // The tab bar along the bottom, full width, and the module strip above it.
+    // The tab bar along the bottom, full width, and the row stepping tools above it.
     assert_eq!(last.len(), 2, "{last:?}");
     assert!(
         last.iter().any(|r| r[3] >= height - 1 && r[0] <= 0),
@@ -2792,6 +2797,8 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     h.settle(&mut app, Duration::from_secs(30));
     app.compact_tab = Some(Tab::Edit);
     app.compact_module = photo_app::InspectorSectionId::Exposure;
+    // In the grid of tools the photo is only the photo; inside one, it is its control.
+    app.compact_controls_open = true;
     for _ in 0..6 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
@@ -3273,4 +3280,58 @@ fn the_screen_follows_the_systems_profile_for_the_monitor() {
     let (screen, note) = app.screen_for_tests();
     assert_eq!(screen, Screen::SRGB);
     assert!(note.is_some_and(|n| n.contains("no profile")));
+}
+
+/// Tools as Snapseed has them: a tap on a tile opens that tool on its own, and back
+/// returns to the grid before it closes the sheet; the cutout is a tool too, and back
+/// closes it first.
+#[test]
+fn a_tile_opens_its_tool_and_back_returns_to_the_grid() {
+    use photo_app::InspectorSectionId as M;
+    let dir = scratch_dir("tools_grid");
+    let a = dir.join("a.dng");
+    write_dng(&a, 640, 426);
+    let h = Headless::new();
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(FakePlatform::default()));
+    h.frame_sized(&mut app, PORTRAIT, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone()]);
+    h.settle(&mut app, Duration::from_secs(30));
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    assert!(!app.compact_controls_open);
+
+    // The grid: four across a phone, in the strip's order.
+    let order: Vec<M> = app
+        .compact_sections
+        .iter()
+        .filter(|s| s.visible)
+        .map(|s| s.id)
+        .collect();
+    let i = order.iter().position(|id| *id == M::Exposure).unwrap();
+    let (gap, margin, tile_h) = (6.0, 10.0, 76.0);
+    let tile_w = (PORTRAIT.x - 2.0 * margin - 3.0 * gap) / 4.0;
+    let (row, col) = ((i / 4) as f32, (i % 4) as f32);
+    let top = app.sheet_rect().top();
+    let at = egui::pos2(
+        margin + col * (tile_w + gap) + tile_w / 2.0,
+        top + margin + row * (tile_h + gap) + tile_h / 2.0,
+    );
+    tap(&h, &mut app, PORTRAIT, at);
+    assert!(app.compact_controls_open, "the tile opens its tool");
+    assert_eq!(app.compact_module, M::Exposure);
+
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert!(!app.compact_controls_open, "back is the grid again");
+    assert_eq!(
+        app.compact_tab,
+        Some(Tab::Edit),
+        "…with the sheet still open"
+    );
+
+    app.cutout_studio.open = true;
+    h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
+    assert!(!app.cutout_studio.open, "back closes the cutout first");
+    assert_eq!(app.compact_tab, Some(Tab::Edit));
+    let _ = std::fs::remove_dir_all(&dir);
 }

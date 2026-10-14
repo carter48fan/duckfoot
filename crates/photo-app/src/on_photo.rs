@@ -72,6 +72,9 @@ impl PhotoApp {
     pub(crate) fn edits_on_photo(&self, at_fit: bool) -> bool {
         self.layout.is_compact()
             && self.compact_tab == Some(crate::compact::Tab::Edit)
+            && self.compact_controls_open
+            && !self.customize_open
+            && !self.cutout_studio.open
             && !knobs(self.compact_module).is_empty()
             && at_fit
             && !self.cropping

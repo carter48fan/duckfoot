@@ -27,6 +27,10 @@ impl PhotoApp {
             } else if self.healing {
                 self.healing = false;
                 self.selected_spot = None;
+            } else if self.compact_more_open {
+                self.compact_more_open = false;
+            } else if self.layout.is_compact() && self.cutout_studio.open {
+                self.cutout_studio.open = false;
             } else if self.customize_open {
                 self.customize_open = false;
             } else if self.select_mode {
@@ -41,6 +45,12 @@ impl PhotoApp {
             } else if self.split_active {
                 self.split_active = false;
                 self.needs_render = true;
+            } else if self.layout.is_compact()
+                && self.compact_tab == Some(compact::Tab::Edit)
+                && self.compact_controls_open
+            {
+                // Out of a tool, back to every tool, as Snapseed's ✕ does.
+                self.compact_controls_open = false;
             } else if self.layout.is_compact() && self.compact_tab.is_some() {
                 self.compact_tab = None;
             } else {

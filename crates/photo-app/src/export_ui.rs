@@ -89,6 +89,17 @@ pub(crate) fn settings_editor(
     s: &mut ExportSettings,
     source: Option<(u32, u32)>,
 ) -> bool {
+    settings_editor_with(ui, s, source, true)
+}
+
+/// [`settings_editor`], without the background row when `background` is false: the
+/// phone removes a background in its own tool, where it can be seen.
+pub(crate) fn settings_editor_with(
+    ui: &mut egui::Ui,
+    s: &mut ExportSettings,
+    source: Option<(u32, u32)>,
+    background: bool,
+) -> bool {
     let before = *s;
     ui.spacing_mut().item_spacing.y = 6.0;
 
@@ -229,37 +240,40 @@ pub(crate) fn settings_editor(
         });
     }
 
-    row_label(ui, "Background");
-    ui.horizontal_wrapped(|ui| {
-        if widgets::chip(ui, s.remove_background, "remove background (rembg)").clicked() {
-            s.remove_background = !s.remove_background;
-        }
+    if background {
+        row_label(ui, "Background");
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, s.remove_background, "remove background (rembg)").clicked() {
+                s.remove_background = !s.remove_background;
+            }
+            if s.remove_background {
+                let is_white = s.matte_color == Some([255, 255, 255]);
+                let is_trans = s.matte_color.is_none();
+                if widgets::chip(ui, is_trans, "transparent alpha").clicked() {
+                    s.matte_color = None;
+                }
+                if widgets::chip(ui, is_white, "catalog white").clicked() {
+                    s.matte_color = Some([255, 255, 255]);
+                }
+                if widgets::chip(ui, s.cutout_params.defringe_white, "defringe white").clicked() {
+                    s.cutout_params.defringe_white = !s.cutout_params.defringe_white;
+                }
+            }
+        });
         if s.remove_background {
-            let is_white = s.matte_color == Some([255, 255, 255]);
-            let is_trans = s.matte_color.is_none();
-            if widgets::chip(ui, is_trans, "transparent alpha").clicked() {
-                s.matte_color = None;
+            widgets::param_slider(
+                ui,
+                "threshold",
+                &mut s.cutout_params.threshold,
+                0.05..=0.95,
+                2,
+                0.50,
+            );
+            let mut shift_f = s.cutout_params.edge_shift as f32;
+            if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0).changed()
+            {
+                s.cutout_params.edge_shift = shift_f.round() as i32;
             }
-            if widgets::chip(ui, is_white, "catalog white").clicked() {
-                s.matte_color = Some([255, 255, 255]);
-            }
-            if widgets::chip(ui, s.cutout_params.defringe_white, "defringe white").clicked() {
-                s.cutout_params.defringe_white = !s.cutout_params.defringe_white;
-            }
-        }
-    });
-    if s.remove_background {
-        widgets::param_slider(
-            ui,
-            "threshold",
-            &mut s.cutout_params.threshold,
-            0.05..=0.95,
-            2,
-            0.50,
-        );
-        let mut shift_f = s.cutout_params.edge_shift as f32;
-        if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0).changed() {
-            s.cutout_params.edge_shift = shift_f.round() as i32;
         }
     }
 
