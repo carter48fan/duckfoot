@@ -272,10 +272,14 @@ pub const HISTORY_BUDGET: usize = 256 * 1024;
 
 /// The newest of `past` (oldest first) that fit [`HISTORY_STEPS`] and [`HISTORY_BUDGET`],
 /// still oldest first.
-pub fn recent_history(past: &[PhotoStack]) -> Vec<PhotoStack> {
+pub fn recent_history<'a, I>(past: I) -> Vec<PhotoStack>
+where
+    I: IntoIterator<Item = &'a PhotoStack>,
+    I::IntoIter: DoubleEndedIterator,
+{
     let mut kept = Vec::new();
     let mut bytes = 0;
-    for stack in past.iter().rev().take(HISTORY_STEPS) {
+    for stack in past.into_iter().rev().take(HISTORY_STEPS) {
         bytes += serde_json::to_string(stack).map_or(usize::MAX, |s| s.len());
         if bytes > HISTORY_BUDGET {
             break;
@@ -287,12 +291,16 @@ pub fn recent_history(past: &[PhotoStack]) -> Vec<PhotoStack> {
 }
 
 /// [`save_sidecar_full`], with the undo steps behind the stack.
-pub fn save_sidecar_with_history(
+pub fn save_sidecar_with_history<'a, I>(
     raw_path: &Path,
     stack: &PhotoStack,
     metadata: &AssetMetadata,
-    past: &[PhotoStack],
-) -> Result<PathBuf> {
+    past: I,
+) -> Result<PathBuf>
+where
+    I: IntoIterator<Item = &'a PhotoStack>,
+    I::IntoIter: DoubleEndedIterator,
+{
     let history = recent_history(past);
     update_sidecar(raw_path, |data| {
         data.stack = Some(stack.clone());
