@@ -25,9 +25,7 @@ impl PhotoApp {
             ui.spacing_mut().item_spacing.y = 0.0;
             self.inspector_footer(ui);
 
-            if self.ready_image().is_some() {
-                self.scope_block(ui);
-            }
+            self.scope_block(ui);
             // The pipeline follows the photo being edited, which is ahead of the pixels
             // while a newly chosen photo decodes.
             let loaded = self.can_edit();
@@ -188,11 +186,17 @@ impl PhotoApp {
                     bottom: 6,
                 })
                 .show(ui, |ui| {
-                    inspector_map_3d::render_inspector_map(
-                        ui,
-                        &mut self.inspector_map_state,
-                        self.engine.histogram(),
-                    );
+                    // Held at its size while a photo decodes, empty rather than gone: the
+                    // engine's histogram is still the last photo's, and dropping the scope
+                    // shifted every card below it.
+                    let empty;
+                    let hist = if self.ready_image().is_some() {
+                        self.engine.histogram()
+                    } else {
+                        empty = photo_engine::Histogram::default();
+                        &empty
+                    };
+                    inspector_map_3d::render_inspector_map(ui, &mut self.inspector_map_state, hist);
                 });
             let r = ui.min_rect();
             ui.painter()
