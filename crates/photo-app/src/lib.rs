@@ -351,7 +351,8 @@ enum Export {
 /// a command-diff system for it — DESIGN.md invariant 3 only demands that *every* mutation
 /// is undoable, not that it is clever.
 struct History {
-    past: Vec<PhotoStack>,
+    /// Oldest first. A deque, so dropping the oldest at the cap is not a shift of all 256.
+    past: std::collections::VecDeque<PhotoStack>,
     future: Vec<PhotoStack>,
     /// The oldest state has been dropped to stay under the cap, so `past[0]` is no longer
     /// the stack the file opened with.
@@ -374,7 +375,7 @@ impl History {
 
     fn from_past(past: Vec<PhotoStack>, truncated: bool) -> Self {
         Self {
-            past,
+            past: past.into(),
             future: Vec::new(),
             truncated,
             revision: fresh_revision(),
@@ -389,16 +390,16 @@ impl History {
     /// drag start, not once per frame.
     fn checkpoint(&mut self, current: &PhotoStack) {
         self.changed();
-        self.past.push(current.clone());
+        self.past.push_back(current.clone());
         if self.past.len() > 256 {
-            self.past.remove(0);
+            self.past.pop_front();
             self.truncated = true;
         }
         self.future.clear();
     }
 
     fn undo(&mut self, current: &mut PhotoStack) -> bool {
-        let Some(prev) = self.past.pop() else {
+        let Some(prev) = self.past.pop_back() else {
             return false;
         };
         self.changed();
@@ -411,7 +412,7 @@ impl History {
             return false;
         };
         self.changed();
-        self.past.push(std::mem::replace(current, next));
+        self.past.push_back(std::mem::replace(current, next));
         true
     }
 
@@ -1677,8 +1678,8 @@ impl PhotoApp {
         }
         ctx.stop_dragging();
         if self.stack != self.stack_before_drag {
-            if self.history.past.last() == Some(&self.stack_before_drag) {
-                self.history.past.pop();
+            if self.history.past.back() == Some(&self.stack_before_drag) {
+                self.history.past.pop_back();
                 self.history.changed();
             }
             self.stack = self.stack_before_drag.clone();
