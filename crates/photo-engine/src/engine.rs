@@ -86,6 +86,9 @@ const GREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 const RCD_DIRS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// RCD's red at blue sites and blue at red ones, as the green plane is kept.
 const RCD_OPPOSITE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// The mosaic normalised to its black and white levels, which RCD's passes read in place
+/// of the raw counts. Full float: half would round a 14-bit sensor's counts.
+const RCD_LEVELS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -507,7 +510,7 @@ const NAN_PAINT: u32 = 0x8000_0000;
 pub struct Engine {
     /// Bayer demosaic, RCD's passes (`shaders/demosaic_rcd.wgsl`): the highlight
     /// ratios, directions, green, the opposite colour at red and blue sites, and the rest.
-    rcd_pipelines: [wgpu::RenderPipeline; 5],
+    rcd_pipelines: [wgpu::RenderPipeline; 6],
     rcd_bgl: wgpu::BindGroupLayout,
     rcd_sampler: wgpu::Sampler,
     green_bgl: wgpu::BindGroupLayout,
@@ -1227,6 +1230,7 @@ impl Engine {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                plane_entry(7),
             ],
         });
         let rcd_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1242,6 +1246,7 @@ impl Engine {
             ("fs_green", GREEN_FORMAT),
             ("fs_opposite", RCD_OPPOSITE_FORMAT),
             ("fs_final", SENSOR_FORMAT),
+            ("fs_levels", RCD_LEVELS_FORMAT),
         ]
         .map(|(entry, format)| {
             fullscreen_pipeline_at(device, "demosaic rcd", &rcd_shader, entry, &rcd_bgl, format)
@@ -4035,6 +4040,7 @@ impl Engine {
             |label, size, format| texture(label, size, format, 1).create_view(&Default::default());
         let dirs = plane("rcd directions", extent, RCD_DIRS_FORMAT);
         let opposite = plane("rcd opposite colour", extent, RCD_OPPOSITE_FORMAT);
+        let levels = plane("rcd levels", extent, RCD_LEVELS_FORMAT);
         // What a pass does not read yet, since a pass may not read what it writes.
         let unused = plane(
             "rcd unused",
@@ -4061,7 +4067,7 @@ impl Engine {
             })
         };
         let all_ratios = ratios.create_view(&Default::default());
-        let bind = |label, reads: [&wgpu::TextureView; 4]| {
+        let bind_with = |label, reads: [&wgpu::TextureView; 4], levels: &wgpu::TextureView| {
             device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout: &self.rcd_bgl,
@@ -4094,9 +4100,23 @@ impl Engine {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&self.rcd_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(levels),
+                    },
                 ],
             })
         };
+        let bind = |label, reads| bind_with(label, reads, &levels);
+
+        // Every pass after this reads the normalised mosaic.
+        draw_fullscreen(
+            encoder,
+            "rcd levels pass",
+            &self.rcd_pipelines[5],
+            &bind_with("rcd levels pass", [&unused; 4], &unused),
+            &levels,
+        );
 
         let base = ratio_level(0);
         let ratio_bind = bind("rcd ratios pass", [&unused; 4]);

@@ -1,5 +1,5 @@
 // Bayer demosaic by RCD, Ratio Corrected Demosaicing (Luis Sanz Rodríguez, 2017; as in
-// RawTherapee and darktable), in four passes.
+// RawTherapee and darktable), in four passes after the mosaic is normalised (`fs_levels`).
 //
 // Hamilton-Adams (which this replaces) chose one direction per pixel from two gradient
 // sums and interpolated along it: at a slanted or curved edge it flipped between the two
@@ -38,6 +38,10 @@ struct Demosaic {
 // The trusted colour ratios, with their mips (see `fs_ratios`).
 @group(0) @binding(5) var ratios: texture_2d<f32>;
 @group(0) @binding(6) var ratio_sampler: sampler;
+// The mosaic against its black and white levels, written once by `fs_levels`: every other
+// pass reads each photosite dozens of times, and doing the normalisation in each read was
+// most of the demosaic's time.
+@group(0) @binding(7) var levels: texture_2d<f32>;
 
 const EPS: f32 = 1e-5;
 const EPSSQ: f32 = 1e-10;
@@ -75,12 +79,17 @@ fn at(x: i32, y: i32) -> vec2<i32> {
 
 // The mosaic, against its photosite's own black and white. Values above 1.0 are headroom
 // the highlight reconstruction needs to see.
-fn cfa(x: i32, y: i32) -> f32 {
-    let p = at(x, y);
+@fragment
+fn fs_levels(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(pos.xy);
     let raw = f32(textureLoad(mosaic, p, 0).r);
     let c = colour_at(p.x, p.y);
     let b = u.black[c];
-    return max(raw - b, 0.0) / max(u.white[c] - b, 1.0);
+    return vec4<f32>(max(raw - b, 0.0) / max(u.white[c] - b, 1.0), 0.0, 0.0, 1.0);
+}
+
+fn cfa(x: i32, y: i32) -> f32 {
+    return textureLoad(levels, at(x, y), 0).r;
 }
 
 fn green(x: i32, y: i32) -> f32 {
