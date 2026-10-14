@@ -565,7 +565,9 @@ impl ApplicationHandler<UserEvent> for Shell {
         };
 
         let response = window.egui_winit.on_window_event(&window.window, &event);
-        if response.repaint {
+        // egui-winit asks for a repaint on RedrawRequested too, which is the repaint itself:
+        // answering it queues another frame after every frame, and the loop never idles.
+        if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
             window.window.request_redraw();
         }
         if response.consumed {
