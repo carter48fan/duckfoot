@@ -2611,14 +2611,28 @@ impl Engine {
             .geometry
             .output_size(image.sensor_width, image.sensor_height);
         check_size(device, out_w, out_h)?;
-        // Noise reduction at full resolution, for this export only.
+        // The crop is not baked into the texture, so export is where it becomes real: only
+        // the region the user framed is drawn. See `params::Crop` for why it is not in the
+        // shader.
+        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
+        let (rx, ry, rw, rh) = rect;
+        let resize_to = target_size.filter(|&(tw, th)| (tw < rw || th < rh) && tw > 0 && th > 0);
+        // A small render (the cutout studio's) is drawn from the sensor's mip level that is
+        // still at least the size asked for, as the preview is, and scaled from there: the
+        // full frame drawn whole was 400 MB of GPU memory at 100 MP for a 1400-pixel image.
+        let level = resize_to.map_or(0, |(tw, th)| {
+            let ratio = (rw / tw.max(1)).min(rh / th.max(1)).max(1);
+            ratio.ilog2().min(image.mip_levels.saturating_sub(1))
+        });
+        // Noise reduction at the level drawn, for this export only.
         let denoised = match denoise_wanted(stack, (image.sensor_width, image.sensor_height)) {
             Some((params, local)) => {
-                Some(self.make_denoised(device, queue, &params, &local, 0, None)?)
+                Some(self.make_denoised(device, queue, &params, &local, level, None)?)
             }
             None => None,
         };
-        let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
+        let drawn = scaled(out_w, out_h, level);
+        let sizes = ((out_w, out_h), drawn, level, level);
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
         let target = Target {
             out: crate::gamut::Screen::of(space),
@@ -2636,22 +2650,15 @@ impl Engine {
         } else {
             (OUTPUT_FORMAT, &self.adjust_pipeline)
         };
-        // The crop is not baked into the texture, so export is where it becomes real: only
-        // the region the user framed is drawn. See `params::Crop` for why it is not in the
-        // shader.
-        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
         let texel = format.block_copy_size(None).unwrap_or(4);
-        let resizing =
-            target_size.is_some_and(|(tw, th)| (tw < rect.2 || th < rect.3) && tw > 0 && th > 0);
-        if !resizing {
+        let Some((tw, th)) = resize_to else {
             let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
             let pixels =
                 self.render_bands(device, queue, image, sensor, pipeline, format, rect, texel)?;
-            return Ok((rect.2, rect.3, pixels));
-        }
-        // Resized on the GPU (the cutout studio's small render): drawn whole, then scaled.
+            return Ok((rw, rh, pixels));
+        };
         let full = scoped(device, "export render", || {
-            let full = output_texture_as(device, out_w, out_h, format);
+            let full = output_texture_as(device, drawn.0, drawn.1, format);
             let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
             let bind = self.adjust_bind(
                 device,
@@ -2674,84 +2681,68 @@ impl Engine {
             full
         })?;
 
-        let (rx, ry, rw, rh) = rect;
+        let target_tex = output_texture_as(device, tw, th, format);
+        let target_view = target_tex.create_view(&Default::default());
+        let full_view = full.create_view(&Default::default());
 
-        if let Some((tw, th)) = target_size {
-            if (tw < rw || th < rh) && tw > 0 && th > 0 {
-                let target_tex = output_texture_as(device, tw, th, format);
-                let target_view = target_tex.create_view(&Default::default());
-                let full_view = full.create_view(&Default::default());
+        let crop_norm = [
+            rx as f32 / out_w as f32,
+            ry as f32 / out_h as f32,
+            rw as f32 / out_w as f32,
+            rh as f32 / out_h as f32,
+        ];
+        let uniforms = ResizeUniforms {
+            crop: crop_norm,
+            dest_size: [tw as f32, th as f32, 0.0, 0.0],
+        };
+        queue.write_buffer(&self.resize_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-                let crop_norm = [
-                    rx as f32 / out_w as f32,
-                    ry as f32 / out_h as f32,
-                    rw as f32 / out_w as f32,
-                    rh as f32 / out_h as f32,
-                ];
-                let uniforms = ResizeUniforms {
-                    crop: crop_norm,
-                    dest_size: [tw as f32, th as f32, 0.0, 0.0],
-                };
-                queue.write_buffer(&self.resize_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let resize_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resize bind"),
+            layout: &self.resize_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&full_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.resize_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.resize_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
-                let resize_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("resize bind"),
-                    layout: &self.resize_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&full_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.resize_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.resize_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
+        let r_pipeline = if deep {
+            &self.deep_resize_pipeline
+        } else {
+            &self.resize_pipeline
+        };
 
-                let r_pipeline = if deep {
-                    &self.deep_resize_pipeline
-                } else {
-                    &self.resize_pipeline
-                };
-
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("resize encoder"),
-                });
-                draw_fullscreen(
-                    &mut encoder,
-                    "export gpu resize",
-                    r_pipeline,
-                    &resize_bind,
-                    &target_view,
-                );
-                queue.submit([encoder.finish()]);
-
-                let pixels = read_back(
-                    device,
-                    queue,
-                    &target_tex,
-                    (0, 0, tw, th),
-                    texel,
-                    self.export_band_bytes(device),
-                )?;
-                return Ok((tw, th, pixels));
-            }
-        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resize encoder"),
+        });
+        draw_fullscreen(
+            &mut encoder,
+            "export gpu resize",
+            r_pipeline,
+            &resize_bind,
+            &target_view,
+        );
+        queue.submit([encoder.finish()]);
 
         let pixels = read_back(
             device,
             queue,
-            &full,
-            rect,
+            &target_tex,
+            (0, 0, tw, th),
             texel,
             self.export_band_bytes(device),
         )?;
-        Ok((rw, rh, pixels))
+        Ok((tw, th, pixels))
     }
 
     /// The export's `rect` of the output, drawn and read back one band of rows at a time
