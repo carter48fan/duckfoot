@@ -1357,6 +1357,35 @@ fn removing_the_open_photo_takes_it_off_the_stage() {
 }
 
 #[test]
+fn a_photo_stands_in_for_itself_until_its_pixels_are_on_the_stage() {
+    let dir = scratch_dir("stand-in");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    for p in [&a, &b] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
+    app.open_path(&h.gpu(), a.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    app.open_path(&h.gpu(), b.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.stand_in_for_tests(), None, "the photo replaced it");
+
+    app.open_path(&h.gpu(), a.clone());
+    assert_eq!(
+        app.stand_in_for_tests(),
+        Some(a.as_path()),
+        "its thumbnail, the moment it is chosen"
+    );
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.is_photo_ready());
+    assert_eq!(app.stand_in_for_tests(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn clear_shelf_removes_all_and_undo_restores_all() {
     let dir = scratch_dir("clear-shelf");
     let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));

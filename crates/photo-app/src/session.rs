@@ -714,7 +714,9 @@ impl PhotoApp {
         }
         self.open_generation += 1;
         self.loading = Some((path.clone(), Instant::now()));
-        self.stage_preview = None;
+        // Its filmstrip thumbnail, at once, until something sharper comes: the stage never
+        // goes blank between photos.
+        self.stage_preview = self.thumbs.get(&path).map(|t| (path.clone(), t.clone()));
         self.loader.open(path, self.open_generation);
     }
 
@@ -887,6 +889,11 @@ impl PhotoApp {
         self.ready_image().is_some()
     }
 
+    /// The open photo's own texture is what the stage draws, not a stand-in.
+    pub(crate) fn photo_on_stage(&self) -> bool {
+        self.texture_id.is_some() && self.ready_image().is_some()
+    }
+
     /// Collect whatever the workers have finished.
     pub(crate) fn poll_loader(&mut self, ctx: &egui::Context, gpu: &Gpu) {
         while let Ok(done) = self.loader.done.try_recv() {
@@ -897,8 +904,9 @@ impl PhotoApp {
                     result,
                     decode_ms,
                 } if generation == self.open_generation => {
+                    // The stand-in stays until the photo's own texture is on the stage
+                    // (`sync`): the decode is only the CPU's half of opening it.
                     self.loading = None;
-                    self.stage_preview = None;
                     match result {
                         Ok(source) => {
                             self.decode_ms = decode_ms;
@@ -906,6 +914,7 @@ impl PhotoApp {
                         }
                         // DESIGN.md: failures surface in the UI, with the filename.
                         Err(e) => {
+                            self.stage_preview = None;
                             self.error = Some(e);
                             self.edit_when_opened = false;
                             if self.loaded_path.as_ref() == Some(&path) {
@@ -922,9 +931,11 @@ impl PhotoApp {
                     image,
                     orientation,
                 } => {
-                    // Only while its own decode is still running; a preview that loses the
-                    // race to the real image has nothing left to stand in for.
-                    let current = self.loading.as_ref().is_some_and(|(p, _)| *p == path);
+                    // Until the photo itself is on the stage, which can be well after its
+                    // decode: the GPU still has to demosaic it.
+                    let current = self.loaded_path.as_ref() == Some(&path)
+                        && !self.decode_failed
+                        && !self.photo_on_stage();
                     if generation == self.open_generation && current {
                         if self.orientation_pending {
                             self.apply_orientation(orientation);
