@@ -5,6 +5,7 @@ members = [
     "crates/photo-app",
     "crates/duckfoot",
     "crates/duckfoot-android",
+    "crates/display-profile",
     "crates/vendor/lc-heif",
     "crates/vendor/lc-inpaint",
 ]
@@ -20,6 +21,7 @@ repository = "https://github.com/carter48fan/duckfoot"
 [workspace.dependencies]
 photo-engine = { path = "crates/photo-engine" }
 photo-app = { path = "crates/photo-app" }
+display-profile = { path = "crates/display-profile" }
 
 wgpu = "30"
 egui = "0.36"

@@ -1074,6 +1074,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-profile"
+version = "0.3.0"
+dependencies = [
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "windows-sys 0.61.2",
+ "zbus",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1125,6 +1135,7 @@ name = "duckfoot"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "display-profile",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -2912,6 +2923,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
+ "bitflags 2.13.2",
  "dispatch2",
  "objc2 0.6.4",
  "objc2-core-foundation",

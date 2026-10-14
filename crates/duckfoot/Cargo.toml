@@ -28,6 +28,7 @@ pollster = "1"
 env_logger = "0.11"
 egui-winit = { workspace = true, features = ["accesskit"] }
 rfd = "0.17"
+display-profile.workspace = true
 
 [features]
 # HEIF/HEIC stills; off by default, as HEVC is patented in some places

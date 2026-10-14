@@ -3247,3 +3247,30 @@ fn an_edit_from_before_v2_offers_the_update_and_it_can_be_undone() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn the_screen_follows_the_systems_profile_for_the_monitor() {
+    use photo_engine::gamut::{OutputSpace, Screen};
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    // Until the shell has looked, and while not asked to, the screen is sRGB.
+    app.set_system_display(Ok(Some((
+        "Display P3".into(),
+        photo_engine::icc::display_p3_profile().to_vec(),
+    ))));
+    assert_eq!(app.screen_for_tests().0, Screen::SRGB);
+    app.follow_system_display_for_tests(true);
+    let (screen, note) = app.screen_for_tests();
+    assert_eq!(note, None);
+    let p3 = Screen::of(OutputSpace::DisplayP3).from_srgb;
+    for (row, want) in screen.from_srgb.iter().zip(p3) {
+        for (a, b) in row.iter().zip(want) {
+            assert!((a - b).abs() < 2e-3, "{:?} for {p3:?}", screen.from_srgb);
+        }
+    }
+    // The window reaches a monitor the system has nothing for: sRGB, and why.
+    app.set_system_display(Ok(None));
+    let (screen, note) = app.screen_for_tests();
+    assert_eq!(screen, Screen::SRGB);
+    assert!(note.is_some_and(|n| n.contains("no profile")));
+}

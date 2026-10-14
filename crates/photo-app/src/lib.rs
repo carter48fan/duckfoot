@@ -631,6 +631,9 @@ pub struct PhotoApp {
     screen_note: Option<String>,
     /// The monitor's own profile, baked, when the screen is a profile file that bakes.
     screen_profile: Option<display::ScreenProfile>,
+    /// What the shell found the system has for the window's monitor, once it has looked:
+    /// its name and bytes, none, or why it could not ask. `None` where nothing looks.
+    system_display: Option<display::SystemDisplay>,
     /// Counts each change of screen, so what was baked or shown for one can tell.
     screen_rev: u64,
     shown_screen_rev: u64,
@@ -895,6 +898,7 @@ impl PhotoApp {
             screen: photo_engine::gamut::Screen::SRGB,
             screen_note: None,
             screen_profile: None,
+            system_display: None,
             screen_rev: 0,
             shown_screen_rev: 0,
             proofing: false,
@@ -1399,6 +1403,19 @@ impl PhotoApp {
     pub fn notice_for_tests(&self) -> Option<(String, Option<&'static str>)> {
         self.live_notice()
             .map(|(m, a, _)| (m.to_string(), a.map(NoticeAction::label)))
+    }
+
+    /// The screen the preview is finished for, and why a profile could not be used.
+    #[doc(hidden)]
+    pub fn screen_for_tests(&self) -> (photo_engine::gamut::Screen, Option<String>) {
+        (self.screen, self.screen_note.clone())
+    }
+
+    /// Follow the system's profile for the monitor, or stop, as the "system" chip does.
+    #[doc(hidden)]
+    pub fn follow_system_display_for_tests(&mut self, on: bool) {
+        self.settings.display_system = on;
+        self.refresh_screen();
     }
 
     /// Press the notice's button, for tests.
