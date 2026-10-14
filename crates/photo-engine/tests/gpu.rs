@@ -2768,3 +2768,57 @@ fn gpu_gain_map_brightens_only_what_the_export_takes_past_white() {
     assert!(text.contains("urn:iso:std:iso:ts:21496:-1"));
     assert!(bytes.windows(4).any(|w| w == b"MPF\0"));
 }
+
+#[test]
+fn gpu_a_small_export_from_a_mip_level_matches_the_full_one_shrunk() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (512u32, 384u32);
+    let mut engine = photo_engine::Engine::new(&gpu.device);
+    // Smooth detail at a scale the mip chain keeps: a 1400-pixel studio image of a large
+    // photo should look like the photo, not like its finest texture.
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+        [0.05 + 0.6 * u, 0.05 + 0.6 * v, 0.3 + 0.2 * (u * 9.0).sin()]
+    });
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let stack = PhotoStack::default();
+    let small = |engine: &mut photo_engine::Engine, size| {
+        let e = engine
+            .export_sized_in(
+                &gpu.device,
+                &gpu.queue,
+                &stack,
+                photo_engine::BitDepth::Eight,
+                photo_engine::gamut::OutputSpace::Srgb,
+                size,
+            )
+            .unwrap();
+        let photo_engine::Exported::Eight(img) = e else {
+            panic!("expected 8-bit")
+        };
+        img
+    };
+    let full = small(&mut engine, None);
+    let (tw, th) = (w / 4, h / 4);
+    let img = small(&mut engine, Some((tw, th)));
+    assert_eq!((img.width, img.height), (tw, th));
+    // The full export averaged over each 4 × 4 block, in its encoded values (close enough
+    // for a smooth image), against the small one.
+    let mut worst = 0u32;
+    for y in 1..th - 1 {
+        for x in 1..tw - 1 {
+            for c in 0..3 {
+                let mut sum = 0u32;
+                for dy in 0..4 {
+                    for dx in 0..4 {
+                        let i = (((y * 4 + dy) * w + x * 4 + dx) * 4 + c) as usize;
+                        sum += u32::from(full.rgba[i]);
+                    }
+                }
+                let i = ((y * tw + x) * 4 + c) as usize;
+                worst = worst.max((sum / 16).abs_diff(u32::from(img.rgba[i])));
+            }
+        }
+    }
+    assert!(worst <= 3, "{worst} codes off the full export shrunk");
+}
