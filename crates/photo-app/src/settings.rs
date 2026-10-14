@@ -51,6 +51,10 @@ pub struct Settings {
     /// (which wins while it reads).
     pub display: Option<photo_engine::gamut::OutputSpace>,
     pub display_icc: Option<PathBuf>,
+    /// The profile the operating system has for the monitor the window is on, followed
+    /// as the window moves between monitors; wins over both of the above.
+    #[serde(default)]
+    pub display_system: bool,
     /// The printer profile soft proofing goes through (W-10), if one is chosen.
     #[serde(default)]
     pub proof_icc: Option<PathBuf>,
@@ -89,6 +93,7 @@ impl Default for Settings {
             watched_folders: Vec::new(),
             display: None,
             display_icc: None,
+            display_system: false,
             proof_icc: None,
             proof_printing: photo_engine::proof::Printing::default(),
             xmp_sidecars: false,

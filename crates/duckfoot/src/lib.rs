@@ -8,6 +8,9 @@
 //! system file picker opens, so rebuilding the app there would lose the user's work at
 //! exactly the moment they chose a file.
 
+#[cfg(not(target_os = "android"))]
+mod monitor;
+
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -349,6 +352,9 @@ struct Shell {
     proxy: EventLoopProxy<UserEvent>,
     /// The earliest delayed repaint egui has asked for, if any.
     repaint_at: Option<Instant>,
+    /// The monitor the window is on, and the system's profile for it.
+    #[cfg(not(target_os = "android"))]
+    monitors: monitor::Watch,
 }
 
 impl Shell {
@@ -362,6 +368,8 @@ impl Shell {
             options,
             proxy,
             repaint_at: None,
+            #[cfg(not(target_os = "android"))]
+            monitors: monitor::Watch::default(),
         }
     }
 
@@ -464,6 +472,8 @@ impl Shell {
         }
 
         window.request_redraw();
+        #[cfg(not(target_os = "android"))]
+        self.monitors.check(&window, &self.proxy);
         self.window = Some(WindowState {
             surface,
             window,
@@ -580,7 +590,16 @@ impl ApplicationHandler<UserEvent> for Shell {
                 app.drop_file(path);
                 window.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => window.redraw(gpu, &self.egui_ctx, app),
+            // Dragged to another monitor, or that monitor's scale changed with it.
+            #[cfg(not(target_os = "android"))]
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.monitors.check(&window.window, &self.proxy);
+            }
+            WindowEvent::RedrawRequested => {
+                #[cfg(not(target_os = "android"))]
+                self.monitors.poll(app);
+                window.redraw(gpu, &self.egui_ctx, app)
+            }
             _ => {}
         }
     }

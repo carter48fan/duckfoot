@@ -19,6 +19,10 @@ pub(crate) struct Printer {
 /// The monitor's own profile (W-14), when the screen is a profile file that bakes: its
 /// bytes, for the printer proof to end on, and its table, for the preview to finish
 /// through.
+/// What the shell found the system has for the window's monitor: its name and bytes,
+/// nothing, or why it could not ask.
+pub type SystemDisplay = Result<Option<(String, Vec<u8>)>, String>;
+
 pub(crate) struct ScreenProfile {
     icc: Arc<[u8]>,
     table: ProofTable,
@@ -34,27 +38,30 @@ impl PhotoApp {
         self.screen_note = None;
         self.screen_profile = None;
         self.screen_rev += 1;
+        if self.settings.display_system {
+            self.screen = match &self.system_display {
+                Some(Ok(Some((name, bytes)))) => {
+                    let (name, bytes) = (name.clone(), bytes.clone());
+                    self.screen_from_icc(bytes, &name, named)
+                }
+                Some(Ok(None)) => {
+                    self.screen_note =
+                        Some("the system has no profile for this screen; showing sRGB".into());
+                    named
+                }
+                Some(Err(e)) => {
+                    self.screen_note = Some(format!("could not ask the system: {e}"));
+                    named
+                }
+                None => named,
+            };
+            return;
+        }
         self.screen = match &self.settings.display_icc {
             Some(path) => match std::fs::read(path) {
                 Ok(bytes) => {
-                    let matrix = Screen::from_icc(&bytes);
-                    match ProofTable::bake_screen(&bytes) {
-                        Ok(table) => {
-                            self.screen_profile = Some(ScreenProfile {
-                                icc: bytes.into(),
-                                table,
-                            });
-                            matrix.unwrap_or(named)
-                        }
-                        Err(table_e) => match matrix {
-                            Ok(screen) => screen,
-                            Err(e) => {
-                                self.screen_note =
-                                    Some(format!("{}: {e}; {table_e:#}", file_name(path)));
-                                named
-                            }
-                        },
-                    }
+                    let name = file_name(path);
+                    self.screen_from_icc(bytes, &name, named)
                 }
                 Err(e) => {
                     self.screen_note = Some(format!("{}: {e}", file_name(path)));
@@ -63,6 +70,38 @@ impl PhotoApp {
             },
             None => named,
         };
+    }
+
+    /// The screen a monitor profile describes: baked through moxcms if it bakes, its
+    /// matrix if not, else `named`, with the note saying why.
+    fn screen_from_icc(&mut self, bytes: Vec<u8>, name: &str, named: Screen) -> Screen {
+        let matrix = Screen::from_icc(&bytes);
+        match ProofTable::bake_screen(&bytes) {
+            Ok(table) => {
+                self.screen_profile = Some(ScreenProfile {
+                    icc: bytes.into(),
+                    table,
+                });
+                matrix.unwrap_or(named)
+            }
+            Err(table_e) => match matrix {
+                Ok(screen) => screen,
+                Err(e) => {
+                    self.screen_note = Some(format!("{name}: {e}; {table_e:#}"));
+                    named
+                }
+            },
+        }
+    }
+
+    /// What the shell found the system has for the window's monitor (looked up again
+    /// whenever the window reaches another one).
+    pub fn set_system_display(&mut self, found: SystemDisplay) {
+        let changed = self.system_display.as_ref() != Some(&found);
+        self.system_display = Some(found);
+        if changed && self.settings.display_system {
+            self.refresh_screen();
+        }
     }
 
     /// The screen a printer proof ends on: the monitor's profile if it has one baked.
@@ -198,17 +237,32 @@ impl PhotoApp {
                 .size(12.5)
                 .color(theme::TEXT),
         );
-        let using_file = self.settings.display_icc.is_some() && self.screen_note.is_none();
+        let system = self.settings.display_system;
+        let using_file =
+            !system && self.settings.display_icc.is_some() && self.screen_note.is_none();
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for space in OutputSpace::ALL {
-                let on = !using_file && self.settings.display.unwrap_or_default() == space;
+                let on =
+                    !system && !using_file && self.settings.display.unwrap_or_default() == space;
                 if widgets::chip(ui, on, space.label()).clicked() {
                     self.settings.display = Some(space);
                     self.settings.display_icc = None;
+                    self.settings.display_system = false;
                     changed = true;
                 }
+            }
+            if self.system_display.is_some()
+                && widgets::chip(ui, system, "system")
+                    .on_hover_text(
+                        "The profile the system has for this monitor (colord, Windows colour \
+                         management or ColorSync), followed as the window moves",
+                    )
+                    .clicked()
+            {
+                self.settings.display_system = !system;
+                changed = true;
             }
             if widgets::chip(ui, using_file, "profile…")
                 .on_hover_text("The monitor's own ICC profile, as a calibrator writes it")
@@ -224,6 +278,10 @@ impl PhotoApp {
         });
         let note = match (&self.screen_note, &self.settings.display_icc) {
             (Some(problem), _) => problem.clone(),
+            (None, _) if system => match &self.system_display {
+                Some(Ok(Some((name, _)))) => format!("using the system's {name}"),
+                _ => "the system's profile for this monitor".into(),
+            },
             (None, Some(path)) => format!("using {}", file_name(path)),
             (None, None) => "the preview's colours, for a screen of this kind".into(),
         };
@@ -237,6 +295,7 @@ impl PhotoApp {
     /// The display profile the picker answered with.
     pub(crate) fn use_display_profile(&mut self, path: PathBuf) {
         self.settings.display_icc = Some(path);
+        self.settings.display_system = false;
         self.refresh_screen();
         self.save_settings();
         match &self.screen_note {

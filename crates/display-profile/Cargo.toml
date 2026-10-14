@@ -1,0 +1,18 @@
+[package]
+name = "display-profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The ICC profile the operating system has for a monitor: colord on Linux, ICM on Windows, ColorSync on macOS"
+
+# colord, over D-Bus (zbus is already in the tree, through AccessKit's AT-SPI).
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
+zbus = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_UI_ColorSystem"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGColorSpace", "CGDirectDisplay", "CGDisplayConfiguration"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
