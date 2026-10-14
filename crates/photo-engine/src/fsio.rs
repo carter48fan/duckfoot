@@ -45,8 +45,11 @@ fn temp_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // Hidden, so a file manager or the shelf's folder scan does not show it mid-write.
-    path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
+    // Hidden, so a file manager or the shelf's folder scan does not show it mid-write, and
+    // ending in the file's own name: Android 11+ lets an app create in Pictures only files
+    // whose extension is an image's, so a `.tmp` there was refused and every export on a
+    // phone failed.
+    path.with_file_name(format!(".tmp-{}-{n}-{name}", std::process::id()))
 }
 
 #[cfg(test)]
@@ -57,6 +60,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("duckfoot-fsio-{name}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_temporary_keeps_the_files_extension() {
+        let tmp = temp_path(Path::new("/pictures/DSC08450.jpg"));
+        assert_eq!(tmp.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert_eq!(tmp.parent(), Some(Path::new("/pictures")));
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with('.') && name.ends_with("DSC08450.jpg"),
+            "{name}"
+        );
     }
 
     #[test]
