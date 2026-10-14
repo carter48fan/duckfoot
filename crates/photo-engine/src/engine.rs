@@ -603,6 +603,8 @@ pub struct Engine {
     /// The open photo's demosaic, while it is still running. Locked so that a reader of
     /// full-resolution pixels can finish it from `&self`.
     pending: std::sync::Mutex<Option<PendingDemosaic>>,
+    /// The photo expected next, made ready while this one is looked at.
+    prepared: Option<Prepared>,
     retired_sensor: Option<(wgpu::Extent3d, u32, wgpu::Texture)>,
     /// Where the mosaic texture goes once demosaic has read it, for the decode thread's
     /// next upload of the same size (see `UploadPool`).
@@ -640,6 +642,12 @@ struct DemosaicDraw {
     band: Option<(u32, u32)>,
     width: u32,
     pixels: u64,
+}
+
+/// A photo made ready ahead of being opened (`Engine::prepare`).
+struct Prepared {
+    image: LoadedImage,
+    pending: Option<PendingDemosaic>,
 }
 
 /// The RCD still to run on a photo opened progressively, a slice a frame
@@ -1511,6 +1519,7 @@ impl Engine {
             progressive: false,
             slice_pixels: slice_pixels_for(device),
             pending: std::sync::Mutex::new(None),
+            prepared: None,
             retired_sensor: None,
             upload_pool: UploadPool::default(),
             export_buffer,
@@ -2101,36 +2110,61 @@ impl Engine {
     /// of the sensor is RCD's from now on, and the preview wants rendering again.
     pub fn advance_demosaic(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         let Some(mut pending) = self.lock_pending().take() else {
+            // The open photo is done: the prepared one's turn.
+            let Some(mut pending) = self.prepared.as_mut().and_then(|p| p.pending.take()) else {
+                return false;
+            };
+            self.record_slice(device, queue, &mut pending);
+            match self.prepared.as_mut() {
+                Some(prepared) if !pending.steps.is_empty() => prepared.pending = Some(pending),
+                _ => self.retire(pending),
+            }
             return false;
         };
-        if !pending.steps.is_empty() {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("demosaic slice encoder"),
-            });
-            let mut spent = 0;
-            while spent < self.slice_pixels {
-                let Some(step) = pending.steps.pop_front() else {
-                    break;
-                };
-                for draw in &step {
-                    self.record(&mut encoder, draw);
-                    spent += draw.pixels;
-                }
-            }
-            queue.submit([encoder.finish()]);
-        }
+        self.record_slice(device, queue, &mut pending);
         if !pending.steps.is_empty() {
             *self.lock_pending() = Some(pending);
             return false;
         }
-        self.scratch = Some(pending.scratch);
-        self.upload_pool.put(pending.mosaic);
+        self.retire(pending);
         if let Some(image) = &mut self.image {
             // Both were made from the quick picture.
             image.denoised = None;
             image.fills.clear();
         }
         true
+    }
+
+    /// About a frame's worth of `pending`'s steps, submitted.
+    fn record_slice(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pending: &mut PendingDemosaic,
+    ) {
+        if pending.steps.is_empty() {
+            return;
+        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("demosaic slice encoder"),
+        });
+        let mut spent = 0;
+        while spent < self.slice_pixels {
+            let Some(step) = pending.steps.pop_front() else {
+                break;
+            };
+            for draw in &step {
+                self.record(&mut encoder, draw);
+                spent += draw.pixels;
+            }
+        }
+        queue.submit([encoder.finish()]);
+    }
+
+    /// A demosaic's memory back for the next one: its scratch, and its mosaic to the pool.
+    fn retire(&mut self, pending: PendingDemosaic) {
+        self.scratch = Some(pending.scratch);
+        self.upload_pool.put(pending.mosaic);
     }
 
     /// Run all that is left of the open photo's demosaic, for a reader of full-resolution
@@ -2157,8 +2191,7 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(pending) = pending {
-            self.scratch = Some(pending.scratch);
-            self.upload_pool.put(pending.mosaic);
+            self.retire(pending);
         }
     }
 
@@ -2169,6 +2202,7 @@ impl Engine {
     }
 
     pub fn release_spares(&mut self) {
+        self.drop_prepared();
         self.scratch = None;
         self.retired_sensor = None;
         self.upload_pool.clear();
@@ -2227,6 +2261,82 @@ impl Engine {
         queue: &wgpu::Queue,
         uploaded: UploadedImage,
     ) -> Result<()> {
+        // The last photo's, if it never finished: nothing will show it now.
+        self.cancel_demosaic();
+        let (image, pending) = self.build_image(device, queue, uploaded)?;
+        self.install(device, image, pending);
+        Ok(())
+    }
+
+    /// Get the photo after this one ready while this one is looked at: uploaded, and
+    /// demosaicked a slice at a time by `advance_demosaic` once the open photo's own
+    /// demosaic has landed. `install_prepared` then makes it current with no GPU work
+    /// left to wait on. Replaces whatever was prepared before.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uploaded: UploadedImage,
+    ) -> Result<()> {
+        self.drop_prepared();
+        let (image, pending) = self.build_image(device, queue, uploaded)?;
+        self.prepared = Some(Prepared { image, pending });
+        Ok(())
+    }
+
+    /// A photo is prepared (`prepare`), finished or not.
+    pub fn has_prepared(&self) -> bool {
+        self.prepared.is_some()
+    }
+
+    /// The prepared photo still has demosaic work to do.
+    pub fn prepare_pending(&self) -> bool {
+        self.prepared.as_ref().is_some_and(|p| p.pending.is_some())
+    }
+
+    /// Make the prepared photo the current image, as `load_uploaded` would have. False
+    /// when nothing is prepared.
+    pub fn install_prepared(&mut self, device: &wgpu::Device) -> bool {
+        let Some(prepared) = self.prepared.take() else {
+            return false;
+        };
+        self.cancel_demosaic();
+        self.install(device, prepared.image, prepared.pending);
+        true
+    }
+
+    /// Forget the prepared photo, keeping its scratch memory for the next demosaic.
+    pub fn drop_prepared(&mut self) {
+        if let Some(pending) = self.prepared.take().and_then(|p| p.pending) {
+            self.retire(pending);
+        }
+    }
+
+    /// `image` as the current one, with whatever is left of its demosaic.
+    fn install(
+        &mut self,
+        device: &wgpu::Device,
+        image: LoadedImage,
+        pending: Option<PendingDemosaic>,
+    ) {
+        *self
+            .pending
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pending;
+        // Any histogram in flight describes the previous image.
+        self.hist_epoch = self.hist_epoch.wrapping_add(1);
+        self.histogram = Histogram::default();
+        self.image = Some(image);
+        self.sync_overlay(device);
+    }
+
+    /// Upload's other half: demosaic (or copy), mips, and the image's own textures.
+    fn build_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uploaded: UploadedImage,
+    ) -> Result<(LoadedImage, Option<PendingDemosaic>)> {
         let UploadedImage {
             pixels,
             extent,
@@ -2243,8 +2353,6 @@ impl Engine {
             model,
         } = uploaded;
         let (width, height) = (extent.width, extent.height);
-        // The last photo's, if it never finished: nothing will show it now.
-        self.cancel_demosaic();
 
         // Everything this allocates — sensor, mips, green plane, preview — is the most a
         // photo ever asks of the GPU. A refusal is an `Err` for the caller to show, and the
@@ -2479,16 +2587,8 @@ impl Engine {
             &self.adjust_buffer,
         );
         scopes.pop("loading the image onto the GPU")?;
-        *self
-            .pending
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = deferred;
 
-        // Any histogram in flight describes the previous image.
-        self.hist_epoch = self.hist_epoch.wrapping_add(1);
-        self.histogram = Histogram::default();
-
-        self.image = Some(LoadedImage {
+        let image = LoadedImage {
             width: out_w,
             height: out_h,
             sensor_width: width,
@@ -2516,9 +2616,8 @@ impl Engine {
             brushes,
             denoised: None,
             fills: Vec::new(),
-        });
-        self.sync_overlay(device);
-        Ok(())
+        };
+        Ok((image, deferred))
     }
 
     /// Render the stack at full resolution and read it back off the GPU.

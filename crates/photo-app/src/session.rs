@@ -636,6 +636,7 @@ impl PhotoApp {
     pub fn renderer_replaced(&mut self) {
         // Not freed: the renderer that held it has gone.
         self.texture_id = None;
+        self.retired_textures.clear();
         self.thumbs.clear();
         self.thumbs_requested.clear();
         self.thumb_used.clear();
@@ -645,15 +646,26 @@ impl PhotoApp {
 
     pub fn release_memory(&mut self) {
         self.engine.release_spares();
+        self.prefetch = None;
         self.evict_thumbs(self.thumb_cap() / 4);
     }
 
     /// Step to the previous (-1) or next (+1) photo as the shelf shows them: through the
     /// active filter and sort, so stepping with "picks only" on stays on picks.
     pub(crate) fn step_photo(&mut self, gpu: &Gpu, dir: isize) {
+        let Some(path) = self.neighbour(dir) else {
+            return;
+        };
+        self.step_dir = dir.signum();
+        self.open_path(gpu, path);
+    }
+
+    /// The photo `dir` steps from the one open (or opening) in the filmstrip's order,
+    /// past any whose file is missing.
+    fn neighbour(&self, dir: isize) -> Option<PathBuf> {
         let order = self.displayed_indices();
         if order.is_empty() {
-            return;
+            return None;
         }
         let current = self
             .loading
@@ -672,8 +684,32 @@ impl PhotoApp {
         let found = (0..n)
             .map(|k| order[(next + k * step) % n])
             .find(|&i| !self.shelf[i].missing);
-        let path = self.shelf[found.unwrap_or(order[next])].path.clone();
-        self.open_path(gpu, path);
+        Some(self.shelf[found.unwrap_or(order[next])].path.clone())
+    }
+
+    /// Make the photo a step on ready while this one is looked at: decoded, uploaded and
+    /// demosaicked in the background, so stepping to it has nothing to wait for. Only once
+    /// the open photo has landed, and not on a phone, whose GPU memory is the whole
+    /// device's.
+    pub(crate) fn prefetch_next(&mut self) {
+        if cfg!(target_os = "android")
+            || self.loading.is_some()
+            || !self.photo_on_stage()
+            || self.engine.demosaic_pending()
+        {
+            return;
+        }
+        let Some(next) = self.neighbour(self.step_dir) else {
+            return;
+        };
+        if self.loaded_path.as_ref() == Some(&next)
+            || self.prefetch.as_ref().is_some_and(|(p, _)| *p == next)
+        {
+            return;
+        }
+        self.engine.drop_prepared();
+        self.prefetch = Some((next.clone(), Prefetch::Decoding));
+        self.loader.prefetch(next);
     }
 
     /// Make `path` the photo being edited, and start decoding it.
@@ -683,7 +719,7 @@ impl PhotoApp {
     /// frame on, while the decode runs in the background. Tone and colour can be edited
     /// straight away and appear when the pixels land; rotate, flip, crop and white balance
     /// wait for the decode, which is what knows the photo's true orientation and camera.
-    pub fn open_path(&mut self, _gpu: &Gpu, path: PathBuf) {
+    pub fn open_path(&mut self, gpu: &Gpu, path: PathBuf) {
         if !photo_engine::copies::source_file(&path).exists() {
             if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                 item.missing = true;
@@ -713,6 +749,26 @@ impl PhotoApp {
             self.begin_editing(&path);
         }
         self.open_generation += 1;
+        // Made ready ahead: nothing to decode, nothing to wait on.
+        if let Some((_, Prefetch::Ready(orientation))) = self
+            .prefetch
+            .take_if(|(p, state)| *p == path && matches!(state, Prefetch::Ready(_)))
+        {
+            if self.engine.has_prepared() {
+                self.loading = None;
+                self.stage_preview = None;
+                self.open_with(gpu, path, orientation, |engine| {
+                    engine.install_prepared(gpu.device);
+                    Ok(())
+                });
+                return;
+            }
+        }
+        // Still on its way: opened the ordinary way instead.
+        if self.prefetch.as_ref().is_some_and(|(p, _)| *p == path) {
+            self.prefetch = None;
+            self.engine.drop_prepared();
+        }
         self.loading = Some((path.clone(), Instant::now()));
         // Its filmstrip thumbnail, at once, until something sharper comes: the stage never
         // goes blank between photos.
@@ -925,6 +981,26 @@ impl PhotoApp {
                 }
                 // Superseded by a newer request while it was decoding.
                 loader::Done::Opened { .. } => {}
+                loader::Done::Prefetched { path, result } => {
+                    // Unless the photo expected next has changed since it was asked for.
+                    if matches!(&self.prefetch, Some((p, Prefetch::Decoding)) if *p == path) {
+                        let prepared = result.and_then(|uploaded| {
+                            let orientation = uploaded.orientation;
+                            self.engine
+                                .prepare(gpu.device, gpu.queue, *uploaded)
+                                .map(|()| orientation)
+                                .map_err(|e| format!("{e:#}"))
+                        });
+                        let state = match prepared {
+                            Ok(orientation) => Prefetch::Ready(orientation),
+                            Err(e) => {
+                                log::info!("not prepared ahead: {e}");
+                                Prefetch::Failed
+                            }
+                        };
+                        self.prefetch = Some((path, state));
+                    }
+                }
                 loader::Done::Preview {
                     path,
                     generation,
@@ -1006,17 +1082,29 @@ impl PhotoApp {
         path: PathBuf,
         uploaded: Box<photo_engine::UploadedImage>,
     ) {
+        let orientation = uploaded.orientation;
+        // The pixels are already on the GPU (the loader uploaded them); what is left here
+        // is recording the demosaic.
+        self.open_with(gpu, path, orientation, |engine| {
+            engine.load_uploaded(gpu.device, gpu.queue, *uploaded)
+        });
+    }
+
+    /// Put `path` on the stage, its pixels given to the engine by `install`.
+    fn open_with(
+        &mut self,
+        gpu: &Gpu,
+        path: PathBuf,
+        orientation: photo_engine::Geometry,
+        install: impl FnOnce(&mut Engine) -> anyhow::Result<()>,
+    ) {
         if self.loaded_path.as_ref() != Some(&path) {
             // The user has moved on; the generation check makes this rare, not impossible.
             return;
         }
-        let orientation = uploaded.orientation;
         self.release_texture(gpu);
         self.engine_path = None;
-
-        // The pixels are already on the GPU (the loader uploaded them); what is left here
-        // is recording the demosaic.
-        let load_res = self.engine.load_uploaded(gpu.device, gpu.queue, *uploaded);
+        let load_res = install(&mut self.engine);
 
         if let Err(e) = load_res {
             // DESIGN.md: failures surface in the UI, with the filename.
@@ -1039,9 +1127,11 @@ impl PhotoApp {
         self.needs_render = true;
     }
 
-    pub(crate) fn release_texture(&mut self, gpu: &Gpu) {
+    pub(crate) fn release_texture(&mut self, _gpu: &Gpu) {
+        // Freed at the start of the next frame: a step taken after the stage was drawn
+        // would otherwise leave this frame painting a texture that is gone.
         if let Some(id) = self.texture_id.take() {
-            renderer_write(gpu).free_texture(&id);
+            self.retired_textures.push(id);
         }
         self.engine.unload();
     }
@@ -1257,6 +1347,8 @@ impl PhotoApp {
     /// on the next frame, which has the `Gpu` to free them with.
     fn close_photo(&mut self) {
         self.cancel_crop();
+        self.prefetch = None;
+        self.engine.drop_prepared();
         self.loaded_path = None;
         self.engine_path = None;
         self.loading = None;

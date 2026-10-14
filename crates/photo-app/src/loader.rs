@@ -38,6 +38,14 @@ const THUMB_SIDE: usize = 256;
 /// decodes the latter at 1/2 or 1/4.
 const STAGE_PREVIEW_SIDE: u32 = 2048;
 
+/// A photo for the open thread to decode and upload.
+struct OpenJob {
+    path: PathBuf,
+    generation: u64,
+    /// For `Done::Prefetched`, with no embedded preview.
+    prefetch: bool,
+}
+
 pub enum Done {
     Opened {
         path: PathBuf,
@@ -46,6 +54,12 @@ pub enum Done {
         /// Decoded and already copied into GPU memory: the UI thread only has to demosaic.
         result: Result<Box<UploadedImage>, String>,
         decode_ms: f32,
+    },
+    /// A photo decoded and uploaded ahead of being opened (`Loader::prefetch`), for the
+    /// engine to prepare while the open one is looked at.
+    Prefetched {
+        path: PathBuf,
+        result: Result<Box<UploadedImage>, String>,
     },
     /// The camera's embedded rendering of a photo still being opened, to show until the
     /// decode lands. Arrives before `Opened` for the same generation, or not at all.
@@ -131,7 +145,7 @@ pub enum FileJob {
 }
 
 pub struct Loader {
-    open_tx: Sender<(PathBuf, u64)>,
+    open_tx: Sender<OpenJob>,
     thumb_tx: Sender<PathBuf>,
     file_tx: Sender<FileJob>,
     scan: Arc<ScanProgress>,
@@ -290,7 +304,7 @@ impl Loader {
                 photo_engine::lensfun::database();
             });
 
-        let (open_tx, open_rx) = mpsc::channel::<(PathBuf, u64)>();
+        let (open_tx, open_rx) = mpsc::channel::<OpenJob>();
         {
             let done_tx = done_tx.clone();
             let repaint = repaint.clone();
@@ -301,10 +315,17 @@ impl Loader {
                     while let Ok(mut job) = open_rx.recv() {
                         // Stepping quickly through a roll queues several opens; only the
                         // last one is still wanted.
+                        // A prefetch never displaces an open the user asked for.
                         while let Ok(newer) = open_rx.try_recv() {
-                            job = newer;
+                            if !newer.prefetch || job.prefetch {
+                                job = newer;
+                            }
                         }
-                        let (path, generation) = job;
+                        let OpenJob {
+                            path,
+                            generation,
+                            prefetch,
+                        } = job;
                         // A virtual copy's bytes are its photo's.
                         let file = photo_engine::copies::source_file(&path).into_owned();
                         let _opening = gate.opening();
@@ -313,7 +334,7 @@ impl Loader {
                         std::thread::scope(|scope| {
                             // The stand-in, alongside the decode rather than ahead of it:
                             // it is only worth showing if it beats the real thing.
-                            if !is_raster_path(&path) {
+                            if !prefetch && !is_raster_path(&path) {
                                 let (path, file, done_tx, repaint) =
                                     (&path, &file, &done_tx, &repaint);
                                 scope.spawn(move || {
@@ -389,11 +410,18 @@ impl Loader {
                                 path.display(),
                                 uploading.elapsed().as_secs_f32() * 1000.0
                             );
-                            let _ = done_tx.send(Done::Opened {
-                                path: path.clone(),
-                                generation,
-                                result,
-                                decode_ms,
+                            let _ = done_tx.send(if prefetch {
+                                Done::Prefetched {
+                                    path: path.clone(),
+                                    result,
+                                }
+                            } else {
+                                Done::Opened {
+                                    path: path.clone(),
+                                    generation,
+                                    result,
+                                    decode_ms,
+                                }
                             });
                             wake(&repaint);
                         });
@@ -488,7 +516,20 @@ impl Loader {
     }
 
     pub fn open(&self, path: PathBuf, generation: u64) {
-        let _ = self.open_tx.send((path, generation));
+        let _ = self.open_tx.send(OpenJob {
+            path,
+            generation,
+            prefetch: false,
+        });
+    }
+
+    /// Decode and upload `path` for the engine to prepare: the photo expected next.
+    pub fn prefetch(&self, path: PathBuf) {
+        let _ = self.open_tx.send(OpenJob {
+            path,
+            generation: 0,
+            prefetch: true,
+        });
     }
 
     pub fn thumbnail(&self, path: PathBuf) {

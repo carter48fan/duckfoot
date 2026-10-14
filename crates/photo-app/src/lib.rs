@@ -525,11 +525,22 @@ type ShelfDisplayCache = Option<(
     Vec<usize>,
 )>;
 
+/// Where the photo expected next has got to (`PhotoApp::prefetch_next`).
+enum Prefetch {
+    Decoding,
+    /// Prepared in the engine; how the camera meant it to be viewed.
+    Ready(photo_engine::Geometry),
+    /// Not to be tried again: it opens the ordinary way.
+    Failed,
+}
+
 pub struct PhotoApp {
     engine: Engine,
     stack: PhotoStack,
     history: History,
     texture_id: Option<egui::TextureId>,
+    /// The photo textures let go of this frame, freed at the start of the next.
+    retired_textures: Vec<egui::TextureId>,
     /// Set whenever the stack changes; cleared once the GPU has re-rendered.
     needs_render: bool,
     error: Option<String>,
@@ -791,6 +802,10 @@ pub struct PhotoApp {
     /// The photo to open in place of one just taken off the shelf, which happens where
     /// there is no `Gpu` to open it with.
     pending_open: Option<PathBuf>,
+    /// The photo expected next, being made ready while this one is looked at.
+    prefetch: Option<(PathBuf, Prefetch)>,
+    /// The way the last step went (+1 or -1): the side the next photo is expected on.
+    step_dir: isize,
     /// Which arrangement this frame is laid out in; decided by the screen's size.
     layout: compact::Layout,
     /// Where settings are kept, and what they say.
@@ -856,6 +871,7 @@ impl PhotoApp {
             stack: PhotoStack::default(),
             history: History::new(),
             texture_id: None,
+            retired_textures: Vec::new(),
             needs_render: false,
             error: None,
             loaded_path: None,
@@ -997,6 +1013,8 @@ impl PhotoApp {
             compact_sheet_fit: None,
             pending_step: None,
             pending_open: None,
+            prefetch: None,
+            step_dir: 1,
             layout: compact::Layout::Desktop,
             settings_dir,
             settings,
@@ -1644,6 +1662,9 @@ impl PhotoApp {
         }
         widgets::set_touch(&ctx, self.touch_seen || self.layout.is_compact());
         widgets::set_fine(&ctx, self.fine_adjust);
+        for id in self.retired_textures.drain(..) {
+            renderer_write(gpu).free_texture(&id);
+        }
         self.loader.set_context(&ctx);
         self.clip_held = widgets::take_clip_hold(&ctx);
         self.poll_platform(gpu);
@@ -1668,7 +1689,8 @@ impl PhotoApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.sync(gpu, ctx.pixels_per_point());
-        if self.engine.demosaic_pending() {
+        self.prefetch_next();
+        if self.engine.demosaic_pending() || self.engine.prepare_pending() {
             // The next slice, whether or not anything else moves.
             ctx.request_repaint();
         }

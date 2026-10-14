@@ -2878,3 +2878,39 @@ fn reading_full_resolution_pixels_finishes_a_progressive_open() {
         "and it lands on the next call"
     );
 }
+
+#[test]
+fn a_prepared_photo_opens_with_nothing_left_to_do() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (200, 136);
+    let (mut whole, mut engine) = opened_both_ways(gpu, (w, h));
+    // The next photo: the same scene upside down.
+    let scene = testkit::smooth_scene(w, h);
+    let next = || testkit::cfa_from_fn(w, h, |x, y| scene(w - 1 - x, h - 1 - y));
+
+    let uploaded =
+        photo_engine::upload_cfa(&gpu.device, &gpu.queue, &engine.upload_pool(), next()).unwrap();
+    engine.prepare(&gpu.device, &gpu.queue, uploaded).unwrap();
+    assert!(engine.has_prepared() && engine.prepare_pending());
+    let mut calls = 0;
+    while engine.demosaic_pending() || engine.prepare_pending() {
+        engine.advance_demosaic(&gpu.device, &gpu.queue);
+        calls += 1;
+        assert!(calls < 2000, "never finished");
+    }
+    let open = engine.sensor_level0(&gpu.device, &gpu.queue).unwrap();
+    assert!(
+        open == whole.sensor_level0(&gpu.device, &gpu.queue).unwrap(),
+        "preparing the next photo leaves the open one alone"
+    );
+
+    assert!(engine.install_prepared(&gpu.device));
+    assert!(!engine.has_prepared());
+    assert!(!engine.demosaic_pending(), "nothing left to wait on");
+    whole.load(&gpu.device, &gpu.queue, next()).unwrap();
+    assert!(
+        engine.sensor_level0(&gpu.device, &gpu.queue).unwrap()
+            == whole.sensor_level0(&gpu.device, &gpu.queue).unwrap(),
+        "and it is the photo a plain load gives"
+    );
+}
