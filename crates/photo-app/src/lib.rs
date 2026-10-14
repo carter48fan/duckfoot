@@ -788,6 +788,9 @@ pub struct PhotoApp {
     /// Where a swipe across the stage began, to step photos when it ends.
     /// A photo step asked for where there was no `Gpu` to do it with.
     pending_step: Option<isize>,
+    /// The photo to open in place of one just taken off the shelf, which happens where
+    /// there is no `Gpu` to open it with.
+    pending_open: Option<PathBuf>,
     /// Which arrangement this frame is laid out in; decided by the screen's size.
     layout: compact::Layout,
     /// Where settings are kept, and what they say.
@@ -990,6 +993,7 @@ impl PhotoApp {
             compact_sheet_width: None,
             compact_sheet_fit: None,
             pending_step: None,
+            pending_open: None,
             layout: compact::Layout::Desktop,
             settings_dir,
             settings,
@@ -1466,6 +1470,10 @@ impl PhotoApp {
 
     /// Runs the GPU work for this frame, if anything changed.
     fn sync(&mut self, gpu: &Gpu, pixels_per_point: f32) {
+        // A photo taken off the shelf while open: its pixels go with it.
+        if self.loaded_path.is_none() && self.engine.image().is_some() {
+            self.release_texture(gpu);
+        }
         // The engine still holds the last photo while the chosen one decodes; rendering
         // it with the new photo's stack would draw one photo with another's edits.
         if self.ready_image().is_none() {
@@ -1682,6 +1690,9 @@ impl PhotoApp {
         }
         if let Some(dir) = self.pending_step.take() {
             self.step_photo(gpu, dir);
+        }
+        if let Some(path) = self.pending_open.take() {
+            self.open_path(gpu, path);
         }
         self.was_dragging = ctx.dragged_id().is_some();
         if !self.was_dragging && self.stack_before_drag != self.stack {

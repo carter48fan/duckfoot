@@ -1317,6 +1317,46 @@ fn removing_from_the_shelf_can_be_taken_back() {
 }
 
 #[test]
+fn removing_the_open_photo_takes_it_off_the_stage() {
+    let dir = scratch_dir("remove-open");
+    let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone(), c.clone()]);
+    app.open_path(&h.gpu(), b.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.is_photo_ready());
+
+    app.remove_from_shelf(std::slice::from_ref(&b));
+    assert!(!app.is_photo_ready(), "gone from the stage at once");
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.loaded_path(),
+        Some(c.as_path()),
+        "the next photo takes its place"
+    );
+    assert!(app.is_photo_ready());
+
+    app.remove_from_shelf(std::slice::from_ref(&c));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(a.as_path()), "or the one before it");
+
+    app.clear_shelf();
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.loaded_path(),
+        None,
+        "an empty shelf leaves an empty stage"
+    );
+    assert!(!app.is_photo_ready());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn clear_shelf_removes_all_and_undo_restores_all() {
     let dir = scratch_dir("clear-shelf");
     let (a, b, c) = (dir.join("a.dng"), dir.join("b.dng"), dir.join("c.dng"));

@@ -1191,6 +1191,7 @@ impl PhotoApp {
         }
         let count = self.shelf.len();
         let removed = self.take_off_shelf(|_| true);
+        self.close_photo();
         self.removed_from_shelf = removed;
         self.set_status_undoable(
             format!("Cleared shelf ({count} stills removed)"),
@@ -1204,10 +1205,31 @@ impl PhotoApp {
         if paths.is_empty() {
             return;
         }
-        if self.loaded_path.as_ref().is_some_and(|p| paths.contains(p)) {
+        let open_removed = self.loaded_path.as_ref().is_some_and(|p| paths.contains(p));
+        // The open photo's place goes to the next one shown that stays, or else the one
+        // before it.
+        let successor = if open_removed {
             self.flush();
-        }
+            let order = self.displayed_indices();
+            let open = order
+                .iter()
+                .position(|&i| Some(&self.shelf[i].path) == self.loaded_path.as_ref());
+            let stays = |&&i: &&usize| !paths.contains(&self.shelf[i].path);
+            open.and_then(|at| {
+                order[at..]
+                    .iter()
+                    .find(stays)
+                    .or_else(|| order[..at].iter().rev().find(stays))
+            })
+            .map(|&i| self.shelf[i].path.clone())
+        } else {
+            None
+        };
         let removed = self.take_off_shelf(|p| paths.contains(p));
+        if open_removed {
+            self.close_photo();
+            self.pending_open = successor;
+        }
         let n = removed.len();
         self.removed_from_shelf = removed;
         self.set_status_undoable(
@@ -1218,6 +1240,21 @@ impl PhotoApp {
             },
             NoticeAction::Remove,
         );
+    }
+
+    /// Leave the stage empty: nothing being edited, nothing decoding. The pixels are let go
+    /// on the next frame, which has the `Gpu` to free them with.
+    fn close_photo(&mut self) {
+        self.cancel_crop();
+        self.loaded_path = None;
+        self.engine_path = None;
+        self.loading = None;
+        self.stage_preview = None;
+        // A decode still running for it lands on nothing.
+        self.open_generation += 1;
+        self.error = None;
+        self.decode_failed = false;
+        self.edit_when_opened = false;
     }
 
     /// The shelf's items `gone` picks, taken off it with their thumbnails, each with the
