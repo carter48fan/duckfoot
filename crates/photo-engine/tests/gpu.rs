@@ -2700,3 +2700,71 @@ fn gpu_export_resizing_downsamples_to_target_dimensions() {
         full.rgba[0]
     );
 }
+
+#[test]
+fn gpu_gain_map_brightens_only_what_the_export_takes_past_white() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (64u32, 32u32);
+    let mut engine = photo_engine::Engine::new(&gpu.device);
+    // Two stops up: the left half lands at 0.8, under white; the right at 4, two stops
+    // past it, which the SDR export takes to white and the HDR rendition keeps.
+    let raster = testkit::raster_from_fn(w, h, |x, _| if x < w / 2 { [0.2; 3] } else { [1.0; 3] });
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+    let mut stack = PhotoStack::default();
+    stack.exposure.enabled = true;
+    stack.exposure.params.ev = 2.0;
+
+    let map = engine
+        .gain_map(
+            &gpu.device,
+            &gpu.queue,
+            &stack,
+            photo_engine::gamut::OutputSpace::Srgb,
+        )
+        .unwrap();
+    assert_eq!((map.width, map.height), (w / 4, h / 4));
+    let want = ((4.0f32 + 1.0 / 64.0) / (1.0 + 1.0 / 64.0)).log2();
+    assert!(
+        (map.meta.max - want).abs() < 0.05,
+        "{} stops for {want}",
+        map.meta.max
+    );
+    for y in 0..map.height {
+        let row = &map.data[(y * map.width) as usize..((y + 1) * map.width) as usize];
+        let (left, right) = row.split_at(map.width as usize / 2);
+        assert!(left.iter().all(|&c| c <= 2), "row {y}: {row:?}");
+        assert!(right.iter().all(|&c| c >= 250), "row {y}: {row:?}");
+    }
+
+    // Written after the export's JPEG, which still reads as the SDR image.
+    let settings = photo_engine::ExportSettings {
+        hdr_gain_map: true,
+        ..photo_engine::ExportSettings::new(photo_engine::ExportFormat::Jpeg)
+    };
+    let dir = std::env::temp_dir().join(format!("duckfoot-gainmap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hdr.jpg");
+    let exported = engine
+        .export_at(
+            &gpu.device,
+            &gpu.queue,
+            &stack,
+            photo_engine::BitDepth::Eight,
+        )
+        .unwrap();
+    exported
+        .save_with(&path, &settings, None, &[], Some(&map))
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let base = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!((base.width(), base.height()), (w, h));
+    assert!(
+        base.get_pixel(w - 4, 4)[0] >= 250,
+        "the right half is white in SDR"
+    );
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains(r#"Item:Semantic="GainMap""#));
+    assert!(text.contains("urn:iso:std:iso:ts:21496:-1"));
+    assert!(bytes.windows(4).any(|w| w == b"MPF\0"));
+}

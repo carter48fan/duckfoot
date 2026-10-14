@@ -274,10 +274,9 @@ pub struct ExportSettings {
     /// If None and format supports alpha (PNG, WebP, TIFF), produces transparent alpha channel.
     #[serde(default)]
     pub matte_color: Option<[u8; 3]>,
-    /// Reserved for HDR gain map export (ISO 21496-1 / Ultra HDR). Not written yet: the
-    /// pipeline has no HDR rendition to measure a gain map against (`finish()` clamps to
-    /// 0..1), so the export path ignores this and the UI does not offer it. Kept so saved
-    /// settings that carry it still load.
+    /// An HDR gain map (ISO 21496-1, Ultra HDR) after a JPEG: see [`crate::gainmap`].
+    /// JPEG only, and not with the background removed (the map would brighten what the
+    /// matte replaced).
     #[serde(default)]
     pub hdr_gain_map: bool,
     /// Fine-tuning parameters for background cutout (threshold, feather, edge shift, defringing).
@@ -318,6 +317,11 @@ impl ExportSettings {
         }
     }
 
+    /// Whether the export gets an HDR gain map: asked for, and possible.
+    pub fn wants_gain_map(&self) -> bool {
+        self.hdr_gain_map && self.format == ExportFormat::Jpeg && !self.remove_background
+    }
+
     /// The colour space the file will really be in: sRGB where the format holds no other,
     /// so a recipe saved with one is written correctly rather than mislabelled.
     pub fn effective_space(&self) -> crate::gamut::OutputSpace {
@@ -326,124 +330,6 @@ impl ExportSettings {
         } else {
             crate::gamut::OutputSpace::Srgb
         }
-    }
-}
-
-/// ISO 21496-1 metadata for HDR gain map still images (Ultra HDR).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GainMapMetadata {
-    pub version: String,
-    pub gain_map_min: f32,
-    pub gain_map_max: f32,
-    pub gamma: f32,
-    pub offset_sdr: f32,
-    pub offset_hdr: f32,
-    pub hdr_capacity_min: f32,
-    pub hdr_capacity_max: f32,
-    pub base_rendition_is_sdr: bool,
-}
-
-impl Default for GainMapMetadata {
-    fn default() -> Self {
-        Self {
-            version: "1.0".to_string(),
-            gain_map_min: 0.0,
-            gain_map_max: 2.0,
-            gamma: 1.0,
-            offset_sdr: 1.0 / 64.0,
-            offset_hdr: 1.0 / 64.0,
-            hdr_capacity_min: 0.0,
-            hdr_capacity_max: 2.0,
-            base_rendition_is_sdr: true,
-        }
-    }
-}
-
-/// An HDR gain map and ISO 21496-1 metadata payload.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GainMap {
-    pub width: u32,
-    pub height: u32,
-    /// 8-bit grayscale luminance gain values [0..255]
-    pub data: Vec<u8>,
-    pub metadata: GainMapMetadata,
-}
-
-impl GainMap {
-    /// Compute a gain map from an SDR image (8-bit RGBA) and an HDR source (float RGB in linear light).
-    pub fn compute(
-        sdr_rgba: &[u8],
-        hdr_rgb_f32: &[f32],
-        width: u32,
-        height: u32,
-        max_headroom_stops: f32,
-    ) -> Self {
-        let metadata = GainMapMetadata {
-            gain_map_max: max_headroom_stops,
-            hdr_capacity_max: max_headroom_stops,
-            ..Default::default()
-        };
-        let mut data = Vec::with_capacity((width * height) as usize);
-        let denom = (metadata.gain_map_max - metadata.gain_map_min).max(1e-4);
-
-        for i in 0..(width * height) as usize {
-            let r_sdr = sdr_rgba[i * 4] as f32 / 255.0;
-            let g_sdr = sdr_rgba[i * 4 + 1] as f32 / 255.0;
-            let b_sdr = sdr_rgba[i * 4 + 2] as f32 / 255.0;
-            let luma_sdr = 0.2126 * r_sdr + 0.7152 * g_sdr + 0.0722 * b_sdr;
-
-            let r_hdr = hdr_rgb_f32.get(i * 3).copied().unwrap_or(r_sdr);
-            let g_hdr = hdr_rgb_f32.get(i * 3 + 1).copied().unwrap_or(g_sdr);
-            let b_hdr = hdr_rgb_f32.get(i * 3 + 2).copied().unwrap_or(b_sdr);
-            let luma_hdr = (0.2126 * r_hdr + 0.7152 * g_hdr + 0.0722 * b_hdr).max(0.0);
-
-            let gain = ((luma_hdr + metadata.offset_hdr) / (luma_sdr + metadata.offset_sdr)).log2();
-            let norm = ((gain - metadata.gain_map_min) / denom).clamp(0.0, 1.0);
-            let val = norm.powf(1.0 / metadata.gamma);
-            data.push((val * 255.0).round() as u8);
-        }
-
-        Self {
-            width,
-            height,
-            data,
-            metadata,
-        }
-    }
-
-    /// Format the ISO 21496-1 XMP metadata packet for embedding in image files.
-    pub fn iso_21496_1_xmp(&self) -> String {
-        format!(
-            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
-  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-    <rdf:Description rdf:about=""
-      xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/">
-      <hdrgm:Version>{}</hdrgm:Version>
-      <hdrgm:GainMapMin>{:.6}</hdrgm:GainMapMin>
-      <hdrgm:GainMapMax>{:.6}</hdrgm:GainMapMax>
-      <hdrgm:Gamma>{:.6}</hdrgm:Gamma>
-      <hdrgm:OffsetSDR>{:.6}</hdrgm:OffsetSDR>
-      <hdrgm:OffsetHDR>{:.6}</hdrgm:OffsetHDR>
-      <hdrgm:HDRCapacityMin>{:.6}</hdrgm:HDRCapacityMin>
-      <hdrgm:HDRCapacityMax>{:.6}</hdrgm:HDRCapacityMax>
-      <hdrgm:BaseRenditionIsSDR>{}</hdrgm:BaseRenditionIsSDR>
-    </rdf:Description>
-  </rdf:RDF>
-</x:xmpmeta>"#,
-            self.metadata.version,
-            self.metadata.gain_map_min,
-            self.metadata.gain_map_max,
-            self.metadata.gamma,
-            self.metadata.offset_sdr,
-            self.metadata.offset_hdr,
-            self.metadata.hdr_capacity_min,
-            self.metadata.hdr_capacity_max,
-            if self.metadata.base_rendition_is_sdr {
-                "True"
-            } else {
-                "False"
-            }
-        )
     }
 }
 
@@ -644,6 +530,17 @@ impl ExportedImage<u8> {
         settings: &ExportSettings,
         info: Option<&PhotoInfo>,
     ) -> Result<()> {
+        self.write_with(path, settings, info, None)
+    }
+
+    /// [`Self::write`], with an HDR gain map after a JPEG.
+    pub fn write_with(
+        &self,
+        path: &Path,
+        settings: &ExportSettings,
+        info: Option<&PhotoInfo>,
+        gain: Option<&crate::gainmap::GainMap>,
+    ) -> Result<()> {
         self.check_size()?;
         write_atomically(path, |out| {
             encode(
@@ -652,6 +549,7 @@ impl ExportedImage<u8> {
                 Samples::Eight(&self.rgba),
                 settings,
                 info,
+                gain,
                 out,
             )
         })
@@ -671,6 +569,7 @@ impl ExportedImage<u8> {
             Samples::Eight(&self.rgba),
             settings,
             info,
+            None,
             out,
         )
     }
@@ -722,6 +621,17 @@ impl ExportedImage<u16> {
         settings: &ExportSettings,
         info: Option<&PhotoInfo>,
     ) -> Result<()> {
+        self.write_with(path, settings, info, None)
+    }
+
+    /// [`Self::write`], with an HDR gain map after a JPEG.
+    pub fn write_with(
+        &self,
+        path: &Path,
+        settings: &ExportSettings,
+        info: Option<&PhotoInfo>,
+        gain: Option<&crate::gainmap::GainMap>,
+    ) -> Result<()> {
         self.check_size()?;
         write_atomically(path, |out| {
             encode(
@@ -730,6 +640,7 @@ impl ExportedImage<u16> {
                 Samples::Sixteen(&self.rgba),
                 settings,
                 info,
+                gain,
                 out,
             )
         })
@@ -748,6 +659,7 @@ impl ExportedImage<u16> {
             Samples::Sixteen(&self.rgba),
             settings,
             info,
+            None,
             out,
         )
     }
@@ -875,9 +787,24 @@ impl Exported {
         info: Option<&PhotoInfo>,
         touchups: &[crate::rembg::TouchupDab],
     ) -> Result<()> {
+        self.save_with(path, settings, info, touchups, None)
+    }
+
+    /// Finish and write, with an HDR gain map (see [`crate::Engine::gain_map`]) after a
+    /// JPEG when there is one: the map is measured before the resize and stretched over
+    /// whatever size the export is written at.
+    pub fn save_with(
+        self,
+        path: &Path,
+        settings: &ExportSettings,
+        info: Option<&PhotoInfo>,
+        touchups: &[crate::rembg::TouchupDab],
+        gain: Option<&crate::gainmap::GainMap>,
+    ) -> Result<()> {
+        let gain = gain.filter(|_| settings.wants_gain_map());
         match self.finished_with_touchups(settings, touchups)? {
-            Exported::Eight(i) => i.write(path, settings, info),
-            Exported::Sixteen(i) => i.write(path, settings, info),
+            Exported::Eight(i) => i.write_with(path, settings, info, gain),
+            Exported::Sixteen(i) => i.write_with(path, settings, info, gain),
         }
     }
 
@@ -921,6 +848,7 @@ fn encode<W: Write + Seek>(
     samples: Samples,
     settings: &ExportSettings,
     info: Option<&PhotoInfo>,
+    gain: Option<&crate::gainmap::GainMap>,
     mut out: W,
 ) -> Result<()> {
     let quality = settings.quality.clamp(1, 100);
@@ -986,9 +914,19 @@ fn encode<W: Write + Seek>(
                 enc.set_exif_metadata(exif)
                     .map_err(|e| anyhow!("JPEG EXIF: {e}"))?;
             }
+            // The map is written first: the export's XMP says how long it is.
+            let gain = gain.map(|g| g.to_jpeg(quality)).transpose()?;
+            let xmp = match &gain {
+                Some(g) => Some(crate::gainmap::container_xmp(xmp.as_deref(), g.len())),
+                None => xmp,
+            };
             enc.encode_image(&view)?;
-            match &xmp {
-                Some(xmp) => out.write_all(&jpeg_with_xmp(&jpeg, xmp)?)?,
+            let jpeg = match &xmp {
+                Some(xmp) => jpeg_with_xmp(&jpeg, xmp)?,
+                None => jpeg,
+            };
+            match &gain {
+                Some(g) => out.write_all(&crate::gainmap::with_gain_map(&jpeg, g)?)?,
                 None => out.write_all(&jpeg)?,
             }
         }
@@ -1306,7 +1244,7 @@ fn xmp_for(info: Option<&PhotoInfo>, policy: MetadataPolicy) -> Option<String> {
 }
 
 /// The namespace that opens a JPEG's XMP segment (APP1), NUL included.
-const JPEG_XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+pub(crate) const JPEG_XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 /// A JPEG with `xmp` in an APP1 segment after its other application segments (EXIF and
 /// ICC among them). A packet too big for one segment is left out: extended XMP, which
@@ -1320,29 +1258,9 @@ fn jpeg_with_xmp(jpeg: &[u8], xmp: &str) -> Result<Vec<u8>> {
         );
         return Ok(jpeg.to_vec());
     }
-    if jpeg.get(..2) != Some(&[0xFF, 0xD8]) {
-        bail!("the JPEG encoder wrote something that is not a JPEG");
-    }
-    let mut at = 2;
-    while let (Some(&0xFF), Some(&m)) = (jpeg.get(at), jpeg.get(at + 1)) {
-        if !(0xE0..=0xEF).contains(&m) {
-            break;
-        }
-        let seg = jpeg
-            .get(at + 2..at + 4)
-            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
-            .ok_or_else(|| anyhow!("truncated JPEG segment"))?;
-        at += 2 + seg;
-    }
-    let at = at.min(jpeg.len());
-    let mut out = Vec::with_capacity(jpeg.len() + len + 2);
-    out.extend_from_slice(&jpeg[..at]);
-    out.extend_from_slice(&[0xFF, 0xE1]);
-    out.extend_from_slice(&(len as u16).to_be_bytes());
-    out.extend_from_slice(JPEG_XMP);
-    out.extend_from_slice(xmp.as_bytes());
-    out.extend_from_slice(&jpeg[at..]);
-    Ok(out)
+    let mut payload = JPEG_XMP.to_vec();
+    payload.extend_from_slice(xmp.as_bytes());
+    crate::gainmap::insert_segments(jpeg, &[(0xE1, payload)])
 }
 
 /// A PNG with `xmp` in an `iTXt` chunk keyed `XML:com.adobe.xmp`, uncompressed, before
@@ -2007,39 +1925,5 @@ mod tests {
         let img = noise(64, 48).resized(32, 24).unwrap();
         assert_eq!((img.width, img.height), (32, 24));
         assert_eq!(img.rgba.len(), 32 * 24 * 4);
-    }
-
-    #[test]
-    fn gain_map_computes_headroom_and_formats_iso_21496_1_xmp() {
-        // SDR image: 2 pixels. First is mid-grey, second is blown SDR white (1.0).
-        let sdr_rgba = vec![
-            128, 128, 128, 255, // mid-grey
-            255, 255, 255, 255, // 1.0 SDR white
-        ];
-        // HDR image: First pixel is mid-grey (same), second pixel is HDR specular (4.0 = +2 stops headroom).
-        let hdr_rgb = vec![0.5, 0.5, 0.5, 4.0, 4.0, 4.0];
-        let gm = GainMap::compute(&sdr_rgba, &hdr_rgb, 2, 1, 2.0);
-        assert_eq!(gm.width, 2);
-        assert_eq!(gm.height, 1);
-        assert_eq!(gm.data.len(), 2);
-
-        // Pixel 0 has ~0 gain (same brightness)
-        assert!(
-            gm.data[0] < 10,
-            "pixel 0 gain should be near 0, got {}",
-            gm.data[0]
-        );
-        // Pixel 1 has max gain (4x = 2 stops headroom on a 2-stop max map)
-        assert!(
-            gm.data[1] > 240,
-            "pixel 1 gain should be near 255, got {}",
-            gm.data[1]
-        );
-
-        // Verify ISO 21496-1 XMP metadata
-        let xmp = gm.iso_21496_1_xmp();
-        assert!(xmp.contains("<hdrgm:Version>1.0</hdrgm:Version>"));
-        assert!(xmp.contains("<hdrgm:GainMapMax>2.000000</hdrgm:GainMapMax>"));
-        assert!(xmp.contains("<hdrgm:BaseRenditionIsSDR>True</hdrgm:BaseRenditionIsSDR>"));
     }
 }

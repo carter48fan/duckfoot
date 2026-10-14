@@ -186,6 +186,9 @@ struct AdjustUniforms {
     /// proof cannot hold, [2].w = the proof space's gamma (0: the sRGB curve), which the
     /// printer table's input is encoded with.
     proof_m: [[f32; 4]; 3],
+    /// The gain map render (export only): the output's luminance weights (xyz) and the
+    /// HDR rendition's white (w; 0 for an ordinary render).
+    hdr: [f32; 4],
 }
 
 #[repr(C)]
@@ -212,6 +215,9 @@ struct Target {
     proof: Option<Proof>,
     /// Encode for `out` (Rec.2020 and the sRGB curve) and then through the screen table.
     screen_table: bool,
+    /// Render the gain map's two luminances instead, the HDR rendition's white this many
+    /// times the export's (see `adjust.wgsl`'s `finish`).
+    hdr_white: Option<f32>,
 }
 
 pub struct LoadedImage {
@@ -2500,6 +2506,73 @@ impl Engine {
         })
     }
 
+    /// The HDR gain map of `stack`'s export in `space` (ISO 21496-1): rendered once more,
+    /// in bands, as the luminance of the export and of its HDR rendition, whose white is
+    /// [`crate::gainmap::HDR_WHITE`] times brighter, and reduced to a map a quarter the
+    /// size each way as the bands come back, so the HDR rendition is never held whole.
+    /// Measured on the export before it is resized: the map is stretched over the image,
+    /// whatever its size.
+    pub fn gain_map(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        space: crate::gamut::OutputSpace,
+    ) -> Result<crate::gainmap::GainMap> {
+        if let Some(image) = &mut self.image {
+            image.brushes.sync(queue, &brush_layers(stack));
+        }
+        self.sync_fills(device, queue, stack);
+        self.sync_look(queue, stack);
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let (out_w, out_h) = stack
+            .geometry
+            .output_size(image.sensor_width, image.sensor_height);
+        check_size(device, out_w, out_h)?;
+        let denoised = match denoise_wanted(stack, (image.sensor_width, image.sensor_height)) {
+            Some((params, local)) => {
+                Some(self.make_denoised(device, queue, &params, &local, 0, None)?)
+            }
+            None => None,
+        };
+        let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
+        let target = Target {
+            out: crate::gamut::Screen::of(space),
+            proof: None,
+            screen_table: false,
+            hdr_white: Some(crate::gainmap::HDR_WHITE),
+        };
+        self.write_uniforms(queue, stack, None, sizes, true, false, target);
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let rect = stack.geometry.crop.to_pixels(out_w, out_h);
+        let mut map = crate::gainmap::Measure::new(rect.2, rect.3);
+        let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
+        let texel = DEEP_OUTPUT_FORMAT.block_copy_size(None).unwrap_or(8);
+        self.render_bands_into(
+            device,
+            queue,
+            image,
+            sensor,
+            &self.deep_adjust_pipeline,
+            DEEP_OUTPUT_FORMAT,
+            rect,
+            texel,
+            &mut |first, band| {
+                // RGBA16F: the export's luminance in R, the HDR rendition's in G.
+                let px = band.chunks_exact(8).map(|t| {
+                    let h = |i: usize| half::f16::from_le_bytes([t[i], t[i + 1]]).to_f32();
+                    (h(0), h(2))
+                });
+                map.add(first, px);
+            },
+        )?;
+        Ok(map.finish())
+    }
+
     fn render_export(
         &mut self,
         device: &wgpu::Device,
@@ -2551,6 +2624,7 @@ impl Engine {
             out: crate::gamut::Screen::of(space),
             proof: None,
             screen_table: false,
+            hdr_white: None,
         };
         self.write_uniforms(queue, stack, None, sizes, true, !deep, target);
 
@@ -2695,9 +2769,42 @@ impl Engine {
         sensor: &wgpu::TextureView,
         pipeline: &wgpu::RenderPipeline,
         format: wgpu::TextureFormat,
-        (rx, ry, rw, rh): (u32, u32, u32, u32),
+        rect: (u32, u32, u32, u32),
         texel: u32,
     ) -> Result<Vec<u8>> {
+        let (rw, rh) = (rect.2, rect.3);
+        let mut out = Vec::new();
+        out.try_reserve_exact(rw as usize * rh as usize * texel as usize)
+            .map_err(|_| anyhow::anyhow!("no memory for a {rw}×{rh} export"))?;
+        self.render_bands_into(
+            device,
+            queue,
+            image,
+            sensor,
+            pipeline,
+            format,
+            rect,
+            texel,
+            &mut |_, band| out.extend_from_slice(band),
+        )?;
+        Ok(out)
+    }
+
+    /// [`Self::render_bands`], each band handed to `sink` (its first row in the rect, and
+    /// its tightly packed rows) as it is read back rather than gathered into one frame.
+    #[allow(clippy::too_many_arguments)]
+    fn render_bands_into(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &LoadedImage,
+        sensor: &wgpu::TextureView,
+        pipeline: &wgpu::RenderPipeline,
+        format: wgpu::TextureFormat,
+        (rx, ry, rw, rh): (u32, u32, u32, u32),
+        texel: u32,
+        sink: &mut dyn FnMut(u32, &[u8]),
+    ) -> Result<()> {
         let band_bytes = self.export_band_bytes(device);
         let stride = crate::export::padded_row_bytes(rw, texel) as u64;
         let band_rows = (band_bytes / stride)
@@ -2715,9 +2822,6 @@ impl Engine {
             &self.export_buffer,
         );
         let origin_at = std::mem::offset_of!(AdjustUniforms, split) as u64 + 4;
-        let mut out = Vec::new();
-        out.try_reserve_exact(rw as usize * rh as usize * texel as usize)
-            .map_err(|_| anyhow::anyhow!("no memory for a {rw}×{rh} export"))?;
         let mut y = 0;
         while y < rh {
             let rows = band_rows.min(rh - y);
@@ -2732,17 +2836,11 @@ impl Engine {
             });
             draw_fullscreen(&mut encoder, "export band", pipeline, &bind, &band_view);
             queue.submit([encoder.finish()]);
-            out.extend(read_back(
-                device,
-                queue,
-                &band,
-                (0, 0, rw, rows),
-                texel,
-                band_bytes,
-            )?);
+            let pixels = read_back(device, queue, &band, (0, 0, rw, rows), texel, band_bytes)?;
+            sink(y, &pixels);
             y += rows;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Choose the preview resolution: 1/2^level of full, clamped to what the sensor mip
@@ -2862,12 +2960,14 @@ impl Engine {
                     },
                     proof: self.proof,
                     screen_table: true,
+                    hdr_white: None,
                 }
             } else {
                 Target {
                     out: self.screen,
                     proof: self.proof,
                     screen_table: false,
+                    hdr_white: None,
                 }
             },
         );
@@ -3237,6 +3337,16 @@ impl Engine {
                         [m[1][0], m[1][1], m[1][2], warn],
                         [m[2][0], m[2][1], m[2][2], first.gamma.unwrap_or(0.0)],
                     ]
+                },
+                hdr: match ends.hdr_white {
+                    // The output's luminance: sRGB's, of the output's RGB taken back to sRGB.
+                    Some(white) => {
+                        let back = invert3(&ends.out.from_srgb);
+                        let y = crate::gamut::luminance(&SRGB);
+                        let w = |j: usize| (0..3).map(|i| y[i] * back[i][j]).sum::<f32>();
+                        [w(0), w(1), w(2), white]
+                    }
+                    None => [0.0; 4],
                 },
             }),
         );
@@ -4640,6 +4750,7 @@ mod uniform_layout_tests {
             ("luma_w", std::mem::offset_of!(AdjustUniforms, luma_w)),
             ("out_m", std::mem::offset_of!(AdjustUniforms, out_m)),
             ("proof_m", std::mem::offset_of!(AdjustUniforms, proof_m)),
+            ("hdr", std::mem::offset_of!(AdjustUniforms, hdr)),
         ];
         assert_eq!(members.len(), rust.len(), "a member on one side only");
         for (m, (name, offset)) in members.iter().zip(rust) {

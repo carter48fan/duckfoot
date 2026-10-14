@@ -82,6 +82,9 @@ struct Adjust {
     // 2 through the printer table, [1].w = 1 to mark what the proof cannot hold, [2].w =
     // the proof space's gamma (0: the sRGB curve), which the table's input is encoded with.
     proof_m:    array<vec4<f32>, 3>,
+    // The gain map render (export only): the output space's luminance weights (xyz) and
+    // the HDR rendition's white, linear (w; 0 for an ordinary render). See `finish`.
+    hdr:        vec4<f32>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -292,14 +295,10 @@ fn filmic(c: vec3<f32>) -> vec3<f32> {
     return c * (filmic_curve(norm) / norm);
 }
 
-// The one and only transfer function in the pipeline. The render target is a plain
-// unorm format, so nothing else applies or removes a gamma — see OUTPUT_FORMAT.
-// The finished pixel: display-encoded, and for an 8-bit target dithered by up to half a
-// level either way, so a smooth gradient (a sky) lands on a fine mix of neighbouring levels
-// instead of visible steps. The noise (interleaved gradient noise) is fixed per output
-// pixel, so the preview at 1:1 and the export agree exactly, and has a mean of zero, so it
-// shifts no tone. A 16-bit target has levels to spare and is left alone.
-fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
+// The finished pixel in the output's linear RGB, before it is encoded: brought into the
+// output's primaries and into its gamut, and to the proof's when proofing against a space,
+// clamped to 0..1. `a` is 1 where the colour was outside what the proof holds.
+fn fitted(linear: vec3<f32>) -> vec4<f32> {
     var c = linear;
     let y = luma(c);
     if (u.out_m[1].w > 0.5) {
@@ -337,6 +336,31 @@ fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
         c = vec3<f32>(y_fit) + (c - vec3<f32>(y_fit)) * gamut_scale(c, y_fit);
     }
     c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(c, select(0.0, 1.0, outside));
+}
+
+// The one and only transfer function in the pipeline. The render target is a plain
+// unorm format, so nothing else applies or removes a gamma — see OUTPUT_FORMAT.
+// The finished pixel: display-encoded, and for an 8-bit target dithered by up to half a
+// level either way, so a smooth gradient (a sky) lands on a fine mix of neighbouring levels
+// instead of visible steps. The noise (interleaved gradient noise) is fixed per output
+// pixel, so the preview at 1:1 and the export agree exactly, and has a mean of zero, so it
+// shifts no tone. A 16-bit target has levels to spare and is left alone.
+fn finish(linear: vec3<f32>, out_px: vec2<f32>) -> vec4<f32> {
+    if (u.hdr.w > 0.0) {
+        // The gain map render: the luminance of the export as written (white at 1) and of
+        // its HDR rendition, the same picture with white `hdr.w` times brighter, so what
+        // the SDR export takes to white is shown up to that. Both are fitted exactly as
+        // the export is; nothing is encoded.
+        let sdr = fitted(linear).rgb;
+        let hdr = fitted(linear / u.hdr.w).rgb * u.hdr.w;
+        return vec4<f32>(dot(u.hdr.xyz, sdr), dot(u.hdr.xyz, hdr), 0.0, 1.0);
+    }
+    let f = fitted(linear);
+    let c = f.rgb;
+    var outside = f.a > 0.5;
+    let proofing = u.proof_m[0].w > 0.5;
+    let printer = u.proof_m[0].w > 1.5;
     var e: vec3<f32>;
     if (printer) {
         // The file as written (encoded in the proof's space), through the printer to the

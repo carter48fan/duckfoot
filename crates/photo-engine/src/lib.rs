@@ -14,6 +14,7 @@ pub mod engine;
 pub mod exif_out;
 pub mod export;
 pub mod fsio;
+pub mod gainmap;
 pub mod gamut;
 pub mod heal;
 pub mod heif;
@@ -47,9 +48,10 @@ pub use engine::{
 };
 pub use exif_out::MetadataPolicy;
 pub use export::{
-    BitDepth, ExportFormat, ExportSettings, Exported, ExportedImage, GainMap, GainMapMetadata,
-    Resize, SharpenAmount, SharpenFor, JPEG_QUALITY,
+    BitDepth, ExportFormat, ExportSettings, Exported, ExportedImage, Resize, SharpenAmount,
+    SharpenFor, JPEG_QUALITY,
 };
+pub use gainmap::GainMap;
 pub use histogram::Histogram;
 pub use lens::{FileWarp, LensModel};
 pub use lut3d::{parse_cube, Lut3D};

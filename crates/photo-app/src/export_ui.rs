@@ -263,6 +263,25 @@ pub(crate) fn settings_editor(
         }
     }
 
+    if s.format == ExportFormat::Jpeg {
+        row_label(ui, "HDR");
+        ui.horizontal_wrapped(|ui| {
+            let hover = if s.remove_background {
+                "Not with the background removed: the map would brighten the matte"
+            } else {
+                "A gain map after the JPEG (ISO 21496-1, Ultra HDR): an HDR screen shows \
+                 what the export takes to white up to two stops brighter; anything else \
+                 shows the JPEG as it is"
+            };
+            let on = s.wants_gain_map();
+            let chip =
+                ui.add_enabled_ui(!s.remove_background, |ui| widgets::chip(ui, on, "gain map"));
+            if chip.inner.on_hover_text(hover).clicked() {
+                s.hdr_gain_map = !s.hdr_gain_map;
+            }
+        });
+    }
+
     ui.label(
         RichText::new(summary(s, source))
             .family(theme::mono_bold())
@@ -305,6 +324,9 @@ pub(crate) fn summary(s: &ExportSettings, source: Option<(u32, u32)>) -> String 
         } else {
             parts.push("rembg cutout".into());
         }
+    }
+    if s.wants_gain_map() {
+        parts.push("HDR gain map".into());
     }
     parts.push(match s.metadata {
         MetadataPolicy::All if s.strip_location => "metadata, no location".into(),
