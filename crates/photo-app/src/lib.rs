@@ -821,7 +821,10 @@ impl PhotoApp {
     }
 
     pub fn with_platform(gpu: &Gpu, platform: Box<dyn platform::Platform>) -> Self {
-        let engine = Engine::new(gpu.device);
+        let mut engine = Engine::new(gpu.device);
+        // A photo opens on a quick half-size picture, and RCD lands a slice a frame later:
+        // no frame waits on a whole demosaic.
+        engine.set_progressive(true);
         let mut folder_tree = dam::FolderTree::default();
         let bookmarks = platform.bookmarks();
         if !bookmarks.is_empty() {
@@ -1486,6 +1489,9 @@ impl PhotoApp {
         if self.ready_image().is_none() {
             return;
         }
+        if self.engine.advance_demosaic(gpu.device, gpu.queue) {
+            self.needs_render = true;
+        }
         // Zooming changes how much resolution the screen can show; the preview follows,
         // and a new preview texture needs registering with egui like a turned one does.
         let level = self.wanted_preview_level(pixels_per_point);
@@ -1662,6 +1668,10 @@ impl PhotoApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.sync(gpu, ctx.pixels_per_point());
+        if self.engine.demosaic_pending() {
+            // The next slice, whether or not anything else moves.
+            ctx.request_repaint();
+        }
 
         if self.layout.is_compact() {
             self.compact_layout(ui, gpu, screen);

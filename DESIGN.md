@@ -283,7 +283,10 @@ images from a hardcoded RGGB assumption. All of the following are mandatory:
 5. **The decoded sensor texture is immutable.** Every adjustment is a shader reading it.
    Nothing writes to it after upload. *Because in-place mutation is how "revert to
    original" quietly stops working — and on the GPU this one is free, so there is no
-   excuse.*
+   excuse.* The one exception is opening itself: in the app a Bayer photo first shows
+   a quick half-size picture in level 1, and RCD then lands a slice a frame and draws
+   every level again, so no frame waits on a whole demosaic. Anything that reads
+   full-resolution pixels finishes it first; after it lands, nothing writes again.
 
 6. **A slider drag writes a uniform buffer.** It does not re-decode, does not re-upload a
    texture, and does not allocate. If an interaction does any of those, it is a bug.

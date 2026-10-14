@@ -510,7 +510,7 @@ const NAN_PAINT: u32 = 0x8000_0000;
 pub struct Engine {
     /// Bayer demosaic, RCD's passes (`shaders/demosaic_rcd.wgsl`): the highlight
     /// ratios, directions, green, the opposite colour at red and blue sites, and the rest.
-    rcd_pipelines: [wgpu::RenderPipeline; 6],
+    rcd_pipelines: [wgpu::RenderPipeline; 7],
     rcd_bgl: wgpu::BindGroupLayout,
     rcd_sampler: wgpu::Sampler,
     green_bgl: wgpu::BindGroupLayout,
@@ -596,6 +596,13 @@ pub struct Engine {
     /// normal case when stepping through a roll from one camera. Allocating ~300 MB of
     /// fresh textures per photo costs tens of milliseconds of driver time on the UI thread.
     scratch: Option<Scratch>,
+    /// Open photos demosaic progressively (`set_progressive`).
+    progressive: bool,
+    /// About how many pixels of demosaic work `advance_demosaic` records a call.
+    slice_pixels: u64,
+    /// The open photo's demosaic, while it is still running. Locked so that a reader of
+    /// full-resolution pixels can finish it from `&self`.
+    pending: std::sync::Mutex<Option<PendingDemosaic>>,
     retired_sensor: Option<(wgpu::Extent3d, u32, wgpu::Texture)>,
     /// Where the mosaic texture goes once demosaic has read it, for the decode thread's
     /// next upload of the same size (see `UploadPool`).
@@ -614,6 +621,35 @@ pub struct Engine {
 struct Scratch {
     extent: wgpu::Extent3d,
     green: wgpu::Texture,
+}
+
+/// Which pipeline a demosaic draw runs: one of `rcd_pipelines`, or the 2×2 downsample.
+#[derive(Clone, Copy)]
+enum Pipe {
+    Rcd(usize),
+    Mip,
+}
+
+/// One draw of a demosaic: a whole pass, or a band of one.
+struct DemosaicDraw {
+    label: &'static str,
+    pipe: Pipe,
+    bind: wgpu::BindGroup,
+    target: wgpu::TextureView,
+    /// The rows `(y, height)` it covers, or the whole target.
+    band: Option<(u32, u32)>,
+    width: u32,
+    pixels: u64,
+}
+
+/// The RCD still to run on a photo opened progressively, a slice a frame
+/// (`Engine::advance_demosaic`), while the stage shows the quick half-size picture.
+struct PendingDemosaic {
+    /// In order; the draws of one step go together.
+    steps: std::collections::VecDeque<Vec<DemosaicDraw>>,
+    /// Given back to the upload pool, and the scratch to the engine, once it is done.
+    mosaic: wgpu::Texture,
+    scratch: Scratch,
 }
 
 /// A photo whose pixels are already in GPU memory, ready for `Engine::load_uploaded`.
@@ -1247,6 +1283,7 @@ impl Engine {
             ("fs_opposite", RCD_OPPOSITE_FORMAT),
             ("fs_final", SENSOR_FORMAT),
             ("fs_levels", RCD_LEVELS_FORMAT),
+            ("fs_quick", SENSOR_FORMAT),
         ]
         .map(|(entry, format)| {
             fullscreen_pipeline_at(device, "demosaic rcd", &rcd_shader, entry, &rcd_bgl, format)
@@ -1471,6 +1508,9 @@ impl Engine {
             resize_buffer,
             preview_level: 0,
             scratch: None,
+            progressive: false,
+            slice_pixels: slice_pixels_for(device),
+            pending: std::sync::Mutex::new(None),
             retired_sensor: None,
             upload_pool: UploadPool::default(),
             export_buffer,
@@ -1892,6 +1932,7 @@ impl Engine {
         spot: &crate::heal::Spot,
         slot: usize,
     ) -> Result<Fill> {
+        self.finish_demosaic(device, queue);
         use crate::heal::{FILL_CONTEXT, FILL_TILE};
         let (sw, sh) = (image.sensor_width, image.sensor_height);
         let r = (spot.radius * sw.max(sh) as f32).max(1.0);
@@ -2037,6 +2078,96 @@ impl Engine {
     /// Let go of the textures kept only to be reused (the green plane, the pooled mosaic,
     /// the last sensor), when the system is short of memory. The next open allocates them
     /// again.
+    /// Open photos progressively: `load_uploaded` draws a quick half-size picture from the
+    /// mosaic straight away and leaves RCD to `advance_demosaic`, a slice a frame, so no
+    /// frame waits on a whole demosaic. Off by default, for callers that only export.
+    pub fn set_progressive(&mut self, on: bool) {
+        self.progressive = on;
+    }
+
+    /// How many pixels of demosaic work `advance_demosaic` does a call, in place of what
+    /// the GPU's type suggests. For tests and tuning.
+    #[doc(hidden)]
+    pub fn set_demosaic_slice(&mut self, pixels: u64) {
+        self.slice_pixels = pixels.max(1);
+    }
+
+    /// The open photo's full-resolution demosaic has yet to land.
+    pub fn demosaic_pending(&self) -> bool {
+        self.lock_pending().is_some()
+    }
+
+    /// Run the next slice of the open photo's demosaic. True when it lands: every level
+    /// of the sensor is RCD's from now on, and the preview wants rendering again.
+    pub fn advance_demosaic(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        let Some(mut pending) = self.lock_pending().take() else {
+            return false;
+        };
+        if !pending.steps.is_empty() {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("demosaic slice encoder"),
+            });
+            let mut spent = 0;
+            while spent < self.slice_pixels {
+                let Some(step) = pending.steps.pop_front() else {
+                    break;
+                };
+                for draw in &step {
+                    self.record(&mut encoder, draw);
+                    spent += draw.pixels;
+                }
+            }
+            queue.submit([encoder.finish()]);
+        }
+        if !pending.steps.is_empty() {
+            *self.lock_pending() = Some(pending);
+            return false;
+        }
+        self.scratch = Some(pending.scratch);
+        self.upload_pool.put(pending.mosaic);
+        if let Some(image) = &mut self.image {
+            // Both were made from the quick picture.
+            image.denoised = None;
+            image.fills.clear();
+        }
+        true
+    }
+
+    /// Run all that is left of the open photo's demosaic, for a reader of full-resolution
+    /// pixels. It still lands on the next `advance_demosaic`.
+    fn finish_demosaic(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let mut pending = self.lock_pending();
+        let Some(pending) = pending.as_mut().filter(|p| !p.steps.is_empty()) else {
+            return;
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("demosaic finish encoder"),
+        });
+        for draw in pending.steps.drain(..).flatten() {
+            self.record(&mut encoder, &draw);
+        }
+        queue.submit([encoder.finish()]);
+    }
+
+    /// Drop a demosaic that will never be shown, keeping its memory for the next photo.
+    fn cancel_demosaic(&mut self) {
+        let pending = self
+            .pending
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pending) = pending {
+            self.scratch = Some(pending.scratch);
+            self.upload_pool.put(pending.mosaic);
+        }
+    }
+
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, Option<PendingDemosaic>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn release_spares(&mut self) {
         self.scratch = None;
         self.retired_sensor = None;
@@ -2044,6 +2175,7 @@ impl Engine {
     }
 
     pub fn unload(&mut self) {
+        self.cancel_demosaic();
         if let Some(image) = self.image.take() {
             // Only its memory is kept, for the next image to overwrite. The image itself
             // is gone, so nothing it showed can change (invariant 5 is per image).
@@ -2111,6 +2243,8 @@ impl Engine {
             model,
         } = uploaded;
         let (width, height) = (extent.width, extent.height);
+        // The last photo's, if it never finished: nothing will show it now.
+        self.cancel_demosaic();
 
         // Everything this allocates — sensor, mips, green plane, preview — is the most a
         // photo ever asks of the GPU. A refusal is an `Err` for the caller to show, and the
@@ -2150,6 +2284,9 @@ impl Engine {
         });
 
         let mut spent_mosaic = None;
+        // RCD left to run a slice at a time, when this photo opens progressively.
+        let mut deferred = None;
+        let mut rcd_left = None;
         match pixels {
             UploadedPixels::Mosaic {
                 texture: mosaic,
@@ -2222,16 +2359,27 @@ impl Engine {
                     ],
                 });
 
+                let progressive = self.progressive && cfa.is_bayer() && mip_levels > 1;
                 if cfa.is_bayer() {
-                    self.demosaic_rcd(
+                    let quick_target = progressive.then(|| level_view(1));
+                    let (quick, steps) = self.demosaic_rcd(
                         device,
-                        &mut encoder,
                         &mosaic_view,
                         &demosaic_uniforms,
                         &green_view,
                         &level_view(0),
                         extent,
+                        quick_target.as_ref(),
+                        progressive.then_some(self.slice_pixels / 2),
                     );
+                    if let Some(quick) = quick {
+                        self.record(&mut encoder, &quick);
+                        rcd_left = Some(steps);
+                    } else {
+                        for draw in steps.iter().flatten() {
+                            self.record(&mut encoder, draw);
+                        }
+                    }
                 } else {
                     // Green first and alone: red and blue are reconstructed relative to it.
                     draw_fullscreen(
@@ -2249,9 +2397,15 @@ impl Engine {
                         &level_view(0),
                     );
                 }
-                // Kept for the next photo's demosaic; the mosaic for its next upload.
-                self.scratch = Some(scratch);
-                spent_mosaic = Some(mosaic);
+                // Kept for the next photo's demosaic; the mosaic for its next upload. Or,
+                // while RCD still has to read them, held until it lands.
+                match rcd_left.take() {
+                    Some(steps) => deferred = Some((steps, mosaic, scratch)),
+                    None => {
+                        self.scratch = Some(scratch);
+                        spent_mosaic = Some(mosaic);
+                    }
+                }
             }
             UploadedPixels::Linear { texture } => {
                 encoder.copy_texture_to_texture(
@@ -2263,25 +2417,43 @@ impl Engine {
         }
 
         // Each level from the one above. Still part of "demosaic once": after this the
-        // whole sensor texture, every level of it, is immutable (invariant 5).
-        for level in 1..mip_levels {
-            let parent = level_view(level - 1);
+        // whole sensor texture, every level of it, is immutable (invariant 5) — or, opened
+        // progressively, once RCD has landed and drawn them again from its own level 0.
+        let downsample = |level: u32| {
             let bind = device.make_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("sensor downsample bind"),
                 layout: &self.mip_bgl,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&parent),
+                    resource: wgpu::BindingResource::TextureView(&level_view(level - 1)),
                 }],
             });
-            draw_fullscreen(
-                &mut encoder,
-                "sensor downsample pass",
-                &self.mip_pipeline,
-                &bind,
-                &level_view(level),
-            );
+            let (w, h) = ((width >> level).max(1), (height >> level).max(1));
+            DemosaicDraw {
+                label: "sensor downsample pass",
+                pipe: Pipe::Mip,
+                bind,
+                target: level_view(level),
+                band: None,
+                width: w,
+                pixels: w as u64 * h as u64,
+            }
+        };
+        // The quick picture is level 1; the levels below it come from it.
+        let first = if deferred.is_some() { 2 } else { 1 };
+        for level in first..mip_levels {
+            self.record(&mut encoder, &downsample(level));
         }
+        let deferred = deferred.map(|(steps, mosaic, scratch)| {
+            let mut steps: std::collections::VecDeque<_> = steps.into();
+            // All at once, so the stage never draws from a mix of quick and RCD levels.
+            steps.push_back((1..mip_levels).map(downsample).collect());
+            PendingDemosaic {
+                steps,
+                mosaic,
+                scratch,
+            }
+        });
         queue.submit([encoder.finish()]);
         // Only after the submit: an upload into it now is ordered after this demosaic.
         if let Some(mosaic) = spent_mosaic {
@@ -2289,7 +2461,11 @@ impl Engine {
         }
 
         let (out_w, out_h) = geometry.output_size(width, height);
-        let preview_level = self.preview_level.min(mip_levels - 1);
+        // Level 0 is not drawn until RCD lands.
+        let preview_level = self
+            .preview_level
+            .min(mip_levels - 1)
+            .max(deferred.is_some() as u32);
         let (preview_w, preview_h) = scaled(out_w, out_h, preview_level);
         let output_texture = output_texture(device, preview_w, preview_h);
         let output_view = output_texture.create_view(&Default::default());
@@ -2303,6 +2479,10 @@ impl Engine {
             &self.adjust_buffer,
         );
         scopes.pop("loading the image onto the GPU")?;
+        *self
+            .pending
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = deferred;
 
         // Any histogram in flight describes the previous image.
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
@@ -2524,6 +2704,7 @@ impl Engine {
         stack: &PhotoStack,
         space: crate::gamut::OutputSpace,
     ) -> Result<crate::gainmap::GainMap> {
+        self.finish_demosaic(device, queue);
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
@@ -2601,6 +2782,7 @@ impl Engine {
         space: crate::gamut::OutputSpace,
         target_size: Option<(u32, u32)>,
     ) -> Result<(u32, u32, Vec<u8>)> {
+        self.finish_demosaic(device, queue);
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
@@ -2801,6 +2983,7 @@ impl Engine {
         texel: u32,
         sink: &mut dyn FnMut(u32, &[u8]),
     ) -> Result<()> {
+        self.finish_demosaic(device, queue);
         let band_bytes = self.export_band_bytes(device);
         let stride = crate::export::padded_row_bytes(rw, texel) as u64;
         let band_rows = (band_bytes / stride)
@@ -2849,8 +3032,14 @@ impl Engine {
         let Some(image) = &mut self.image else {
             return false;
         };
-        let level = level.min(image.mip_levels - 1);
         self.preview_level = level;
+        // Level 0 is not there to show until the demosaic lands.
+        let pending = self
+            .pending
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let level = level.min(image.mip_levels - 1).max(pending as u32);
         if image.preview_level == level {
             return false;
         }
@@ -4009,20 +4198,51 @@ fn fullscreen_pipeline_at(
 }
 
 impl Engine {
-    /// RCD's four passes over a Bayer mosaic (`shaders/demosaic_rcd.wgsl`), into `target`.
-    /// Its two scratch planes live only for this demosaic: kept, they would hold another
-    /// 6 bytes a photosite for as long as the photo is open.
+    /// RCD's passes over a Bayer mosaic (`shaders/demosaic_rcd.wgsl`), into `target`, as
+    /// steps to run in order. With `band`, each full-size pass is cut into bands of about
+    /// that many pixels, a step each, so the work can be spread over frames; and with
+    /// `quick`, the half-size picture for the stage to show meanwhile is drawn into it.
+    /// Its scratch planes live only for this demosaic: kept, they would hold another
+    /// 10 bytes a photosite for as long as the photo is open.
     #[allow(clippy::too_many_arguments)]
     fn demosaic_rcd(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
         mosaic: &wgpu::TextureView,
         uniforms: &wgpu::Buffer,
         green: &wgpu::TextureView,
         target: &wgpu::TextureView,
         extent: wgpu::Extent3d,
-    ) {
+        quick: Option<&wgpu::TextureView>,
+        band: Option<u64>,
+    ) -> (Option<DemosaicDraw>, Vec<Vec<DemosaicDraw>>) {
+        let mut steps: Vec<Vec<DemosaicDraw>> = Vec::new();
+        // One pass over a `width` × `height` target: whole, or in bands of rows.
+        let pass = |label: &'static str,
+                    pipe: Pipe,
+                    bind: wgpu::BindGroup,
+                    target: &wgpu::TextureView,
+                    (width, height): (u32, u32)| {
+            let rows = band.map_or(height, |b| {
+                (b / width as u64).clamp(8, height as u64) as u32
+            });
+            let mut bands = Vec::new();
+            let mut y = 0;
+            while y < height {
+                let h = rows.min(height - y);
+                bands.push(vec![DemosaicDraw {
+                    label,
+                    pipe,
+                    bind: bind.clone(),
+                    target: target.clone(),
+                    band: (rows < height).then_some((y, h)),
+                    width,
+                    pixels: width as u64 * h as u64,
+                }]);
+                y += h;
+            }
+            bands
+        };
         let texture = |label, size, format, mips| {
             device.make_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -4109,24 +4329,36 @@ impl Engine {
         };
         let bind = |label, reads| bind_with(label, reads, &levels);
 
+        let size = (extent.width, extent.height);
+        let quick = quick.map(|target| DemosaicDraw {
+            label: "rcd quick pass",
+            pipe: Pipe::Rcd(6),
+            bind: bind_with("rcd quick pass", [&unused; 4], &unused),
+            target: target.clone(),
+            band: None,
+            width: quads.width,
+            pixels: quads.width as u64 * quads.height as u64,
+        });
+
         // Every pass after this reads the normalised mosaic.
-        draw_fullscreen(
-            encoder,
+        steps.extend(pass(
             "rcd levels pass",
-            &self.rcd_pipelines[5],
-            &bind_with("rcd levels pass", [&unused; 4], &unused),
+            Pipe::Rcd(5),
+            bind_with("rcd levels pass", [&unused; 4], &unused),
             &levels,
-        );
+            size,
+        ));
 
         let base = ratio_level(0);
-        let ratio_bind = bind("rcd ratios pass", [&unused; 4]);
-        draw_fullscreen(
-            encoder,
+        steps.extend(pass(
             "rcd ratios pass",
-            &self.rcd_pipelines[0],
-            &ratio_bind,
+            Pipe::Rcd(0),
+            bind("rcd ratios pass", [&unused; 4]),
             &base,
-        );
+            (quads.width, quads.height),
+        ));
+        // Small: all of them together.
+        let mut ratio_mips = Vec::new();
         for level in 1..ratio_levels {
             let parent = ratio_level(level - 1);
             let mip = device.make_bind_group(&wgpu::BindGroupDescriptor {
@@ -4137,13 +4369,22 @@ impl Engine {
                     resource: wgpu::BindingResource::TextureView(&parent),
                 }],
             });
-            draw_fullscreen(
-                encoder,
-                "rcd ratio downsample",
-                &self.mip_pipeline,
-                &mip,
-                &ratio_level(level),
+            let (w, h) = (
+                (quads.width >> level).max(1),
+                (quads.height >> level).max(1),
             );
+            ratio_mips.push(DemosaicDraw {
+                label: "rcd ratio downsample",
+                pipe: Pipe::Mip,
+                bind: mip,
+                target: ratio_level(level),
+                band: None,
+                width: w,
+                pixels: w as u64 * h as u64,
+            });
+        }
+        if !ratio_mips.is_empty() {
+            steps.push(ratio_mips);
         }
 
         let passes: [(&str, [&wgpu::TextureView; 4], &wgpu::TextureView); 4] = [
@@ -4165,10 +4406,51 @@ impl Engine {
             ),
         ];
         for (i, (label, reads, writes)) in passes.into_iter().enumerate() {
-            let bind = bind(label, reads);
-            draw_fullscreen(encoder, label, &self.rcd_pipelines[i + 1], &bind, writes);
+            steps.extend(pass(
+                label,
+                Pipe::Rcd(i + 1),
+                bind(label, reads),
+                writes,
+                size,
+            ));
+        }
+        (quick, steps)
+    }
+
+    /// Record one demosaic draw.
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, draw: &DemosaicDraw) {
+        let pipeline = match draw.pipe {
+            Pipe::Rcd(i) => &self.rcd_pipelines[i],
+            Pipe::Mip => &self.mip_pipeline,
+        };
+        match draw.band {
+            None => draw_fullscreen(encoder, draw.label, pipeline, &draw.bind, &draw.target),
+            Some((y, h)) => draw_band(
+                encoder,
+                draw.label,
+                pipeline,
+                &draw.bind,
+                &draw.target,
+                (draw.width, y, h),
+            ),
         }
     }
+}
+
+/// About how much demosaic work fits in one frame without making it late, in pixels of one
+/// pass. An integrated GPU does RCD's heaviest pass at about 0.3 MP a millisecond (Intel UHD
+/// 770, 24 MP), so 2 MP is about 6 ms. `DUCKFOOT_DEMOSAIC_SLICE_MP` overrides it.
+fn slice_pixels_for(device: &wgpu::Device) -> u64 {
+    let set = std::env::var("DUCKFOOT_DEMOSAIC_SLICE_MP")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|mp| *mp > 0.0);
+    let mp = set.unwrap_or(match device.adapter_info().device_type {
+        wgpu::DeviceType::DiscreteGpu => 16.0,
+        wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::VirtualGpu => 2.0,
+        wgpu::DeviceType::Cpu | wgpu::DeviceType::Other => 1.0,
+    });
+    (mp * 1e6).max(1.0) as u64
 }
 
 fn draw_fullscreen(
@@ -4197,6 +4479,37 @@ fn draw_fullscreen(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind, &[]);
     // Three vertices, no vertex buffer — the shader derives an oversized triangle.
+    pass.draw(0..3, 0..1);
+}
+
+/// [`draw_fullscreen`] over rows `y..y + h` of a `width`-wide target, keeping the rest of it.
+fn draw_band(
+    encoder: &mut wgpu::CommandEncoder,
+    label: &str,
+    pipeline: &wgpu::RenderPipeline,
+    bind: &wgpu::BindGroup,
+    target: &wgpu::TextureView,
+    (width, y, h): (u32, u32, u32),
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.set_scissor_rect(0, y, width, h);
     pass.draw(0..3, 0..1);
 }
 
@@ -4369,6 +4682,7 @@ impl Engine {
         level: u32,
         rect: (u32, u32, u32, u32),
     ) -> Result<Vec<[f32; 4]>> {
+        self.finish_demosaic(device, queue);
         let Some(image) = &self.image else {
             bail!("no image is loaded");
         };
