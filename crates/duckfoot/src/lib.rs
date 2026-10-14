@@ -443,6 +443,9 @@ impl Shell {
             .ok_or_else(|| anyhow::anyhow!("this adapter cannot present to the window surface"))?;
         config.format = format;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // One frame queued, not two: a drag or a step is on screen a refresh sooner. The
+        // frame is short (the demosaic runs in slices), so it still makes every vsync.
+        config.desired_maximum_frame_latency = 1;
         surface.configure(&gpu.device, &config);
 
         #[allow(unused_mut)]
