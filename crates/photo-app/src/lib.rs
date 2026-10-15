@@ -338,6 +338,8 @@ enum Export {
     Idle,
     Writing {
         path: PathBuf,
+        /// The photo exported, as it was when the export began.
+        source: Option<PathBuf>,
         started: Instant,
         result: Receiver<Result<(), String>>,
     },
@@ -805,6 +807,8 @@ pub struct PhotoApp {
     /// Where a swipe across the stage began, to step photos when it ends.
     /// A photo step asked for where there was no `Gpu` to do it with.
     pending_step: Option<isize>,
+    /// The library deletion under way is the exported copies' sweep: no notice for it.
+    quiet_library_delete: bool,
     /// The photo to open in place of one just taken off the shelf, which happens where
     /// there is no `Gpu` to open it with.
     pending_open: Option<PathBuf>,
@@ -1020,6 +1024,7 @@ impl PhotoApp {
             compact_sheet_width: None,
             compact_sheet_fit: None,
             pending_step: None,
+            quiet_library_delete: false,
             pending_open: None,
             prefetch: None,
             step_dir: 1,
@@ -1094,6 +1099,8 @@ impl PhotoApp {
         // Missing photos are shelved too, and shown as missing. One photo at a time starts
         // each session empty: the photo is chosen anew, from the gallery it lives in.
         let shelf = if self.single_photo() {
+            // What was exported last time and still open when the app closed goes now.
+            self.sweep_exported_copies();
             Vec::new()
         } else {
             s.shelf
@@ -1405,6 +1412,11 @@ impl PhotoApp {
     /// The size the photo's stage got last frame.
     pub fn stage_size(&self) -> egui::Vec2 {
         self.last_panel
+    }
+
+    /// No export is being written.
+    pub fn export_finished(&self) -> bool {
+        !matches!(self.export, Export::Writing { .. })
     }
 
     pub fn is_busy(&self) -> bool {
