@@ -101,6 +101,13 @@ pub trait Platform: Send {
     /// platforms to request system indexing into the media library/gallery.
     fn export_completed(&mut self, _path: &std::path::Path) {}
 
+    /// One photo at a time: opening a photo replaces the one open, with no shelf of others
+    /// behind it, and the next launch starts empty. A phone's photos already live in its
+    /// gallery, and one picked is the point of the session.
+    fn single_photo(&self) -> bool {
+        false
+    }
+
     /// Whether [`Request::Share`] does anything here.
     fn can_share(&self) -> bool {
         false

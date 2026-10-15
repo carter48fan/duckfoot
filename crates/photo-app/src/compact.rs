@@ -3,33 +3,35 @@
 //! the desktop's panels are — only arranged for a small, touch-driven screen, after
 //! Google Photos and Snapseed.
 //!
-//! Upright, the bottom bar holds five categories and the sheet rises above it, only as
-//! tall as what it holds. Turned sideways the bar becomes a rail down the right edge and
-//! the sheet opens beside it. Tapping the open category again closes the sheet and gives
-//! the photo the whole screen.
+//! Upright, the bottom bar holds four groups and the sheet rises above it, only as tall
+//! as what it holds. Turned sideways the bar becomes a rail down the right edge and the
+//! sheet opens beside it. Tapping the open group again closes the sheet and gives the
+//! photo the whole screen.
 //!
 //! | Where | Holds |
 //! |---|---|
-//! | Crop · Light · Colour · Detail · Retouch | the Edit sheet: the chosen value over a ruler that turns it, over the category's chips ([`crate::categories`]). A chip is a value, or a tool (›) that opens in the ruler's place — the curve, colour bands and wheels, healing, masks, removing the background. Looks (one-tap looks, snapshots, history, copy & paste) is Colour's |
-//! | the top bar's ‹ | the Library: the roll's thumbnails and the current photo's rating and flag, over one row of actions: open, add, import a folder, and chips for the folder tree, the library's storage (a phone's copies: sizes and delete), filters, select mode and the tour |
-//! | the top bar's Export | the export, its options, removing the background, share and batch export |
+//! | Looks | one-tap looks and their strength, snapshots, history, copy & paste |
+//! | Tune | the chosen value over a ruler that turns it, over a bar of Light · Colour · Detail with a dot per value. Every quick value is in this one list ([`crate::categories`]) |
+//! | Crop | crop & rotate, and straighten, keystone and distortion on the ruler |
+//! | Tools | a grid of the tools that are not one value: curves, the colour mixer and grade, brush & masks, healing, removing the background, a LUT, filmic, the scope |
+//! | the top bar's ＋ | another photo, in place of this one (one photo at a time on a phone) |
+//! | the top bar's Export | the export, its options, removing the background and share |
+//! | the top bar's ⋯ | before / after, zoom, fine adjust, clipping, reset, the photo's info and the library's storage, the tour |
 //!
 //! Getting around without a keyboard:
 //!
-//! - tap a category, or swipe along the bar, to change category;
-//! - tap a chip, or swipe the row of chips, to choose what to change; drag the ruler to
-//!   change it, double-tap it to put it back; the ⋯ beside a value opens all its tool's
+//! - tap a group, or swipe along the bar, to change group;
+//! - swipe up or down, on the photo or on the ruler, to choose what to change: the whole
+//!   group's list follows the finger; tap Light, Colour or Detail to jump;
+//! - swipe sideways, on the photo or on the ruler, to change it; double-tap to put it
+//!   back; hold the photo to see the original; the ⋯ beside a value opens all its tool's
 //!   settings;
-//! - on the photo, swipe up or down to choose a value of the chosen tool and sideways to
-//!   change it; hold to see the original;
-//! - inside a tool, swipe an empty part of its controls to move to the next chip; back
-//!   returns to the ruler;
-//! - fine adjust, before / after, zoom, the clipping view and reset are in the top bar's
-//!   ⋯ menu.
+//! - inside a tool, swipe an empty part of its controls to move to the next tool; back
+//!   returns to the ruler or the grid.
 //!
-//! Opening a photo from a picker goes straight to editing: on a phone the photo is the
-//! point, and the roll is only how you got to it. The first run walks through all this
-//! (`tour`).
+//! On a phone ([`crate::platform::Platform::single_photo`]) there is one photo at a time:
+//! the one picked on opening, edited until another replaces it, and the next launch starts
+//! empty. The first run walks through all this (`tour`).
 
 use egui::containers::scroll_area::{DragScroll, ScrollSource};
 use egui::{
@@ -335,7 +337,12 @@ impl PhotoApp {
                     // Back to the roll: Library is where a photo is chosen, so it is
                     // "back" from the photo. Tapped from the Library, it returns.
                     let in_library = self.compact_tab == Some(Tab::Library);
-                    if bar_icon(
+                    if self.single_photo() {
+                        // One photo at a time: another is chosen in its place.
+                        if bar_icon(ui, BarIcon::Open, false, "Open another photo").clicked() {
+                            self.pick_and_open(ui.ctx());
+                        }
+                    } else if bar_icon(
                         ui,
                         BarIcon::Back,
                         in_library,
@@ -473,6 +480,16 @@ impl PhotoApp {
                             self.reset_to_default();
                             close = true;
                         }
+                        if self.single_photo()
+                            && menu_row(ui, true, "Photo info & storage", None).clicked()
+                        {
+                            self.compact_tab = Some(Tab::Library);
+                            close = true;
+                        }
+                        if menu_row(ui, true, "Show the tour", None).clicked() {
+                            self.start_tour();
+                            close = true;
+                        }
                     });
             });
         // A tap anywhere else closes it, as a menu does.
@@ -487,11 +504,11 @@ impl PhotoApp {
         }
     }
 
-    /// Four tabs, each an icon over its name. Tapping the open one closes its sheet;
-    /// swiping along the bar moves to the next tab that way.
+    /// The groups, each an icon over its name. Tapping the open one closes its sheet;
+    /// swiping along the bar moves to the next group that way.
     fn compact_nav(&mut self, ui: &mut egui::Ui, vertical: bool) {
         let area = ui.available_rect_before_wrap();
-        // The sheet the categories are for: Edit, or Looks, which Colour lists.
+        // The sheet the groups are for: Edit, or Looks.
         let editing = matches!(self.compact_tab, Some(Tab::Edit | Tab::Presets));
         // Registered before the cells, so a tap still reaches them.
         if let Some(step) = swipe(ui, area, ui.id().with("nav_swipe"), vertical) {
@@ -555,12 +572,16 @@ impl PhotoApp {
         ui.allocate_rect(area, Sense::hover());
     }
 
-    /// Show `cat`'s chips in the Edit sheet, on the chip last chosen there, else its first
-    /// value; a tool open from another category closes.
+    /// Show `cat` in the Edit sheet, on the value last chosen there, else its first; a tool
+    /// open from another group closes. Looks opens its looks.
     pub fn open_category(&mut self, cat: Category) {
         if self.compact_category != cat || self.current_chip().is_some_and(Chip::is_tool) {
             self.compact_controls_open = false;
             self.cutout_studio.open = false;
+        }
+        if cat == Category::Looks {
+            self.choose_chip(Chip::Looks);
+            return;
         }
         if self.compact_category != cat {
             self.compact_category = cat;
@@ -672,6 +693,10 @@ impl PhotoApp {
     /// The roll, then one row of actions under it. Filters, select mode and the folder
     /// tree are chips in that row, and take room only while they are on.
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        if self.single_photo() {
+            self.photo_sheet(ui);
+            return;
+        }
         if self.storage.is_some() {
             self.storage_panel(ui);
         } else if self.folder_browser_open {
@@ -775,6 +800,36 @@ impl PhotoApp {
         if self.select_mode {
             self.selection_bar(ui);
         }
+    }
+
+    /// One photo at a time: no roll to show, only this photo's marks and what the file
+    /// says, opening another, and the library's storage (the copies picked photos leave).
+    fn photo_sheet(&mut self, ui: &mut egui::Ui) {
+        if self.storage.is_some() {
+            self.storage_panel(ui);
+        } else {
+            self.current_photo_marks(ui);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if widgets::button(ui, Kind::Primary, "Open another", 0.0).clicked() {
+                self.pick_and_open(ui.ctx());
+            }
+            ui.add_space(4.0);
+            if self.platform.library_dir().is_some()
+                && widgets::chip(ui, self.storage.is_some(), "storage")
+                    .on_hover_text(
+                        "The copies in Duckfoot's library, their sizes, and deleting them",
+                    )
+                    .clicked()
+            {
+                if self.storage.is_some() {
+                    self.storage = None;
+                } else {
+                    self.open_storage();
+                }
+            }
+        });
     }
 
     /// The Library screen (H11): every copy Duckfoot made from the picker, largest first,
@@ -1442,9 +1497,9 @@ impl PhotoApp {
 
     // ── Edit ────────────────────────────────────────────────────────────────────────────
 
-    /// Tools, as Snapseed has them: a grid of every tool, and a tool chosen from it on
-    /// its own — its header, its controls, and a row that steps to the tool before or
-    /// after. Returns the height it wants, as [`Self::compact_sheet`] does.
+    /// The open group: a value over its ruler, the Tools grid, or one tool on its own — its
+    /// header, its controls, and the group's row to step on from it. Returns the height it
+    /// wants, as [`Self::compact_sheet`] does.
     fn edit_sheet(&mut self, ui: &mut egui::Ui, cap: f32) -> f32 {
         // Editable from the moment a photo is chosen, before it has decoded.
         let loaded = self.can_edit();
@@ -1488,14 +1543,16 @@ impl PhotoApp {
             ToolView::Looks
         } else if self.compact_controls_open {
             ToolView::Module(self.compact_module)
+        } else if self.compact_category.is_grid() {
+            return self.tools_grid(ui);
         } else {
             return self.ruler_sheet(ui);
         };
         self.tool_frame(ui, cap, view)
     }
 
-    /// The chosen value over a ruler that turns it, over the category's chips. Nothing
-    /// scrolls: it is the same height whatever is chosen, so the photo above stays put.
+    /// The chosen value over a ruler that turns it, over the group's row. Nothing scrolls:
+    /// it is the same height whatever is chosen, so the photo above stays put.
     fn ruler_sheet(&mut self, ui: &mut egui::Ui) -> f32 {
         let top = ui.cursor().top();
         let chip = self.current_chip().filter(|c| {
@@ -1512,26 +1569,51 @@ impl PhotoApp {
                 let changed = (value - home).abs() > (range.1 - range.0) * 1e-4;
                 let label = Chip::Knob(id, i).label();
                 let unit = Chip::Knob(id, i).unit();
+                let auto = auto_for(Chip::Knob(id, i)).filter(|_| self.ready_image().is_some());
                 let mut reset = false;
                 let mut more = false;
-                // `NAME      +0.27 EV      [⟲] [⋯]`
+                let mut run_auto = false;
+                // `NAME      +0.27 EV      [AUTO] [⟲] [⋯]`
                 ui.allocate_ui_with_layout(
                     vec2(width, READOUT_H),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.set_min_size(vec2(width, READOUT_H));
                         let row = ui.max_rect();
+                        // The controls first, from the right, so the value can be centred
+                        // in what they and the name leave.
+                        let controls = ui
+                            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.add_space(4.0);
+                                more = bar_icon(
+                                    ui,
+                                    BarIcon::More,
+                                    false,
+                                    "All of this tool's settings",
+                                )
+                                .clicked();
+                                reset = ui
+                                    .add_enabled_ui(changed, |ui| {
+                                        bar_icon(ui, BarIcon::Reset, false, "Reset")
+                                    })
+                                    .inner
+                                    .clicked();
+                                if let Some((_, tip)) = auto {
+                                    run_auto = auto_button(ui, tip).clicked();
+                                }
+                            })
+                            .response
+                            .rect;
                         let painter = ui.painter();
-                        painter.text(
+                        let name = painter.text(
                             pos2(row.left() + 16.0, row.center().y),
                             Align2::LEFT_CENTER,
                             label.to_uppercase(),
                             FontId::new(11.5, theme::mono_bold()),
                             theme::TEXT_DIM,
                         );
-                        painter.text(
-                            row.center(),
-                            Align2::CENTER_CENTER,
+                        let galley = painter.layout_no_wrap(
                             format!("{}{unit}", k.format(value)),
                             FontId::new(20.0, theme::mono_bold()),
                             if changed {
@@ -1540,24 +1622,22 @@ impl PhotoApp {
                                 theme::TEXT_HI
                             },
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.add_space(4.0);
-                            more =
-                                bar_icon(ui, BarIcon::More, false, "All of this tool's settings")
-                                    .clicked();
-                            reset = ui
-                                .add_enabled_ui(changed, |ui| {
-                                    bar_icon(ui, BarIcon::Reset, false, "Reset")
-                                })
-                                .inner
-                                .clicked();
-                        });
+                        // Centred on the row when it fits there, else in the gap.
+                        let (lo, hi) = (name.right() + 8.0, controls.left() - 4.0);
+                        let half = galley.size().x / 2.0;
+                        let x = row.center().x.clamp(lo + half, (hi - half).max(lo + half));
+                        painter.galley(
+                            pos2(x - half, row.center().y - galley.size().y / 2.0),
+                            galley,
+                            Color32::PLACEHOLDER,
+                        );
                     },
                 );
                 let snapshot = self.stack.clone();
                 let mut started = false;
                 let mut next = None;
+                let mut choose = 0;
+                let mut choosing = false;
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(16, 0))
                     .show(ui, |ui| {
@@ -1565,7 +1645,14 @@ impl PhotoApp {
                             categories::ruler(ui, label, value, range, home, self.fine_adjust);
                         started = turned.started;
                         next = turned.value;
+                        choose = turned.choose;
+                        choosing = turned.choosing;
                     });
+                if run_auto {
+                    if let Some((sample, _)) = auto {
+                        self.pending_sample = Some(sample);
+                    }
+                }
                 if reset {
                     started = true;
                     next = Some(home);
@@ -1581,6 +1668,12 @@ impl PhotoApp {
                 }
                 if more {
                     self.compact_controls_open = true;
+                }
+                // Up or down on the ruler walks the group's list, as on the photo; the list
+                // shows over the photo while the finger is on it.
+                self.step_choice(choose);
+                if choosing {
+                    self.show_photo_readout(true);
                 }
             }
             _ => {
@@ -1601,8 +1694,48 @@ impl PhotoApp {
         ui.cursor().top() - top
     }
 
-    /// The open category's chips, one row to swipe along; the chosen one is filled amber
-    /// and scrolled into view when it changes.
+    /// Tools: every tool that is not one value, as a grid of tiles to tap, all in view at
+    /// once. A tile opens its tool in the grid's place, and back returns here.
+    fn tools_grid(&mut self, ui: &mut egui::Ui) -> f32 {
+        use InspectorSectionId as M;
+        let top = ui.cursor().top();
+        let white = self.white_scale();
+        let mut picked = None;
+        egui::Frame::new()
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                let gap = 8.0;
+                let cols = (((ui.available_width() + gap) / 128.0).floor() as usize).clamp(2, 4);
+                let w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+                ui.spacing_mut().item_spacing = vec2(gap, gap);
+                for row in Category::Tools.chips().chunks(cols) {
+                    ui.horizontal(|ui| {
+                        for chip in row {
+                            let changed = match *chip {
+                                Chip::Tool(M::Scope) => false,
+                                Chip::Tool(id) => {
+                                    id.is_on(&self.stack)
+                                        && summarise(id, &self.stack, &self.baseline, &white).1
+                                }
+                                _ => false,
+                            };
+                            let tile = categories::tool_tile(ui, *chip, vec2(w, 58.0), changed);
+                            if tile.clicked() {
+                                picked = Some(*chip);
+                            }
+                        }
+                    });
+                }
+            });
+        self.compact_rects.strip = Rect::NOTHING;
+        if let Some(chip) = picked {
+            self.choose_chip(chip);
+        }
+        ui.cursor().top() - top
+    }
+
+    /// The open group's row: its sections (Tune), or its chips to swipe along, the chosen
+    /// one filled amber and scrolled into view when it changes.
     fn chip_row(&mut self, ui: &mut egui::Ui) {
         let y = ui.cursor().top();
         ui.painter()
@@ -1622,6 +1755,39 @@ impl PhotoApp {
             Chip::Looks | Chip::Cutout => false,
         };
         let marks: Vec<bool> = cat.chips().iter().map(|c| changed(*c)).collect();
+        if !cat.sections().is_empty() {
+            // A group in named stretches (Tune) shows them, a dot per value, in place of a
+            // row of chips to scroll: the values are walked by swiping, not by finding pills.
+            let row = Rect::from_min_size(
+                pos2(ui.max_rect().left(), y + 1.0),
+                vec2(ui.max_rect().width(), CHIPS_H),
+            );
+            // Registered before the sections, so a tap still reaches them.
+            let step = swipe(ui, row, ui.id().with("section_swipe"), false);
+            // With a value's ⋯ open, its dot stays lit.
+            let chosen = current
+                .and_then(|c| cat.chips().iter().position(|x| *x == c))
+                .or_else(|| {
+                    let (i, _) = self.photo_knob()?;
+                    let knob = Chip::Knob(self.compact_module, i);
+                    cat.chips().iter().position(|x| *x == knob)
+                });
+            let tapped = categories::section_bar(ui, row, cat, chosen, &marks);
+            ui.advance_cursor_after_rect(row);
+            self.compact_rects.strip = row;
+            if let Some(step) = step {
+                self.step_module(step);
+            } else if let Some(s) = tapped {
+                let range = cat.section_range(s);
+                if chosen.is_some_and(|i| range.contains(&i)) && !self.compact_controls_open {
+                    // Already there: show where in its list.
+                    self.show_photo_readout(true);
+                } else {
+                    self.choose_chip(cat.chips()[range.start]);
+                }
+            }
+            return;
+        }
         let reveal_id = ui.id().with("chip_revealed");
         let revealed: Option<Chip> = ui.data(|d| d.get_temp::<Option<Chip>>(reveal_id)).flatten();
         let mut picked = None;
@@ -1673,10 +1839,11 @@ impl PhotoApp {
         }
     }
 
-    /// Leave the open tool for the ruler, on its module's first value if it has one.
+    /// Leave the open tool for the ruler (or the Tools grid).
     fn close_tool(&mut self) {
         match self.current_chip() {
-            Some(Chip::Looks) => self.compact_tab = Some(Tab::Edit),
+            // Looks is a group of its own: leaving it gives the photo the screen.
+            Some(Chip::Looks) => self.compact_tab = None,
             Some(Chip::Cutout) => self.cutout_studio.open = false,
             _ => self.compact_controls_open = false,
         }
@@ -1687,8 +1854,15 @@ impl PhotoApp {
     /// under them its category's chips, to move on without going back.
     fn tool_frame(&mut self, ui: &mut egui::Ui, cap: f32, view: ToolView) -> f32 {
         let top = ui.cursor().top();
-        let chips = !matches!(view, ToolView::Modules);
-        self.tool_header(ui, view);
+        // A sideways swipe on its controls steps on to the next in its group; the group's row
+        // shows under it only where it has no row of pills to scroll (Tune's and Crop's
+        // sections). A tool from the grid goes back to the grid instead.
+        let steps = !matches!(view, ToolView::Modules | ToolView::Looks);
+        let chips = steps && !self.compact_category.sections().is_empty();
+        // Looks is a group of its own, its sheet its whole content: no header over it.
+        if view != ToolView::Looks {
+            self.tool_header(ui, view);
+        }
         let y = ui.cursor().top();
         ui.painter()
             .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::BORDER));
@@ -1714,7 +1888,7 @@ impl PhotoApp {
             .show(ui, |ui| {
                 // A sideways flick on anything that is not a control moves to the next
                 // chip.
-                if chips {
+                if steps {
                     // No lower than the body is given: the clip rect can reach past it,
                     // over the row below, once the controls scroll.
                     let mut area = ui.clip_rect().intersect(ui.max_rect());
@@ -2022,33 +2196,37 @@ impl PhotoApp {
             if button(ui, editable && has_clip, Kind::Secondary, "Paste", 0.0).clicked() {
                 self.paste_adjustments();
             }
-            if button(
-                ui,
-                self.can_same_as_previous(),
-                Kind::Secondary,
-                "Same as previous",
-                0.0,
-            )
-            .clicked()
-            {
-                self.same_as_previous();
-            }
-            if self.can_undo_paste_to_all() {
-                if button(ui, true, Kind::Secondary, "Undo paste", 0.0).clicked() {
-                    self.undo_paste_to_all();
-                }
-            } else {
-                let label = format!("Paste to all {}", self.shelf.len());
+            // One photo at a time has no previous photo and no shelf to paste to: a look
+            // copied here pastes onto the next photo opened.
+            if !self.single_photo() {
                 if button(
                     ui,
-                    has_clip && !self.shelf.is_empty(),
+                    self.can_same_as_previous(),
                     Kind::Secondary,
-                    &label,
+                    "Same as previous",
                     0.0,
                 )
                 .clicked()
                 {
-                    self.paste_to_all_in_shelf();
+                    self.same_as_previous();
+                }
+                if self.can_undo_paste_to_all() {
+                    if button(ui, true, Kind::Secondary, "Undo paste", 0.0).clicked() {
+                        self.undo_paste_to_all();
+                    }
+                } else {
+                    let label = format!("Paste to all {}", self.shelf.len());
+                    if button(
+                        ui,
+                        has_clip && !self.shelf.is_empty(),
+                        Kind::Secondary,
+                        &label,
+                        0.0,
+                    )
+                    .clicked()
+                    {
+                        self.paste_to_all_in_shelf();
+                    }
                 }
             }
             if widgets::chip(ui, self.paste_picker_open, "what pastes").clicked() {
@@ -2140,6 +2318,9 @@ impl PhotoApp {
             {
                 self.request(ui.ctx(), crate::platform::Request::Share { path });
             }
+        }
+        if self.single_photo() {
+            return;
         }
         let n = self.selection.count();
         let sub = if n > 1 {
@@ -2275,7 +2456,6 @@ impl PhotoApp {
             Goal::Reset => log.reset > mark.log.reset,
             Goal::Hold => log.held > mark.log.held,
             Goal::Module => self.current_chip() != mark.chip,
-            Goal::Photo => log.stepped > mark.log.stepped,
             Goal::Done => false,
         };
         if done {
@@ -2283,12 +2463,8 @@ impl PhotoApp {
             ui.ctx().request_repaint();
             return;
         }
-        // Gestures on a photo need one open, and stepping needs two.
-        let possible = match s.goal {
-            Goal::Photo => self.ready_image().is_some() && self.shelf.len() > 1,
-            g if g.on_photo() => self.ready_image().is_some(),
-            _ => true,
-        };
+        // Gestures on a photo need one open.
+        let possible = !s.goal.on_photo() || self.ready_image().is_some();
 
         let ctx = ui.ctx().clone();
         let screen = ctx.content_rect();
@@ -2471,7 +2647,7 @@ impl PhotoApp {
 enum Target {
     Nav,
     Stage,
-    /// The open category's row of chips.
+    /// The open group's row: Tune's sections.
     Strip,
     Nothing,
 }
@@ -2485,7 +2661,6 @@ enum Goal {
     Reset,
     Hold,
     Module,
-    Photo,
     /// The last card: a button closes it.
     Done,
 }
@@ -2510,7 +2685,7 @@ struct TourStep {
     /// Message ids, in `locales/`.
     title_id: &'static str,
     text_id: &'static str,
-    /// Said instead when the gesture cannot be made yet (no photo open, one photo).
+    /// Said instead when the gesture cannot be made yet (no photo open).
     fallback_id: &'static str,
     target: Target,
     /// The tab to open as the step begins, if it is about one.
@@ -2520,7 +2695,7 @@ struct TourStep {
 
 pub(crate) const TOUR_LEN: usize = TOUR.len();
 
-const TOUR: [TourStep; 8] = [
+const TOUR: [TourStep; 7] = [
     TourStep {
         title_id: "tour-tabs-title",
         text_id: "tour-tabs-text",
@@ -2570,14 +2745,6 @@ const TOUR: [TourStep; 8] = [
         goal: Goal::Module,
     },
     TourStep {
-        title_id: "tour-photo-title",
-        text_id: "tour-photo-text",
-        fallback_id: "tour-photo-one",
-        target: Target::Stage,
-        tab: Some(Tab::Library),
-        goal: Goal::Photo,
-    },
-    TourStep {
         title_id: "tour-end-title",
         text_id: "tour-end-text",
         fallback_id: "tour-end-text",
@@ -2586,6 +2753,60 @@ const TOUR: [TourStep; 8] = [
         goal: Goal::Done,
     },
 ];
+
+/// The one-tap "auto" beside a value, where there is one for it: tone for light, white
+/// balance for colour, upright for straightening. With what it does, for its tip.
+fn auto_for(chip: Chip) -> Option<(crate::Sample, &'static str)> {
+    use crate::Sample;
+    use photo_engine::keystone::Upright;
+    use InspectorSectionId as M;
+    let Chip::Knob(id, _) = chip else {
+        return None;
+    };
+    match id {
+        M::Exposure | M::Tonal | M::Dehaze | M::Vignette => Some((
+            Sample::AutoTone,
+            "Auto tone: exposure, highlights and shadows",
+        )),
+        M::WhiteBalance | M::Vibrance => Some((Sample::AutoWb, "Auto white balance")),
+        M::Geometry if chip == Chip::Knob(M::Geometry, 0) => {
+            Some((Sample::Upright(Upright::Level), "Auto straighten"))
+        }
+        M::Geometry => Some((
+            Sample::Upright(Upright::Full),
+            "Auto upright: straighten and stand the lines up",
+        )),
+        _ => None,
+    }
+}
+
+/// "AUTO", in a 44-point target on the readout's line.
+fn auto_button(ui: &mut egui::Ui, tip: &str) -> egui::Response {
+    let (rect, response) = widgets::allocate_control(ui, vec2(56.0, 44.0), Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+    });
+    let hot = response.hovered() || response.is_pointer_button_down_on();
+    let pill = Rect::from_center_size(rect.center(), vec2(50.0, 26.0));
+    let painter = ui.painter();
+    painter.rect_stroke(
+        pill,
+        13.0,
+        Stroke::new(1.0, if hot { theme::ACCENT } else { theme::BORDER_HI }),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        pill.center(),
+        Align2::CENTER_CENTER,
+        "AUTO",
+        FontId::new(11.0, theme::mono_bold()),
+        if hot { theme::ACCENT } else { theme::TEXT },
+    );
+    if hot {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.on_hover_text(tip)
+}
 
 /// The top bar's icons.
 #[derive(Clone, Copy)]
@@ -2597,6 +2818,8 @@ enum BarIcon {
     More,
     /// A chevron pointing left: back.
     Back,
+    /// A plus: another photo.
+    Open,
 }
 
 /// A top-bar icon: painted strokes in a 44 × 44 target, all one size and centred on the
@@ -2634,6 +2857,16 @@ fn bar_icon(ui: &mut egui::Ui, icon: BarIcon, active: bool, tip: &str) -> egui::
         BarIcon::Back => {
             painter.line_segment([c + vec2(4.0, -8.0), c + vec2(-4.0, 0.0)], stroke);
             painter.line_segment([c + vec2(-4.0, 0.0), c + vec2(4.0, 8.0)], stroke);
+        }
+        BarIcon::Open => {
+            painter.rect_stroke(
+                Rect::from_center_size(c, vec2(20.0, 20.0)),
+                4.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], stroke);
+            painter.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], stroke);
         }
     }
     if hovered {

@@ -32,7 +32,6 @@ pub(crate) struct GestureLog {
     pub(crate) adjusted: u32,
     pub(crate) reset: u32,
     pub(crate) held: u32,
-    pub(crate) stepped: u32,
 }
 
 /// What a touch on the photo is doing, kept between frames.
@@ -76,7 +75,7 @@ impl PhotoApp {
             && !self.customize_open
             && !self.cutout_studio.open
             && !knobs(self.compact_module).is_empty()
-            && crate::categories::Category::of(self.compact_module) == self.compact_category
+            && self.photo_turns_a_value()
             && at_fit
             && !self.cropping
             && !self.split_active
@@ -84,6 +83,59 @@ impl PhotoApp {
             && !self.healing
             && !self.picking_wb
             && self.ready_image().is_some()
+    }
+
+    /// On a phone, whether the module the Edit sheet is on has a value the open group lists
+    /// (under the ruler), or its tool is open: a tool in the Tools grid that is not open
+    /// leaves the photo alone.
+    fn photo_turns_a_value(&self) -> bool {
+        let module = self.compact_module;
+        (self.compact_controls_open
+            && crate::categories::Category::of(module) == self.compact_category)
+            || self
+                .compact_category
+                .chips()
+                .iter()
+                .any(|c| matches!(c, crate::categories::Chip::Knob(id, _) if *id == module))
+    }
+
+    /// The values a swipe up or down walks, and which of them is chosen. On a phone, under
+    /// the ruler, it is the whole group's list (all of Tune: light, colour, detail), so one
+    /// swipe reaches any value; with a tool open, or on the desktop, the module's own.
+    pub(crate) fn swipe_list(&self) -> (Vec<(InspectorSectionId, usize)>, usize) {
+        let module = self.knob_module();
+        let at = self.photo_knob().map_or(0, |(i, _)| i);
+        if self.layout.is_compact() && !self.compact_controls_open {
+            let list = self.compact_category.knob_list();
+            if let Some(pos) = list.iter().position(|k| *k == (module, at)) {
+                return (list, pos);
+            }
+        }
+        let list = (0..knobs(module).len()).map(|i| (module, i)).collect();
+        (list, at)
+    }
+
+    /// Move the choice `steps` along [`Self::swipe_list`], stopping at its ends.
+    pub(crate) fn step_choice(&mut self, steps: i32) {
+        if steps == 0 {
+            return;
+        }
+        let (list, at) = self.swipe_list();
+        if list.is_empty() {
+            return;
+        }
+        let to = (at as i32 + steps).clamp(0, list.len() as i32 - 1) as usize;
+        if to != at {
+            self.photo_touch.log.chose += 1;
+            let (id, i) = list[to];
+            if self.layout.is_compact() && !self.compact_controls_open {
+                // Under the ruler: the ruler, its readout and the group's dots follow.
+                self.choose_chip(crate::categories::Chip::Knob(id, i));
+            } else {
+                self.photo_touch.knob = Some((id, i));
+            }
+        }
+        self.photo_touch.shown = Some((Instant::now(), Shown::Choosing));
     }
 
     /// The module the photo's gestures turn: the Edit sheet's on a phone, the card last
@@ -236,23 +288,13 @@ impl PhotoApp {
             } if editing => {
                 let t = &mut self.photo_touch;
                 t.choose_travel += delta;
-                let module = self.knob_module();
-                let n = knobs(module).len();
-                let (mut i, _) = self.photo_knob().expect("editing has knobs");
-                while self.photo_touch.choose_travel.abs() >= CHOOSE_STEP {
-                    let down = self.photo_touch.choose_travel > 0.0;
-                    self.photo_touch.choose_travel -=
-                        CHOOSE_STEP.copysign(self.photo_touch.choose_travel);
-                    i = if down {
-                        (i + 1).min(n - 1)
-                    } else {
-                        i.saturating_sub(1)
-                    };
+                let mut steps = 0;
+                while t.choose_travel.abs() >= CHOOSE_STEP {
+                    let down = t.choose_travel > 0.0;
+                    t.choose_travel -= CHOOSE_STEP.copysign(t.choose_travel);
+                    steps += if down { 1 } else { -1 };
                 }
-                if self.photo_knob().map(|(j, _)| j) != Some(i) {
-                    self.photo_touch.log.chose += 1;
-                }
-                self.photo_touch.knob = Some((module, i));
+                self.step_choice(steps);
                 self.photo_touch.shown = Some((Instant::now(), Shown::Choosing));
             }
             Event::Slide {
@@ -324,9 +366,11 @@ impl PhotoApp {
             } if !editing && ((at_fit && fingers == 1) || (!at_fit && fingers >= 2)) => {
                 let step = -sign;
                 if self.layout.is_compact() && self.compact_tab == Some(crate::compact::Tab::Edit) {
-                    self.step_module(step);
-                } else {
-                    self.photo_touch.log.stepped += 1;
+                    // In a tool, the next tool; in the Tools grid, nothing to step.
+                    if self.compact_controls_open || !self.compact_category.is_grid() {
+                        self.step_module(step);
+                    }
+                } else if !self.single_photo() {
                     self.pending_step = Some(step as isize);
                 }
             }
@@ -390,19 +434,34 @@ impl PhotoApp {
                 }
             }
             Shown::Choosing => {
-                let list = knobs(self.knob_module());
-                let Some((chosen, _)) = self.photo_knob() else {
+                let (list, chosen) = self.swipe_list();
+                if list.is_empty() {
                     return;
-                };
+                }
+                // As many rows as fit, the chosen one kept in view: a long list (all of
+                // Tune) scrolls under the finger rather than running off the photo.
                 let row = 34.0;
-                let h = row * list.len() as f32 + 12.0;
+                let fit = (((rect.height() - 40.0) / row).floor() as usize).clamp(3, 9);
+                let shown = list.len().min(fit);
+                let first = chosen.saturating_sub(shown / 2).min(list.len() - shown);
+                let h = row * shown as f32 + 12.0;
                 let panel = Rect::from_center_size(
                     rect.center(),
-                    vec2(220.0_f32.min(rect.width() - 32.0), h),
+                    vec2(240.0_f32.min(rect.width() - 32.0), h),
                 );
                 painter.rect_filled(panel, 12.0, Color32::from_black_alpha(200));
-                for (i, k) in list.iter().enumerate() {
-                    let y = panel.top() + 6.0 + row * (i as f32 + 0.5);
+                let compact = self.layout.is_compact();
+                for (row_i, i) in (first..first + shown).enumerate() {
+                    let (id, ki) = list[i];
+                    let Some(k) = knobs(id).get(ki) else {
+                        continue;
+                    };
+                    let name = if compact {
+                        crate::categories::Chip::Knob(id, ki).label()
+                    } else {
+                        k.name
+                    };
+                    let y = panel.top() + 6.0 + row * (row_i as f32 + 0.5);
                     let on = i == chosen;
                     if on {
                         let band = Rect::from_center_size(
@@ -417,12 +476,22 @@ impl PhotoApp {
                             egui::StrokeKind::Inside,
                         );
                     }
+                    // Faded towards a cut-off end, so it reads as a list that goes on.
+                    let edge = (row_i == 0 && first > 0)
+                        || (row_i + 1 == shown && first + shown < list.len());
+                    let ink = if on {
+                        theme::ACCENT
+                    } else if edge {
+                        theme::TEXT_FAINT
+                    } else {
+                        theme::TEXT
+                    };
                     painter.text(
                         pos2(panel.left() + 18.0, y),
                         Align2::LEFT_CENTER,
-                        k.name,
+                        name,
                         FontId::new(15.0, theme::sans_strong()),
-                        if on { theme::ACCENT } else { theme::TEXT },
+                        ink,
                     );
                     painter.text(
                         pos2(panel.right() - 18.0, y),
