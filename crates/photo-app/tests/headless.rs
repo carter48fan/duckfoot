@@ -1554,6 +1554,8 @@ fn the_shelf_and_the_open_photo_come_back_on_the_next_launch() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
         h.settle(&mut app, Duration::from_secs(30));
         app.open_path(&h.gpu(), b.clone());
@@ -1689,6 +1691,8 @@ fn a_missing_photo_stays_on_the_shelf_and_the_filter_comes_back() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
         h.settle(&mut app, Duration::from_secs(30));
         app.filter.sort_descending = true;
@@ -1744,6 +1748,32 @@ fn a_screen_reader_is_told_what_each_control_is() {
 }
 
 #[test]
+fn the_first_run_welcomes_once_and_enter_starts_the_tour() {
+    let dir = scratch_dir("welcome");
+    let settings = dir.join("settings");
+    let h = Headless::new();
+    {
+        let mut app =
+            PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
+        h.frame(&mut app, Default::default());
+        assert!(app.welcome_showing(), "a first run opens on the welcome");
+        h.frame(&mut app, key(egui::Key::Enter));
+        assert!(!app.welcome_showing());
+        assert_eq!(app.desk_tour_showing(), Some(0), "Enter takes the tour");
+        // Esc ends the tour, which counts as seen.
+        h.frame(&mut app, key(egui::Key::Escape));
+        assert_eq!(app.desk_tour_showing(), None);
+        app.shutdown();
+    }
+    let app = PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings)));
+    assert!(!app.welcome_showing(), "the welcome shows once");
+    // Without settings every run would be the first, so none is.
+    let app = PhotoApp::with_platform(&h.gpu(), Box::new(photo_app::platform::NoPlatform));
+    assert!(!app.welcome_showing());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ctrl_e_opens_the_export_settings_and_they_are_remembered() {
     let dir = scratch_dir("exportsettings");
     let settings = dir.join("settings");
@@ -1767,6 +1797,8 @@ fn ctrl_e_opens_the_export_settings_and_they_are_remembered() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.add_to_shelf(&h.gpu(), vec![a.clone()]);
         h.settle(&mut app, Duration::from_secs(30));
         h.frame(&mut app, ctrl_e);
@@ -1817,6 +1849,8 @@ fn paste_carries_only_the_chosen_modules_and_the_choice_is_remembered() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
         h.settle(&mut app, Duration::from_secs(30));
         h.frame(&mut app, ctrl_shift_v);
@@ -1876,6 +1910,8 @@ fn a_saved_preset_applies_elsewhere_survives_a_restart_and_can_go() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.add_to_shelf(&h.gpu(), vec![a.clone(), b.clone()]);
         h.settle(&mut app, Duration::from_secs(30));
         app.edit(|s| {
@@ -2496,6 +2532,8 @@ fn undo_reaches_back_past_a_restart() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.open_path(&h.gpu(), raw.clone());
         h.settle(&mut app, Duration::from_secs(30));
         app.edit(|s| s.exposure.params.ev = 0.5);
@@ -2579,6 +2617,8 @@ fn a_watched_folder_brings_in_new_photos_and_marks_gone_ones() {
         let mut app =
             PhotoApp::with_platform(&h.gpu(), Box::new(RememberingPlatform(settings.clone())));
         h.frame(&mut app, Default::default());
+        // A first run: skip the welcome, which takes the keys while it shows.
+        h.frame(&mut app, key(egui::Key::Escape));
         app.open_session_folder(&h.gpu(), roll.clone());
         h.settle(&mut app, Duration::from_secs(30));
         write_dng(&b, 320, 214);

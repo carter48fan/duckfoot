@@ -760,6 +760,9 @@ pub struct PhotoApp {
     /// The desktop tour's step, while it shows, and where the parts it points at were.
     pub(crate) desk_tour_step: Option<usize>,
     pub(crate) desk_spots: help::DeskSpots,
+    /// The welcome card the desktop shows on its first run, until the tour is taken or
+    /// skipped.
+    pub(crate) welcome_open: bool,
     /// Blown and crushed pixels painted on the stage (J).
     pub clip_overlay: bool,
     /// The white-balance eyedropper is armed (W): the next click on the photo picks.
@@ -878,6 +881,9 @@ impl PhotoApp {
         let settings = settings::Settings::load(settings_dir.as_deref());
         // A skipped tour asked to be shown again: once, now.
         let tour_step = settings.tour_again.then_some(0);
+        // The desktop's first run welcomes and offers the tour. Only where settings are
+        // kept: without them (tests, the screenshot tool) every run would be the first.
+        let welcome_open = settings_dir.is_some() && !settings.desk_tour_done;
         let compact_sections = settings
             .compact_sections
             .clone()
@@ -1016,6 +1022,7 @@ impl PhotoApp {
             help_topic: 0,
             desk_tour_step: None,
             desk_spots: help::DeskSpots::default(),
+            welcome_open,
             clip_overlay: false,
             picking_wb: false,
             pending_sample: None,
@@ -1445,6 +1452,16 @@ impl PhotoApp {
         self.desk_tour_step.and_then(|s| self.desk_spot(s))
     }
 
+    /// The first run's welcome card shows.
+    pub fn welcome_showing(&self) -> bool {
+        self.welcome_open
+    }
+
+    /// The desktop tour's step, while it shows.
+    pub fn desk_tour_showing(&self) -> Option<usize> {
+        self.desk_tour_step
+    }
+
     /// Steps in the desktop tour.
     pub fn desk_tour_len(&self) -> usize {
         help::DESK_TOUR_LEN
@@ -1823,6 +1840,7 @@ impl PhotoApp {
             self.shortcuts_overlay(&ctx);
             self.preferences_window(&ctx);
             self.help_window(&ctx);
+            self.welcome(&ctx);
             self.desk_tour(&ctx);
         }
         let ppp = ctx.pixels_per_point();

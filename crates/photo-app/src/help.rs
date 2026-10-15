@@ -5,8 +5,9 @@
 //! cannot drift. Only the little Markdown the guide uses is understood — paragraphs, `- `
 //! and `1. ` lists, `**bold**` and `*italic*` — which is all a plain-language guide needs.
 //!
-//! The tour points at the window's parts one at a time. Like the phone's, it is offered
-//! (Help is lit until it has been seen) and never starts on its own (DESIGN.md).
+//! The tour points at the window's parts one at a time. The first run opens on a welcome
+//! card that offers it, or Help, or to skip both; after that it is offered (Help is lit
+//! until it has been seen) and never starts on its own (DESIGN.md).
 
 use crate::*;
 use egui::{CursorIcon, Pos2, Response, StrokeKind, Vec2};
@@ -157,6 +158,12 @@ enum Spot {
     Tools,
 }
 
+enum Welcome {
+    Skip,
+    Tour,
+    Help,
+}
+
 struct TourStep {
     spot: Spot,
     title: &'static str,
@@ -221,11 +228,13 @@ const TOUR: [TourStep; 8] = [
 
 impl PhotoApp {
     pub(crate) fn open_help(&mut self) {
+        self.welcome_open = false;
         self.help_open = true;
         self.shortcuts_open = false;
     }
 
     pub(crate) fn start_desk_tour(&mut self) {
+        self.welcome_open = false;
         self.help_open = false;
         self.shortcuts_open = false;
         self.desk_tour_step = Some(0);
@@ -233,6 +242,7 @@ impl PhotoApp {
 
     /// Finished or skipped, the tour is seen: Help stops asking for attention.
     pub(crate) fn end_desk_tour(&mut self) {
+        self.welcome_open = false;
         self.desk_tour_step = None;
         if !self.settings.desk_tour_done {
             self.settings.desk_tour_done = true;
@@ -240,8 +250,9 @@ impl PhotoApp {
         }
     }
 
-    /// Esc closes Help or the tour; while the tour shows, ← and → step through it. True
-    /// when either is up, so no other key reaches the photo behind them.
+    /// Esc closes the welcome, Help or the tour; Enter on the welcome starts the tour, and
+    /// while the tour shows, ← and → step through it. True when any is up, so no other key
+    /// reaches the photo behind them.
     pub(crate) fn help_keys(&mut self, ctx: &egui::Context) -> bool {
         let (esc, next, back) = ctx.input(|i| {
             (
@@ -250,6 +261,14 @@ impl PhotoApp {
                 i.key_pressed(egui::Key::ArrowLeft),
             )
         });
+        if self.welcome_open {
+            if esc {
+                self.end_desk_tour();
+            } else if next {
+                self.start_desk_tour();
+            }
+            return true;
+        }
         if let Some(step) = self.desk_tour_step {
             if esc {
                 self.end_desk_tour();
@@ -503,6 +522,99 @@ impl PhotoApp {
             self.shortcuts_open = true;
         } else if close {
             self.help_open = false;
+        }
+    }
+
+    /// The first run's welcome: what Duckfoot is, and the tour, Help or Skip. Skip counts
+    /// as having seen the tour, so the card shows once; the tour ends the same way.
+    pub(crate) fn welcome(&mut self, ctx: &egui::Context) {
+        if !self.welcome_open {
+            return;
+        }
+        let screen = ctx.content_rect();
+        egui::Area::new(egui::Id::new("welcome-backdrop"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                // Catches clicks without acting on them: the card asks for a choice.
+                ui.allocate_rect(screen, Sense::click());
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
+            });
+        let width = 420.0_f32.min(screen.width() - 32.0);
+        let mut choice = None;
+        egui::Area::new(egui::Id::new("welcome"))
+            .order(egui::Order::Tooltip)
+            .fade_in(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme::BG_900)
+                    .stroke(Stroke::new(1.0, theme::ACCENT))
+                    .corner_radius(10.0)
+                    .inner_margin(Margin::same(24))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 48.0);
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        ui.label(theme::tag("Welcome").color(theme::ACCENT));
+                        ui.label(
+                            RichText::new("Welcome to Duckfoot")
+                                .family(theme::display())
+                                .size(21.0)
+                                .color(theme::TEXT_HI),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Open a photo, make it look the way you remember, and save a \
+                                 copy to share. Your original is never changed.",
+                            )
+                            .size(14.5)
+                            .color(theme::TEXT),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "New here? The tour points at each part of the window and \
+                                 takes about a minute. Help is always in the ⋯ menu.",
+                            )
+                            .size(14.0)
+                            .color(theme::TEXT_DIM),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if widgets::button(ui, Kind::Secondary, "Skip", 0.0)
+                                .on_hover_text("Go straight to your photos (Esc)")
+                                .clicked()
+                            {
+                                choice = Some(Welcome::Skip);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if widgets::button(ui, Kind::Primary, "Take the tour", 0.0)
+                                        .on_hover_text("Enter")
+                                        .clicked()
+                                    {
+                                        choice = Some(Welcome::Tour);
+                                    }
+                                    if widgets::button(ui, Kind::Secondary, "Open Help", 0.0)
+                                        .clicked()
+                                    {
+                                        choice = Some(Welcome::Help);
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
+        match choice {
+            Some(Welcome::Skip) => self.end_desk_tour(),
+            Some(Welcome::Tour) => self.start_desk_tour(),
+            Some(Welcome::Help) => {
+                self.end_desk_tour();
+                self.open_help();
+            }
+            None => {}
         }
     }
 

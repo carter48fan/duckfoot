@@ -1021,8 +1021,8 @@ impl PhotoApp {
             });
     }
 
-    /// No image yet: a drop target that is also the Open button, and the reason the last
-    /// file failed, in place (DESIGN.md: failures surface in the UI, with the filename).
+    /// No image yet: a drop target that is also the Add button (one photo or several, and
+    /// the first opens), and the reason the last file failed, in place (DESIGN.md: failures surface in the UI, with the filename).
     pub(crate) fn empty_stage(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         let zone = Rect::from_center_size(
@@ -1068,7 +1068,7 @@ impl PhotoApp {
             if touch {
                 "Open a photo"
             } else {
-                "Drop a camera RAW file"
+                "Drop photos here"
             },
             FontId::new(15.0, theme::sans_strong()),
             theme::TEXT_HI,
@@ -1079,7 +1079,7 @@ impl PhotoApp {
             if touch {
                 "tap here to choose one"
             } else {
-                "or click to open one"
+                "or click to choose one or several"
             },
             FontId::proportional(12.5),
             theme::TEXT_DIM,
@@ -1111,7 +1111,7 @@ impl PhotoApp {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if response.clicked() {
-            self.pick_and_open(ui.ctx());
+            self.pick_and_shelve(ui.ctx());
         }
     }
 

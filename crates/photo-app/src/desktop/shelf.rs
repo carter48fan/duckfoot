@@ -1,12 +1,16 @@
-//! The left panel: this photo's history and snapshots.
+//! The left panel: the shelf's photos at a glance, and this photo's history and snapshots.
 
 use crate::*;
+
+/// How many rows of the Photos list show before it scrolls.
+const PHOTO_ROWS: f32 = 8.0;
 
 impl PhotoApp {
     // ── History panel (left) ────────────────────────────────────────────────────────────
 
-    /// The left panel: this photo's snapshots and history, one view. Folded, it is a thin
-    /// edge with one button to open it again. The photos are on the shelf under the stage.
+    /// The left panel: ways to add photos and a list of the shelf's, then this photo's
+    /// snapshots and history. Folded, it is a thin edge with a button to open it again and
+    /// the two add buttons, so adding is always one click away.
     pub(crate) fn history_panel(&mut self, ui: &mut egui::Ui) {
         if !self.shelf_open && !self.touring_history() {
             let edge = egui::Panel::left("history_edge")
@@ -19,8 +23,17 @@ impl PhotoApp {
                 .resizable(false)
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        if widgets::icon(ui, "›", false, "Show history and snapshots").clicked() {
+                        if widgets::icon(ui, "›", false, "Show photos, history and snapshots")
+                            .clicked()
+                        {
                             self.shelf_open = true;
+                        }
+                        ui.add_space(6.0);
+                        if widgets::icon(ui, "+", false, "Add photos…").clicked() {
+                            self.pick_and_shelve(ui.ctx());
+                        }
+                        if widgets::icon(ui, "🗀", false, "Add a folder…").clicked() {
+                            self.pick_folder_and_shelve(ui.ctx());
                         }
                     });
                 });
@@ -55,12 +68,87 @@ impl PhotoApp {
                             })
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 10.0;
+                                self.photos_group(ui);
                                 self.snapshots_group(ui);
                                 self.history_group(ui);
                             });
                     });
             });
         self.desk_spots.history = Some(panel.response.rect);
+    }
+
+    /// Add photos or a folder, and the shelf as a list in the order the shelf shows it
+    /// (its filter and sort too): the open photo marked, a click opens another.
+    pub(crate) fn photos_group(&mut self, ui: &mut egui::Ui) {
+        let shown = self.displayed_indices();
+        let count = self.shelf.len();
+        let mut open = None;
+        group(
+            ui,
+            "Photos",
+            |ui| {
+                ui.label(theme::tag(count.to_string()).color(theme::TEXT_DIM));
+            },
+            |ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let w = ((ui.available_width() - gap) / 2.0).floor();
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, Kind::Secondary, "+ Photos…", w)
+                        .on_hover_text("Add one photo or several to the shelf")
+                        .clicked()
+                    {
+                        self.pick_and_shelve(ui.ctx());
+                    }
+                    if widgets::button(ui, Kind::Secondary, "+ Folder…", w)
+                        .on_hover_text("Add every photo in a folder and its folders")
+                        .clicked()
+                    {
+                        self.pick_folder_and_shelve(ui.ctx());
+                    }
+                });
+                ui.add_space(4.0);
+                if shown.is_empty() {
+                    let empty = if count == 0 {
+                        "no photos yet"
+                    } else {
+                        "none match the filter"
+                    };
+                    ui.label(theme::dim(empty));
+                    ui.add_space(2.0);
+                    return;
+                }
+                // The rows are 22 high with 3 between them.
+                egui::ScrollArea::vertical()
+                    .id_salt("photos-list")
+                    .max_height(PHOTO_ROWS * 25.0)
+                    .show_rows(ui, 22.0, shown.len(), |ui, range| {
+                        for &i in &shown[range] {
+                            let item = &self.shelf[i];
+                            let style = if self.loaded_path.as_ref() == Some(&item.path) {
+                                RowStyle::Now
+                            } else if item.missing {
+                                RowStyle::Faint
+                            } else {
+                                RowStyle::Normal
+                            };
+                            let stars = match item.metadata.rating {
+                                0 => String::new(),
+                                r => format!("{r}★"),
+                            };
+                            let row =
+                                list_row(ui, &item.name, style, Some((&stars, theme::TEXT_DIM)));
+                            if row.clicked() && style != RowStyle::Now {
+                                open = Some(item.path.clone());
+                            }
+                        }
+                    });
+                ui.add_space(2.0);
+            },
+        );
+        // Opened at the end of the frame, where the GPU is at hand.
+        if open.is_some() {
+            self.pending_open = open;
+        }
     }
 
     pub(crate) fn snapshots_group(&mut self, ui: &mut egui::Ui) {

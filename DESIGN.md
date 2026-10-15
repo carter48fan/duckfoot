@@ -9,7 +9,8 @@ The measure of success is not what Duckfoot can do — it's what it declines to 
 feature request answered with *"that belongs in another barrel, or nowhere"* is the
 design working. Build tools a friend can open, do one thing, and close: no project
 wizard, no onboarding, no mode you can get lost in. (The phone's short tour is offered —
-its chip is lit until it has been seen — and never started on its own.)
+its chip is lit until it has been seen — and never started on its own. The desktop's first
+run opens on one welcome card that offers its tour, with Skip; after that the same rule.)
 
 ## Where this document is aimed right now
 
