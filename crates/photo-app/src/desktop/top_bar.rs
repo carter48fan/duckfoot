@@ -3,7 +3,7 @@
 use crate::*;
 
 /// The top bar's line: the brand's two lines of text, the tallest thing on it.
-const TOP_BAR_LINE: f32 = 32.0;
+const TOP_BAR_LINE: f32 = 36.0;
 
 impl PhotoApp {
     // ── Top bar ─────────────────────────────────────────────────────────────────────────
@@ -13,11 +13,11 @@ impl PhotoApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(14, 9)),
+                    .inner_margin(Margin::symmetric(16, 10)),
             )
             // Exactly its line and margins: grown by the spacing after its last row it
             // would sit its items above its middle.
-            .exact_size(TOP_BAR_LINE + 18.0)
+            .exact_size(TOP_BAR_LINE + 20.0)
             .resizable(false)
             .show(ui, |ui| {
                 widgets::bar_line(ui, TOP_BAR_LINE, |ui| {
@@ -54,9 +54,20 @@ impl PhotoApp {
                         });
                     });
 
-                    if ui.available_width() > 720.0 {
+                    // The pill only where it fits beside the actions, as last frame measured
+                    // both; until the pill has been measured, about its usual width.
+                    let actions_key = egui::Id::new("top_bar_actions_width");
+                    let pill_key = egui::Id::new("top_bar_pill_width");
+                    let actions_w = widgets::trailing_width(ui.ctx(), actions_key);
+                    let pill_w = Some(widgets::trailing_width(ui.ctx(), pill_key))
+                        .filter(|w| w.is_finite())
+                        .unwrap_or(320.0);
+                    if actions_w + pill_w + 24.0 <= ui.available_width() {
                         ui.add_space(10.0);
-                        self.telemetry_pill(ui);
+                        ui.scope(|ui| {
+                            self.telemetry_pill(ui);
+                            widgets::remember_trailing_width(ui, pill_key);
+                        });
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -106,6 +117,25 @@ impl PhotoApp {
                         {
                             self.shortcuts_open = !self.shortcuts_open;
                         }
+                        ui.add_space(8.0);
+
+                        // Right-to-left, so these read undo · redo · depth on screen.
+                        ui.label(
+                            theme::num(format!("{} steps", self.history.past.len()))
+                                .size(11.0)
+                                .color(theme::TEXT_FAINT),
+                        );
+                        ui.add_enabled_ui(!self.history.future.is_empty(), |ui| {
+                            if widgets::icon(ui, "↷", false, "Redo (Ctrl+Shift+Z)").clicked() {
+                                self.redo();
+                            }
+                        });
+                        ui.add_enabled_ui(!self.history.past.is_empty(), |ui| {
+                            if widgets::icon(ui, "↶", false, "Undo (Ctrl+Z)").clicked() {
+                                self.undo();
+                            }
+                        });
+                        ui.add_space(8.0);
 
                         // Right-to-left, so these read shelf · split · inspector on screen.
                         pod(ui, |ui| {
@@ -143,12 +173,13 @@ impl PhotoApp {
                                 self.shelf_open = !self.shelf_open;
                             }
                         });
+                        widgets::remember_trailing_width(ui, actions_key);
                     });
                 });
             });
     }
 
-    /// The session readout: camera, dimensions, undo depth. Real values only.
+    /// The session readout: camera and dimensions. Real values only.
     pub(crate) fn telemetry_pill(&self, ui: &mut egui::Ui) {
         egui::Frame::new()
             .stroke(Stroke::new(1.0, Color32::from_gray(0x2a)))
@@ -183,12 +214,6 @@ impl PhotoApp {
                                 theme::num(format!("{:.1} MP", image.megapixels()))
                                     .size(11.5)
                                     .color(Color32::from_gray(0xcc)),
-                            );
-                            sep(ui);
-                            ui.label(
-                                theme::num(format!("undo ({})", self.history.past.len()))
-                                    .size(11.5)
-                                    .color(theme::TEXT_DIM),
                             );
                         }
                         None => {

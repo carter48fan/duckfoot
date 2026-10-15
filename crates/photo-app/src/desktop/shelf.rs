@@ -5,6 +5,40 @@ use crate::*;
 impl PhotoApp {
     // ── Shelf bin (left) ────────────────────────────────────────────────────────────────
 
+    /// The shelf folded to a rail of icons, always there. The filmstrip already shows the
+    /// roll, so the full shelf is a drawer opened from here for files and folders.
+    pub(crate) fn shelf_rail(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("shelf_rail")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG_925)
+                    .inner_margin(Margin::symmetric(8, 10)),
+            )
+            .exact_size(48.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.vertical_centered(|ui| {
+                    let stills = self.shelf_open && !self.folder_browser_open;
+                    let tip = format!("Stills on the shelf ({})", self.shelf.len());
+                    if widgets::icon(ui, "▦", stills, &tip).clicked() {
+                        self.shelf_open = !stills;
+                        self.folder_browser_open = false;
+                    }
+                    ui.label(theme::tag(self.shelf.len().to_string()).color(theme::TEXT_FAINT));
+                    let folders = self.shelf_open && self.folder_browser_open;
+                    if widgets::icon(ui, "🗁", folders, "Folders").clicked() {
+                        self.shelf_open = !folders;
+                        self.folder_browser_open = true;
+                    }
+                    ui.add_space(6.0);
+                    if widgets::icon(ui, "✚", false, "Add photos to the shelf").clicked() {
+                        self.pick_and_shelve(ui.ctx());
+                    }
+                });
+            });
+    }
+
     pub(crate) fn shelf(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         if !self.shelf_open {
             return;

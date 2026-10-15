@@ -29,20 +29,20 @@ impl PhotoApp {
     }
 
     pub(crate) fn stage_toolbar(&mut self, ui: &mut egui::Ui) {
-        // A pod of icons: 26 and its margin and hairline.
-        const STAGE_TOOLBAR_LINE: f32 = 32.0;
+        // A pod of icons: 30 and its margin and hairline.
+        const STAGE_TOOLBAR_LINE: f32 = 36.0;
         let panel = egui::Panel::top("stage_toolbar")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(14, 7)),
+                    .inner_margin(Margin::symmetric(16, 8)),
             )
             .resizable(false);
         // One line and its margins, exactly, but while framing a crop, which adds a row.
         let panel = if self.cropping {
             panel
         } else {
-            panel.exact_size(STAGE_TOOLBAR_LINE + 14.0)
+            panel.exact_size(STAGE_TOOLBAR_LINE + 16.0)
         };
         panel
             .show(ui, |ui| {
@@ -258,106 +258,82 @@ impl PhotoApp {
 
         egui::Panel::bottom("filmstrip")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
-                left: 14,
-                right: 14,
-                top: 8,
-                bottom: 10,
+                left: 16,
+                right: 16,
+                top: 10,
+                bottom: 12,
             }))
             .show(ui, |ui| {
-                let actions_key = egui::Id::new("filmstrip_actions_width");
-                let actions_w = widgets::trailing_width(ui.ctx(), actions_key);
-                let mut beside = false;
-                ui.horizontal(|ui| {
-                    ui.label(theme::head("Filmstrip").color(theme::ACCENT));
-                    let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
-                    let visible_count = displayed.len();
-                    ui.label(
-                        theme::num(format!(
-                            "{visible_count}/{} stills · {developed} with sidecar",
-                            self.shelf.len()
-                        ))
-                        .size(11.0)
-                        .color(Color32::from_gray(0xcc)),
-                    );
-                    // Beside the title when they fit there, as last frame measured them.
-                    beside = actions_w + 12.0 <= ui.available_width();
-                    if beside {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.scope(|ui| {
-                                self.filmstrip_actions(ui, true);
-                                widgets::remember_trailing_width(ui, actions_key);
-                            });
-                        });
-                    }
-                });
-                if !beside {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        self.filmstrip_actions(ui, false);
-                        widgets::remember_trailing_width(ui, actions_key);
-                    });
-                }
-                ui.add_space(6.0);
-
-                // Two rows: what is shown, then how it is ordered and what to do with the
-                // selection. One row with a right-aligned half ran the halves into each other
-                // on a narrow stage.
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    self.rating_filter(ui);
-                    ui.separator();
-                    self.flag_filter(ui);
-                });
-                ui.add_space(4.0);
-                let selected_key = egui::Id::new("filmstrip_selection_width");
-                let selected_w = widgets::trailing_width(ui.ctx(), selected_key);
-                let mut selection_beside = false;
                 let count = self.selection.count();
-                let selection_actions = |ui: &mut egui::Ui, export: &mut bool, clear: &mut bool| {
-                    if widgets::button(ui, Kind::Primary, &format!("Export Batch ({count})"), 0.0)
-                        .clicked()
-                    {
-                        *export = true;
-                    }
-                    if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
-                        *clear = true;
-                    }
-                };
                 let mut clear = false;
-                // The label filter after the sort when it fits there, as last frame
-                // measured it, else on a row of its own.
-                let label_key = egui::Id::new("filmstrip_label_width");
-                let label_w = widgets::trailing_width(ui.ctx(), label_key);
-                let mut label_beside = false;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    self.search_field(ui, 140.0);
-                    ui.separator();
-                    self.sort_controls(ui, false);
-                    if label_w + 12.0 <= ui.available_width() {
-                        label_beside = true;
-                        ui.separator();
-                        ui.scope(|ui| {
-                            ui.horizontal(|ui| self.label_filter(ui));
-                            widgets::remember_trailing_width(ui, label_key);
-                        });
-                    }
-                    if count > 0 && selected_w + 12.0 <= ui.available_width() {
-                        selection_beside = true;
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The title, then the filters, find and sort, and what to do with a
+                // selection, each group on the line it fits on as last frame measured it,
+                // else starting the next. The stack's own actions are in the inspector.
+                let mut parts = vec![Part::Stars, Part::Flags, Part::Labels, Part::Order];
+                if count > 0 {
+                    parts.push(Part::Selection);
+                }
+                let mut next = 0;
+                let mut first_line = true;
+                while next < parts.len() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if first_line {
+                            ui.label(theme::head("Filmstrip").color(theme::ACCENT));
+                            let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
+                            ui.label(
+                                theme::num(format!("{}/{}", displayed.len(), self.shelf.len()))
+                                    .size(11.0)
+                                    .color(Color32::from_gray(0xcc)),
+                            )
+                            .on_hover_text(format!("{developed} with a sidecar"));
+                        }
+                        let mut placed = 0;
+                        while let Some(&part) = parts.get(next) {
+                            let key = egui::Id::new(("filmstrip_part_width", part as u8));
+                            let w = widgets::trailing_width(ui.ctx(), key);
+                            // Always at least one per line, so a too-narrow stage still moves on.
+                            if (placed > 0 || first_line) && w + 14.0 > ui.available_width() {
+                                break;
+                            }
+                            ui.add_space(6.0);
                             ui.scope(|ui| {
-                                selection_actions(ui, &mut action_export, &mut clear);
-                                widgets::remember_trailing_width(ui, selected_key);
+                                ui.horizontal(|ui| match part {
+                                    Part::Stars => self.star_filter(ui),
+                                    Part::Flags => self.flag_filter(ui),
+                                    Part::Labels => self.label_filter(ui),
+                                    Part::Order => {
+                                        self.search_field(ui, 150.0);
+                                        self.sort_controls(ui, false);
+                                    }
+                                    Part::Selection => {
+                                        if widgets::button(
+                                            ui,
+                                            Kind::Primary,
+                                            &format!("Export Batch ({count})"),
+                                            0.0,
+                                        )
+                                        .clicked()
+                                        {
+                                            action_export = true;
+                                        }
+                                        if widgets::button(ui, Kind::Secondary, "Deselect", 0.0)
+                                            .clicked()
+                                        {
+                                            clear = true;
+                                        }
+                                    }
+                                });
+                                widgets::remember_trailing_width(ui, key);
                             });
-                        });
-                    }
-                });
-                if !label_beside {
-                    ui.add_space(4.0);
-                    ui.scope(|ui| {
-                        ui.horizontal(|ui| self.label_filter(ui));
-                        widgets::remember_trailing_width(ui, label_key);
+                            placed += 1;
+                            next += 1;
+                        }
                     });
+                    first_line = false;
+                    if next < parts.len() {
+                        ui.add_space(4.0);
+                    }
                 }
                 if !self.saved_filters.is_empty()
                     || self.filtering()
@@ -367,14 +343,6 @@ impl PhotoApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         self.saved_filters_row(ui);
-                    });
-                }
-                if count > 0 && !selection_beside {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        selection_actions(ui, &mut action_export, &mut clear);
-                        widgets::remember_trailing_width(ui, selected_key);
                     });
                 }
                 if clear {
@@ -493,6 +461,32 @@ impl PhotoApp {
                         dam::RatingFilter::All
                     } else {
                         dam::RatingFilter::MinStars(min)
+                    };
+                }
+            }
+        });
+    }
+
+    /// Five stars: the lowest rating shown. Clicking the lit end star again shows all.
+    pub(crate) fn star_filter(&mut self, ui: &mut egui::Ui) {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let min = match self.filter.rating {
+                dam::RatingFilter::MinStars(m) => m,
+                _ => 0,
+            };
+            for stars in 1..=5u8 {
+                let lit = stars <= min;
+                let tip = if stars == 5 {
+                    "Five stars only".to_string()
+                } else {
+                    format!("{stars} stars or more")
+                };
+                if widgets::icon(ui, if lit { "★" } else { "☆" }, lit, &tip).clicked() {
+                    self.filter.rating = if stars == min {
+                        dam::RatingFilter::All
+                    } else {
+                        dam::RatingFilter::MinStars(stars)
                     };
                 }
             }
@@ -827,151 +821,93 @@ impl PhotoApp {
         }
     }
 
-    /// Undo · Redo | Reset all · Copy stack · Paste · Modules… · Previous · Paste to all. `right_to_left` callers
-    /// get them reversed, so they read the same way on screen either way.
-    pub(crate) fn filmstrip_actions(&mut self, ui: &mut egui::Ui, right_to_left: bool) {
-        #[derive(Clone, Copy)]
-        enum Action {
-            Undo,
-            Redo,
-            Sep,
-            Reset,
-            Copy,
-            Paste,
-            Choose,
-            Previous,
-            PasteAll,
-        }
-        let mut order = [
-            Action::Undo,
-            Action::Redo,
-            Action::Sep,
-            Action::Reset,
-            Action::Copy,
-            Action::Paste,
-            Action::Choose,
-            Action::Previous,
-            Action::PasteAll,
-        ];
-        if right_to_left {
-            order.reverse();
-        }
-
+    /// Copy · Paste · Modules… · Previous · Reset all · Paste to all: what you do to the
+    /// stack as a whole, in the inspector's footer beside Save sidecar. Undo and Redo are
+    /// in the top bar.
+    pub(crate) fn edit_actions(&mut self, ui: &mut egui::Ui) {
         let loaded = self.loaded_path.is_some();
         let has_clip = self.clipboard_stack.is_some();
         let n = self.shelf.len();
-        for action in order {
-            use widgets::button_enabled as button;
-            match action {
-                Action::Undo => {
-                    if button(
-                        ui,
-                        !self.history.past.is_empty(),
-                        Kind::Secondary,
-                        "Undo",
-                        0.0,
-                    )
-                    .on_hover_text("Ctrl+Z")
-                    .clicked()
-                    {
-                        self.undo();
-                    }
-                }
-                Action::Redo => {
-                    if button(
-                        ui,
-                        !self.history.future.is_empty(),
-                        Kind::Secondary,
-                        "Redo",
-                        0.0,
-                    )
-                    .on_hover_text("Ctrl+Shift+Z")
-                    .clicked()
-                    {
-                        self.redo();
-                    }
-                }
-                Action::Sep => vsep(ui),
-                Action::Reset => {
-                    if button(ui, loaded, Kind::Secondary, "Reset all", 0.0)
-                        .on_hover_text("Every module back to default (undoable)")
-                        .clicked()
-                    {
-                        self.reset_to_default();
-                    }
-                }
-                Action::Copy => {
-                    if button(ui, loaded, Kind::Secondary, "Copy stack", 0.0)
-                        .on_hover_text("Copy this image's adjustments (Ctrl+C)")
-                        .clicked()
-                    {
-                        self.copy_adjustments();
-                    }
-                }
-                Action::Paste => {
-                    if button(ui, has_clip && loaded, Kind::Secondary, "Paste", 0.0)
-                        .on_hover_text("Paste the copied stack onto this image (Ctrl+V)")
-                        .clicked()
-                    {
-                        self.paste_adjustments();
-                    }
-                }
-                Action::Choose => {
-                    let tip = format!(
-                        "Choose what Paste, Previous and Paste to all carry: now {} \
-                         (Ctrl+Shift+V)",
-                        self.paste_set.describe()
-                    );
-                    if widgets::button(ui, Kind::Secondary, "Modules…", 0.0)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        self.paste_picker_open = !self.paste_picker_open;
-                    }
-                }
-                Action::Previous => {
-                    if button(
-                        ui,
-                        self.can_same_as_previous(),
-                        Kind::Secondary,
-                        "Previous",
-                        0.0,
-                    )
-                    .on_hover_text(
-                        "The same edits as the photo open before this one; crop and \
-                             rotation stay (Ctrl+Alt+V)",
-                    )
-                    .clicked()
-                    {
-                        self.same_as_previous();
-                    }
-                }
-                Action::PasteAll if self.can_undo_paste_to_all() => {
-                    if button(ui, true, Kind::Secondary, "Undo paste", 0.0)
-                        .on_hover_text("Put back every sidecar the paste to all replaced")
-                        .clicked()
-                    {
-                        self.undo_paste_to_all();
-                    }
-                }
-                Action::PasteAll => {
-                    if button(
-                        ui,
-                        has_clip && n > 0,
-                        Kind::Accent,
-                        &format!("Paste to all {n}"),
-                        0.0,
-                    )
-                    .on_hover_text(
-                        "Paste the copied look onto every shelf photo; each keeps its own \
-                         crop and rotation",
-                    )
-                    .clicked()
-                    {
-                        self.paste_to_all_in_shelf();
-                    }
-                }
+        let gap = ui.spacing().item_spacing.x;
+        // Two to a row, equal widths: three left "Paste to all 22" no room for its label.
+        let w = ((ui.available_width() - gap) / 2.0).floor();
+        use widgets::button_enabled as button;
+        ui.horizontal_wrapped(|ui| {
+            if button(ui, loaded, Kind::Secondary, "Copy", w)
+                .on_hover_text("Copy this image's adjustments (Ctrl+C)")
+                .clicked()
+            {
+                self.copy_adjustments();
             }
-        }
+            if button(ui, has_clip && loaded, Kind::Secondary, "Paste", w)
+                .on_hover_text("Paste the copied stack onto this image (Ctrl+V)")
+                .clicked()
+            {
+                self.paste_adjustments();
+            }
+            let tip = format!(
+                "Choose what Paste, Previous and Paste to all carry: now {} (Ctrl+Shift+V)",
+                self.paste_set.describe()
+            );
+            if widgets::button(ui, Kind::Secondary, "Modules…", w)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                self.paste_picker_open = !self.paste_picker_open;
+            }
+            if button(
+                ui,
+                self.can_same_as_previous(),
+                Kind::Secondary,
+                "Previous",
+                w,
+            )
+            .on_hover_text(
+                "The same edits as the photo open before this one; crop and rotation \
+                     stay (Ctrl+Alt+V)",
+            )
+            .clicked()
+            {
+                self.same_as_previous();
+            }
+            if button(ui, loaded, Kind::Secondary, "Reset all", w)
+                .on_hover_text("Every module back to default (undoable)")
+                .clicked()
+            {
+                self.reset_to_default();
+            }
+            if self.can_undo_paste_to_all() {
+                if button(ui, true, Kind::Secondary, "Undo paste", w)
+                    .on_hover_text("Put back every sidecar the paste to all replaced")
+                    .clicked()
+                {
+                    self.undo_paste_to_all();
+                }
+            } else if button(
+                ui,
+                has_clip && n > 0,
+                Kind::Accent,
+                &format!("Paste to all {n}"),
+                w,
+            )
+            .on_hover_text(
+                "Paste the copied look onto every shelf photo; each keeps its own crop and \
+                 rotation",
+            )
+            .clicked()
+            {
+                self.paste_to_all_in_shelf();
+            }
+        });
     }
+}
+
+/// The groups on the filmstrip's header lines, in order.
+#[derive(Clone, Copy)]
+enum Part {
+    Stars,
+    Flags,
+    Labels,
+    Order,
+    Selection,
 }

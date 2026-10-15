@@ -121,6 +121,66 @@ module_table! {
     Look => look;
 }
 
+/// The desktop inspector's tabs. `All` is the whole customised list, folded as before;
+/// each other tab shows its modules open. Grouping is display only: the pipeline order is
+/// fixed whichever tab is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModuleGroup {
+    All,
+    Basic,
+    Tone,
+    Colour,
+    Detail,
+    Optics,
+    Retouch,
+}
+
+impl ModuleGroup {
+    pub(crate) const TABS: [Self; 7] = [
+        Self::All,
+        Self::Basic,
+        Self::Tone,
+        Self::Colour,
+        Self::Detail,
+        Self::Optics,
+        Self::Retouch,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Basic => "basic",
+            Self::Tone => "tone",
+            Self::Colour => "colour",
+            Self::Detail => "detail",
+            Self::Optics => "optics",
+            Self::Retouch => "retouch",
+        }
+    }
+
+    /// Whether `id` shows on this tab. The scope is pinned above the tabs, so none has it.
+    pub(crate) fn holds(self, id: InspectorSectionId) -> bool {
+        id != InspectorSectionId::Scope && (self == Self::All || id.group() == self)
+    }
+}
+
+impl InspectorSectionId {
+    /// The tab a module lives on.
+    pub(crate) fn group(self) -> ModuleGroup {
+        use InspectorSectionId as I;
+        match self {
+            I::WhiteBalance | I::Exposure | I::Tonal | I::Vibrance => ModuleGroup::Basic,
+            I::ToneCurve | I::Filmic3D | I::Clarity | I::Dehaze => ModuleGroup::Tone,
+            I::ColorEq | I::ColorBalance | I::Look => ModuleGroup::Colour,
+            I::Sharpen | I::Denoise => ModuleGroup::Detail,
+            I::Geometry | I::Lens | I::Vignette => ModuleGroup::Optics,
+            I::Local | I::Heal => ModuleGroup::Retouch,
+            // Pinned above the tabs; `holds` never asks.
+            I::Scope => ModuleGroup::All,
+        }
+    }
+}
+
 /// What changed between two adjacent undo states, for the History list.
 pub(crate) fn describe_change(a: &PhotoStack, b: &PhotoStack) -> String {
     let mut names: Vec<String> = Vec::new();
@@ -192,6 +252,21 @@ mod tests {
             let mut reset = on.clone();
             id.reset(&mut reset, &base);
             assert_eq!(reset, base, "{id:?}: reset did not restore it");
+        }
+    }
+
+    /// Every module is on exactly one tab besides All, so none can be lost to the tabs.
+    #[test]
+    fn every_module_has_one_tab() {
+        for &id in InspectorSectionId::all() {
+            if id == InspectorSectionId::Scope {
+                continue;
+            }
+            let tabs = ModuleGroup::TABS
+                .iter()
+                .filter(|g| **g != ModuleGroup::All && g.holds(id))
+                .count();
+            assert_eq!(tabs, 1, "{id:?} is on {tabs} tabs");
         }
     }
 }

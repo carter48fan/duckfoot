@@ -150,14 +150,14 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
     let enabled = enabled && ui.is_enabled();
     let galley = ui.painter().layout_no_wrap(
         text.to_uppercase(),
-        FontId::new(sized(ui, 10.5, 12.5), theme::mono_bold()),
+        FontId::new(sized(ui, 11.0, 12.5), theme::mono_bold()),
         Color32::PLACEHOLDER,
     );
     // On touch, big enough to see what a finger is aiming at: a hit area grown round a
     // small chip overlaps its neighbours', and the wrong one answers.
     let size = vec2(
-        galley.size().x + sized(ui, 14.0, 22.0),
-        sized(ui, 20.0, 34.0),
+        galley.size().x + sized(ui, 18.0, 22.0),
+        sized(ui, 26.0, 34.0),
     );
     let sense = if enabled {
         Sense::click()
@@ -216,7 +216,7 @@ pub fn button_enabled(
     text: &str,
     min_width: f32,
 ) -> Response {
-    let height = sized(ui, 26.0, 40.0);
+    let height = sized(ui, 30.0, 40.0);
     button_sized(ui, enabled, kind, text, min_width, height)
 }
 
@@ -240,7 +240,7 @@ pub fn button_sized(
         Color32::PLACEHOLDER,
     );
     let size = vec2(
-        (galley.size().x + sized(ui, 22.0, 28.0)).max(min_width),
+        (galley.size().x + sized(ui, 26.0, 28.0)).max(min_width),
         height,
     );
     let sense = if enabled {
@@ -275,7 +275,7 @@ pub fn button_sized(
 /// A square icon button, ghost-styled. `glyph` must exist in egui's bundled fallback fonts.
 pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 26.0, 40.0)), Sense::click());
+    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 30.0, 40.0)), Sense::click());
     // The tooltip says what it does; the glyph alone would be read as "question mark".
     describe(ui, &response, rect, || {
         egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tooltip)
@@ -436,13 +436,13 @@ fn rail_painted(
         readout,
     } = spec;
     let touch = is_touch(ui.ctx());
-    let row_h = sized(ui, 18.0, 32.0);
+    let row_h = sized(ui, 24.0, 32.0);
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     let thumb = if touch {
         vec2(14.0, 22.0)
     } else {
-        vec2(8.0, 14.0)
+        vec2(10.0, 16.0)
     };
     let track = Rect::from_min_max(
         pos2(rect.left() + thumb.x / 2.0, rect.center().y - 1.0),
@@ -657,7 +657,7 @@ pub fn scaled_slider(
     ui.horizontal(|ui| {
         // Room for the longest label in the stack ("smoothness") at either size, so a
         // module's rails start in one column.
-        let label_col = sized(ui, 74.0, 82.0);
+        let label_col = sized(ui, 84.0, 82.0);
         // The value box is sized from its widest possible text, not a guess. In a side panel,
         // a row that overflows by even a few pixels is read as content asking for a wider
         // panel — and it asks again every frame.
@@ -681,7 +681,7 @@ pub fn scaled_slider(
         // A common floor keeps the rails of a module's rows the same length.
         let value_w =
             (digit_w + 2.0 * ui.spacing().button_padding.x + 4.0).max(sized(ui, 50.0, 56.0));
-        let row_h = sized(ui, 18.0, 32.0);
+        let row_h = sized(ui, 24.0, 32.0);
         let modified = (*value - default).abs() > 1e-6;
         let text = ui.painter().layout_no_wrap(
             label.to_string(),
@@ -792,7 +792,7 @@ pub fn bar_line<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> 
 pub fn band<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let inner = Frame::new()
         .fill(BG_925)
-        .inner_margin(Margin::symmetric(12, 7))
+        .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(add).inner
@@ -813,14 +813,14 @@ pub fn card<R>(ui: &mut Ui, focused: bool, add: impl FnOnce(&mut Ui) -> R) -> In
         .fill(BG_925)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(CornerRadius::same(RADIUS))
-        .inner_margin(Margin::symmetric(10, 5))
+        .inner_margin(Margin::symmetric(12, 8))
         .begin(ui);
     let inner = {
         let ui = &mut prepared.content_ui;
         ui.set_min_width(ui.available_width());
         add(ui)
     };
-    let outer = prepared.content_ui.min_rect().expand2(vec2(11.0, 6.0));
+    let outer = prepared.content_ui.min_rect().expand2(vec2(13.0, 9.0));
     let hovered = ui.rect_contains_pointer(outer);
     prepared.frame.stroke.color = if focused {
         ACCENT
@@ -858,7 +858,10 @@ pub fn module_header(
     summary_colour: Color32,
     focused: bool,
 ) -> ModuleHeader {
-    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let (row, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), sized(ui, 32.0, 24.0)),
+        Sense::click(),
+    );
     describe(ui, &response, row, || {
         egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title)
     });
@@ -892,7 +895,7 @@ pub fn module_header(
     let painter = ui.painter();
     let title_galley = painter.layout_no_wrap(
         title.to_owned(),
-        FontId::new(13.0, theme::sans_strong()),
+        FontId::new(13.5, theme::sans_strong()),
         title_colour,
     );
     let title_w = title_galley.size().x;
