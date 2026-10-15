@@ -196,28 +196,6 @@ impl PhotoApp {
         });
     }
 
-    /// `dir`'s folders for the browser: the last listing, asked for again off this thread
-    /// when it is for another folder or a few seconds old (WP5.3).
-    pub(crate) fn cached_subfolders(&mut self, dir: &std::path::Path) -> Vec<PathBuf> {
-        let fresh = |t: &Instant| t.elapsed() < Duration::from_secs(3);
-        match &mut self.subfolders {
-            Some((d, subs, asked)) if d == dir => {
-                if !fresh(asked) {
-                    *asked = Instant::now();
-                    self.loader
-                        .file_job(loader::FileJob::Subfolders(dir.to_path_buf()));
-                }
-                subs.clone()
-            }
-            _ => {
-                self.subfolders = Some((dir.to_path_buf(), Vec::new(), Instant::now()));
-                self.loader
-                    .file_job(loader::FileJob::Subfolders(dir.to_path_buf()));
-                Vec::new()
-            }
-        }
-    }
-
     /// While a folder is read: how far it has got, with a button that stops it (WP5.8).
     pub(crate) fn show_reading(&mut self) {
         let Some(name) = &self.reading else { return };
@@ -271,8 +249,6 @@ impl PhotoApp {
             for (dir, listing) in &found {
                 self.folder_watch.watch(dir.clone(), listing);
             }
-            self.folder_tree.current_folder = Some(folder);
-            self.folder_browser_open = false;
         }
         let open_first = purpose == loader::ScanFor::Drop || self.loaded_path.is_none();
         self.add_to_shelf(gpu, images);
@@ -1067,9 +1043,6 @@ impl PhotoApp {
                     } else {
                         self.take_scan_result(gpu, folder, purpose, found);
                     }
-                }
-                loader::Done::Subfolders { dir, subs } => {
-                    self.subfolders = Some((dir, subs, Instant::now()));
                 }
                 loader::Done::Library {
                     entries,

@@ -13,6 +13,12 @@ impl PhotoApp {
         self.request(ctx, platform::Request::AddImages { from });
     }
 
+    /// Pick a folder; its photos, and its folders' photos, are added to the shelf.
+    pub(crate) fn pick_folder_and_shelve(&mut self, ctx: &egui::Context) {
+        let from = self.settings.import_dir.clone();
+        self.request(ctx, platform::Request::BrowseFolder { from });
+    }
+
     pub(crate) fn pick_and_export(&mut self, ctx: &egui::Context) {
         let (dir, name) = self.export_suggestion();
         self.request(ctx, platform::Request::ExportImage { dir, name });
@@ -63,10 +69,10 @@ impl PhotoApp {
                         self.open_path(gpu, first);
                     }
                 }
+                // A picked folder goes straight onto the shelf, its folders with it.
                 platform::Response::BrowseFolder(dir) => {
                     self.remember_import_dir(Some(&dir));
-                    self.folder_tree.current_folder = Some(dir);
-                    self.folder_browser_open = true;
+                    self.open_session_folder(gpu, dir);
                 }
                 platform::Response::BatchOutputDir(dir) => {
                     self.settings.batch_output_dir = Some(dir.clone());

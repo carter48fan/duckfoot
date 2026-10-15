@@ -1,88 +1,33 @@
-//! The left rail, and the drawer it opens: folders, history and snapshots.
+//! The left panel: this photo's history and snapshots.
 
 use crate::*;
 
 impl PhotoApp {
-    // ── Shelf bin (left) ────────────────────────────────────────────────────────────────
+    // ── History panel (left) ────────────────────────────────────────────────────────────
 
-    /// The left rail. The shelf is one thing, under the stage: the top two buttons show it
-    /// as a strip or a grid, or hide it. Below them, the drawer's two views (folders, and
-    /// this photo's history and snapshots) and adding photos.
-    pub(crate) fn shelf_rail(&mut self, ui: &mut egui::Ui) {
-        let rail = egui::Panel::left("shelf_rail")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(8, 10)),
-            )
-            .exact_size(48.0)
-            .resizable(false)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.vertical_centered(|ui| {
-                    let shown = self.strip != StripMode::Hidden;
-                    let tip = if shown {
-                        "Hide the shelf (F)"
-                    } else {
-                        "Show the shelf (F)"
-                    };
-                    if widgets::icon(ui, "▤", shown, tip).clicked() {
-                        self.strip = if shown {
-                            StripMode::Hidden
-                        } else {
-                            StripMode::Strip
-                        };
-                    }
-                    let grid = self.strip == StripMode::Grid;
-                    let tip = if grid {
-                        "Back to the strip"
-                    } else {
-                        "The shelf as a grid"
-                    };
-                    if widgets::icon(ui, "▦", grid, tip).clicked() {
-                        self.strip = if grid {
-                            StripMode::Strip
-                        } else {
-                            StripMode::Grid
-                        };
-                    }
-                    ui.label(theme::tag(self.shelf.len().to_string()).color(theme::TEXT_FAINT))
-                        .on_hover_text(format!("{} photos on the shelf", self.shelf.len()));
-
-                    ui.add_space(4.0);
-                    let r = ui.available_rect_before_wrap();
-                    ui.painter().hline(
-                        (r.center().x - 12.0)..=(r.center().x + 12.0),
-                        r.top(),
-                        Stroke::new(1.0, theme::BORDER),
-                    );
-                    ui.add_space(8.0);
-
-                    let folders = self.shelf_open && self.folder_browser_open;
-                    if widgets::icon(ui, "🗁", folders, "Folders").clicked() {
-                        self.shelf_open = !folders;
-                        self.folder_browser_open = true;
-                    }
-                    let history = self.shelf_open && !self.folder_browser_open;
-                    if widgets::icon(ui, "🕘", history, "History and snapshots").clicked() {
-                        self.shelf_open = !history;
-                        self.folder_browser_open = false;
-                    }
-                    if widgets::icon(ui, "✚", false, "Add photos to the shelf").clicked() {
-                        self.pick_and_shelve(ui.ctx());
-                    }
+    /// The left panel: this photo's snapshots and history, one view. Folded, it is a thin
+    /// edge with one button to open it again. The photos are on the shelf under the stage.
+    pub(crate) fn history_panel(&mut self, ui: &mut egui::Ui) {
+        if !self.shelf_open && !self.touring_history() {
+            let edge = egui::Panel::left("history_edge")
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG_950)
+                        .inner_margin(Margin::symmetric(2, 10)),
+                )
+                .exact_size(34.0)
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if widgets::icon(ui, "›", false, "Show history and snapshots").clicked() {
+                            self.shelf_open = true;
+                        }
+                    });
                 });
-            });
-        self.desk_spots.rail = Some(rail.response.rect);
-    }
-
-    /// The drawer the rail opens: folders to bring photos in from, or this photo's history
-    /// and snapshots. The photos themselves are on the shelf under the stage.
-    pub(crate) fn shelf(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        if !self.shelf_open {
+            self.desk_spots.history = Some(edge.response.rect);
             return;
         }
-        egui::Panel::left("shelf")
+        let panel = egui::Panel::left("history")
             .frame(egui::Frame::new().fill(theme::BG_950))
             .resizable(true)
             .default_size(272.0)
@@ -90,21 +35,11 @@ impl PhotoApp {
             .max_size(400.0)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let title = if self.folder_browser_open {
-                    "Folders"
-                } else {
-                    "History"
-                };
                 widgets::band(ui, |ui| {
-                    ui.label(theme::head(title));
+                    ui.label(theme::head("History"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon(ui, "×", false, "Close").clicked() {
+                        if widgets::icon(ui, "‹", false, "Fold this panel away").clicked() {
                             self.shelf_open = false;
-                        }
-                        if self.folder_browser_open
-                            && widgets::icon(ui, "✚", false, "Add photos to the shelf").clicked()
-                        {
-                            self.pick_and_shelve(ui.ctx());
                         }
                     });
                 });
@@ -119,137 +54,13 @@ impl PhotoApp {
                                 bottom: 10,
                             })
                             .show(ui, |ui| {
-                                if self.folder_browser_open {
-                                    self.shelf_folders(ui, gpu);
-                                } else {
-                                    ui.spacing_mut().item_spacing.y = 10.0;
-                                    self.snapshots_group(ui);
-                                    self.history_group(ui);
-                                }
+                                ui.spacing_mut().item_spacing.y = 10.0;
+                                self.snapshots_group(ui);
+                                self.history_group(ui);
                             });
                     });
             });
-    }
-
-    pub(crate) fn shelf_folders(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        let mut load_folder = None;
-        let mut change_folder = None;
-
-        group(
-            ui,
-            "Bookmarks",
-            |_ui| {},
-            |ui| {
-                for bm in &self.folder_tree.bookmarks {
-                    let is_cur = self.folder_tree.current_folder.as_ref() == Some(&bm.path);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-                    let painter = ui.painter();
-                    if resp.hovered() {
-                        painter.rect_filled(rect, 3.0, Color32::from_gray(0x18));
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    let col = if is_cur { theme::ACCENT } else { theme::TEXT };
-                    painter.text(
-                        pos2(rect.left() + 8.0, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        format!("📁 {}", bm.name),
-                        FontId::new(12.0, theme::sans_strong()),
-                        col,
-                    );
-                    if resp.clicked() {
-                        change_folder = Some(bm.path.clone());
-                    }
-                }
-
-                ui.add_space(4.0);
-                if widgets::button(ui, Kind::Secondary, "Browse Folder…", 0.0).clicked() {
-                    self.request(
-                        ui.ctx(),
-                        platform::Request::BrowseFolder {
-                            from: self.settings.import_dir.clone(),
-                        },
-                    );
-                }
-            },
-        );
-
-        if let Some(cur) = &self.folder_tree.current_folder.clone() {
-            let subs = self.cached_subfolders(cur);
-            ui.add_space(8.0);
-            let folder_name = cur.file_name().and_then(|n| n.to_str()).unwrap_or("Folder");
-            let title = format!("Folder: {folder_name}");
-            group(
-                ui,
-                &title,
-                |_ui| {},
-                |ui| {
-                    ui.label(
-                        RichText::new(cur.display().to_string())
-                            .family(egui::FontFamily::Monospace)
-                            .size(10.5)
-                            .color(theme::TEXT_DIM),
-                    );
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if widgets::button(ui, Kind::Primary, "Scan & Load", 0.0)
-                            .on_hover_text(
-                                "Load all supported images from this folder into the shelf",
-                            )
-                            .clicked()
-                        {
-                            load_folder = Some(cur.clone());
-                        }
-                        if let Some(parent) = cur.parent() {
-                            if widgets::button(ui, Kind::Secondary, "⬆ Parent", 0.0).clicked() {
-                                change_folder = Some(parent.to_path_buf());
-                            }
-                        }
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label(theme::dim("Subfolders:"));
-                    if subs.is_empty() {
-                        ui.label(theme::dim("No subdirectories").size(11.0));
-                    } else {
-                        for sub in subs {
-                            let name = sub.file_name().and_then(|n| n.to_str()).unwrap_or("dir");
-                            let (rect, resp) = ui.allocate_exact_size(
-                                vec2(ui.available_width(), 24.0),
-                                Sense::click(),
-                            );
-                            let painter = ui.painter();
-                            if resp.hovered() {
-                                painter.rect_filled(rect, 2.0, Color32::from_gray(0x18));
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            painter.text(
-                                pos2(rect.left() + 8.0, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                format!("📁 {name}"),
-                                FontId::proportional(11.5),
-                                theme::TEXT,
-                            );
-                            if resp.clicked() {
-                                change_folder = Some(sub);
-                            }
-                        }
-                    }
-                },
-            );
-        } else {
-            ui.add_space(8.0);
-            ui.label(theme::dim(
-                "Select a bookmark or browse to a session folder to scan photos.",
-            ));
-        }
-
-        if let Some(cf) = change_folder {
-            self.folder_tree.current_folder = Some(cf);
-        }
-        if let Some(lf) = load_folder {
-            self.open_session_folder(gpu, lf);
-        }
+        self.desk_spots.history = Some(panel.response.rect);
     }
 
     pub(crate) fn snapshots_group(&mut self, ui: &mut egui::Ui) {

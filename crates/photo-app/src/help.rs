@@ -136,7 +136,7 @@ pub(crate) struct DeskSpots {
     pub stage: Option<Rect>,
     pub toolbar: Option<Rect>,
     pub filmstrip: Option<Rect>,
-    pub rail: Option<Rect>,
+    pub history: Option<Rect>,
     pub tabs: Option<Rect>,
     pub footer: Option<Rect>,
     pub export: Option<Rect>,
@@ -150,7 +150,7 @@ enum Spot {
     Stage,
     Toolbar,
     Filmstrip,
-    Rail,
+    History,
     Tabs,
     Footer,
     Export,
@@ -176,13 +176,15 @@ const TOUR: [TourStep; 8] = [
         spot: Spot::Filmstrip,
         title: "All your photos",
         body: "Click a picture to open it, or use the arrow keys. The button at its start \
-               shows only the photos you want, such as your five-star keepers.",
+               shows only the photos you want, such as your five-star keepers. At its end, \
+               + adds photos or a whole folder, and the gear hides the shelf or makes it a \
+               grid.",
     },
     TourStep {
-        spot: Spot::Rail,
-        title: "The left strip",
-        body: "The top two buttons hide the shelf or show it as a grid. Below them: your \
-               folders, this photo's history and snapshots, and + to add photos.",
+        spot: Spot::History,
+        title: "History",
+        body: "Every change to this photo, newest first: click one to go back to it. Save \
+               a snapshot to come back to a state by name. The arrow folds the panel away.",
     },
     TourStep {
         spot: Spot::Tabs,
@@ -274,12 +276,19 @@ impl PhotoApp {
             Spot::Stage => spots.stage,
             Spot::Toolbar => spots.toolbar,
             Spot::Filmstrip => spots.filmstrip,
-            Spot::Rail => spots.rail,
+            Spot::History => spots.history,
             Spot::Tabs => spots.tabs,
             Spot::Footer => spots.footer,
             Spot::Export => spots.export,
             Spot::Tools => spots.tools,
         }
+    }
+
+    /// The tour is on its History step, which shows the history panel open.
+    pub(crate) fn touring_history(&self) -> bool {
+        self.desk_tour_step
+            .and_then(|s| TOUR.get(s))
+            .is_some_and(|t| t.spot == Spot::History)
     }
 
     fn tour_step_to(&mut self, step: usize) {
@@ -713,8 +722,8 @@ fn topic_group(title: &str) -> &'static str {
 fn topic_spot(title: &str) -> Option<Spot> {
     Some(match title {
         "Your first edit" | "The editing panel" | "Choosing which tools show" => Spot::Tabs,
-        "Bringing photos in" | "Undo, snapshots and history" => Spot::Rail,
-        "Choosing and sorting photos" => Spot::Filmstrip,
+        "Undo, snapshots and history" => Spot::History,
+        "Bringing photos in" | "Choosing and sorting photos" => Spot::Filmstrip,
         "Cropping and straightening" | "Starting from a look" => Spot::Tools,
         "Comparing before and after" | "Cutting out a background" => Spot::Toolbar,
         "Reusing your edits" | "Saving your work" => Spot::Footer,
@@ -751,7 +760,7 @@ impl PhotoApp {
         // The editing panel stands for its sections and its footer both.
         let parts = [
             (Spot::Toolbar, spots.toolbar, "top bar"),
-            (Spot::Rail, spots.rail, "left strip"),
+            (Spot::History, spots.history, "history"),
             (Spot::Stage, spots.stage, "photo"),
             (Spot::Filmstrip, spots.filmstrip, "shelf"),
             (Spot::Tabs, spots.inspector, "editing panel"),
