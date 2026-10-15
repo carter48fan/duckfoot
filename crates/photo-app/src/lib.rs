@@ -787,7 +787,7 @@ pub struct PhotoApp {
     /// The phone's bottom bar: which group of chips the Edit sheet shows.
     pub compact_category: categories::Category,
     /// The chip last chosen in each category, to come back to.
-    compact_memory: [Option<categories::Chip>; 5],
+    compact_memory: [Option<categories::Chip>; categories::Category::ALL.len()],
     /// The phone layout's Library shows its rating, flag and search filters.
     pub library_filters_open: bool,
     /// A photo was asked for from outside the Library grid (a picker, a share); when it
@@ -1011,8 +1011,8 @@ impl PhotoApp {
             touch_seen: false,
             compact_tab: Some(compact::Tab::Library),
             compact_module: InspectorSectionId::Exposure,
-            compact_category: categories::Category::Light,
-            compact_memory: [None; 5],
+            compact_category: categories::Category::Tune,
+            compact_memory: [None; categories::Category::ALL.len()],
             library_filters_open: false,
             edit_when_opened: false,
             compact_controls_open: false,
@@ -1091,8 +1091,13 @@ impl PhotoApp {
             });
         }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
-        // Missing photos are shelved too, and shown as missing.
-        let shelf = s.shelf;
+        // Missing photos are shelved too, and shown as missing. One photo at a time starts
+        // each session empty: the photo is chosen anew, from the gallery it lives in.
+        let shelf = if self.single_photo() {
+            Vec::new()
+        } else {
+            s.shelf
+        };
         if !shelf.is_empty() {
             self.add_to_shelf(gpu, shelf);
             if let Some(last) = s
@@ -1112,6 +1117,7 @@ impl PhotoApp {
         if self.settings_dir.is_none() {
             return;
         }
+        let single = self.single_photo();
         let s = &mut self.settings;
         s.inspector_sections = Some(self.inspector_sections.clone());
         s.single_open = Some(self.single_open);
@@ -1124,8 +1130,14 @@ impl PhotoApp {
         s.paste = Some(self.paste_set.clone());
         s.saved_filters = self.saved_filters.clone();
         s.watched_folders = self.folder_watch.folders();
-        s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
-        s.last_open = self.loaded_path.clone();
+        if single {
+            // Nothing to come back to: the next launch starts empty.
+            s.shelf = Vec::new();
+            s.last_open = None;
+        } else {
+            s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
+            s.last_open = self.loaded_path.clone();
+        }
         self.save_settings();
     }
 
@@ -1292,6 +1304,11 @@ impl PhotoApp {
     /// The edit on the stage.
     pub fn stack(&self) -> &PhotoStack {
         &self.stack
+    }
+
+    /// One photo at a time, as on a phone: see [`platform::Platform::single_photo`].
+    pub fn single_photo(&self) -> bool {
+        self.platform.single_photo()
     }
 
     /// A photo is chosen and editable: from the moment it is picked, before it decodes,

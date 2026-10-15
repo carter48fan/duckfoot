@@ -693,6 +693,7 @@ impl PhotoApp {
     /// device's.
     pub(crate) fn prefetch_next(&mut self) {
         if cfg!(target_os = "android")
+            || self.single_photo()
             || self.loading.is_some()
             || !self.photo_on_stage()
             || self.engine.demosaic_pending()
@@ -710,6 +711,21 @@ impl PhotoApp {
         self.engine.drop_prepared();
         self.prefetch = Some((next.clone(), Prefetch::Decoding));
         self.loader.prefetch(next);
+    }
+
+    /// Open `path` as the only photo (`Platform::single_photo`): it replaces whatever was
+    /// open, whose edits are saved on the way out, and nothing else is kept on the shelf to
+    /// step to or prepare ahead.
+    pub fn open_alone(&mut self, gpu: &Gpu, path: PathBuf) {
+        if self.loaded_path.as_ref() != Some(&path) {
+            self.cancel_crop();
+            self.flush();
+        }
+        self.take_off_shelf(|p| *p != path);
+        self.removed_from_shelf.clear();
+        self.prefetch = None;
+        self.engine.drop_prepared();
+        self.open_path(gpu, path);
     }
 
     /// Make `path` the photo being edited, and start decoding it.

@@ -39,7 +39,19 @@ impl PhotoApp {
                 platform::Response::OpenImage(path) => {
                     self.remember_import_dir(path.parent());
                     self.edit_when_opened = true;
-                    self.open_path(gpu, path);
+                    if self.single_photo() {
+                        self.open_alone(gpu, path);
+                    } else {
+                        self.open_path(gpu, path);
+                    }
+                }
+                platform::Response::AddImages(paths) if self.single_photo() => {
+                    // One at a time: the first of them is the photo.
+                    if let Some(first) = paths.into_iter().next() {
+                        self.remember_import_dir(first.parent());
+                        self.edit_when_opened = true;
+                        self.open_alone(gpu, first);
+                    }
                 }
                 platform::Response::AddImages(paths) => {
                     self.remember_import_dir(paths.first().and_then(|p| p.parent()));
