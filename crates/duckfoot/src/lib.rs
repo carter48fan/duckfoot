@@ -230,8 +230,8 @@ impl WindowState {
                 }
             }
         }
-        // Frees are deferred until after the render pass: a texture released this frame
-        // may still be referenced by this frame's primitives.
+        // Frees are deferred until after the submit: a texture released this frame may
+        // still be referenced by this frame's primitives.
         let to_free = std::mem::take(&mut textures_delta.free);
         textures_delta.clear();
 
@@ -304,13 +304,14 @@ impl WindowState {
 
             renderer.render(&mut pass, &primitives, &desc);
             drop(pass);
-
-            for id in &to_free {
-                renderer.free_texture(id);
-            }
         }
 
         gpu.queue.submit([encoder.finish()]);
+        // Only after the submit: `free_texture` destroys the wgpu texture at once, and a
+        // command buffer recorded against it but not yet submitted then fails validation
+        // ("texture has been destroyed"). Removing every photo from the shelf frees every
+        // thumbnail the same frame last drew.
+        gpu.free_textures(&to_free);
         gpu.queue.present(frame);
         if suboptimal {
             self.surface.configure(&gpu.device, &self.config);

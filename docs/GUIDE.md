@@ -26,13 +26,14 @@ The window has five parts:
 - **History**: the panel on the left, with this photo's history and snapshots. The arrow at
   its top folds it away; the arrow on the left edge opens it again.
 
-New here? Click **Take the tour** in Help. It points at each part in turn and takes about
-a minute.
+New here? The first time Duckfoot opens it offers a tour; you can also click **Take the
+tour** in Help any time. It points at each part in turn and takes about a minute.
 
 ## Your first edit
 
-1. Click **⋯** at the right of the top bar, then **Open RAW…**, and choose a photo. (Any
-   photo works, not just RAW files.) You can also drag photos from a folder onto the window.
+1. Click the empty middle of the window and choose one photo or several, or use **+
+   Photos…** in the panel on the left. (Any photo works, not just RAW files.) You can also
+   drag photos from a folder onto the window.
 2. Look at the editing panel on the right. **Light** is at the top.
 3. Drag the **exposure** slider to the right to brighten the photo, or left to darken it.
 4. If the colours look too blue or too orange, move **temp** under **white balance**.
