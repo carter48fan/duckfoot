@@ -38,6 +38,7 @@ pub mod mask_tool;
 mod modules;
 mod parts;
 pub mod paste;
+mod preferences;
 mod requests;
 mod session;
 pub mod tat;
@@ -592,6 +593,8 @@ pub struct PhotoApp {
     /// The Shelf: assets in the project/session.
     pub shelf: Vec<ShelfItem>,
     pub shelf_open: bool,
+    /// The shelf under the stage (desktop): hidden, a strip or a grid.
+    pub(crate) strip: StripMode,
     /// Bumped whenever items are added/removed/rated in the shelf to invalidate caches.
     pub shelf_epoch: usize,
     /// Cached (epoch, filter, loaded_path, is_edited, indices) to eliminate per-frame O(N log N) sorting.
@@ -691,8 +694,15 @@ pub struct PhotoApp {
     pub inspector_sections: Vec<InspectorSectionConfig>,
     /// The Inspector is showing its Customize tab rather than the pipeline.
     pub customize_open: bool,
-    /// The inspector tab showing (desktop): All, or one group of modules held open.
-    pub(crate) inspector_group: modules::ModuleGroup,
+    /// The Preferences window is open (desktop).
+    pub(crate) preferences_open: bool,
+    /// The inspector sections folded shut (desktop).
+    pub(crate) shut_groups: HashSet<modules::ModuleGroup>,
+    /// The tool chosen on the rail beside the inspector (desktop).
+    pub(crate) tool: Tool,
+    /// The modules a section's switch turned off, so switching it on again brings back
+    /// exactly those. Forgotten once any module in the section is on again.
+    pub(crate) bypassed: HashMap<modules::ModuleGroup, Vec<InspectorSectionId>>,
     pub inspector_width: f32,
     pub inspector_force_width: Option<f32>,
     pub cutout_studio: cutout_studio::CutoutStudioState,
@@ -916,6 +926,7 @@ impl PhotoApp {
             shelf: Vec::new(),
             // The rail is always there; the drawer opens from it.
             shelf_open: false,
+            strip: StripMode::default(),
             split_active: false,
             split_pos: 0.5,
             clipboard_stack: None,
@@ -966,7 +977,10 @@ impl PhotoApp {
             inspector_map_state: inspector_map_3d::InspectorMapState::default(),
             inspector_sections: InspectorSectionConfig::default_sections(),
             customize_open: false,
-            inspector_group: modules::ModuleGroup::Basic,
+            preferences_open: false,
+            shut_groups: HashSet::new(),
+            tool: Tool::default(),
+            bypassed: HashMap::new(),
             inspector_width: 300.0,
             inspector_force_width: None,
             focused_section: None,
@@ -1078,6 +1092,9 @@ impl PhotoApp {
         if let Some(width) = s.inspector_width {
             self.inspector_width = width.clamp(240.0, 640.0);
         }
+        if let Some(strip) = s.strip {
+            self.strip = strip;
+        }
         if let Some(open) = s.shelf_open {
             self.shelf_open = open;
         }
@@ -1145,6 +1162,7 @@ impl PhotoApp {
         s.single_open = Some(self.single_open);
         s.inspector_width = Some(self.inspector_width);
         s.shelf_open = Some(self.shelf_open);
+        s.strip = Some(self.strip);
         s.export_recipes = Some(self.export_recipes.clone());
         s.rename_pattern = Some(self.batch_renamer.pattern.clone());
         s.filter = Some(self.filter.clone());
@@ -1456,8 +1474,12 @@ impl PhotoApp {
         !matches!(self.export, Export::Writing { .. })
     }
 
+    /// Something is still being read or decoded. That includes the next photo being got
+    /// ready while this one is open: a test that waits for quiet and then steps on would
+    /// otherwise race it.
     pub fn is_busy(&self) -> bool {
         self.loading.is_some()
+            || matches!(self.prefetch, Some((_, Prefetch::Decoding)))
             || !self.thumbs_pending.is_empty()
             || !self.shelf_pending.is_empty()
             || self.scans_pending > 0
@@ -1795,6 +1817,7 @@ impl PhotoApp {
             self.status_bar(ui);
             self.shelf_rail(ui);
             self.shelf(ui, gpu);
+            self.tool_rail(ui);
             self.inspector(ui);
             self.filmstrip(ui, gpu);
             self.stage_toolbar(ui);
@@ -1804,6 +1827,7 @@ impl PhotoApp {
             self.export_dialog(&ctx);
             self.paste_picker(&ctx);
             self.shortcuts_overlay(&ctx);
+            self.preferences_window(&ctx);
             self.help_window(&ctx);
             self.desk_tour(&ctx);
         }

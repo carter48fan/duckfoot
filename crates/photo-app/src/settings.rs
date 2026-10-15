@@ -25,6 +25,8 @@ pub struct Settings {
     pub single_open: Option<bool>,
     pub inspector_width: Option<f32>,
     pub shelf_open: Option<bool>,
+    /// The shelf under the stage: hidden, strip or grid.
+    pub(crate) strip: Option<crate::StripMode>,
     /// Size of the whole interface, 0.85..=1.5: text, controls, spacing.
     pub ui_scale: f32,
     /// The shelf as it was left, and the photo that was open.
@@ -84,6 +86,7 @@ impl Default for Settings {
             single_open: None,
             inspector_width: None,
             shelf_open: None,
+            strip: None,
             ui_scale: 1.0,
             shelf: Vec::new(),
             last_open: None,

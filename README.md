@@ -183,7 +183,9 @@ You can also **drag a RAW file onto the window**.
 | `\` | before / after split |
 | `S` | soft proof: the preview in the export's colour space |
 | `Ctrl+0` / `Ctrl+1` / `Z` | fit / 100% / toggle between them |
+| `F` / `G` | show or hide the shelf / show it as a grid (desktop) |
 | `?` or `F1` | this list of shortcuts |
+| `Ctrl+,` | preferences (desktop) |
 | **Library** | |
 | `0`–`5` | star rating for the selection (`0` clears) |
 | `6` / `7` / `8` / `9` | red / yellow / green / blue label (again takes it off) |

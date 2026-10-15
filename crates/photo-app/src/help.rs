@@ -140,9 +140,12 @@ pub(crate) struct DeskSpots {
     pub tabs: Option<Rect>,
     pub footer: Option<Rect>,
     pub export: Option<Rect>,
+    /// The whole editing panel, and the tool rail beside it.
+    pub inspector: Option<Rect>,
+    pub tools: Option<Rect>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Spot {
     Stage,
     Toolbar,
@@ -151,6 +154,7 @@ enum Spot {
     Tabs,
     Footer,
     Export,
+    Tools,
 }
 
 struct TourStep {
@@ -161,7 +165,7 @@ struct TourStep {
 
 pub(crate) const DESK_TOUR_LEN: usize = TOUR.len();
 
-const TOUR: [TourStep; 7] = [
+const TOUR: [TourStep; 8] = [
     TourStep {
         spot: Spot::Stage,
         title: "Your photo",
@@ -171,21 +175,27 @@ const TOUR: [TourStep; 7] = [
     TourStep {
         spot: Spot::Filmstrip,
         title: "All your photos",
-        body: "Click a picture to open it, or use the arrow keys. The stars, flags and \
-               coloured dots show only the photos you want, such as your five-star keepers.",
+        body: "Click a picture to open it, or use the arrow keys. The button at its start \
+               shows only the photos you want, such as your five-star keepers.",
     },
     TourStep {
         spot: Spot::Rail,
-        title: "The shelf",
-        body: "Add photos with +, or load a whole folder. Click the photos icon to see the \
-               full list, your History and your Snapshots.",
+        title: "The left strip",
+        body: "The top two buttons hide the shelf or show it as a grid. Below them: your \
+               folders, this photo's history and snapshots, and + to add photos.",
     },
     TourStep {
         spot: Spot::Tabs,
         title: "Editing tools",
-        body: "The tools are sorted into tabs. Basic has what most photos need. Drag a \
-               slider to change the photo, and double-click it to reset. The gear chooses \
-               which tools show.",
+        body: "The tools are in sections: Light and Colour have what most photos need. Drag \
+               a slider to change the photo, and double-click it to reset. A section's \
+               switch turns it off to compare. The gear chooses which tools show.",
+    },
+    TourStep {
+        spot: Spot::Tools,
+        title: "Tools",
+        body: "Looks, Edit, Crop, Spot heal and Masks. Choose one and the panel beside it \
+               shows it; Edit is the sections of sliders.",
     },
     TourStep {
         spot: Spot::Toolbar,
@@ -203,7 +213,7 @@ const TOUR: [TourStep; 7] = [
         spot: Spot::Export,
         title: "Share it",
         body: "When you like it, Export saves a copy to share or print. Made a mistake? The \
-               curved arrow beside it undoes anything. Help is always here in the top bar.",
+               curved arrow beside it undoes anything. Help is in the ⋯ menu at its end.",
     },
 ];
 
@@ -268,6 +278,7 @@ impl PhotoApp {
             Spot::Tabs => spots.tabs,
             Spot::Footer => spots.footer,
             Spot::Export => spots.export,
+            Spot::Tools => spots.tools,
         }
     }
 
@@ -307,6 +318,8 @@ impl PhotoApp {
         let body_w = size.x - list_w - 20.0;
         let mut tour = false;
         let mut shortcuts = false;
+        let mut show_me = None;
+        let mut go_to = None;
         egui::Area::new(egui::Id::new("help"))
             .order(egui::Order::Tooltip)
             .fade_in(false)
@@ -345,7 +358,20 @@ impl PhotoApp {
                                     .id_salt("help-topics")
                                     .max_height(size.y - 150.0)
                                     .show(ui, |ui| {
+                                        let mut last_group = "";
                                         for (i, t) in topics.iter().enumerate() {
+                                            // A caption where the kind of topic changes.
+                                            let group = topic_group(&t.title);
+                                            if group != last_group {
+                                                if i > 0 {
+                                                    ui.add_space(10.0);
+                                                }
+                                                ui.label(
+                                                    theme::tag(group).color(theme::TEXT_FAINT),
+                                                );
+                                                ui.add_space(2.0);
+                                                last_group = group;
+                                            }
                                             if topic_row(ui, i == self.help_topic, &t.title)
                                                 .clicked()
                                             {
@@ -371,28 +397,97 @@ impl PhotoApp {
                             let Some(topic) = topics.get(self.help_topic) else {
                                 return;
                             };
+                            let spot = topic_spot(&topic.title);
+                            let step = spot.and_then(|s| TOUR.iter().position(|t| t.spot == s));
                             ui.vertical(|ui| {
-                                // A set width, so the text wraps to it rather than widening the window.
+                                // A set width, so the text wraps to it rather than widening
+                                // the window. Only the text scrolls: the title, the picture
+                                // and the buttons under it stay where they are from topic
+                                // to topic.
                                 ui.set_width(body_w);
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("help-topic", self.help_topic))
-                                    .max_height(size.y - 60.0)
-                                    .show(ui, |ui| {
-                                        let width = body_w - 16.0;
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui.allocate_ui_with_layout(
+                                    vec2(body_w, 32.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
                                         ui.label(
                                             RichText::new(&topic.title)
                                                 .family(theme::display())
                                                 .size(17.0)
                                                 .color(theme::TEXT_HI),
                                         );
-                                        ui.add_space(10.0);
-                                        topic_body(ui, topic, width);
+                                        if let Some(step) = step {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if widgets::button(
+                                                        ui,
+                                                        Kind::Accent,
+                                                        "Show me",
+                                                        0.0,
+                                                    )
+                                                    .on_hover_text("Point at it in the window")
+                                                    .clicked()
+                                                    {
+                                                        show_me = Some(step);
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    },
+                                );
+                                ui.add_space(10.0);
+                                let (picture, _) =
+                                    ui.allocate_exact_size(vec2(body_w, PICTURE_H), Sense::hover());
+                                self.paint_window_map(ui.painter(), picture, spot);
+                                ui.add_space(14.0);
+                                let footer_h = 44.0;
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("help-topic", self.help_topic))
+                                    .auto_shrink([false, false])
+                                    .max_height(
+                                        size.y - 60.0 - 32.0 - 10.0 - PICTURE_H - 14.0 - footer_h,
+                                    )
+                                    .show(ui, |ui| {
+                                        topic_body(ui, topic, body_w - 16.0);
                                     });
+                                ui.add_space(12.0);
+                                ui.horizontal(|ui| {
+                                    let last = topics.len().saturating_sub(1);
+                                    let here = self.help_topic;
+                                    if here > 0 {
+                                        let back = format!("← {}", topics[here - 1].title);
+                                        if widgets::button(ui, Kind::Secondary, &back, 0.0)
+                                            .clicked()
+                                        {
+                                            go_to = Some(here - 1);
+                                        }
+                                    }
+                                    if here < last {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let next = format!("{} →", topics[here + 1].title);
+                                                if widgets::button(ui, Kind::Secondary, &next, 0.0)
+                                                    .clicked()
+                                                {
+                                                    go_to = Some(here + 1);
+                                                }
+                                            },
+                                        );
+                                    }
+                                });
                             });
                         });
                     });
             });
-        if tour {
+        if let Some(i) = go_to {
+            self.help_topic = i;
+        }
+        if let Some(step) = show_me {
+            self.help_open = false;
+            self.desk_tour_step = Some(step);
+        } else if tour {
             self.start_desk_tour();
         } else if shortcuts {
             self.help_open = false;
@@ -590,9 +685,130 @@ fn topic_body(ui: &mut egui::Ui, topic: &Topic, width: f32) {
     }
 }
 
+/// The height of a topic's picture: the same for every topic, so nothing below it moves.
+const PICTURE_H: f32 = 190.0;
+
+/// The kind of topic, for the captions down the topic list. The guide's own order is kept;
+/// a topic it adds later goes under "More" until it is given a home here.
+fn topic_group(title: &str) -> &'static str {
+    match title {
+        "Welcome" | "Your first edit" | "Bringing photos in" => "Start here",
+        "Choosing and sorting photos" => "Your photos",
+        "The editing panel"
+        | "Choosing which tools show"
+        | "Cropping and straightening"
+        | "Comparing before and after"
+        | "Starting from a look"
+        | "Undo, snapshots and history" => "Editing",
+        "Reusing your edits"
+        | "Saving your work"
+        | "Exporting a finished photo"
+        | "Cutting out a background" => "Saving and sharing",
+        "Keyboard shortcuts" | "If something goes wrong" => "Reference",
+        _ => "More",
+    }
+}
+
+/// The part of the window a guide topic is about, if it is about one.
+fn topic_spot(title: &str) -> Option<Spot> {
+    Some(match title {
+        "Your first edit" | "The editing panel" | "Choosing which tools show" => Spot::Tabs,
+        "Bringing photos in" | "Undo, snapshots and history" => Spot::Rail,
+        "Choosing and sorting photos" => Spot::Filmstrip,
+        "Cropping and straightening" | "Starting from a look" => Spot::Tools,
+        "Comparing before and after" | "Cutting out a background" => Spot::Toolbar,
+        "Reusing your edits" | "Saving your work" => Spot::Footer,
+        "Exporting a finished photo" => Spot::Export,
+        _ => return None,
+    })
+}
+
+impl PhotoApp {
+    /// A topic's picture: this window, drawn small from where each part was last laid out,
+    /// with the part the topic is about outlined in amber. It is always the window as it
+    /// is, whatever the panels' sizes, so the picture never disagrees with the screen.
+    fn paint_window_map(&self, painter: &egui::Painter, area: Rect, lit: Option<Spot>) {
+        let screen = painter.ctx().content_rect();
+        if screen.width() < 1.0 || screen.height() < 1.0 {
+            return;
+        }
+        let scale = (area.width() / screen.width()).min(area.height() / screen.height());
+        let size = screen.size() * scale;
+        let origin = area.center() - size / 2.0;
+        let map = |r: Rect| {
+            Rect::from_min_max(
+                origin + (r.min - screen.min) * scale,
+                origin + (r.max - screen.min) * scale,
+            )
+        };
+        painter.rect_stroke(
+            Rect::from_min_size(origin, size),
+            2,
+            Stroke::new(1.0, theme::BORDER),
+            StrokeKind::Inside,
+        );
+        let spots = &self.desk_spots;
+        // The editing panel stands for its sections and its footer both.
+        let parts = [
+            (Spot::Toolbar, spots.toolbar, "top bar"),
+            (Spot::Rail, spots.rail, "left strip"),
+            (Spot::Stage, spots.stage, "photo"),
+            (Spot::Filmstrip, spots.filmstrip, "shelf"),
+            (Spot::Tabs, spots.inspector, "editing panel"),
+            (Spot::Tools, spots.tools, "tools"),
+            (Spot::Export, spots.export, "export"),
+        ];
+        let is_lit =
+            |part: Spot| lit == Some(part) || (part == Spot::Tabs && lit == Some(Spot::Footer));
+        // The lit part last, so its outline is on top of its neighbours'.
+        let order = parts
+            .iter()
+            .filter(|p| !is_lit(p.0))
+            .chain(parts.iter().filter(|p| is_lit(p.0)));
+        for &(part, rect, name) in order {
+            let Some(rect) = rect else {
+                continue;
+            };
+            let r = map(rect).shrink(1.0);
+            let on = is_lit(part);
+            let colour = if on { theme::ACCENT } else { theme::TEXT_FAINT };
+            painter.rect_stroke(
+                r,
+                1,
+                Stroke::new(1.0, if on { theme::ACCENT } else { theme::BORDER_HI }),
+                StrokeKind::Inside,
+            );
+            let label = painter.layout_no_wrap(name.to_owned(), FontId::monospace(10.0), colour);
+            if label.size().x + 6.0 < r.width() && label.size().y + 4.0 < r.height() {
+                painter.galley(r.center() - label.size() / 2.0, label, colour);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every topic either points at a part of the window or is known not to: renaming a
+    /// heading in the guide cannot quietly leave its picture with nothing lit.
+    #[test]
+    fn every_topic_knows_its_part_of_the_window() {
+        let about_no_part = ["Welcome", "Keyboard shortcuts", "If something goes wrong"];
+        for t in topics() {
+            assert!(
+                topic_spot(&t.title).is_some() || about_no_part.contains(&t.title.as_str()),
+                "{:?} points at no part of the window",
+                t.title
+            );
+            assert_ne!(
+                topic_group(&t.title),
+                "More",
+                "{:?} has no group in the list",
+                t.title
+            );
+        }
+    }
 
     /// The guide reads as topics, every one with something in it.
     #[test]

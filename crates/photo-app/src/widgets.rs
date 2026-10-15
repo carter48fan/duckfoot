@@ -9,8 +9,8 @@ use std::ops::RangeInclusive;
 use egui::text::LayoutJob;
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, FontFamily, FontId, Frame,
-    InnerResponse, Margin, Painter, Rect, Response, Sense, Shape, Stroke, StrokeKind, TextFormat,
-    Ui, Vec2,
+    InnerResponse, Margin, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind,
+    TextFormat, Ui, Vec2,
 };
 
 use crate::theme::{self, *};
@@ -171,9 +171,9 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = if selected {
-        (BG_850, ACCENT.linear_multiply(0.7), ACCENT)
+        (Color32::TRANSPARENT, ACCENT, ACCENT)
     } else if hovered {
-        (BG_850, BORDER_HI, TEXT_HI)
+        (Color32::TRANSPARENT, Color32::TRANSPARENT, TEXT_HI)
     } else if enabled {
         (
             Color32::TRANSPARENT,
@@ -184,7 +184,7 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
         (Color32::TRANSPARENT, Color32::TRANSPARENT, TEXT_FAINT)
     };
     let painter = ui.painter();
-    painter.rect(rect, 3, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    painter.rect(rect, 2, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
     painter.galley(rect.center() - galley.size() / 2.0, galley, colour);
     if hovered {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -194,11 +194,12 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// Solid amber. One per screen: the action the panel exists for.
+    /// An amber outline that fills amber under the pointer. One per screen: the action
+    /// the panel exists for.
     Primary,
     /// Black with a hairline.
     Secondary,
-    /// Black with an amber hairline: a batch action worth noticing, but not *the* action.
+    /// A dimmer amber hairline: a batch action worth noticing, but not *the* action.
     Accent,
 }
 
@@ -255,21 +256,99 @@ pub fn button_sized(
 
     let hovered = enabled && response.hovered();
     let (fill, stroke, colour) = match (kind, enabled, hovered) {
-        (_, false, _) => (BG_900, BORDER, TEXT_FAINT),
-        (Kind::Primary, true, false) => (ACCENT, ACCENT, Color32::BLACK),
-        (Kind::Primary, true, true) => (ACCENT_HI, ACCENT_HI, Color32::BLACK),
+        (_, false, _) => (BG_950, BORDER, TEXT_FAINT),
+        (Kind::Primary, true, false) => (BG_950, ACCENT, ACCENT),
+        (Kind::Primary, true, true) => (ACCENT, ACCENT, Color32::BLACK),
         (Kind::Secondary, true, false) => (BG_950, Color32::from_gray(0x2a), TEXT),
-        (Kind::Secondary, true, true) => (BG_850, Color32::from_gray(0x55), TEXT_HI),
-        (Kind::Accent, true, false) => (BG_850, ACCENT.linear_multiply(0.8), ACCENT),
-        (Kind::Accent, true, true) => (ACCENT.linear_multiply(0.18), ACCENT, ACCENT_HI),
+        (Kind::Secondary, true, true) => (BG_950, ACCENT, ACCENT),
+        (Kind::Accent, true, false) => (BG_950, ACCENT.linear_multiply(0.6), ACCENT),
+        (Kind::Accent, true, true) => (BG_950, ACCENT, ACCENT),
     };
     let painter = ui.painter();
-    painter.rect(rect, 3, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    painter.rect(rect, 2, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
     painter.galley(rect.center() - galley.size() / 2.0, galley, colour);
     if hovered {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     response
+}
+
+/// A tool on the rail beside the inspector: a line-drawn icon, amber with a hairline at the
+/// rail's inner edge while it is the tool in use. Drawn, not a glyph, so no font can lack it.
+pub(crate) fn tool_button(ui: &mut Ui, tool: crate::Tool, active: bool) -> Response {
+    let (rect, response) = allocate_control(ui, Vec2::splat(36.0), Sense::click());
+    let tip = tool.tip();
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, tool.label())
+    });
+    let hovered = response.hovered();
+    let colour = if active || hovered { ACCENT } else { TEXT_DIM };
+    let painter = ui.painter();
+    if active {
+        painter.vline(
+            rect.left() - 5.0,
+            (rect.top() + 9.0)..=(rect.bottom() - 9.0),
+            Stroke::new(1.0, ACCENT),
+        );
+    }
+    paint_tool_icon(
+        painter,
+        Rect::from_center_size(rect.center(), Vec2::splat(18.0)),
+        tool,
+        colour,
+    );
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.on_hover_text(tip)
+}
+
+/// The tools' icons, in 1.5pt lines within `r` (18pt square).
+fn paint_tool_icon(painter: &Painter, r: Rect, tool: crate::Tool, colour: Color32) {
+    use crate::Tool;
+    let line = Stroke::new(1.5, colour);
+    let at = |x: f32, y: f32| r.left_top() + vec2(x, y);
+    match tool {
+        // Three sliders, their knobs at different places.
+        Tool::Edit => {
+            for (y, knob) in [(4.0, 12.0), (9.0, 5.0), (14.0, 10.0)] {
+                painter.hline(r.left() + 1.0..=r.right() - 1.0, r.top() + y, line);
+                painter.circle(at(knob, y), 2.2, BG_950, line);
+            }
+        }
+        // Two corners crossing, as a crop frame's handles.
+        Tool::Crop => {
+            painter.add(Shape::line(
+                vec![at(4.0, 0.5), at(4.0, 14.0), at(17.5, 14.0)],
+                line,
+            ));
+            painter.add(Shape::line(
+                vec![at(0.5, 4.0), at(14.0, 4.0), at(14.0, 17.5)],
+                line,
+            ));
+        }
+        // A spot, and the healing brush's ring around it.
+        Tool::Heal => {
+            painter.circle_stroke(r.center(), 8.0, line);
+            painter.circle_filled(r.center(), 2.5, colour);
+        }
+        // A circle, half of it painted in: a mask.
+        Tool::Masks => {
+            painter.circle_stroke(r.center(), 8.0, line);
+            let half: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_2 + i as f32 / 16.0 * std::f32::consts::PI;
+                    r.center() + vec2(a.cos(), a.sin()) * 8.0
+                })
+                .collect();
+            painter.add(Shape::convex_polygon(half, colour, Stroke::NONE));
+        }
+        // Two overlapping rounds: one look laid over the photo.
+        Tool::Looks => {
+            painter.circle_stroke(at(6.5, 9.0), 6.0, line);
+            painter.circle_stroke(at(11.5, 9.0), 6.0, line);
+        }
+    }
 }
 
 /// A square icon button, ghost-styled. `glyph` must exist in egui's bundled fallback fonts.
@@ -284,13 +363,10 @@ pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     let colour = match (enabled, active, hovered) {
         (false, ..) => TEXT_FAINT,
         (true, true, _) => ACCENT,
-        (true, false, true) => TEXT_HI,
+        (true, false, true) => ACCENT,
         (true, false, false) => Color32::from_gray(0xcc),
     };
     let painter = ui.painter();
-    if hovered || active {
-        painter.rect_filled(rect, 3, BG_850);
-    }
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -341,8 +417,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool) -> Response {
     response
 }
 
-/// An on / off switch sized for a thumb: a 38×22 track in a 48×34 target. Amber with the
-/// knob to the right when on.
+/// An on / off switch sized for a thumb: a 38×22 track in a 48×34 target.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let (rect, mut response) = allocate_control(ui, vec2(48.0, 34.0), Sense::click());
     if response.clicked() {
@@ -355,30 +430,48 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     });
     let track = Rect::from_center_size(rect.center(), vec2(38.0, 22.0));
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
-    let hovered = response.hovered();
-    let painter = ui.painter();
-    let fill = if *on {
-        if hovered {
-            ACCENT_HI
-        } else {
-            ACCENT
-        }
-    } else {
-        BG_850
-    };
-    let stroke = if *on {
-        Stroke::NONE
-    } else {
-        Stroke::new(1.0, if hovered { BORDER_HI } else { BORDER })
-    };
-    painter.rect(track, 11, fill, stroke, StrokeKind::Inside);
-    let x = egui::lerp(track.left() + 11.0..=track.right() - 11.0, t);
-    let knob = if *on { Color32::BLACK } else { TEXT_DIM };
-    painter.circle_filled(pos2(x, track.center().y), 8.0, knob);
+    paint_switch(ui.painter(), track, t, response.hovered());
     response
 }
 
-/// A 2px rail with an amber fill and an 8×14 thumb (14×22 on touch).
+/// A switch in the panel's flat style: a hairline pill with a dot in it. Off, the dot is
+/// an open ring on the left and the pill is grey; on, it is solid amber on the right with a
+/// hairline trailing back to where it started — a two-position slider, which is what it
+/// is. `t` runs 0 (off) to 1 (on) so the dot can travel between them.
+pub fn paint_switch(painter: &Painter, track: Rect, t: f32, hovered: bool) {
+    let h = track.height();
+    let dot_r = h * 0.22;
+    let inset = h / 2.0;
+    let lerp = |a: Color32, b: Color32| {
+        Color32::from_rgb(
+            egui::lerp(f32::from(a.r())..=f32::from(b.r()), t) as u8,
+            egui::lerp(f32::from(a.g())..=f32::from(b.g()), t) as u8,
+            egui::lerp(f32::from(a.b())..=f32::from(b.b()), t) as u8,
+        )
+    };
+    let off_edge = if hovered { TEXT_FAINT } else { BORDER_HI };
+    painter.rect_stroke(
+        track,
+        h / 2.0,
+        Stroke::new(1.0, lerp(off_edge, ACCENT)),
+        StrokeKind::Inside,
+    );
+    let start = track.left() + inset;
+    let x = egui::lerp(start..=track.right() - inset, t);
+    let cy = track.center().y;
+    if x - dot_r > start {
+        painter.hline(start..=x - dot_r, cy, Stroke::new(1.0, ACCENT));
+    }
+    let off_dot = if hovered { TEXT } else { TEXT_DIM };
+    if t > 0.5 {
+        painter.circle_filled(pos2(x, cy), dot_r, ACCENT);
+    } else {
+        painter.circle_stroke(pos2(x, cy), dot_r - 0.75, Stroke::new(1.5, off_dot));
+    }
+}
+
+/// A hairline rail, a 2px amber run from the origin to the value, and a ring for a thumb
+/// (11pt across, 16 on touch) that fills amber once the value has left its default.
 ///
 /// Bipolar ranges fill from zero rather than from the left end, so "+0.4 EV" and "−0.4 EV"
 /// read as the same distance from neutral.
@@ -402,6 +495,7 @@ pub fn rail(
         gradient: None,
         label: "",
         readout: f64::from(*value),
+        bubble: None,
     };
     rail_painted(ui, value, range, width, spec)
 }
@@ -417,6 +511,8 @@ struct RailSpec<'a> {
     /// slider is not the rail position).
     label: &'a str,
     readout: f64,
+    /// The value as the thumb's tag shows it while dragged, if it has one.
+    bubble: Option<String>,
 }
 
 /// `rail`, optionally with a two-colour gradient for a track instead of the amber fill —
@@ -434,15 +530,18 @@ fn rail_painted(
         gradient,
         label,
         readout,
+        bubble,
     } = spec;
     let touch = is_touch(ui.ctx());
-    let row_h = sized(ui, 24.0, 32.0);
+    let row_h = sized(ui, 20.0, 32.0);
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
+    // The thumb is a ring; this is its box at rest, which also insets the track so the ring
+    // never hangs off either end.
     let thumb = if touch {
-        vec2(14.0, 22.0)
+        vec2(16.0, 16.0)
     } else {
-        vec2(10.0, 16.0)
+        vec2(11.0, 11.0)
     };
     let track = Rect::from_min_max(
         pos2(rect.left() + thumb.x / 2.0, rect.center().y - 1.0),
@@ -556,13 +655,15 @@ fn rail_painted(
     }
 
     let (x0, x1) = (x_of(origin), x_of(*value));
+    let cy = rect.center().y;
 
     let hot = enabled && (response.hovered() || response.dragged());
-    let fill = if enabled { ACCENT } else { TEXT_FAINT };
+    let moved = (*value - default).abs() > (hi - lo) * 1e-4;
 
     let painter = ui.painter();
     if let Some([left, right]) = gradient {
-        let band = track.expand2(vec2(0.0, 1.0));
+        // A colour track is itself the scale, so it is drawn instead of the amber run.
+        let band = Rect::from_x_y_ranges(track.x_range(), (cy - 1.0)..=(cy + 1.0));
         let (left, right) = if enabled {
             (left, right)
         } else {
@@ -577,31 +678,64 @@ fn rail_painted(
         mesh.add_triangle(0, 2, 3);
         painter.add(Shape::mesh(mesh));
     } else {
-        painter.rect_filled(track, 1, RAIL);
-        painter.rect_filled(
-            Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), track.y_range()),
-            1,
-            fill,
-        );
+        // One hairline for the whole range, and a 2px amber run from the origin to the
+        // value: how far from neutral it is, at a glance.
+        painter.hline(track.x_range(), cy, Stroke::new(1.0, BORDER_HI));
+        if enabled && x0 != x1 {
+            painter.rect_filled(
+                Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), (cy - 1.0)..=(cy + 1.0)),
+                0,
+                ACCENT,
+            );
+        }
     }
     // A tick where the default sits, so "back to neutral" is visible before you do it.
-    let home = x_of(default);
     painter.vline(
-        home,
-        (track.top() - 3.0)..=(track.bottom() + 3.0),
+        x_of(default),
+        (cy - 4.0)..=(cy + 4.0),
         Stroke::new(1.0, BORDER_HI),
     );
-    let knob = Rect::from_center_size(pos2(x1, rect.center().y), thumb);
-    painter.rect_filled(
-        knob,
-        sized(ui, 2.0, 4.0),
-        if hot { ACCENT_HI } else { fill },
-    );
-    painter.vline(
-        x1,
-        (knob.top() + 4.0)..=(knob.bottom() - 4.0),
-        Stroke::new(sized(ui, 1.0, 1.5), Color32::BLACK),
-    );
+
+    // The thumb: an open ring at the default, filled amber once moved. It grows a little
+    // under the pointer and more while held. Eased, so it reads as a response, not a jump.
+    let grow = if response.dragged() {
+        1.35
+    } else if hot {
+        1.15
+    } else {
+        1.0
+    };
+    let grow = ui
+        .ctx()
+        .animate_value_with_time(response.id.with("thumb"), grow, 0.12);
+    let r = thumb.x / 2.0 * grow;
+    let centre = pos2(x1, cy);
+    if !enabled {
+        painter.circle(centre, r, BG_950, Stroke::new(1.5, TEXT_FAINT));
+    } else if moved {
+        painter.circle_filled(centre, r, ACCENT);
+    } else {
+        let ring = if hot { TEXT } else { TEXT_DIM };
+        painter.circle(centre, r - 0.75, BG_950, Stroke::new(1.5, ring));
+    }
+    if response.has_focus() {
+        painter.circle_stroke(centre, r + 3.0, Stroke::new(1.0, TEXT));
+    }
+
+    // While held, the value rides above the thumb, so the eye need not leave it for the
+    // number box. On touch the finger would cover it, and the sheet shows the value anyway.
+    if let (true, false, Some(text)) = (response.dragged(), touch, bubble) {
+        let galley = painter.layout_no_wrap(text, FontId::monospace(11.0), ACCENT);
+        let size = galley.size() + vec2(10.0, 4.0);
+        let tag = Rect::from_center_size(pos2(x1, cy - r - 6.0 - size.y / 2.0), size);
+        let over = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            response.id.with("bubble"),
+        ));
+        over.rect(tag, 2, BG_950, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+        over.galley(tag.center() - galley.size() / 2.0, galley, ACCENT);
+    }
+
     if hot {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
     }
@@ -645,7 +779,131 @@ pub struct SliderScale<'a> {
 /// `param_slider` on a non-linear rail: for a quantity like colour temperature, where equal
 /// steps in kelvin are nowhere near equal steps in what you see. The number box still reads
 /// and types the value itself.
+///
+/// On the desktop the label and value share a line and the rail runs the panel's width
+/// under them; on a phone the three sit on one row, as the sheets are short.
 pub fn scaled_slider(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    decimals: usize,
+    default: f32,
+    scale: SliderScale,
+) -> Response {
+    if is_touch(ui.ctx()) {
+        inline_slider(ui, label, value, range, decimals, default, scale)
+    } else {
+        stacked_slider(ui, label, value, range, decimals, default, scale)
+    }
+}
+
+/// `label ··········· value` over a full-width rail. Every rail in the panel is one length
+/// and a long label never squeezes it.
+fn stacked_slider(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    decimals: usize,
+    default: f32,
+    scale: SliderScale,
+) -> Response {
+    let modified = (*value - default).abs() > 1e-6;
+    let (lo, hi) = (*range.start(), *range.end());
+    let origin = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let width = ui.available_width();
+        let line = ui.allocate_ui_with_layout(
+            vec2(width, 16.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let text = egui::RichText::new(label).size(12.5).color(if modified {
+                    TEXT_HI
+                } else {
+                    TEXT
+                });
+                let label_response = ui.add(
+                    egui::Label::new(text)
+                        .sense(Sense::click())
+                        .selectable(false),
+                );
+                let typed = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        value_box(ui, value, range.clone(), decimals, scale.speed, modified)
+                    })
+                    .inner;
+                (label_response, typed)
+            },
+        );
+        let (mut label_response, typed) = line.inner;
+        if label_response.double_clicked() && modified {
+            *value = default;
+            label_response.mark_changed();
+        }
+        let mut t = (scale.to_rail)(*value);
+        let spec = RailSpec {
+            default: (scale.to_rail)(default),
+            origin: (scale.to_rail)(origin),
+            gradient: scale.gradient,
+            label,
+            readout: f64::from(*value),
+            bubble: Some(format!("{:.decimals$}", *value)),
+        };
+        let slid = rail_painted(ui, &mut t, 0.0..=1.0, width, spec);
+        if slid.changed() {
+            *value = (scale.from_rail)(t).clamp(lo, hi);
+        }
+        label_response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+        let typed = typed.labelled_by(label_response.id);
+        label_response | slid | typed
+    })
+    .inner
+}
+
+/// The number beside a slider: no box until the pointer is on it, amber once the value has
+/// moved. A `DragValue`, so it can be dragged, or double-clicked and typed into.
+fn value_box(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    decimals: usize,
+    speed: f32,
+    modified: bool,
+) -> Response {
+    ui.scope(|ui| {
+        // As tall as the label beside it, so the two share a baseline.
+        ui.spacing_mut().interact_size.y = 16.0;
+        ui.spacing_mut().button_padding = vec2(3.0, 0.0);
+        let v = ui.visuals_mut();
+        v.override_text_color = Some(if modified { ACCENT } else { TEXT });
+        for w in [
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+        ] {
+            w.weak_bg_fill = Color32::TRANSPARENT;
+            w.bg_fill = Color32::TRANSPARENT;
+        }
+        v.widgets.inactive.bg_stroke = Stroke::NONE;
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_HI);
+        ui.add(
+            egui::DragValue::new(value)
+                .range(range)
+                .fixed_decimals(decimals)
+                .speed(speed)
+                // A typed value lands once, on Enter or leaving the field: one undo step,
+                // not one per keystroke (and no half-typed values on the image).
+                .update_while_editing(false),
+        )
+    })
+    .inner
+}
+
+/// The phone's row: `label  ───────●──────  value`.
+fn inline_slider(
     ui: &mut Ui,
     label: &str,
     value: &mut f32,
@@ -720,6 +978,7 @@ pub fn scaled_slider(
             gradient: scale.gradient,
             label,
             readout: f64::from(*value),
+            bubble: None,
         };
         let slid = rail_painted(ui, &mut t, 0.0..=1.0, rail_w, spec);
         if slid.changed() {
@@ -841,6 +1100,82 @@ pub fn card_title(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
     });
 }
 
+pub struct SectionHeader {
+    /// The row (not the switch) was clicked: fold or unfold.
+    pub clicked: bool,
+    /// The switch was clicked.
+    pub toggled: bool,
+}
+
+/// An inspector section's heading: `▸ Title •` with a switch at the end. The arrow turns as
+/// the section opens; the dot is amber while anything in the section has been changed.
+/// `on` is `None` for a section with nothing to switch off.
+pub fn section_header(
+    ui: &mut Ui,
+    title: &str,
+    open: bool,
+    edited: bool,
+    on: Option<bool>,
+) -> SectionHeader {
+    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    describe(ui, &response, row, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title)
+    });
+    let hot = response.hovered();
+    let cy = row.center().y;
+
+    let mut toggled = false;
+    if let Some(on) = on {
+        // Set in by its hit area's margin, so that stays inside the row.
+        let track = Rect::from_min_size(pos2(row.right() - 35.0, cy - 9.0), vec2(32.0, 18.0));
+        let switch_response =
+            ui.interact(track.expand(3.0), response.id.with("on"), Sense::click());
+        toggled = switch_response.clicked();
+        describe(ui, &switch_response, track, || {
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, title)
+        });
+        let t = ui.ctx().animate_bool_responsive(switch_response.id, on);
+        paint_switch(ui.painter(), track, t, switch_response.hovered());
+    }
+
+    let painter = ui.painter();
+    // The arrow points right when shut and down when open, turning between.
+    let turn = ui
+        .ctx()
+        .animate_bool_responsive(response.id.with("turn"), open);
+    let centre = pos2(row.left() + 5.0, cy);
+    let angle = turn * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let rot = |v: Vec2| centre + vec2(v.x * cos - v.y * sin, v.x * sin + v.y * cos);
+    painter.add(Shape::line(
+        vec![
+            rot(vec2(-2.0, -4.0)),
+            rot(vec2(2.0, 0.0)),
+            rot(vec2(-2.0, 4.0)),
+        ],
+        Stroke::new(1.5, if hot { TEXT } else { TEXT_FAINT }),
+    ));
+
+    let galley = painter.layout_no_wrap(
+        title.to_owned(),
+        FontId::new(14.0, theme::sans_strong()),
+        if hot { TEXT_HI } else { TEXT },
+    );
+    let title_pos = pos2(row.left() + 18.0, cy - galley.size().y / 2.0);
+    let title_right = title_pos.x + galley.size().x;
+    painter.galley(title_pos, galley, TEXT);
+    if edited {
+        painter.circle_filled(pos2(title_right + 8.0, cy), 2.5, ACCENT);
+    }
+    if hot {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    SectionHeader {
+        clicked: response.clicked(),
+        toggled,
+    }
+}
+
 pub struct ModuleHeader {
     /// The row (not the check box) was clicked: collapse or expand.
     pub clicked: bool,
@@ -869,20 +1204,44 @@ pub fn module_header(
     let mut toggled = false;
     let mut active = true;
     let mut x = row.left();
+    // Where the summary must stop: the row's end, or the switch's left edge.
+    let mut right = row.right();
     if let Some(on) = enabled {
-        // Its hit area is 3 px larger all round; set in by that much so it stays inside the
-        // row rather than reaching over the card's edge.
-        let box_rect =
-            Rect::from_center_size(pos2(row.left() + 10.0, row.center().y), Vec2::splat(14.0));
-        let box_response =
-            ui.interact(box_rect.expand(3.0), response.id.with("on"), Sense::click());
-        if box_response.clicked() {
-            *on = !*on;
-            toggled = true;
+        if is_touch(ui.ctx()) {
+            // Its hit area is 3 px larger all round; set in by that much so it stays inside
+            // the row rather than reaching over the card's edge.
+            let box_rect =
+                Rect::from_center_size(pos2(row.left() + 10.0, row.center().y), Vec2::splat(14.0));
+            let box_response =
+                ui.interact(box_rect.expand(3.0), response.id.with("on"), Sense::click());
+            if box_response.clicked() {
+                *on = !*on;
+                toggled = true;
+            }
+            paint_checkbox(ui.painter(), box_rect, *on, box_response.hovered());
+            x = box_rect.right() + 9.0;
+        } else {
+            // On the desktop a switch at the row's end, as the panel's sections have, set
+            // in by its hit area's margin so that stays inside the row.
+            let track = Rect::from_min_size(
+                pos2(row.right() - 35.0, row.center().y - 9.0),
+                vec2(32.0, 18.0),
+            );
+            let switch_response =
+                ui.interact(track.expand(3.0), response.id.with("on"), Sense::click());
+            if switch_response.clicked() {
+                *on = !*on;
+                toggled = true;
+            }
+            let state = *on;
+            describe(ui, &switch_response, track, || {
+                egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, state, title)
+            });
+            let t = ui.ctx().animate_bool_responsive(switch_response.id, *on);
+            paint_switch(ui.painter(), track, t, switch_response.hovered());
+            right = track.left() - 10.0;
         }
-        paint_checkbox(ui.painter(), box_rect, *on, box_response.hovered());
         active = *on;
-        x = box_rect.right() + 9.0;
     }
 
     let title_colour = if focused {
@@ -906,7 +1265,7 @@ pub fn module_header(
     );
 
     // The summary gets whatever the title leaves, and is truncated rather than overlapping.
-    let room = row.right() - (x + title_w + 10.0);
+    let room = right - (x + title_w + 10.0);
     if room > 24.0 && !summary.is_empty() {
         let mut job = LayoutJob::single_section(
             summary.to_owned(),
@@ -916,7 +1275,7 @@ pub fn module_header(
         let galley = painter.layout_job(job);
         painter.galley(
             pos2(
-                row.right() - galley.size().x,
+                right - galley.size().x,
                 row.center().y - galley.size().y / 2.0,
             ),
             galley,
