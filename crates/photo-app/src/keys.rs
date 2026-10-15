@@ -51,9 +51,6 @@ impl PhotoApp {
             {
                 // Out of a tool, back to the ruler, as Snapseed's ✕ does.
                 self.compact_controls_open = false;
-            } else if self.layout.is_compact() && self.compact_tab == Some(compact::Tab::Presets) {
-                // Looks is a tool in Colour's row: back is the ruler too.
-                self.compact_tab = Some(compact::Tab::Edit);
             } else if self.layout.is_compact() && self.compact_tab.is_some() {
                 self.compact_tab = None;
             } else {

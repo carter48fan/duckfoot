@@ -520,8 +520,8 @@ fn cell_centre(size: egui::Vec2, i: usize) -> egui::Pos2 {
 }
 
 /// Phones get the navigation-bar layout either way up; every sheet lays out with a photo
-/// open. The bar's categories open the Edit sheet on their chips, and the top bar's back
-/// arrow is the Library.
+/// open. The bar's groups open the Edit sheet (Looks its looks), and the top bar's back
+/// arrow is the Library where there is a shelf.
 #[test]
 fn the_phone_layout_shows_every_sheet_and_the_bar_picks_a_category() {
     let dir = scratch_dir("phone");
@@ -546,11 +546,13 @@ fn the_phone_layout_shows_every_sheet_and_the_bar_picks_a_category() {
             app.compact_tab = Some(Tab::Library);
             h.frame_sized(&mut app, size, Default::default());
             tap(&h, &mut app, size, cell_centre(size, i));
-            assert_eq!(
-                app.compact_tab,
-                Some(Tab::Edit),
-                "tapping {cat:?} at {size:?}"
-            );
+            // Looks opens its looks; the others the Edit sheet.
+            let sheet = if cat == Category::Looks {
+                Tab::Presets
+            } else {
+                Tab::Edit
+            };
+            assert_eq!(app.compact_tab, Some(sheet), "tapping {cat:?} at {size:?}");
             assert_eq!(app.compact_category, cat, "tapping {cat:?} at {size:?}");
             // Tapping the open category again gives the stage the whole screen.
             tap(&h, &mut app, size, cell_centre(size, i));
@@ -906,8 +908,8 @@ fn flick(h: &Headless, app: &mut PhotoApp, y: f32, x0: f32, x1: f32) {
     h.frame_sized(app, PORTRAIT, pointer(vec![egui::Event::PointerGone]));
 }
 
-/// Swiping moves between chips from an open tool and between categories on the nav bar;
-/// the scope and filmic are Light's tools and draw flat; a look from Looks applies and
+/// Swiping moves between values from an open tool and between groups on the nav bar;
+/// the scope and filmic are in the Tools grid and draw flat; a look from Looks applies and
 /// "original" takes it off; the tour closes with back.
 #[test]
 fn phone_swipes_presets_and_tour() {
@@ -928,9 +930,9 @@ fn phone_swipes_presets_and_tour() {
         "no settings directory, so no tour on its own"
     );
 
-    // The scope and filmic are tools in Light's row.
+    // The scope and filmic are in the Tools grid.
     for id in [M::Scope, M::Filmic3D] {
-        assert!(Category::Light.chips().contains(&Chip::Tool(id)));
+        assert!(Category::Tools.chips().contains(&Chip::Tool(id)));
     }
 
     // A flick to the left across the exposure tool's controls (below its header, where
@@ -948,16 +950,16 @@ fn phone_swipes_presets_and_tour() {
         "a flick left is the next chip"
     );
 
-    // Along the nav bar, a flick left moves one category on, and right comes back.
+    // Along the nav bar, a flick left moves one group on, and right comes back.
     flick(&h, &mut app, PORTRAIT.y - 24.0, 330.0, 150.0);
-    assert_eq!(app.compact_category, Category::Colour);
+    assert_eq!(app.compact_category, Category::Crop);
     assert_eq!(app.compact_tab, Some(Tab::Edit));
     flick(&h, &mut app, PORTRAIT.y - 24.0, 100.0, 300.0);
-    assert_eq!(app.compact_category, Category::Light);
+    assert_eq!(app.compact_category, Category::Tune);
     assert_eq!(
         app.current_chip(),
         Some(Chip::Knob(M::Tonal, 0)),
-        "back where it was in Light"
+        "back where it was in Tune"
     );
 
     // The scope and filmic lay out (flat) on the phone.
@@ -973,8 +975,8 @@ fn phone_swipes_presets_and_tour() {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     let sheet_top = app.sheet_rect().top();
-    // Under the tool's header, and the looks / snapshots / history chips.
-    let row = sheet_top + 46.0 + 4.0 + 34.0 + 4.0 + 24.0;
+    // Under the looks / snapshots / history chips (Looks has no tool header).
+    let row = sheet_top + 4.0 + 34.0 + 4.0 + 24.0;
     let before = app.stack().clone();
     tap(&h, &mut app, PORTRAIT, egui::pos2(14.0 + 78.0 + 36.0, row));
     assert!(app.stack().vibrance.enabled, "vivid turns vibrance on");
@@ -987,6 +989,8 @@ fn phone_swipes_presets_and_tour() {
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
+    // The strength slider has come in under the tiles, and the sheet grown up to fit it.
+    let row = app.sheet_rect().top() + 4.0 + 34.0 + 4.0 + 24.0;
     tap(&h, &mut app, PORTRAIT, egui::pos2(50.0, row));
     assert_eq!(app.stack(), &before, "original takes the look back off");
 
@@ -3046,6 +3050,190 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
         0,
     );
     assert_ne!(app.compact_module, photo_app::InspectorSectionId::ToneCurve);
+
+    // Under the ruler, up and down walk the whole of Tune, from one module to the next:
+    // three steps down from exposure is past highlights and shadows, to whites.
+    use photo_app::InspectorSectionId as M;
+    app.choose_chip(Chip::Knob(M::Exposure, 0));
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    touch_path(
+        &h,
+        &mut app,
+        &line(centre, centre + egui::vec2(0.0, 140.0), 14),
+        0,
+    );
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Tonal, 2)));
+    assert_eq!(app.compact_module, M::Tonal);
+    assert_eq!(app.photo_value(), Some("whites"));
+    // …and sideways turns what it landed on.
+    let whites = app.stack().tonal.params.whites;
+    touch_path(
+        &h,
+        &mut app,
+        &line(
+            centre - egui::vec2(120.0, 0.0),
+            centre + egui::vec2(120.0, 0.0),
+            8,
+        ),
+        0,
+    );
+    assert!(app.stack().tonal.params.whites > whites);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A phone's platform: one photo at a time, with settings kept between launches, and
+/// (when it has one) a library its picked photos are copied into.
+#[derive(Clone)]
+struct PhonePlatform(
+    PathBuf,
+    std::sync::Arc<std::sync::Mutex<Vec<Response>>>,
+    Option<PathBuf>,
+);
+
+impl Platform for PhonePlatform {
+    fn request(&mut self, _request: Request) {}
+    fn poll(&mut self) -> Vec<Response> {
+        std::mem::take(&mut self.1.lock().unwrap())
+    }
+    fn settings_dir(&self) -> Option<PathBuf> {
+        Some(self.0.clone())
+    }
+    fn library_dir(&self) -> Option<PathBuf> {
+        self.2.clone()
+    }
+    fn single_photo(&self) -> bool {
+        true
+    }
+}
+
+/// Settle, then wait for a background export to finish.
+fn settle_export(h: &Headless, app: &mut PhotoApp) {
+    h.settle(app, Duration::from_secs(30));
+    let started = Instant::now();
+    while !app.export_finished() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "export still running"
+        );
+        h.frame(app, Default::default());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.frame(app, Default::default());
+}
+
+/// Wait until `path` is gone (the library's deletions run off the UI thread).
+fn gone(h: &Headless, app: &mut PhotoApp, path: &Path) -> bool {
+    let started = Instant::now();
+    while path.exists() && started.elapsed() < Duration::from_secs(10) {
+        h.frame(app, Default::default());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    !path.exists()
+}
+
+/// A phone's photo editor keeps no gallery: once a photo is exported, its library copy
+/// (and sidecar) goes as soon as another replaces it, or on the next launch. One never
+/// exported stays, so its edits come back if it is picked again.
+#[test]
+fn a_phone_deletes_an_exported_copy_once_it_is_left() {
+    let dir = scratch_dir("exported-copies");
+    let settings = dir.join("settings");
+    let library = dir.join("library");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let (a, b, c) = (
+        library.join("a.dng"),
+        library.join("b.dng"),
+        library.join("c.dng"),
+    );
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let platform = PhonePlatform(settings.clone(), answers.clone(), Some(library.clone()));
+    let say = |r: Response| answers.lock().unwrap().push(r);
+    {
+        let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+        h.frame(&mut app, Default::default());
+
+        // A, edited and exported; it stays while it is open.
+        say(Response::OpenImage(a.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        app.edit(|s| s.exposure.params.ev = 0.5);
+        say(Response::ExportImage(out.join("a.jpg")));
+        settle_export(&h, &mut app);
+        assert!(out.join("a.jpg").exists(), "the export was written");
+        assert!(a.exists(), "the open photo is kept");
+
+        // B replaces it: A's copy and its sidecar go.
+        say(Response::OpenImage(b.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert!(gone(&h, &mut app, &a), "A's copy is deleted");
+        assert!(photo_engine::find_sidecar(&a).is_none(), "…and its sidecar");
+        assert_eq!(app.error(), None);
+
+        // C replaces B, which was never exported: B stays, edits and all.
+        app.edit(|s| s.exposure.params.ev = 0.25);
+        say(Response::OpenImage(c.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert!(b.exists(), "a copy never exported is kept");
+
+        // C exported, then the app closed with it open.
+        say(Response::ExportImage(out.join("c.jpg")));
+        settle_export(&h, &mut app);
+        assert!(c.exists());
+        app.shutdown();
+    }
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(gone(&h, &mut app, &c), "C goes on the next launch");
+    assert!(b.exists());
+    assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One photo at a time: a photo picked replaces the one open (its edits saved), nothing
+/// else sits on a shelf to step to, and the next launch starts empty.
+#[test]
+fn a_phone_edits_one_photo_and_starts_the_next_session_empty() {
+    let dir = scratch_dir("one-photo");
+    let settings = dir.join("settings");
+    let (a, b) = (dir.join("a.dng"), dir.join("b.dng"));
+    write_dng(&a, 320, 214);
+    write_dng(&b, 320, 214);
+    let h = Headless::new();
+    let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let platform = PhonePlatform(settings.clone(), answers.clone(), None);
+    {
+        let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+        h.frame(&mut app, Default::default());
+        assert!(app.single_photo());
+        answers.lock().unwrap().push(Response::OpenImage(a.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert_eq!(app.loaded_path(), Some(a.as_path()));
+        app.edit(|s| {
+            s.exposure.enabled = true;
+            s.exposure.params.ev = 0.5;
+        });
+
+        // The next one picked takes its place, and a's edit is kept in its sidecar.
+        answers.lock().unwrap().push(Response::OpenImage(b.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert_eq!(app.loaded_path(), Some(b.as_path()));
+        let shelf: Vec<_> = app.shelf.iter().map(|it| it.path.clone()).collect();
+        assert_eq!(shelf, vec![b.clone()], "only the photo being edited");
+        let saved = photo_engine::load_sidecar(&a).unwrap().expect("a's edits");
+        assert_eq!(saved.exposure.params.ev, 0.5);
+        app.shutdown();
+    }
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(app.shelf.is_empty(), "the next session starts empty");
+    assert_eq!(app.loaded_path(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3138,18 +3326,7 @@ fn the_tour_waits_for_each_gesture_and_keeps_clear_of_what_it_points_at() {
         egui::pos2(strip.left() + 150.0, strip.center().y),
     );
     settle(&mut app);
-    assert_eq!(app.tour_step(), Some(6));
-    // In the Library, a sideways swipe on the photo: the next photo.
-    let stage = app.tour_card().expect("card").1;
-    let c = stage.center();
-    touch_path(
-        &h,
-        &mut app,
-        &line(c + egui::vec2(100.0, 0.0), c - egui::vec2(100.0, 0.0), 6),
-        0,
-    );
-    settle(&mut app);
-    assert_eq!(app.tour_step(), Some(7), "the last card");
+    assert_eq!(app.tour_step(), Some(6), "the last card");
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
     settle(&mut app);
     assert_eq!(app.tour_step(), None);
@@ -3454,24 +3631,21 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
     assert!(!app.compact_controls_open);
-    assert_eq!(app.compact_category, Category::Light);
+    assert_eq!(app.compact_category, Category::Tune);
 
-    // Light's second chip is highlights: a tap on it puts it under the ruler.
+    // Tune's bar is Light · Colour · Detail: a tap on Colour jumps to its first value.
     let strip = app.strip_rect();
-    let exposure_w = 86.5;
     tap(
         &h,
         &mut app,
         PORTRAIT,
-        egui::pos2(
-            strip.left() + 12.0 + exposure_w + 8.0 + 40.0,
-            strip.center().y,
-        ),
+        egui::pos2(strip.center().x, strip.center().y),
     );
-    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Tonal, 0)));
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::WhiteBalance, 0)));
     assert!(!app.compact_controls_open);
 
     // Dragging the ruler to the left turns it up, and is one undo step.
+    app.choose_chip(Chip::Knob(M::Tonal, 0));
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
@@ -3486,26 +3660,46 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
     app.undo();
     assert_eq!(app.stack().tonal.params.highlights, before);
 
-    // A tool opens in the ruler's place; back is the ruler again, the sheet still open.
+    // Down the ruler walks Tune's list without lifting the thumb, and turns nothing.
+    let x = PORTRAIT.x / 2.0;
+    touch_path(
+        &h,
+        &mut app,
+        &line(
+            egui::pos2(x, ruler_y - 20.0),
+            egui::pos2(x, ruler_y + 50.0),
+            8,
+        ),
+        0,
+    );
+    assert_eq!(
+        app.current_chip(),
+        Some(Chip::Knob(M::Tonal, 2)),
+        "two steps down from highlights is whites"
+    );
+    assert_eq!(app.stack().tonal.params.highlights, before);
+
+    // A tool opens in the grid's place; back is the grid again, the sheet still open.
     app.choose_chip(Chip::Tool(M::ToneCurve));
     h.frame_sized(&mut app, PORTRAIT, Default::default());
-    assert!(app.compact_controls_open, "the chip opens its tool");
+    assert!(app.compact_controls_open, "the tile opens its tool");
     assert_eq!(app.compact_module, M::ToneCurve);
+    assert_eq!(app.compact_category, Category::Tools);
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
-    assert!(!app.compact_controls_open, "back is the ruler again");
+    assert!(!app.compact_controls_open, "back is the grid again");
     assert_eq!(
         app.compact_tab,
         Some(Tab::Edit),
         "…with the sheet still open"
     );
 
-    // Looks is Colour's, and back leaves it for the ruler too.
+    // Looks is a group of its own: back closes it.
     app.choose_chip(Chip::Looks);
     h.frame_sized(&mut app, PORTRAIT, Default::default());
     assert_eq!(app.compact_tab, Some(Tab::Presets));
-    assert_eq!(app.compact_category, Category::Colour);
+    assert_eq!(app.compact_category, Category::Looks);
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
-    assert_eq!(app.compact_tab, Some(Tab::Edit));
+    assert_eq!(app.compact_tab, None);
 
     app.choose_chip(Chip::Cutout);
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));

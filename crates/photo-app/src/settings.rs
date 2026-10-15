@@ -28,6 +28,10 @@ pub struct Settings {
     /// The shelf as it was left, and the photo that was open.
     pub shelf: Vec<PathBuf>,
     pub last_open: Option<PathBuf>,
+    /// One photo at a time: the library copies already exported, deleted (sidecar and
+    /// all) once they are no longer open. Kept here so a copy left open when the app
+    /// closed goes on the next launch.
+    pub exported_copies: Vec<PathBuf>,
     pub export_recipes: Option<Vec<crate::batch::ExportRecipe>>,
     pub rename_pattern: Option<String>,
     /// Where the photo pickers start: the folder the last photos came from.
@@ -80,6 +84,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             shelf: Vec::new(),
             last_open: None,
+            exported_copies: Vec::new(),
             export_recipes: None,
             rename_pattern: None,
             import_dir: None,

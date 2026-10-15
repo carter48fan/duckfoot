@@ -693,6 +693,7 @@ impl PhotoApp {
     /// device's.
     pub(crate) fn prefetch_next(&mut self) {
         if cfg!(target_os = "android")
+            || self.single_photo()
             || self.loading.is_some()
             || !self.photo_on_stage()
             || self.engine.demosaic_pending()
@@ -710,6 +711,23 @@ impl PhotoApp {
         self.engine.drop_prepared();
         self.prefetch = Some((next.clone(), Prefetch::Decoding));
         self.loader.prefetch(next);
+    }
+
+    /// Open `path` as the only photo (`Platform::single_photo`): it replaces whatever was
+    /// open, whose edits are saved on the way out, and nothing else is kept on the shelf to
+    /// step to or prepare ahead.
+    pub fn open_alone(&mut self, gpu: &Gpu, path: PathBuf) {
+        if self.loaded_path.as_ref() != Some(&path) {
+            self.cancel_crop();
+            self.flush();
+        }
+        self.take_off_shelf(|p| *p != path);
+        self.removed_from_shelf.clear();
+        self.prefetch = None;
+        self.engine.drop_prepared();
+        self.open_path(gpu, path);
+        // The photo just left, if it was exported, is no longer needed.
+        self.sweep_exported_copies();
     }
 
     /// Make `path` the photo being edited, and start decoding it.
@@ -1421,6 +1439,48 @@ impl PhotoApp {
             .is_some_and(|dir| crate::dam::storage::is_in(&dir, path))
     }
 
+    /// One photo at a time: `photo` has been exported, so its library copy has done its job.
+    /// It is marked to go once it is no longer open (see [`Self::sweep_exported_copies`]):
+    /// a phone's photo editor is not where its photos are kept.
+    pub(crate) fn exported_copy(&mut self, photo: &Path) {
+        if !self.single_photo() || !self.is_library_copy(photo) {
+            return;
+        }
+        let source = photo_engine::copies::source_file(photo).into_owned();
+        if !self.settings.exported_copies.contains(&source) {
+            self.settings.exported_copies.push(source);
+            self.save_settings();
+        }
+    }
+
+    /// Delete the exported library copies that are no longer open, sidecars and all, off
+    /// the UI thread and without a word: nothing the user sees refers to them.
+    pub(crate) fn sweep_exported_copies(&mut self) {
+        let Some(dir) = self.platform.library_dir() else {
+            return;
+        };
+        if !self.single_photo() || self.settings.exported_copies.is_empty() {
+            return;
+        }
+        let open = self
+            .loaded_path
+            .as_deref()
+            .map(|p| photo_engine::copies::source_file(p).into_owned());
+        let (keep, delete): (Vec<PathBuf>, Vec<PathBuf>) =
+            std::mem::take(&mut self.settings.exported_copies)
+                .into_iter()
+                .partition(|p| Some(p) == open.as_ref() || !p.starts_with(&dir));
+        // One outside the library is never deleted, nor kept on the list.
+        self.settings.exported_copies = keep.into_iter().filter(|p| p.starts_with(&dir)).collect();
+        self.save_settings();
+        if delete.is_empty() {
+            return;
+        }
+        self.quiet_library_delete = true;
+        self.loader
+            .file_job(loader::FileJob::Library { dir, delete });
+    }
+
     /// Deletes these photos of the library, with their sidecars and virtual copies, and
     /// takes them off the shelf. There is no undo, so the buttons that ask for it ask
     /// twice. The open photo is kept: its edits would be written back beside it.
@@ -1468,10 +1528,13 @@ impl PhotoApp {
         deleted: usize,
         failed: Vec<String>,
     ) {
+        let quiet = std::mem::take(&mut self.quiet_library_delete);
         if let Some(first) = failed.first() {
             log::warn!("could not delete from the library: {failed:?}");
-            self.set_status(format!("Could not delete {first}"));
-        } else if deleted > 0 {
+            if !quiet {
+                self.set_status(format!("Could not delete {first}"));
+            }
+        } else if deleted > 0 && !quiet {
             self.set_status(if deleted == 1 {
                 "Deleted 1 copy from the library".to_string()
             } else {

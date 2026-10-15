@@ -389,29 +389,41 @@ over the last — see [android/README.md](./android/README.md).
 
 How it differs from the desktop, for now:
 
-- **Files are imported.** Android hands out documents, not paths, so a picked photo is
-  copied into the app's private library and edited there; its sidecar lives beside the
-  copy. Picking the same photo again reuses the copy, so its edits come back. The shelf's
-  **Library** bookmark lists everything imported.
+- **One photo at a time.** A photo is picked when the app opens, edited, and replaced by
+  the next one picked (＋ at the top left); its edits are saved on the way out. There is no
+  shelf, no stepping between photos and no batch export, and the next launch starts empty.
+  Android hands out documents, not paths, so a picked photo is copied into the app's
+  private library and edited there, its sidecar beside the copy. Once a photo is
+  exported its copy has done its job: it is deleted, sidecar and all, as soon as another
+  photo replaces it (or on the next launch, if the app closed with it open), so the
+  editor never turns into a second gallery. A photo never exported keeps its copy, and
+  picking it again brings its edits back. **⋯ → Photo info & storage** shows what those
+  copies take up and deletes them.
 - **Exports go to `Pictures/Duckfoot`**, where the gallery shows them. There is no save
   dialog.
 - **Back** closes the crop tool or an open dialog first, then sends the app to the
   background. Backgrounding keeps the photo, stack and undo history.
-- **The phone layout**, after Google Photos and Snapseed. Below 900 × 560 points (phones
-  either way up, tablets held upright) the stage fills the screen. The bottom bar holds
-  five categories, **Crop · Light · Colour · Detail · Retouch**; the top bar has ‹ for the
-  Library and **Export** at the right. A category shows the chosen value over a ruler,
-  dragged to change it (double-tap puts it back), over a row of chips: each chip is a
-  value, or a tool (›) — the curve, colour EQ and balance, healing, masks, **remove
-  background**, Looks — that opens in the ruler's place with a header (back to the
-  ruler, reset, on/off). The ⋯ beside a value opens all its tool's settings. The photo
-  is a control too (swipe up/down to choose a value, left/right to change it). Back
-  leaves a tool for the ruler before it closes the sheet. Turned sideways, the bar
-  becomes a rail on the right. What a keyboard does on the desktop has a touch control:
-  select mode (Ctrl/Shift-click), select all, **fine**, before / after, zoom and the
-  clipping view in the top bar's ⋯ menu, rating and flag chips, and a sideways swipe
-  across the photo (in the Library, or with the sheet closed) for the next or previous
-  one. Controls are drawn at touch size (chips 34 pt, buttons 40, icons 44).
+- **The phone layout**, after Snapseed. Below 900 × 560 points (phones either way up,
+  tablets held upright) the stage fills the screen and the bottom bar holds four groups:
+  - **Looks**: one-tap looks and their strength, snapshots, history, copy & paste.
+  - **Tune**: every quick value in one list — light (exposure, highlights, shadows,
+    whites, blacks, dehaze, vignette), colour (temperature, tint, vibrance, saturation)
+    and detail (clarity, texture, sharpen, noise, colour noise). The chosen value sits
+    over a ruler; swipe up or down, on the photo or on the ruler, to walk the whole list,
+    and sideways to change it. Under the ruler, **Light · Colour · Detail** with a dot per
+    value (amber once changed) jump to a stretch; swiping that bar steps value by value.
+    **AUTO** beside a value is auto tone for light, auto white balance for colour.
+  - **Crop**: the crop tool, then straighten, perspective and lens distortion on the
+    ruler, with auto straighten / upright.
+  - **Tools**: a grid of the tools that are not one value — curves, colour mixer, colour
+    grade, brush & masks, healing, **remove background**, LUT, filmic, scope. A tile
+    opens its tool; back returns to the grid.
+
+  Double-tap the ruler or the photo to put a value back; hold the photo for the original;
+  the ⋯ beside a value opens all its tool's settings. Turned sideways, the bar becomes a
+  rail on the right. **Export** is at the top right; before / after, zoom, **fine**, the
+  clipping view, reset and the tour are in the top bar's ⋯ menu. Controls are drawn at
+  touch size (chips 34 pt, buttons 40, icons 44).
 - Requires Android 11+ and Vulkan 1.1. Built for `arm64-v8a` only.
 
 ### Windows, macOS — experimental
