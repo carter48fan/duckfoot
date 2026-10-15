@@ -119,7 +119,7 @@ impl PhotoApp {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!g.crop.is_full_frame(), |ui| {
-                            if widgets::chip(ui, false, "reset crop").clicked() {
+                            if widgets::outlined_chip(ui, true, false, "reset crop").clicked() {
                                 g.crop = Crop::default();
                                 edited = true;
                             }
@@ -139,9 +139,14 @@ impl PhotoApp {
                     let pad = widgets::sized(ui, 3.0, 6.0);
                     ui.spacing_mut().item_spacing = vec2(pad, pad);
                     self.crop_chips(ui);
-                    if widgets::chip(ui, self.settings.constrain_crop, "no empty corners")
-                        .on_hover_text("When straightened, keep the crop on what was photographed")
-                        .clicked()
+                    if widgets::outlined_chip(
+                        ui,
+                        true,
+                        self.settings.constrain_crop,
+                        "no empty corners",
+                    )
+                    .on_hover_text("When straightened, keep the crop on what was photographed")
+                    .clicked()
                     {
                         self.set_constrain_crop(!self.settings.constrain_crop);
                     }
@@ -196,7 +201,10 @@ impl PhotoApp {
                                 "Both keystones and straighten, from every line",
                             ),
                         ] {
-                            if widgets::chip(ui, false, label).on_hover_text(tip).clicked() {
+                            if widgets::outlined_chip(ui, true, false, label)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
                                 self.pending_sample = Some(crate::Sample::Upright(mode));
                             }
                         }
@@ -250,7 +258,9 @@ impl PhotoApp {
                     if let Some(first) = current.get_mut(0..1) {
                         first.make_ascii_uppercase();
                     }
-                    ui.horizontal(|ui| {
+                    // One midline for the label, the menu and PICK, which all come at
+                    // their own heights.
+                    widgets::bar_line(ui, 28.0, |ui| {
                         ui.label(RichText::new("White balance").size(12.5).color(theme::TEXT));
                         ui.menu_button(
                             RichText::new(format!("{current} ▾"))
@@ -297,7 +307,7 @@ impl PhotoApp {
                             },
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::chip(ui, self.picking_wb, "pick")
+                            if widgets::outlined_chip(ui, true, self.picking_wb, "pick")
                                 .on_hover_text("Click something that should be grey (W)")
                                 .clicked()
                             {
@@ -308,19 +318,19 @@ impl PhotoApp {
                 } else {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                        if widgets::chip(ui, self.picking_wb, "pick")
+                        if widgets::outlined_chip(ui, true, self.picking_wb, "pick")
                             .on_hover_text("Click something that should be grey (W)")
                             .clicked()
                         {
                             self.picking_wb = !self.picking_wb;
                         }
-                        if widgets::chip(ui, false, "auto")
+                        if widgets::outlined_chip(ui, true, false, "auto")
                             .on_hover_text("Balance the whole photo")
                             .clicked()
                         {
                             self.pending_sample = Some(crate::Sample::AutoWb);
                         }
-                        if widgets::chip(ui, as_shot, "as shot")
+                        if widgets::outlined_chip(ui, true, as_shot, "as shot")
                             .on_hover_text(format!("What the camera metered: {home_k:.0} K"))
                             .clicked()
                         {
@@ -328,7 +338,7 @@ impl PhotoApp {
                         }
                         for (label, tip, pk, pt) in lights {
                             let wb = scale.white_balance(pk, pt);
-                            let chip = widgets::chip_enabled(ui, wb.is_some(), lit(pk, pt), label)
+                            let chip = widgets::outlined_chip(ui, wb.is_some(), lit(pk, pt), label)
                                 .on_hover_text(tip);
                             if chip.clicked() {
                                 preset = wb;
@@ -385,9 +395,11 @@ impl PhotoApp {
                 // before keeps sRGB, and its look, until it is moved.
                 use photo_engine::gamut::WorkingSpace;
                 let mut space = None;
+                // The caption over its choices, as tone mapping's is: beside them, the
+                // chips start wherever the caption happens to end.
+                ui.label(theme::tag("colour space").color(theme::TEXT_DIM));
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                    ui.label(theme::tag("colour space").color(theme::TEXT_DIM));
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     let now = self.stack.working_space;
                     for (s, label, tip) in [
                         (
@@ -401,7 +413,7 @@ impl PhotoApp {
                             "How edits were made before: saturated colours clip, and shift hue",
                         ),
                     ] {
-                        if widgets::chip(ui, now == s, label)
+                        if widgets::outlined_chip(ui, true, now == s, label)
                             .on_hover_text(tip)
                             .clicked()
                             && now != s
@@ -416,16 +428,7 @@ impl PhotoApp {
                 }
             }
             InspectorSectionId::Exposure => {
-                if self.ready_image().is_some()
-                    && widgets::chip(ui, false, "auto tone")
-                        .on_hover_text(
-                            "Exposure to put the middle tones at mid grey, and highlights and \
-                             shadows eased back from clipping",
-                        )
-                        .clicked()
-                {
-                    self.pending_sample = Some(crate::Sample::AutoTone);
-                }
+                let ready = self.ready_image().is_some();
                 let p = &mut self.stack.exposure.params;
                 let dp = d.exposure.params;
 
@@ -465,7 +468,7 @@ impl PhotoApp {
                     for (m, label, tip) in modes {
                         let sel = p.mode == m;
                         let choice = if touch {
-                            widgets::chip(ui, sel, label)
+                            widgets::outlined_chip(ui,true, sel, label)
                         } else {
                             widgets::tab(ui, sel, label, tab_w)
                         };
@@ -482,7 +485,11 @@ impl PhotoApp {
                     }
                 });
 
-                ui.add_space(4.0);
+                // A picture of the shoulder the tabs choose, under them, where there is
+                // room for one: on a phone the mode chips say the same in a line.
+                if !touch {
+                    widgets::mini_knee_curve(ui, p.ev, p.rolloff);
+                }
 
                 let max_ev = if p.extended_range { 8.0 } else { 4.0 };
                 track!(widgets::param_slider(
@@ -513,31 +520,35 @@ impl PhotoApp {
                     ));
                 }
 
-                ui.horizontal(|ui| {
-                    if widgets::chip(
-                        ui,
-                        p.extended_range,
-                        if p.extended_range {
-                            "±8 EV (Extended)"
-                        } else {
-                            "±4 EV (Standard)"
-                        },
-                    )
-                    .on_hover_text(
-                        "Toggle between standard ±4 EV range and extended ±8 EV extreme range",
-                    )
-                    .clicked()
+                // The section's two buttons on one line: auto at the start, the EV
+                // slider's range at the end.
+                let mut auto = false;
+                widgets::bar_line(ui, 28.0, |ui| {
+                    if widgets::outlined_chip(ui, ready, false, "auto tone")
+                        .on_hover_text(
+                            "Exposure to put the middle tones at mid grey, and highlights and \
+                             shadows eased back from clipping",
+                        )
+                        .clicked()
                     {
-                        p.extended_range = !p.extended_range;
-                        discrete!();
+                        auto = true;
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::outlined_chip(ui, true, p.extended_range, "±8 EV")
+                            .on_hover_text(if p.extended_range {
+                                "The EV slider reaches ±8 stops. Click for ±4"
+                            } else {
+                                "Let the EV slider reach ±8 stops instead of ±4"
+                            })
+                            .clicked()
+                        {
+                            p.extended_range = !p.extended_range;
+                            discrete!();
+                        }
+                    });
                 });
-
-                // A picture of the shoulder, where there is room for one: on a phone the
-                // mode chips say the same in a line.
-                if !widgets::is_touch(ui.ctx()) {
-                    ui.add_space(4.0);
-                    widgets::mini_knee_curve(ui, p.ev, p.rolloff);
+                if auto {
+                    self.pending_sample = Some(crate::Sample::AutoTone);
                 }
             }
             InspectorSectionId::Tonal => {
@@ -587,7 +598,7 @@ impl PhotoApp {
                         (CurveChannel::Green, "Green"),
                         (CurveChannel::Blue, "Blue"),
                     ] {
-                        if widgets::chip(ui, chan == c, label).clicked() {
+                        if widgets::outlined_chip(ui, true, chan == c, label).clicked() {
                             chan = c;
                             ui.data_mut(|d| d.insert_temp(ui.id().with("curve_chan"), chan));
                         }
@@ -627,7 +638,7 @@ impl PhotoApp {
                         ));
                     }
                 }
-                ui.horizontal(|ui| {
+                widgets::bar_line(ui, 28.0, |ui| {
                     let hint = if widgets::is_touch(ui.ctx()) {
                         "tap to add · drag · double-tap to remove"
                     } else {
@@ -648,7 +659,7 @@ impl PhotoApp {
                             }
                         };
                         ui.add_enabled_ui(can_reset, |ui| {
-                            if widgets::chip(ui, false, "reset").clicked() {
+                            if widgets::outlined_chip(ui, true, false, "reset").clicked() {
                                 match chan {
                                     CurveChannel::Rgb => {
                                         self.stack.tone_curve.params = identity_nodes()
@@ -672,13 +683,13 @@ impl PhotoApp {
                 if self.stack.curve_domain == photo_engine::CurveDomain::Linear {
                     // An edit from before curves moved to display values: it keeps its
                     // look, on axes that do not match the histogram under them.
-                    ui.horizontal(|ui| {
+                    widgets::bar_line(ui, 28.0, |ui| {
                         ui.label(theme::tag("older curve · linear axes").color(theme::TEXT_DIM))
                             .on_hover_text(
                                 "Made before the curve's axes matched the histogram. It looks as \
                              it always did; update it to edit on display values.",
                             );
-                        if widgets::chip(ui, false, "update").clicked() {
+                        if widgets::outlined_chip(ui, true, false, "update").clicked() {
                             let nodes = &mut self.stack.tone_curve.params;
                             for n in nodes.iter_mut() {
                                 n.x = encode_srgb(n.x);
@@ -733,7 +744,7 @@ impl PhotoApp {
                         (ColorEqTab::Luminance, "Luminance"),
                     ] {
                         let sel = self.color_eq_tab == tab;
-                        if widgets::chip(ui, sel, label).clicked() {
+                        if widgets::outlined_chip(ui, true, sel, label).clicked() {
                             self.color_eq_tab = tab;
                             if self.tat_mode.is_some() {
                                 self.tat_mode = Some(crate::tat::TatMode::ColorEq(tab));
@@ -742,7 +753,7 @@ impl PhotoApp {
                     }
                     let tat_on =
                         self.tat_mode == Some(crate::tat::TatMode::ColorEq(self.color_eq_tab));
-                    if widgets::chip(ui, tat_on, "🎯 on-photo drag")
+                    if widgets::outlined_chip(ui, true, tat_on, "🎯 on-photo drag")
                         .on_hover_text("Drag directly on colors in the photo to adjust their band")
                         .clicked()
                     {
@@ -858,7 +869,7 @@ impl PhotoApp {
                             .enumerate()
                         {
                             let active = current_tab == idx;
-                            if widgets::chip(ui, active, name).clicked() {
+                            if widgets::outlined_chip(ui, true, active, name).clicked() {
                                 current_tab = idx;
                                 ui.data_mut(|d| {
                                     d.insert_temp(egui::Id::new("duckfoot.cb_tab"), idx)
@@ -938,7 +949,7 @@ impl PhotoApp {
                             ("1.0", 1.0),
                         ] {
                             let active = (p.amount - val).abs() < 0.05;
-                            if widgets::chip(ui, active, label).clicked() {
+                            if widgets::outlined_chip(ui, true, active, label).clicked() {
                                 p.amount = val;
                                 *changed = true;
                                 *started = true;
@@ -961,7 +972,7 @@ impl PhotoApp {
                 if let Some(iso) = iso {
                     let suggested = photo_engine::params::Denoise::for_iso(iso);
                     let lit = self.stack.denoise.enabled && self.stack.denoise.params == suggested;
-                    if widgets::chip(ui, lit, &format!("match ISO {iso}"))
+                    if widgets::outlined_chip(ui, true, lit, &format!("match ISO {iso}"))
                         .on_hover_text("A starting strength for how much noise this ISO leaves")
                         .clicked()
                     {
@@ -1003,7 +1014,7 @@ impl PhotoApp {
                         ui.label(theme::dim("The file corrects its own lens.").size(12.0));
                     } else if let Some(name) = &found {
                         let on = self.stack.lens.params.profile;
-                        if widgets::chip(ui, on, "profile")
+                        if widgets::outlined_chip(ui,true, on, "profile")
                             .on_hover_text("Correct distortion, fringes and fall-off from the lens's profile (lensfun)")
                             .clicked()
                         {
@@ -1037,14 +1048,14 @@ impl PhotoApp {
                 let path = self.stack.look.params.path.clone();
                 let (mut pick, mut clear) = (false, false);
                 ui.horizontal_wrapped(|ui| {
-                    pick = widgets::chip(ui, false, ".cube file…")
+                    pick = widgets::outlined_chip(ui, true, false, ".cube file…")
                         .on_hover_text(
                             "A 3D LUT look (.cube, as Resolve and most LUT packs write \
                              them), applied to the photo as an sRGB screen shows it",
                         )
                         .clicked();
                     if path.is_some() {
-                        clear = widgets::chip(ui, false, "clear").clicked();
+                        clear = widgets::outlined_chip(ui, true, false, "clear").clicked();
                     }
                 });
                 let note = match &path {
@@ -1083,124 +1094,179 @@ impl PhotoApp {
             InspectorSectionId::Heal => {
                 use photo_engine::heal::{Mode, MAX_SPOTS};
                 let n = self.stack.heal.params.spots.len();
-                ui.horizontal_wrapped(|ui| {
+                let ready = self.ready_image().is_some();
+                let touch = widgets::is_touch(ui.ctx());
+                let mut toggle_healing = false;
+                widgets::bar_line(ui, 28.0, |ui| {
                     let tip = if self.healing {
                         "Stop healing (Esc)"
                     } else {
                         "Tap or click a spot on the photo to heal it"
                     };
-                    if widgets::chip_enabled(
-                        ui,
-                        self.ready_image().is_some(),
-                        self.healing,
-                        "heal spots",
-                    )
-                    .on_hover_text(tip)
-                    .clicked()
-                    {
-                        self.healing = !self.healing;
-                        if self.healing {
-                            self.selected_mask = None;
-                            if self.cropping {
-                                self.cancel_crop();
-                            }
-                        } else {
-                            self.selected_spot = None;
-                        }
-                    }
-                    if widgets::chip(ui, self.dust_view, "dust view")
-                        .on_hover_text(
-                            "Show only the finest detail, so dust on the sensor stands out",
-                        )
+                    if widgets::outlined_chip(ui, ready, self.healing, "heal spots")
+                        .on_hover_text(tip)
                         .clicked()
                     {
-                        self.dust_view = !self.dust_view;
+                        toggle_healing = true;
                     }
-                });
-                if self.healing {
-                    widgets::param_slider(ui, "spot size", &mut self.spot_size, 0.3..=8.0, 1, 1.5);
-                    if n >= MAX_SPOTS {
-                        ui.label(theme::dim(format!("All {MAX_SPOTS} spots are used.")).size(11.5));
-                    }
-                }
-                if let Some(i) = self.selected_spot {
-                    let spot = &mut self.stack.heal.params.spots[i];
-                    ui.label(theme::dim(format!("spot {} of {n}", i + 1)).size(11.5));
-                    let mut size = spot.radius * 100.0;
-                    let r = widgets::param_slider(ui, "size", &mut size, 0.1..=10.0, 1, 1.5);
-                    if r.changed() {
-                        spot.radius = size / 100.0;
-                    }
-                    track!(r);
-                    let mut feather = spot.feather * 100.0;
-                    let r =
-                        widgets::param_slider(ui, "feather", &mut feather, 1.0..=100.0, 0, 40.0);
-                    if r.changed() {
-                        spot.feather = feather / 100.0;
-                    }
-                    track!(r);
-                    let mode = spot.mode;
-                    let mut set_mode = None;
-                    let mut delete = false;
-                    ui.horizontal_wrapped(|ui| {
-                        if widgets::chip(ui, mode == Mode::Heal, "heal")
-                            .on_hover_text("Cover it, matched to the tone around it")
-                            .clicked()
-                        {
-                            set_mode = Some(Mode::Heal);
-                        }
-                        if widgets::chip(ui, mode == Mode::Clone, "clone")
-                            .on_hover_text("Cover it with the source exactly as it is")
-                            .clicked()
-                        {
-                            set_mode = Some(Mode::Clone);
-                        }
-                        if widgets::chip(ui, mode == Mode::Remove, "remove")
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::outlined_chip(ui, ready, self.dust_view, "dust view")
                             .on_hover_text(
-                                "Fill it from the ground around it, with no source: for \
-                                 wires, signs and small objects. A large spot fills softer",
+                                "Show only the finest detail, so dust on the sensor stands out",
                             )
                             .clicked()
                         {
-                            set_mode = Some(Mode::Remove);
+                            self.dust_view = !self.dust_view;
                         }
-                        if widgets::chip(ui, false, "delete").clicked() {
+                    });
+                });
+                if toggle_healing {
+                    self.healing = !self.healing;
+                    if self.healing {
+                        self.selected_mask = None;
+                        if self.cropping {
+                            self.cancel_crop();
+                        }
+                    } else {
+                        self.selected_spot = None;
+                    }
+                }
+                if self.healing {
+                    widgets::param_slider(
+                        ui,
+                        "new spot size",
+                        &mut self.spot_size,
+                        0.3..=8.0,
+                        1,
+                        1.5,
+                    );
+                }
+
+                if n == 0 {
+                    let how = if touch {
+                        "Turn on Heal spots, then tap a blemish. Each spot copies from a patch \
+                         nearby, linked to it by a line: drag either circle to move it."
+                    } else {
+                        "Turn on Heal spots, then click a blemish. Each spot copies from a \
+                         patch nearby, linked to it by a line: drag either circle to move it, \
+                         with Shift held to place it to the pixel."
+                    };
+                    ui.label(theme::dim(how).size(11.5));
+                    return;
+                }
+
+                // Every spot, by number: choosing one here is easier than finding a small
+                // circle on the photo.
+                ui.add_space(2.0);
+                ui.label(theme::tag(format!("spots · {n} of {MAX_SPOTS}")).color(theme::TEXT_DIM));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for i in 0..n {
+                        let chosen = self.selected_spot == Some(i);
+                        if widgets::outlined_chip(ui, true, chosen, &format!("{}", i + 1))
+                            .on_hover_text(if chosen {
+                                "Deselect it"
+                            } else {
+                                "Choose it, to move or change it"
+                            })
+                            .clicked()
+                        {
+                            self.selected_spot = if chosen { None } else { Some(i) };
+                            if !chosen {
+                                // Its circles show only while healing.
+                                self.healing = true;
+                            }
+                        }
+                    }
+                });
+
+                let Some(i) = self.selected_spot.filter(|&i| i < n) else {
+                    ui.label(theme::dim("Choose a spot to move or change it.").size(11.5));
+                    return;
+                };
+                ui.add_space(2.0);
+                let mut delete = false;
+                widgets::bar_line(ui, 28.0, |ui| {
+                    ui.label(theme::tag(format!("spot {}", i + 1)).color(theme::TEXT_DIM));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::outlined_chip(ui, true, false, "delete")
+                            .on_hover_text("Take this spot away")
+                            .clicked()
+                        {
                             delete = true;
                         }
                     });
-                    if let Some(m) = set_mode {
-                        self.stack.heal.params.spots[i].mode = m;
-                        discrete!();
+                });
+                let mode = self.stack.heal.params.spots[i].mode;
+                let mut set_mode = None;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (m, label, tip) in [
+                        (
+                            Mode::Heal,
+                            "heal",
+                            "Cover it, matched to the tone around it",
+                        ),
+                        (
+                            Mode::Clone,
+                            "clone",
+                            "Cover it with the source exactly as it is",
+                        ),
+                        (
+                            Mode::Remove,
+                            "remove",
+                            "Fill it from the ground around it, with no source: for wires, \
+                             signs and small objects. A large spot fills softer",
+                        ),
+                    ] {
+                        if widgets::outlined_chip(ui, true, mode == m, label)
+                            .on_hover_text(tip)
+                            .clicked()
+                            && mode != m
+                        {
+                            set_mode = Some(m);
+                        }
                     }
-                    if delete {
-                        self.stack.heal.params.spots.remove(i);
-                        self.selected_spot = None;
-                        discrete!();
-                    }
-                } else if n > 0 {
-                    ui.label(
-                        theme::dim(format!(
-                            "{n} spot{} healed. Heal spots, then tap one to move its source.",
-                            if n == 1 { "" } else { "s" }
-                        ))
-                        .size(11.5),
-                    );
+                });
+                let spot = &mut self.stack.heal.params.spots[i];
+                let mut size = spot.radius * 100.0;
+                let r = widgets::param_slider(ui, "size", &mut size, 0.1..=10.0, 1, 1.5);
+                if r.changed() {
+                    spot.radius = size / 100.0;
+                }
+                track!(r);
+                let mut feather = spot.feather * 100.0;
+                let r = widgets::param_slider(ui, "feather", &mut feather, 1.0..=100.0, 0, 40.0);
+                if r.changed() {
+                    spot.feather = feather / 100.0;
+                }
+                track!(r);
+                if let Some(m) = set_mode {
+                    self.stack.heal.params.spots[i].mode = m;
+                    discrete!();
+                }
+                if delete {
+                    self.stack.heal.params.spots.remove(i);
+                    self.selected_spot = None;
+                    discrete!();
                 }
             }
             InspectorSectionId::Local => {
                 use photo_engine::local::{Mask, RangeMask, Shape, MAX_MASKS};
                 let n = self.stack.local.params.masks.len();
                 let mut add: Option<Mask> = None;
-                ui.horizontal_wrapped(|ui| {
+                ui.label(theme::tag("add a mask").color(theme::TEXT_DIM));
+                widgets::bar_line(ui, 28.0, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     let room = n < MAX_MASKS && self.ready_image().is_some();
-                    if widgets::chip_enabled(ui, room, false, "+ radial")
+                    if widgets::outlined_chip(ui, room, false, "+ radial")
                         .on_hover_text("An ellipse: adjust inside it, or outside when inverted")
                         .clicked()
                     {
                         let c = self.crop_point_on_sensor(0.5, 0.5);
                         add = Some(Mask::radial(c, 0.15));
                     }
-                    if widgets::chip_enabled(ui, room, false, "+ gradient")
+                    if widgets::outlined_chip(ui, room, false, "+ gradient")
                         .on_hover_text("A graduated filter: full at its start, fading to its end")
                         .clicked()
                     {
@@ -1210,20 +1276,24 @@ impl PhotoApp {
                         );
                         add = Some(Mask::linear(a, b));
                     }
-                    if widgets::chip_enabled(ui, room, false, "+ brush")
+                    if widgets::outlined_chip(ui, room, false, "+ brush")
                         .on_hover_text("Paint where it applies")
                         .clicked()
                     {
                         add = Some(Mask::brush());
                     }
-                    if n > 0
-                        && widgets::chip(ui, self.mask_overlay, "show mask")
-                            .on_hover_text(
-                                "Wash the chosen mask red on the photo, to see where it applies",
-                            )
-                            .clicked()
-                    {
-                        self.mask_overlay = !self.mask_overlay;
+                    if n > 0 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::outlined_chip(ui, true, self.mask_overlay, "show")
+                                .on_hover_text(
+                                    "Wash the chosen mask red on the photo, to see where it \
+                                     applies",
+                                )
+                                .clicked()
+                            {
+                                self.mask_overlay = !self.mask_overlay;
+                            }
+                        });
                     }
                 });
                 if let Some(mask) = add {
@@ -1232,18 +1302,40 @@ impl PhotoApp {
                     self.selected_mask = Some(n);
                     discrete!();
                 }
+                if self.stack.local.params.masks.is_empty() {
+                    let how = if widgets::is_touch(ui.ctx()) {
+                        "A mask changes one part of the photo. Radial: an oval, for a face. \
+                         Gradient: a fade, for a sky. Brush: paint where it applies."
+                    } else {
+                        "A mask changes one part of the photo. Radial: an oval, for a face. \
+                         Gradient: a fade, for a sky. Brush: paint where it applies. Drag its \
+                         handles on the photo, with Shift held to place them to the pixel."
+                    };
+                    ui.label(theme::dim(how).size(11.5));
+                }
+                if n > 0 {
+                    ui.add_space(2.0);
+                    ui.label(
+                        theme::tag(format!("masks · {n} of {MAX_MASKS}")).color(theme::TEXT_DIM),
+                    );
+                }
                 let mut remove = None;
                 for i in 0..self.stack.local.params.masks.len() {
                     let m = self.stack.local.params.masks[i].clone();
                     let chosen = self.selected_mask == Some(i);
-                    ui.horizontal(|ui| {
-                        if widgets::chip(ui, chosen, &format!("{} {}", m.kind(), i + 1))
-                            .on_hover_text(if chosen {
-                                "Put its handles away (Esc)"
-                            } else {
-                                "Place it on the photo and adjust it"
-                            })
-                            .clicked()
+                    widgets::bar_line(ui, 28.0, |ui| {
+                        if widgets::outlined_chip(
+                            ui,
+                            true,
+                            chosen,
+                            &format!("{} {}", m.kind(), i + 1),
+                        )
+                        .on_hover_text(if chosen {
+                            "Put its handles away (Esc)"
+                        } else {
+                            "Place it on the photo and adjust it"
+                        })
+                        .clicked()
                         {
                             self.selected_mask = if chosen { None } else { Some(i) };
                         }
@@ -1276,8 +1368,9 @@ impl PhotoApp {
                                 remove = Some(i);
                             }
                             let mut on = m.on;
-                            if ui
-                                .checkbox(&mut on, "")
+                            // The panel's own checkbox, not egui's: one look with the
+                            // module cards', centred on the row's midline.
+                            if widgets::checkbox(ui, &mut on)
                                 .on_hover_text("Apply this mask")
                                 .changed()
                             {
@@ -1298,6 +1391,10 @@ impl PhotoApp {
                 }
                 if let Some(i) = self.selected_mask {
                     let m = &mut self.stack.local.params.masks[i];
+                    ui.add_space(2.0);
+                    ui.label(
+                        theme::tag(format!("adjust {} {}", m.kind(), i + 1)).color(theme::TEXT_DIM),
+                    );
                     let a = &mut m.adjust;
                     track!(widgets::param_slider(
                         ui,
@@ -1318,6 +1415,8 @@ impl PhotoApp {
                     ] {
                         track!(widgets::param_slider(ui, label, value, lo..=100.0, 0, 0.0));
                     }
+                    ui.add_space(2.0);
+                    ui.label(theme::tag("shape").color(theme::TEXT_DIM));
                     if let Shape::Brush { dabs } = &m.shape {
                         let painted = dabs.len();
                         let brush = &mut self.brush;
@@ -1337,14 +1436,15 @@ impl PhotoApp {
                             0,
                             60.0,
                         );
-                        ui.horizontal_wrapped(|ui| {
-                            if widgets::chip(ui, self.brush.erase, "erase")
+                        widgets::bar_line(ui, 28.0, |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if widgets::outlined_chip(ui, true, self.brush.erase, "erase")
                                 .on_hover_text("Paint the mask away (Alt or right-drag too)")
                                 .clicked()
                             {
                                 self.brush.erase = !self.brush.erase;
                             }
-                            if widgets::chip_enabled(ui, painted > 0, false, "clear")
+                            if widgets::outlined_chip(ui, painted > 0, false, "clear")
                                 .on_hover_text("Take all the painting away")
                                 .clicked()
                             {
@@ -1371,7 +1471,7 @@ impl PhotoApp {
                         track!(r);
                     }
                     let inverted = m.invert;
-                    if widgets::chip(ui, inverted, "invert")
+                    if widgets::outlined_chip(ui, true, inverted, "invert")
                         .on_hover_text("Apply outside the shape instead of inside it")
                         .clicked()
                     {
@@ -1379,8 +1479,8 @@ impl PhotoApp {
                         discrete!();
                     }
 
-                    ui.add_space(4.0);
-                    ui.label(theme::tag("Range Mask").color(theme::TEXT_DIM));
+                    ui.add_space(2.0);
+                    ui.label(theme::tag("only where it is…").color(theme::TEXT_DIM));
                     let cur_mode = match m.range {
                         RangeMask::None => 0,
                         RangeMask::Luminance { .. } => 1,
@@ -1388,14 +1488,18 @@ impl PhotoApp {
                     };
                     let mut new_mode = cur_mode;
                     ui.horizontal(|ui| {
-                        if widgets::chip(ui, cur_mode == 0, "Off").clicked() {
-                            new_mode = 0;
-                        }
-                        if widgets::chip(ui, cur_mode == 1, "Luma").clicked() {
-                            new_mode = 1;
-                        }
-                        if widgets::chip(ui, cur_mode == 2, "Color").clicked() {
-                            new_mode = 2;
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (mode, label, tip) in [
+                            (0, "anywhere", "No range: the whole shape"),
+                            (1, "bright/dark", "Only tones between two brightnesses"),
+                            (2, "one colour", "Only near one hue"),
+                        ] {
+                            if widgets::outlined_chip(ui, true, cur_mode == mode, label)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                new_mode = mode;
+                            }
                         }
                     });
                     if new_mode != cur_mode {

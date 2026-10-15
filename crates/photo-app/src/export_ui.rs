@@ -55,14 +55,42 @@ impl SizeKind {
     }
 }
 
-fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text.to_uppercase())
-            .monospace()
-            .size(10.0)
-            .extra_letter_spacing(0.6)
-            .color(theme::TEXT_FAINT),
-    );
+/// How wide the label column is, when there is room for one.
+const LABEL_W: f32 = 92.0;
+
+/// One setting: its name, and its controls. Where the panel is wide enough the name sits
+/// in a column of its own, on the first line of chips, so every row's choices start at one
+/// edge; where it is not (a phone, a recipe's narrow card), the name goes above them.
+fn row(ui: &mut egui::Ui, wide: bool, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let caption = theme::tag(label).color(theme::TEXT_DIM);
+    if !wide {
+        ui.label(caption);
+        add(ui);
+        return;
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        // As tall as a chip, so the name is on its line's midline.
+        let chip_h = widgets::sized(ui, 26.0, 34.0);
+        ui.allocate_ui_with_layout(
+            vec2(LABEL_W, chip_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(vec2(LABEL_W, chip_h));
+                ui.label(caption);
+            },
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+    });
+}
+
+/// A note under a row's controls.
+fn note(ui: &mut egui::Ui, text: &str) {
+    ui.label(theme::dim(text).size(11.0));
 }
 
 /// A row of chips, one per choice; returns the one clicked.
@@ -73,8 +101,11 @@ fn chips<T: Copy + PartialEq>(
 ) -> Option<T> {
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
         for (value, label) in choices {
-            if widgets::chip(ui, value == current, label).clicked() && value != current {
+            if widgets::outlined_chip(ui, true, value == current, label).clicked()
+                && value != current
+            {
                 picked = Some(value);
             }
         }
@@ -89,197 +120,212 @@ pub(crate) fn settings_editor(
     s: &mut ExportSettings,
     source: Option<(u32, u32)>,
 ) -> bool {
-    settings_editor_with(ui, s, source, true)
+    settings_editor_with(ui, s, source, true, true)
 }
 
 /// [`settings_editor`], without the background row when `background` is false: the
-/// phone removes a background in its own tool, where it can be seen.
+/// desktop and the phone remove a background in its own tool, where it can be seen; a
+/// batch recipe still can. Without `summary`, the line saying what will be written is
+/// left to the caller, to put by its button.
 pub(crate) fn settings_editor_with(
     ui: &mut egui::Ui,
     s: &mut ExportSettings,
     source: Option<(u32, u32)>,
     background: bool,
+    summary_line: bool,
 ) -> bool {
     let before = *s;
-    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.spacing_mut().item_spacing.y = 10.0;
+    let wide = ui.available_width() >= 360.0;
 
-    row_label(ui, "Format");
-    if let Some(f) = chips(ui, s.format, ExportFormat::ALL.map(|f| (f, f.label()))) {
-        s.format = f;
-    }
-    if s.format.is_lossy() {
-        let mut q = f32::from(s.quality);
-        let tip = if s.format.lossless_at_100() {
-            "quality (100 = lossless)"
-        } else {
-            "quality"
-        };
-        if widgets::param_slider(ui, tip, &mut q, 1.0..=100.0, 0, 92.0).changed() {
-            s.quality = q.round().clamp(1.0, 100.0) as u8;
+    row(ui, wide, "format", |ui| {
+        if let Some(f) = chips(ui, s.format, ExportFormat::ALL.map(|f| (f, f.label()))) {
+            s.format = f;
         }
-    }
+        if s.format.is_lossy() {
+            let mut q = f32::from(s.quality);
+            let tip = if s.format.lossless_at_100() {
+                "quality (100 = lossless)"
+            } else {
+                "quality"
+            };
+            if widgets::param_slider(ui, tip, &mut q, 1.0..=100.0, 0, 92.0).changed() {
+                s.quality = q.round().clamp(1.0, 100.0) as u8;
+            }
+        }
+    });
     if s.format.has_16_bit() {
-        row_label(ui, "Bits per channel");
-        if let Some(d) = chips(
-            ui,
-            s.depth,
-            [(BitDepth::Eight, "8-bit"), (BitDepth::Sixteen, "16-bit")],
-        ) {
-            s.depth = d;
-        }
+        row(ui, wide, "bit depth", |ui| {
+            if let Some(d) = chips(
+                ui,
+                s.depth,
+                [(BitDepth::Eight, "8-bit"), (BitDepth::Sixteen, "16-bit")],
+            ) {
+                s.depth = d;
+            }
+        });
     }
 
-    row_label(ui, "Colour space");
     use photo_engine::gamut::OutputSpace;
-    let format = s.format;
-    let spaces = OutputSpace::ALL
-        .into_iter()
-        .filter(|c| format.holds(*c))
-        .map(|c| (c, c.label()));
-    if let Some(c) = chips(ui, s.effective_space(), spaces) {
-        s.color_space = c;
-    }
-    if s.format == ExportFormat::Avif {
-        ui.label(
-            theme::tag("AVIF is written in sRGB: its encoder can tag no other space")
-                .color(theme::TEXT_FAINT),
-        );
-    } else if s.format == ExportFormat::Jxl && s.color_space == OutputSpace::AdobeRgb {
-        ui.label(
-            theme::tag("written lossless: JPEG XL's lossy mode cannot describe Adobe RGB")
-                .color(theme::TEXT_FAINT),
-        );
-    } else if s.color_space != OutputSpace::Srgb {
-        ui.label(
-            theme::tag(
-                "for screens and print that manage colour; the web and most apps assume sRGB",
-            )
-            .color(theme::TEXT_FAINT),
-        );
-    }
-
-    row_label(ui, "Size");
-    let kind = SizeKind::of(s.sizing);
-    if let Some(k) = chips(ui, kind, SizeKind::ALL) {
-        s.sizing = k.start();
-    }
-    let drag_u32 = |ui: &mut egui::Ui, v: &mut u32, suffix: &str| {
-        ui.add(
-            egui::DragValue::new(v)
-                .range(16..=65535)
-                .speed(8.0)
-                .suffix(suffix)
-                .update_while_editing(false),
-        )
-    };
-    ui.horizontal(|ui| match &mut s.sizing {
-        Resize::Original => {}
-        Resize::LongEdge(v) | Resize::ShortEdge(v) => {
-            drag_u32(ui, v, " px");
+    row(ui, wide, "colour", |ui| {
+        let format = s.format;
+        let spaces = OutputSpace::ALL
+            .into_iter()
+            .filter(|c| format.holds(*c))
+            .map(|c| (c, c.label()));
+        if let Some(c) = chips(ui, s.effective_space(), spaces) {
+            s.color_space = c;
         }
-        Resize::FitDimensions { width, height } => {
-            drag_u32(ui, width, " px");
-            ui.label(theme::dim("×"));
-            drag_u32(ui, height, " px");
-        }
-        Resize::Megapixels(v) => {
-            ui.add(
-                egui::DragValue::new(v)
-                    .range(0.1..=400.0)
-                    .speed(0.1)
-                    .fixed_decimals(1)
-                    .suffix(" MP")
-                    .update_while_editing(false),
+        if s.format == ExportFormat::Avif {
+            note(
+                ui,
+                "AVIF is written in sRGB: its encoder can tag no other space.",
             );
-        }
-        Resize::Percentage(v) => {
-            ui.add(
-                egui::DragValue::new(v)
-                    .range(1.0..=100.0)
-                    .speed(0.5)
-                    .fixed_decimals(0)
-                    .suffix(" %")
-                    .update_while_editing(false),
+        } else if s.format == ExportFormat::Jxl && s.color_space == OutputSpace::AdobeRgb {
+            note(
+                ui,
+                "Written lossless: JPEG XL's lossy mode cannot describe Adobe RGB.",
+            );
+        } else if s.color_space != OutputSpace::Srgb {
+            note(
+                ui,
+                "For screens and print that manage colour; the web and most apps assume sRGB.",
             );
         }
     });
 
-    row_label(ui, "Output sharpening");
-    if let Some(f) = chips(ui, s.sharpen, SharpenFor::ALL.map(|f| (f, f.label()))) {
-        s.sharpen = f;
-    }
-    if s.sharpen != SharpenFor::Off {
-        if let Some(a) = chips(
-            ui,
-            s.sharpen_amount,
-            SharpenAmount::ALL.map(|a| (a, a.label())),
-        ) {
-            s.sharpen_amount = a;
+    row(ui, wide, "size", |ui| {
+        let kind = SizeKind::of(s.sizing);
+        if let Some(k) = chips(ui, kind, SizeKind::ALL) {
+            s.sizing = k.start();
         }
-    }
+        let drag_u32 = |ui: &mut egui::Ui, v: &mut u32, suffix: &str| {
+            ui.add(
+                egui::DragValue::new(v)
+                    .range(16..=65535)
+                    .speed(8.0)
+                    .suffix(suffix)
+                    .update_while_editing(false),
+            )
+        };
+        if s.sizing != Resize::Original {
+            ui.horizontal(|ui| match &mut s.sizing {
+                Resize::Original => {}
+                Resize::LongEdge(v) | Resize::ShortEdge(v) => {
+                    drag_u32(ui, v, " px");
+                }
+                Resize::FitDimensions { width, height } => {
+                    drag_u32(ui, width, " px");
+                    ui.label(theme::dim("×"));
+                    drag_u32(ui, height, " px");
+                }
+                Resize::Megapixels(v) => {
+                    ui.add(
+                        egui::DragValue::new(v)
+                            .range(0.1..=400.0)
+                            .speed(0.1)
+                            .fixed_decimals(1)
+                            .suffix(" MP")
+                            .update_while_editing(false),
+                    );
+                }
+                Resize::Percentage(v) => {
+                    ui.add(
+                        egui::DragValue::new(v)
+                            .range(1.0..=100.0)
+                            .speed(0.5)
+                            .fixed_decimals(0)
+                            .suffix(" %")
+                            .update_while_editing(false),
+                    );
+                }
+            });
+        }
+    });
 
-    row_label(ui, "Metadata");
-    if let Some(m) = chips(ui, s.metadata, MetadataPolicy::ALL.map(|m| (m, m.label()))) {
-        s.metadata = m;
-    }
-    if s.metadata == MetadataPolicy::All {
-        ui.horizontal_wrapped(|ui| {
-            let mut keep = !s.strip_location;
-            if widgets::chip(ui, keep, "include location").clicked() {
-                keep = !keep;
-                s.strip_location = !keep;
+    row(ui, wide, "sharpen for", |ui| {
+        if let Some(f) = chips(ui, s.sharpen, SharpenFor::ALL.map(|f| (f, f.label()))) {
+            s.sharpen = f;
+        }
+        if s.sharpen != SharpenFor::Off {
+            if let Some(a) = chips(
+                ui,
+                s.sharpen_amount,
+                SharpenAmount::ALL.map(|a| (a, a.label())),
+            ) {
+                s.sharpen_amount = a;
             }
-            ui.label(
-                theme::dim(if keep {
+        }
+    });
+
+    row(ui, wide, "metadata", |ui| {
+        if let Some(m) = chips(ui, s.metadata, MetadataPolicy::ALL.map(|m| (m, m.label()))) {
+            s.metadata = m;
+        }
+        if s.metadata == MetadataPolicy::All {
+            let mut keep = !s.strip_location;
+            if widgets::outlined_chip(ui, true, keep, "include location")
+                .on_hover_text(if keep {
                     "GPS goes out with the file"
                 } else {
                     "GPS is left out"
                 })
-                .size(11.0),
-            );
-        });
-    }
+                .clicked()
+            {
+                keep = !keep;
+                s.strip_location = !keep;
+            }
+        }
+    });
 
     if background {
-        row_label(ui, "Background");
-        ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, s.remove_background, "remove background (rembg)").clicked() {
+        row(ui, wide, "background", |ui| {
+            if widgets::outlined_chip(ui, true, s.remove_background, "remove background").clicked()
+            {
                 s.remove_background = !s.remove_background;
             }
             if s.remove_background {
-                let is_white = s.matte_color == Some([255, 255, 255]);
-                let is_trans = s.matte_color.is_none();
-                if widgets::chip(ui, is_trans, "transparent alpha").clicked() {
-                    s.matte_color = None;
-                }
-                if widgets::chip(ui, is_white, "catalog white").clicked() {
-                    s.matte_color = Some([255, 255, 255]);
-                }
-                if widgets::chip(ui, s.cutout_params.defringe_white, "defringe white").clicked() {
-                    s.cutout_params.defringe_white = !s.cutout_params.defringe_white;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    let is_white = s.matte_color == Some([255, 255, 255]);
+                    let is_trans = s.matte_color.is_none();
+                    if widgets::outlined_chip(ui, true, is_trans, "transparent").clicked() {
+                        s.matte_color = None;
+                    }
+                    if widgets::outlined_chip(ui, true, is_white, "on white").clicked() {
+                        s.matte_color = Some([255, 255, 255]);
+                    }
+                    if widgets::outlined_chip(
+                        ui,
+                        true,
+                        s.cutout_params.defringe_white,
+                        "defringe white",
+                    )
+                    .clicked()
+                    {
+                        s.cutout_params.defringe_white = !s.cutout_params.defringe_white;
+                    }
+                });
+                widgets::param_slider(
+                    ui,
+                    "threshold",
+                    &mut s.cutout_params.threshold,
+                    0.05..=0.95,
+                    2,
+                    0.50,
+                );
+                let mut shift_f = s.cutout_params.edge_shift as f32;
+                if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0)
+                    .changed()
+                {
+                    s.cutout_params.edge_shift = shift_f.round() as i32;
                 }
             }
         });
-        if s.remove_background {
-            widgets::param_slider(
-                ui,
-                "threshold",
-                &mut s.cutout_params.threshold,
-                0.05..=0.95,
-                2,
-                0.50,
-            );
-            let mut shift_f = s.cutout_params.edge_shift as f32;
-            if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0).changed()
-            {
-                s.cutout_params.edge_shift = shift_f.round() as i32;
-            }
-        }
     }
 
     if s.format == ExportFormat::Jpeg {
-        row_label(ui, "HDR");
-        ui.horizontal_wrapped(|ui| {
+        row(ui, wide, "hdr", |ui| {
             let hover = if s.remove_background {
                 "Not with the background removed: the map would brighten the matte"
             } else {
@@ -288,21 +334,30 @@ pub(crate) fn settings_editor_with(
                  shows the JPEG as it is"
             };
             let on = s.wants_gain_map();
-            let chip =
-                ui.add_enabled_ui(!s.remove_background, |ui| widgets::chip(ui, on, "gain map"));
-            if chip.inner.on_hover_text(hover).clicked() {
+            if widgets::outlined_chip(ui, !s.remove_background, on, "gain map")
+                .on_hover_text(hover)
+                .clicked()
+            {
                 s.hdr_gain_map = !s.hdr_gain_map;
             }
         });
     }
 
+    if summary_line {
+        summary_label(ui, s, source);
+    }
+    *s != before
+}
+
+/// What will be written, in one line: under the settings, or beside the button that
+/// writes it.
+pub(crate) fn summary_label(ui: &mut egui::Ui, s: &ExportSettings, source: Option<(u32, u32)>) {
     ui.label(
         RichText::new(summary(s, source))
             .family(theme::mono_bold())
             .size(11.0)
             .color(theme::ACCENT),
     );
-    *s != before
 }
 
 /// "2048 × 1365 · JPEG q85 · 8-bit sRGB · screen sharpening · all metadata, no location".
@@ -376,14 +431,20 @@ impl PhotoApp {
             .fade_in(false)
             .collapsible(false)
             .resizable(false)
-            .default_width(380.0)
+            .default_width(460.0)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                ui.set_width(460.0);
                 let mut settings = self.export_settings;
-                settings_editor(ui, &mut settings, source);
+                // The background comes off in its own tool, where it can be seen.
+                settings_editor_with(ui, &mut settings, source, false, false);
                 self.export_settings = settings;
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.separator();
+                summary_label(ui, &self.export_settings, source);
+                ui.add_space(2.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     let ready = self.ready_image().is_some()
                         && !matches!(self.export, Export::Writing { .. });
                     if widgets::button_enabled(ui, ready, Kind::Primary, "Export…", 120.0)

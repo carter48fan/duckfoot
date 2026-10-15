@@ -221,6 +221,7 @@ fn main() -> anyhow::Result<()> {
         for s in &mut app.inspector_sections {
             s.collapsed = s.id != photo_app::InspectorSectionId::Local;
         }
+        app.open_tool_for(photo_app::InspectorSectionId::Local);
     }
     // DUCKFOOT_SHOT_BRUSH=1: a painted brush mask, chosen, washed red.
     if std::env::var_os("DUCKFOOT_SHOT_BRUSH").is_some() {
@@ -247,6 +248,7 @@ fn main() -> anyhow::Result<()> {
         for s in &mut app.inspector_sections {
             s.collapsed = s.id != photo_app::InspectorSectionId::Local;
         }
+        app.open_tool_for(photo_app::InspectorSectionId::Local);
     }
     // DUCKFOOT_SHOT_HEAL=1: healing, three spots, one chosen; DUCKFOOT_SHOT_DUST=1 too for
     // the dust view.
@@ -270,6 +272,7 @@ fn main() -> anyhow::Result<()> {
         for s in &mut app.inspector_sections {
             s.collapsed = s.id != photo_app::InspectorSectionId::Heal;
         }
+        app.open_tool_for(photo_app::InspectorSectionId::Heal);
     }
     // DUCKFOOT_SHOT_KEYSTONE=1: a vertical keystone, the crop & rotate card open.
     if std::env::var_os("DUCKFOOT_SHOT_KEYSTONE").is_some() {

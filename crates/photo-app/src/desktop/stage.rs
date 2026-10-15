@@ -114,7 +114,7 @@ impl PhotoApp {
                         sensor,
                         frame: frame_now,
                     };
-                    let tolerance = if widgets::is_touch(ui.ctx()) { 24.0 } else { 9.0 };
+                    let tolerance = if widgets::is_touch(ui.ctx()) { 24.0 } else { 12.0 };
                     let painting_brush = self
                         .stack
                         .local
@@ -172,9 +172,10 @@ impl PhotoApp {
                                 }
                             }
                         }
-                        if let (Some((handle, from, start)), Some(p)) =
+                        if let (Some((handle, from, start)), Some(_)) =
                             (self.mask_drag.clone(), response.interact_pointer_pos())
                         {
+                            let p = self.fine_drag_point(ui, &response, from);
                             let moved = mapping.dragged(&start, handle, from, p);
                             if self.stack.local.params.masks[i] != moved {
                                 self.stack.local.params.masks[i] = moved;
@@ -216,7 +217,7 @@ impl PhotoApp {
                     let (ow, _) = self.stack.geometry.output_size(sensor.0, sensor.1);
                     let per_px = frame_now.width() / ow as f32;
                     let long = sensor.0.max(sensor.1) as f32;
-                    let slack = if widgets::is_touch(ui.ctx()) { 12.0 } else { 4.0 };
+                    let slack = if widgets::is_touch(ui.ctx()) { 12.0 } else { 8.0 };
                     let spots = self.stack.heal.params.spots.clone();
                     let selected = self.selected_spot;
                     // The circle under a point: the chosen spot's source first, then any spot.
@@ -252,9 +253,10 @@ impl PhotoApp {
                             }
                         }
                     }
-                    if let (Some((is_src, from, start)), Some(p), Some(i)) =
+                    if let (Some((is_src, from, start)), Some(_), Some(i)) =
                         (self.spot_drag, response.interact_pointer_pos(), self.selected_spot)
                     {
+                        let p = self.fine_drag_point(ui, &response, from);
                         let (a, b) = (mapping.to_sensor(from), mapping.to_sensor(p));
                         let d = [b[0] - a[0], b[1] - a[1]];
                         let mut moved = start;
@@ -290,9 +292,14 @@ impl PhotoApp {
                     }
                 }
                 if response.drag_stopped() {
+                    // A Remove spot is filled where it was let go, in one more render.
+                    if self.spot_drag.is_some() {
+                        self.needs_render = true;
+                    }
                     self.mask_drag = None;
                     self.painting = None;
                     self.spot_drag = None;
+                    self.fine_drag = None;
                 }
                 let mask_dragging =
                     self.mask_drag.is_some() || self.painting.is_some() || self.spot_drag.is_some();
@@ -983,7 +990,7 @@ impl PhotoApp {
                     let badge = if self.layout.is_compact() {
                         "CUTOUT · paint to keep or erase"
                     } else {
-                        "CUTOUT STUDIO · Paint on photo to Keep/Erase · Alt erases · Space+drag pans · Esc closes"
+                        "REMOVE BACKGROUND · paint to keep or erase · Alt erases · Esc closes"
                     };
                     hud_badge(
                         &painter,
@@ -995,16 +1002,13 @@ impl PhotoApp {
                     );
                 }
 
-                // The phone shows the studio's controls in its Tools sheet instead.
-                if self.cutout_studio.open && !self.layout.is_compact() {
-                    let mut export_clicked = false;
-                    self.cutout_studio.show_hud(ui.ctx(), &mut export_clicked);
-                    if export_clicked {
-                        self.export_cutout(ui.ctx());
-                    }
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        self.cutout_studio.open = false;
-                    }
+                // The controls are the Remove background tool's, in the inspector (the
+                // phone's, its Tools sheet). Esc closes it here, back to editing.
+                if self.cutout_studio.open
+                    && !self.layout.is_compact()
+                    && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    self.cutout_studio.open = false;
                 }
 
                 if self.cropping {
@@ -1118,15 +1122,23 @@ impl PhotoApp {
     /// Export the cutout as the studio has it: a PNG, transparent or on catalog white,
     /// with its edge settings and touch-ups.
     pub(crate) fn export_cutout(&mut self, ctx: &egui::Context) {
-        self.export_settings.format = photo_engine::ExportFormat::Png;
-        self.export_settings.remove_background = true;
-        self.export_settings.cutout_params = self.cutout_studio.params;
-        self.export_settings.matte_color = if self.cutout_studio.export_matte_white {
+        let mut settings = self.export_settings;
+        settings.format = photo_engine::ExportFormat::Png;
+        settings.remove_background = true;
+        settings.cutout_params = self.cutout_studio.params;
+        settings.matte_color = if self.cutout_studio.export_matte_white {
             Some([255, 255, 255])
         } else {
             None
         };
-        self.pick_and_export(ctx);
+        // Its own settings, not the Export dialog's: saving a cutout leaves those alone.
+        let (dir, name) = self.export_suggestion();
+        let name = std::path::Path::new(&name)
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned();
+        self.cutout_export = Some(settings);
+        self.request(ctx, platform::Request::ExportImage { dir, name });
     }
 
     /// Prepare Cutout Studio with the current photo: renders an interactive ~1400px base image
@@ -1191,6 +1203,35 @@ impl PhotoApp {
         } else {
             // Fallback to loading from disk (handles camera RAW embedded preview or raster formats)
             self.cutout_studio.prepare(ctx, &path);
+        }
+    }
+}
+
+impl PhotoApp {
+    /// Where a spot or mask-handle drag that started at `from` has got to. The pointer's
+    /// travel is added up frame by frame, at a quarter while Shift is held, so Shift can
+    /// be pressed partway through to place the last few pixels without a jump.
+    fn fine_drag_point(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        from: egui::Pos2,
+    ) -> egui::Pos2 {
+        let slow = if ui.input(|i| i.modifiers.shift) {
+            0.25
+        } else {
+            1.0
+        };
+        match &mut self.fine_drag {
+            // The first frame starts where the pointer is: the few points it moved before
+            // egui called it a drag count in full.
+            None => *self
+                .fine_drag
+                .insert(response.interact_pointer_pos().unwrap_or(from)),
+            Some(at) => {
+                *at += response.drag_delta() * slow;
+                *at
+            }
         }
     }
 }
