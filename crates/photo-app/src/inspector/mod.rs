@@ -59,7 +59,9 @@ impl PhotoApp {
                     if widgets::icon(ui, "⚙", self.customize_open, tip).clicked() {
                         self.customize_open = !self.customize_open;
                     }
+                    // Only All folds; the other tabs hold their modules open.
                     if !self.customize_open
+                        && self.inspector_group == ModuleGroup::All
                         && widgets::icon(ui, "↕", false, "Expand or collapse every module")
                             .clicked()
                     {
@@ -76,15 +78,32 @@ impl PhotoApp {
                 });
             });
 
+            if loaded && !self.customize_open {
+                self.group_tabs(ui);
+            }
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(Margin::symmetric(12, 12))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 10.0;
+                            if self.customize_open {
+                                self.customize_body(ui);
+                            } else if loaded {
+                                self.pipeline_body(ui);
+                            } else {
+                                ui.add_space(8.0);
+                                ui.label(theme::dim("Open a RAW to see its pipeline.").size(12.0));
+                            }
+                        });
                     if loaded && !self.customize_open {
                         self.info_band(ui);
                     }
-                    // The phone's Presets, folded to one line until asked for; it scrolls with
-                    // the pipeline, which it would otherwise push off a short window.
+                    // The phone's Presets, folded to one line until asked for. Info and Looks sit
+                    // under the modules, so on a short window the sliders come first.
                     if loaded && !self.customize_open {
                         let head = widgets::band(ui, |ui| {
                             ui.label(theme::head("Looks"));
@@ -123,19 +142,6 @@ impl PhotoApp {
                                 });
                         }
                     }
-                    egui::Frame::new()
-                        .inner_margin(Margin::symmetric(10, 10))
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 6.0;
-                            if self.customize_open {
-                                self.customize_body(ui);
-                            } else if loaded {
-                                self.pipeline_body(ui);
-                            } else {
-                                ui.add_space(8.0);
-                                ui.label(theme::dim("Open a RAW to see its pipeline.").size(12.0));
-                            }
-                        });
                 });
         });
 
@@ -227,6 +233,51 @@ impl PhotoApp {
         clicked
     }
 
+    /// All, then the six groups, four to a row. Each names how many of its modules are on.
+    fn group_tabs(&mut self, ui: &mut egui::Ui) {
+        let tabs = egui::Frame::new()
+            .inner_margin(Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                let w = ((ui.available_width() - 3.0 * 4.0) / 4.0).floor();
+                for row in ModuleGroup::TABS.chunks(4) {
+                    ui.horizontal(|ui| {
+                        for &group in row {
+                            let on = InspectorSectionId::all()
+                                .iter()
+                                .filter(|&&id| {
+                                    group != ModuleGroup::All
+                                        && group.holds(id)
+                                        // Crop has no on/off to count.
+                                        && id != InspectorSectionId::Geometry
+                                        && id.is_on(&self.stack)
+                                })
+                                .count();
+                            let mut text = group.label().to_string();
+                            if let Some(first) = text.get_mut(0..1) {
+                                first.make_ascii_uppercase();
+                            }
+                            if on > 0 {
+                                text = format!("{text} {on}");
+                            }
+                            let r = widgets::tab(ui, self.inspector_group == group, &text, w)
+                                .on_hover_text(if group == ModuleGroup::All {
+                                    "Every module in your order, folded"
+                                } else {
+                                    "This group's modules, held open"
+                                });
+                            if r.clicked() {
+                                self.inspector_group = group;
+                            }
+                        }
+                    });
+                }
+            });
+        let r = tabs.response.rect;
+        ui.painter()
+            .hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::BORDER));
+    }
+
     pub(crate) fn pipeline_body(&mut self, ui: &mut egui::Ui) {
         // Everything that happens this frame is checkpointed against this one snapshot.
         let snapshot = self.stack.clone();
@@ -237,6 +288,10 @@ impl PhotoApp {
         let mut changed = false;
         let mut started = false;
         let mut close_others = None;
+        let group = self.inspector_group;
+        // Off All, a tab's few modules all stay open: the sliders are the point.
+        let held_open = group != ModuleGroup::All;
+        let mut shown = 0;
 
         for idx in 0..self.inspector_sections.len() {
             let InspectorSectionConfig {
@@ -244,9 +299,10 @@ impl PhotoApp {
                 visible,
                 mut collapsed,
             } = self.inspector_sections[idx].clone();
-            if !visible || id == InspectorSectionId::Scope {
+            if !visible || !group.holds(id) {
                 continue;
             }
+            shown += 1;
 
             let (summary, modified) = summarise(id, &self.stack, &defaults, &white);
             let on = id.is_on(&self.stack);
@@ -275,7 +331,7 @@ impl PhotoApp {
                     card_changed = true;
                     card_started = true;
                 }
-                if head.clicked {
+                if head.clicked && !held_open {
                     let opening = collapsed;
                     collapsed = !collapsed;
                     // One open at a time keeps the list one screen tall; Shift opens this
@@ -284,7 +340,7 @@ impl PhotoApp {
                         close_others = Some(id);
                     }
                 }
-                if !collapsed {
+                if !collapsed || held_open {
                     // Controls show whether or not the module is on, and touching one turns
                     // it on — no need to tick the box before you can try it.
                     ui.add_space(2.0);
@@ -313,6 +369,13 @@ impl PhotoApp {
             changed |= card_changed;
             started |= card_started;
             self.inspector_sections[idx].collapsed = collapsed;
+        }
+
+        if shown == 0 {
+            ui.add_space(8.0);
+            ui.label(
+                theme::dim("Every module on this tab is hidden. ⚙ chooses which show.").size(12.0),
+            );
         }
 
         if let Some(open) = close_others {

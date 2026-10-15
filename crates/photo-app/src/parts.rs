@@ -18,7 +18,7 @@ pub(crate) fn pod<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) ->
             // No taller than a control: in a wrapping row the height left is the panel's.
             let h = ui
                 .available_height()
-                .min(crate::widgets::sized(ui, 26.0, 32.0));
+                .min(crate::widgets::sized(ui, 30.0, 32.0));
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), h),
                 egui::Layout::from_main_dir_and_cross_align(dir, egui::Align::Center),

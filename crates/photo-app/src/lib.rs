@@ -690,6 +690,8 @@ pub struct PhotoApp {
     pub inspector_sections: Vec<InspectorSectionConfig>,
     /// The Inspector is showing its Customize tab rather than the pipeline.
     pub customize_open: bool,
+    /// The inspector tab showing (desktop): All, or one group of modules held open.
+    pub(crate) inspector_group: modules::ModuleGroup,
     pub inspector_width: f32,
     pub inspector_force_width: Option<f32>,
     pub cutout_studio: cutout_studio::CutoutStudioState,
@@ -905,7 +907,8 @@ impl PhotoApp {
             crop_guide: crop_tool::Guide::default(),
             stage_frame: None,
             shelf: Vec::new(),
-            shelf_open: true,
+            // The rail is always there; the drawer opens from it.
+            shelf_open: false,
             split_active: false,
             split_pos: 0.5,
             clipboard_stack: None,
@@ -956,6 +959,7 @@ impl PhotoApp {
             inspector_map_state: inspector_map_3d::InspectorMapState::default(),
             inspector_sections: InspectorSectionConfig::default_sections(),
             customize_open: false,
+            inspector_group: modules::ModuleGroup::Basic,
             inspector_width: 300.0,
             inspector_force_width: None,
             focused_section: None,
@@ -1745,10 +1749,18 @@ impl PhotoApp {
         if self.layout.is_compact() {
             self.compact_layout(ui, gpu, screen);
         } else {
+            // Room to breathe on the desktop (the phone keeps its own, finger-sized). Panels
+            // inherit this; a few set their own rhythm inside.
+            {
+                let s = ui.spacing_mut();
+                s.item_spacing = vec2(10.0, 8.0);
+                s.button_padding = vec2(12.0, 6.0);
+            }
             // Panel order is layout order: full-width bars first, then the side panels,
             // then the filmstrip and stage toolbar, which only span the space left between.
             self.top_bar(ui);
             self.status_bar(ui);
+            self.shelf_rail(ui);
             self.shelf(ui, gpu);
             self.inspector(ui);
             self.filmstrip(ui, gpu);

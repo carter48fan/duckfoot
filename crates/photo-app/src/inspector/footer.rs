@@ -118,7 +118,8 @@ impl PhotoApp {
                     .inner_margin(Margin::symmetric(12, 10)),
             )
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                self.edit_actions(ui);
                 self.export_format_line(ui);
                 self.sidecar_buttons(ui);
                 ui.label(
