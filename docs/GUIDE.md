@@ -23,8 +23,8 @@ The window has five parts:
 - **Photo**: the big picture in the middle.
 - **Shelf**: the row of small pictures under the photo. Click one to open it.
 - **Editing panel**: everything on the right. This is where you change how the photo looks.
-- **Left strip**: shows, hides or enlarges the shelf, and opens your folders and the photo's
-  history and snapshots.
+- **History**: the panel on the left, with this photo's history and snapshots. The arrow at
+  its top folds it away; the arrow on the left edge opens it again.
 
 New here? Click **Take the tour** in Help. It points at each part in turn and takes about
 a minute.
@@ -46,8 +46,8 @@ That's it. Your edits are saved on their own as you go.
 - **Open RAW…** in the top bar's **⋯** menu opens one photo.
 - **Drag and drop**: drag photos from your file manager onto the Duckfoot window. They are
   added to your shelf, and the first one opens.
-- **The + on the left strip** adds more photos to the shelf.
-- **The folder icon on the left strip** lets you browse a folder and load every photo in it.
+- **The + at the right end of the shelf** adds photos (**Add photos…**) or a whole folder
+  (**Add a folder…**): every photo in it, and in the folders inside it, goes on the shelf.
 
 Duckfoot opens camera RAW files from almost every camera (Canon, Nikon, Sony, Fujifilm,
 Olympus, Panasonic, Pentax and more), plus ordinary JPEG, PNG, TIFF and WebP pictures, and
@@ -57,8 +57,8 @@ won't open, the bar at the bottom of the window says which file and why.
 ## Choosing and sorting photos
 
 The shelf under the photo shows every photo you have brought in. Click a picture to open it.
-The **left and right arrow keys** step to the previous or next photo. The top two buttons on
-the left strip hide the shelf (**F**) or show it as a big grid (**G**).
+The **left and right arrow keys** step to the previous or next photo. The gear at the right
+end of the shelf shows it as a strip, a big grid (**G**), or hides its photos (**F**).
 
 To find the good ones quickly, click the button at the start of the shelf (it shows how
 many photos are showing, such as **12/22**). In the grid, these are along its top.
@@ -153,9 +153,9 @@ point. Change any slider afterwards, or undo it with **Ctrl+Z**.
 - **Undo** and **Redo** are the curved arrows in the top bar (**Ctrl+Z** and
   **Ctrl+Shift+Z**). Every photo has its own undo list, so going back on one photo never
   touches another.
-- **History**: open the shelf (the photos icon on the far left) to see every change you
-  made to this photo. Click a line to jump back to that moment.
-- **Snapshots**: also in the shelf. A snapshot keeps a version you like, under a name, so
+- **History**: the panel on the left (click the arrow on the far left if it is folded away)
+  shows every change you made to this photo. Click a line to jump back to that moment.
+- **Snapshots**: in the same panel. A snapshot keeps a version you like, under a name, so
   you can try something else and come back to it.
 - **Revert**, under the editing panel, goes back to the last time the photo was saved.
 

@@ -692,8 +692,8 @@ impl PhotoApp {
 
     // ── Library ─────────────────────────────────────────────────────────────────────────
 
-    /// The roll, then one row of actions under it. Filters, select mode and the folder
-    /// tree are chips in that row, and take room only while they are on.
+    /// The roll, then one row of actions under it. Filters and select mode are chips in
+    /// that row, and take room only while they are on.
     fn library_sheet(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         if self.single_photo() {
             self.photo_sheet(ui);
@@ -701,8 +701,6 @@ impl PhotoApp {
         }
         if self.storage.is_some() {
             self.storage_panel(ui);
-        } else if self.folder_browser_open {
-            self.shelf_folders(ui, gpu);
         } else {
             let displayed = self.displayed_indices();
             self.film_tiles(ui, gpu, &displayed);
@@ -721,19 +719,10 @@ impl PhotoApp {
             if widgets::chip(ui, false, "+ add").clicked() {
                 self.pick_and_shelve(ui.ctx());
             }
-            if widgets::chip(ui, false, "folder…").clicked() {
-                self.request(
-                    ui.ctx(),
-                    crate::platform::Request::BrowseFolder {
-                        from: self.settings.import_dir.clone(),
-                    },
-                );
+            if widgets::chip(ui, false, "+ folder").clicked() {
+                self.pick_folder_and_shelve(ui.ctx());
             }
             divider(ui, 28.0);
-            if widgets::chip(ui, self.folder_browser_open, "folders").clicked() {
-                self.folder_browser_open = !self.folder_browser_open;
-                self.storage = None;
-            }
             if self.platform.library_dir().is_some()
                 && widgets::chip(ui, self.storage.is_some(), "storage")
                     .on_hover_text(
@@ -744,7 +733,6 @@ impl PhotoApp {
                 if self.storage.is_some() {
                     self.storage = None;
                 } else {
-                    self.folder_browser_open = false;
                     self.open_storage();
                 }
             }

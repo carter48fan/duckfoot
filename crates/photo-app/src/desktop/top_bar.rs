@@ -177,7 +177,7 @@ impl PhotoApp {
 }
 
 /// A menu row: `name ········ shortcut`. True when chosen.
-fn menu_item(ui: &mut egui::Ui, name: &str, keys: &str, enabled: bool) -> bool {
+pub(crate) fn menu_item(ui: &mut egui::Ui, name: &str, keys: &str, enabled: bool) -> bool {
     ui.add_enabled_ui(enabled, |ui| {
         ui.add(
             egui::Button::new(name)

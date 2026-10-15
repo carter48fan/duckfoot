@@ -107,7 +107,10 @@ impl PhotoApp {
                 }
             }
         });
-        note(ui, "F shows or hides the shelf; G makes it a grid.");
+        note(
+            ui,
+            "Also the gear at the end of the shelf. F hides its photos; G makes it a grid.",
+        );
         if widgets::chip(ui, self.settings.xmp_sidecars, "update .xmp sidecars")
             .on_hover_text(
                 "Write ratings, labels and keywords into the .xmp sidecar Lightroom or \

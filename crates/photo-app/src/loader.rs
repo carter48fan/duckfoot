@@ -80,8 +80,6 @@ pub enum Done {
         /// Stopped by a cancel: `found` is empty and nothing is to be shelved.
         cancelled: bool,
     },
-    /// A folder's folders, for the folder browser.
-    Subfolders { dir: PathBuf, subs: Vec<PathBuf> },
     /// The library's photos once `deleted` are gone, and what could not be deleted.
     Library {
         entries: Vec<crate::dam::storage::LibraryEntry>,
@@ -136,7 +134,6 @@ pub enum FileJob {
         /// cancel moves the epoch on, and a read of an older one stops (WP5.8).
         epoch: Option<u64>,
     },
-    Subfolders(PathBuf),
     /// The phone's library of copies: delete these, then read what is left.
     Library {
         dir: PathBuf,
@@ -263,10 +260,6 @@ impl Loader {
                                     purpose,
                                 }
                             }
-                            FileJob::Subfolders(dir) => Done::Subfolders {
-                                subs: crate::dam::FolderTree::list_subfolders(&dir),
-                                dir,
-                            },
                             FileJob::Library { dir, delete } => {
                                 let mut failed = Vec::new();
                                 let mut deleted = 0;

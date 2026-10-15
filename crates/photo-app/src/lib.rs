@@ -592,6 +592,7 @@ pub struct PhotoApp {
     stage_frame: Option<egui::Rect>,
     /// The Shelf: assets in the project/session.
     pub shelf: Vec<ShelfItem>,
+    /// The history panel at the left is open, not folded to its edge (desktop).
     pub shelf_open: bool,
     /// The shelf under the stage (desktop): hidden, a strip or a grid.
     pub(crate) strip: StripMode,
@@ -731,8 +732,6 @@ pub struct PhotoApp {
     /// are under way.
     reading: Option<String>,
     reads: usize,
-    /// The folder browser's last listing, and when it was asked for.
-    subfolders: Option<(PathBuf, Vec<PathBuf>, Instant)>,
     /// When each thumbnail was last drawn (a frame count), to evict the stalest (WP5.2).
     thumb_used: HashMap<PathBuf, u64>,
     frame_no: u64,
@@ -747,7 +746,6 @@ pub struct PhotoApp {
     pub selection: dam::SelectionModel,
     pub filter: dam::FilterState,
     pub folder_tree: dam::FolderTree,
-    pub folder_browser_open: bool,
     /// The phone's list of the copies in its library, while it is open.
     pub storage: Option<dam::storage::StorageView>,
     pub batch_renamer: batch::Renamer,
@@ -924,7 +922,6 @@ impl PhotoApp {
             crop_guide: crop_tool::Guide::default(),
             stage_frame: None,
             shelf: Vec::new(),
-            // The rail is always there; the drawer opens from it.
             shelf_open: false,
             strip: StripMode::default(),
             split_active: false,
@@ -996,7 +993,6 @@ impl PhotoApp {
             scans_pending: 0,
             reading: None,
             reads: 0,
-            subfolders: None,
             thumb_used: HashMap::new(),
             frame_no: 0,
             stage_preview: None,
@@ -1007,7 +1003,6 @@ impl PhotoApp {
             shelf_epoch: 0,
             shelf_display_cache: std::cell::RefCell::new(None),
             folder_tree,
-            folder_browser_open: false,
             storage: None,
             batch_renamer: batch::Renamer::default(),
             export_recipes: batch::ExportRecipe::default_recipes(),
@@ -1815,8 +1810,7 @@ impl PhotoApp {
             // then the filmstrip and stage toolbar, which only span the space left between.
             self.top_bar(ui);
             self.status_bar(ui);
-            self.shelf_rail(ui);
-            self.shelf(ui, gpu);
+            self.history_panel(ui);
             self.tool_rail(ui);
             self.inspector(ui);
             self.filmstrip(ui, gpu);

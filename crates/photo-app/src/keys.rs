@@ -35,8 +35,6 @@ impl PhotoApp {
                 self.customize_open = false;
             } else if self.select_mode {
                 self.select_mode = false;
-            } else if self.folder_browser_open {
-                self.folder_browser_open = false;
             } else if self.library_filters_open {
                 self.library_filters_open = false;
             } else if (self.view.zoom - 1.0).abs() > 0.01 {

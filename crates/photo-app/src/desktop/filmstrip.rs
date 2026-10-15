@@ -2,6 +2,11 @@
 
 use crate::*;
 
+use super::top_bar;
+
+/// Room kept at the right of the shelf's first line for its + and gear menus.
+const SHELF_ACTIONS_W: f32 = 84.0;
+
 impl PhotoApp {
     // ── Stage toolbar, canvas and filmstrip (centre) ────────────────────────────────────
 
@@ -189,16 +194,14 @@ impl PhotoApp {
         displayed
     }
 
-    /// The shelf under the stage, as the left rail set it: nothing, a strip of tiles with
-    /// its filters behind one button, or a grid with room for them out in the open.
+    /// The shelf under the stage: a strip of tiles with its filters behind one button, a
+    /// grid with room for them out in the open, or hidden down to the strip's one line.
+    /// Adding photos and choosing the view are at the end of its first line.
     pub(crate) fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
-        let grid = match self.strip {
-            StripMode::Hidden => {
-                self.desk_spots.filmstrip = None;
-                return;
-            }
-            StripMode::Strip => false,
-            StripMode::Grid => true,
+        let (grid, tiles) = match self.strip {
+            StripMode::Hidden => (false, false),
+            StripMode::Strip => (false, true),
+            StripMode::Grid => (true, true),
         };
         let displayed = self.displayed_indices();
         let mut action_export = false;
@@ -222,102 +225,182 @@ impl PhotoApp {
             .show(ui, |ui| {
                 let count = self.selection.count();
                 let mut clear = false;
-                if !grid {
-                    self.strip_line(ui, &displayed, count, &mut action_export, &mut clear);
-                } else {
-                    // The title, then the filters, find and sort, and what to do with a
-                    // selection, each group on the line it fits on as last frame measured it,
-                    // else starting the next. The stack's own actions are in the inspector.
-                    let mut parts = vec![Part::Stars, Part::Flags, Part::Labels, Part::Order];
-                    if count > 0 {
-                        parts.push(Part::Selection);
-                    }
-                    let mut next = 0;
-                    let mut first_line = true;
-                    while next < parts.len() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            if first_line {
-                                ui.label(theme::head("Shelf").color(theme::ACCENT));
-                                let developed =
-                                    self.shelf.iter().filter(|it| it.has_sidecar).count();
-                                ui.label(
-                                    theme::num(format!("{}/{}", displayed.len(), self.shelf.len()))
-                                        .size(11.0)
-                                        .color(Color32::from_gray(0xcc)),
-                                )
-                                .on_hover_text(format!("{developed} with a sidecar"));
-                            }
-                            let mut placed = 0;
-                            while let Some(&part) = parts.get(next) {
-                                let key = egui::Id::new(("filmstrip_part_width", part as u8));
-                                let w = widgets::trailing_width(ui.ctx(), key);
-                                // Always at least one per line, so a too-narrow stage still moves on.
-                                if (placed > 0 || first_line) && w + 14.0 > ui.available_width() {
-                                    break;
+                ui.horizontal_top(|ui| {
+                    // The lines get the width less the actions', which sit at its right end.
+                    let lines_w = ui.available_width() - SHELF_ACTIONS_W;
+                    ui.allocate_ui_with_layout(
+                        vec2(lines_w, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            if !grid {
+                                self.strip_line(
+                                    ui,
+                                    &displayed,
+                                    count,
+                                    &mut action_export,
+                                    &mut clear,
+                                );
+                            } else {
+                                // The title, then the filters, find and sort, and what to do with a
+                                // selection, each group on the line it fits on as last frame measured it,
+                                // else starting the next. The stack's own actions are in the inspector.
+                                let mut parts =
+                                    vec![Part::Stars, Part::Flags, Part::Labels, Part::Order];
+                                if count > 0 {
+                                    parts.push(Part::Selection);
                                 }
-                                ui.add_space(6.0);
-                                ui.scope(|ui| {
-                                    ui.horizontal(|ui| match part {
-                                        Part::Stars => self.star_filter(ui),
-                                        Part::Flags => self.flag_filter(ui),
-                                        Part::Labels => self.label_filter(ui),
-                                        Part::Order => {
-                                            self.search_field(ui, 150.0);
-                                            self.sort_controls(ui, false);
-                                        }
-                                        Part::Selection => {
-                                            if widgets::button(
-                                                ui,
-                                                Kind::Primary,
-                                                &format!("Export Batch ({count})"),
-                                                0.0,
+                                let mut next = 0;
+                                let mut first_line = true;
+                                while next < parts.len() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        if first_line {
+                                            ui.label(theme::head("Shelf").color(theme::ACCENT));
+                                            let developed = self
+                                                .shelf
+                                                .iter()
+                                                .filter(|it| it.has_sidecar)
+                                                .count();
+                                            ui.label(
+                                                theme::num(format!(
+                                                    "{}/{}",
+                                                    displayed.len(),
+                                                    self.shelf.len()
+                                                ))
+                                                .size(11.0)
+                                                .color(Color32::from_gray(0xcc)),
                                             )
-                                            .clicked()
+                                            .on_hover_text(format!("{developed} with a sidecar"));
+                                        }
+                                        let mut placed = 0;
+                                        while let Some(&part) = parts.get(next) {
+                                            let key =
+                                                egui::Id::new(("filmstrip_part_width", part as u8));
+                                            let w = widgets::trailing_width(ui.ctx(), key);
+                                            // Always at least one per line, so a too-narrow stage still moves on.
+                                            if (placed > 0 || first_line)
+                                                && w + 14.0 > ui.available_width()
                                             {
-                                                action_export = true;
+                                                break;
                                             }
-                                            if widgets::button(ui, Kind::Secondary, "Deselect", 0.0)
-                                                .clicked()
-                                            {
-                                                clear = true;
-                                            }
+                                            ui.add_space(6.0);
+                                            ui.scope(|ui| {
+                                                ui.horizontal(|ui| match part {
+                                                    Part::Stars => self.star_filter(ui),
+                                                    Part::Flags => self.flag_filter(ui),
+                                                    Part::Labels => self.label_filter(ui),
+                                                    Part::Order => {
+                                                        self.search_field(ui, 150.0);
+                                                        self.sort_controls(ui, false);
+                                                    }
+                                                    Part::Selection => {
+                                                        if widgets::button(
+                                                            ui,
+                                                            Kind::Primary,
+                                                            &format!("Export Batch ({count})"),
+                                                            0.0,
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            action_export = true;
+                                                        }
+                                                        if widgets::button(
+                                                            ui,
+                                                            Kind::Secondary,
+                                                            "Deselect",
+                                                            0.0,
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            clear = true;
+                                                        }
+                                                    }
+                                                });
+                                                widgets::remember_trailing_width(ui, key);
+                                            });
+                                            placed += 1;
+                                            next += 1;
                                         }
                                     });
-                                    widgets::remember_trailing_width(ui, key);
-                                });
-                                placed += 1;
-                                next += 1;
+                                    first_line = false;
+                                    if next < parts.len() {
+                                        ui.add_space(4.0);
+                                    }
+                                }
+                                if !self.saved_filters.is_empty()
+                                    || self.filtering()
+                                    || self.saved_filter_draft.is_some()
+                                {
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        self.saved_filters_row(ui);
+                                    });
+                                }
                             }
-                        });
-                        first_line = false;
-                        if next < parts.len() {
-                            ui.add_space(4.0);
-                        }
-                    }
-                    if !self.saved_filters.is_empty()
-                        || self.filtering()
-                        || self.saved_filter_draft.is_some()
-                    {
-                        ui.add_space(4.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            self.saved_filters_row(ui);
-                        });
-                    }
-                }
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        self.shelf_actions(ui);
+                    });
+                });
                 if clear {
                     self.selection.clear();
                 }
-                ui.add_space(6.0);
-
-                self.film_tiles_in(ui, gpu, &displayed, grid);
+                if tiles {
+                    ui.add_space(6.0);
+                    self.film_tiles_in(ui, gpu, &displayed, grid);
+                }
             });
         self.desk_spots.filmstrip = Some(strip.response.rect);
 
         if action_export {
             self.batch_dialog_open = true;
         }
+    }
+
+    /// The end of the shelf's first line: + to add photos or a folder, and the gear to
+    /// choose how the shelf shows.
+    fn shelf_actions(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let shown = self.strip;
+        ui.menu_button(RichText::new("⚙").size(15.0).color(theme::TEXT), |ui| {
+            ui.set_min_width(200.0);
+            for (mode, name, keys) in [
+                (StripMode::Strip, "Strip", ""),
+                (StripMode::Grid, "Grid", "G"),
+                (StripMode::Hidden, "Hide the photos", "F"),
+            ] {
+                let name = if shown == mode {
+                    format!("✓ {name}")
+                } else {
+                    format!("   {name}")
+                };
+                if top_bar::menu_item(ui, &name, keys, true) {
+                    self.strip = mode;
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("How the shelf shows: a strip, a grid, or hidden")
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Shelf view"));
+        ui.menu_button(RichText::new("+").size(16.0).color(theme::TEXT), |ui| {
+            ui.set_min_width(200.0);
+            if top_bar::menu_item(ui, "Add photos…", "", true) {
+                self.pick_and_shelve(ui.ctx());
+                ui.close();
+            }
+            if top_bar::menu_item(ui, "Add a folder…", "", true) {
+                self.pick_folder_and_shelve(ui.ctx());
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Add photos, or every photo in a folder and its folders")
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Add to the shelf")
+        });
     }
 
     /// The strip's one line: a filter button saying how many of the shelf show (its
