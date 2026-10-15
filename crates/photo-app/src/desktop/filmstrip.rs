@@ -44,8 +44,7 @@ impl PhotoApp {
         } else {
             panel.exact_size(STAGE_TOOLBAR_LINE + 16.0)
         };
-        panel
-            .show(ui, |ui| {
+        let shown = panel.show(ui, |ui| {
                 let loaded = self.ready_image().is_some();
                 let zoom_key = egui::Id::new("stage_zoom_width");
                 let zoom_w = widgets::trailing_width(ui.ctx(), zoom_key);
@@ -107,6 +106,7 @@ impl PhotoApp {
                     ui.horizontal_wrapped(|ui| self.crop_shape_chips(ui));
                 }
             });
+        self.desk_spots.toolbar = Some(shown.response.rect);
     }
 
     /// − % + FIT 1:1 as they read: laid out right to left at the end of the line, or left
@@ -256,7 +256,7 @@ impl PhotoApp {
         let displayed = self.displayed_indices();
         let mut action_export = false;
 
-        egui::Panel::bottom("filmstrip")
+        let strip = egui::Panel::bottom("filmstrip")
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
                 left: 16,
                 right: 16,
@@ -352,6 +352,7 @@ impl PhotoApp {
 
                 self.film_tiles(ui, gpu, &displayed);
             });
+        self.desk_spots.filmstrip = Some(strip.response.rect);
 
         if action_export {
             self.batch_dialog_open = true;

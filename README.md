@@ -9,6 +9,10 @@
 > The legacy TypeScript codebase (`apps/` and `packages/`) has been completely removed. Duckfoot is native Rust on wgpu. Three dependencies compile non-Rust code: libwebp (C, for WebP export), tract-linalg's assembly matrix kernels (the cutout model), and wayland-backend on Linux.
 
 
+**New to Duckfoot, or not technical? Start with the [Help Guide](./docs/GUIDE.md).** The same
+guide is in the app under **Help**, with a one-minute tour of the window. The rest of this
+README is for people building Duckfoot from source.
+
 ---
 
 ## Quick start
@@ -194,7 +198,7 @@ You can also **drag a RAW file onto the window**.
 | Double-click a slider or its label | back to its default |
 | Drag in the curve | move the nearest point; the ends keep their place |
 | Drag a 3D view | orbit it; `Ctrl`+scroll zooms, double-click resets |
-| Click a module's header | open it and close the others; `Shift`+click opens it alongside |
+| Click a module's header, on the All tab | open it and close the others; `Shift`+click opens it alongside |
 | Touch a control in a module that's off | turns the module on |
 | Click a History row | jump to that step |
 | Drag the split divider | move it; double-click centres it |
@@ -202,7 +206,7 @@ You can also **drag a RAW file onto the window**.
 | Drop files on the window | add them to the shelf and open the first |
 <!-- keymap:end -->
 
-Press `?` in the app for the same list. On a Mac, `Ctrl` is `⌘`.
+Press `?` in the app for the same list, or **Help** for the guide and a tour. On a Mac, `Ctrl` is `⌘`.
 
 Hotkeys deliberately do not fire while a text field has focus.
 

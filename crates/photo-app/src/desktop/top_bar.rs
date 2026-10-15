@@ -80,6 +80,7 @@ impl PhotoApp {
                                 )
                             })
                             .inner;
+                        self.desk_spots.export = Some(export.rect);
                         if export.clicked() {
                             self.export_dialog_open = true;
                         }
@@ -117,6 +118,18 @@ impl PhotoApp {
                         {
                             self.shortcuts_open = !self.shortcuts_open;
                         }
+                        // Lit until the tour has been seen: offered, never started for you.
+                        let kind = if self.settings.desk_tour_done {
+                            Kind::Secondary
+                        } else {
+                            Kind::Accent
+                        };
+                        if widgets::button(ui, kind, "Help", 0.0)
+                            .on_hover_text("The guide, and a tour of the window")
+                            .clicked()
+                        {
+                            self.open_help();
+                        }
                         ui.add_space(8.0);
 
                         // Right-to-left, so these read undo · redo · depth on screen.
@@ -137,42 +150,6 @@ impl PhotoApp {
                         });
                         ui.add_space(8.0);
 
-                        // Right-to-left, so these read shelf · split · inspector on screen.
-                        pod(ui, |ui| {
-                            let wide = self.inspector_width >= 400.0;
-                            if widgets::icon(
-                                ui,
-                                "◨",
-                                wide,
-                                if wide {
-                                    "Narrow the inspector (300px)"
-                                } else {
-                                    "Widen the inspector for the 3D views (460px)"
-                                },
-                            )
-                            .clicked()
-                            {
-                                let target = if wide { 300.0 } else { 460.0 };
-                                self.inspector_width = target;
-                                self.inspector_force_width = Some(target);
-                            }
-                            if widgets::icon(
-                                ui,
-                                "◫",
-                                self.split_active,
-                                "Before / after split (\\)",
-                            )
-                            .clicked()
-                            {
-                                self.split_active = !self.split_active;
-                                self.needs_render = true;
-                            }
-                            if widgets::icon(ui, "◧", self.shelf_open, "Show or hide the shelf")
-                                .clicked()
-                            {
-                                self.shelf_open = !self.shelf_open;
-                            }
-                        });
                         widgets::remember_trailing_width(ui, actions_key);
                     });
                 });

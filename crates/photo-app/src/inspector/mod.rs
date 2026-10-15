@@ -78,6 +78,7 @@ impl PhotoApp {
                 });
             });
 
+            self.desk_spots.tabs = None;
             if loaded && !self.customize_open {
                 self.group_tabs(ui);
             }
@@ -274,6 +275,7 @@ impl PhotoApp {
                 }
             });
         let r = tabs.response.rect;
+        self.desk_spots.tabs = Some(r);
         ui.painter()
             .hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::BORDER));
     }

@@ -8,7 +8,7 @@ impl PhotoApp {
     /// The shelf folded to a rail of icons, always there. The filmstrip already shows the
     /// roll, so the full shelf is a drawer opened from here for files and folders.
     pub(crate) fn shelf_rail(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("shelf_rail")
+        let rail = egui::Panel::left("shelf_rail")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_925)
@@ -37,6 +37,7 @@ impl PhotoApp {
                     }
                 });
             });
+        self.desk_spots.rail = Some(rail.response.rect);
     }
 
     pub(crate) fn shelf(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
