@@ -3083,9 +3083,14 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A phone's platform: one photo at a time, with settings kept between launches.
+/// A phone's platform: one photo at a time, with settings kept between launches, and
+/// (when it has one) a library its picked photos are copied into.
 #[derive(Clone)]
-struct PhonePlatform(PathBuf, std::sync::Arc<std::sync::Mutex<Vec<Response>>>);
+struct PhonePlatform(
+    PathBuf,
+    std::sync::Arc<std::sync::Mutex<Vec<Response>>>,
+    Option<PathBuf>,
+);
 
 impl Platform for PhonePlatform {
     fn request(&mut self, _request: Request) {}
@@ -3095,9 +3100,100 @@ impl Platform for PhonePlatform {
     fn settings_dir(&self) -> Option<PathBuf> {
         Some(self.0.clone())
     }
+    fn library_dir(&self) -> Option<PathBuf> {
+        self.2.clone()
+    }
     fn single_photo(&self) -> bool {
         true
     }
+}
+
+/// Settle, then wait for a background export to finish.
+fn settle_export(h: &Headless, app: &mut PhotoApp) {
+    h.settle(app, Duration::from_secs(30));
+    let started = Instant::now();
+    while !app.export_finished() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "export still running"
+        );
+        h.frame(app, Default::default());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.frame(app, Default::default());
+}
+
+/// Wait until `path` is gone (the library's deletions run off the UI thread).
+fn gone(h: &Headless, app: &mut PhotoApp, path: &Path) -> bool {
+    let started = Instant::now();
+    while path.exists() && started.elapsed() < Duration::from_secs(10) {
+        h.frame(app, Default::default());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    !path.exists()
+}
+
+/// A phone's photo editor keeps no gallery: once a photo is exported, its library copy
+/// (and sidecar) goes as soon as another replaces it, or on the next launch. One never
+/// exported stays, so its edits come back if it is picked again.
+#[test]
+fn a_phone_deletes_an_exported_copy_once_it_is_left() {
+    let dir = scratch_dir("exported-copies");
+    let settings = dir.join("settings");
+    let library = dir.join("library");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let (a, b, c) = (
+        library.join("a.dng"),
+        library.join("b.dng"),
+        library.join("c.dng"),
+    );
+    for p in [&a, &b, &c] {
+        write_dng(p, 320, 214);
+    }
+    let h = Headless::new();
+    let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let platform = PhonePlatform(settings.clone(), answers.clone(), Some(library.clone()));
+    let say = |r: Response| answers.lock().unwrap().push(r);
+    {
+        let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
+        h.frame(&mut app, Default::default());
+
+        // A, edited and exported; it stays while it is open.
+        say(Response::OpenImage(a.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        app.edit(|s| s.exposure.params.ev = 0.5);
+        say(Response::ExportImage(out.join("a.jpg")));
+        settle_export(&h, &mut app);
+        assert!(out.join("a.jpg").exists(), "the export was written");
+        assert!(a.exists(), "the open photo is kept");
+
+        // B replaces it: A's copy and its sidecar go.
+        say(Response::OpenImage(b.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert!(gone(&h, &mut app, &a), "A's copy is deleted");
+        assert!(photo_engine::find_sidecar(&a).is_none(), "…and its sidecar");
+        assert_eq!(app.error(), None);
+
+        // C replaces B, which was never exported: B stays, edits and all.
+        app.edit(|s| s.exposure.params.ev = 0.25);
+        say(Response::OpenImage(c.clone()));
+        h.settle(&mut app, Duration::from_secs(30));
+        assert!(b.exists(), "a copy never exported is kept");
+
+        // C exported, then the app closed with it open.
+        say(Response::ExportImage(out.join("c.jpg")));
+        settle_export(&h, &mut app);
+        assert!(c.exists());
+        app.shutdown();
+    }
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert!(gone(&h, &mut app, &c), "C goes on the next launch");
+    assert!(b.exists());
+    assert_eq!(app.error(), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One photo at a time: a photo picked replaces the one open (its edits saved), nothing
@@ -3111,7 +3207,7 @@ fn a_phone_edits_one_photo_and_starts_the_next_session_empty() {
     write_dng(&b, 320, 214);
     let h = Headless::new();
     let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let platform = PhonePlatform(settings.clone(), answers.clone());
+    let platform = PhonePlatform(settings.clone(), answers.clone(), None);
     {
         let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform.clone()));
         h.frame(&mut app, Default::default());

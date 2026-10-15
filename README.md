@@ -393,9 +393,12 @@ How it differs from the desktop, for now:
   the next one picked (＋ at the top left); its edits are saved on the way out. There is no
   shelf, no stepping between photos and no batch export, and the next launch starts empty.
   Android hands out documents, not paths, so a picked photo is copied into the app's
-  private library and edited there, its sidecar beside the copy; picking the same photo
-  again reuses the copy, so its edits come back. **⋯ → Photo info & storage** shows what
-  the copies take up and deletes them.
+  private library and edited there, its sidecar beside the copy. Once a photo is
+  exported its copy has done its job: it is deleted, sidecar and all, as soon as another
+  photo replaces it (or on the next launch, if the app closed with it open), so the
+  editor never turns into a second gallery. A photo never exported keeps its copy, and
+  picking it again brings its edits back. **⋯ → Photo info & storage** shows what those
+  copies take up and deletes them.
 - **Exports go to `Pictures/Duckfoot`**, where the gallery shows them. There is no save
   dialog.
 - **Back** closes the crop tool or an open dialog first, then sends the app to the
