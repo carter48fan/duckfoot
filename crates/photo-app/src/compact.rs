@@ -21,8 +21,10 @@
 //! Getting around without a keyboard:
 //!
 //! - tap a group, or swipe along the bar, to change group;
-//! - swipe up or down, on the photo or on the ruler, to choose what to change: the whole
-//!   group's list follows the finger; tap Light, Colour or Detail to jump;
+//! - swipe up or down, on the photo or on the ruler, to choose what to change: up for the
+//!   next value in the list. In Tune, Light, Colour and Detail are each their own list,
+//!   shown as tabs over it: drift left or right while choosing, swipe the bar under the
+//!   ruler, or tap one, to move between them;
 //! - swipe sideways, on the photo or on the ruler, to change it; double-tap to put it
 //!   back; hold the photo to see the original; the ⋯ beside a value opens all its tool's
 //!   settings;
@@ -1637,6 +1639,7 @@ impl PhotoApp {
                 let mut started = false;
                 let mut next = None;
                 let mut choose = 0;
+                let mut tab = 0;
                 let mut choosing = false;
                 egui::Frame::new()
                     .inner_margin(Margin::symmetric(16, 0))
@@ -1646,6 +1649,7 @@ impl PhotoApp {
                         started = turned.started;
                         next = turned.value;
                         choose = turned.choose;
+                        tab = turned.tab;
                         choosing = turned.choosing;
                     });
                 if run_auto {
@@ -1669,8 +1673,12 @@ impl PhotoApp {
                 if more {
                     self.compact_controls_open = true;
                 }
-                // Up or down on the ruler walks the group's list, as on the photo; the list
-                // shows over the photo while the finger is on it.
+                // Up or down on the ruler walks the value's list, as on the photo, and a
+                // drift sideways moves between its tabs; the list shows over the photo
+                // while the finger is on it.
+                if tab != 0 {
+                    self.step_section(tab);
+                }
                 self.step_choice(choose);
                 if choosing {
                     self.show_photo_readout(true);
@@ -1776,7 +1784,12 @@ impl PhotoApp {
             ui.advance_cursor_after_rect(row);
             self.compact_rects.strip = row;
             if let Some(step) = step {
-                self.step_module(step);
+                // Tune's sections are tabs: a swipe moves to the next one.
+                if cat.swipes_by_section() {
+                    self.step_section(step);
+                } else {
+                    self.step_module(step);
+                }
             } else if let Some(s) = tapped {
                 let range = cat.section_range(s);
                 if chosen.is_some_and(|i| range.contains(&i)) && !self.compact_controls_open {
@@ -2044,18 +2057,38 @@ impl PhotoApp {
         }
     }
 
+    /// Where the current chip is in the open category. A tool opened from a value's ⋯
+    /// counts as that value's chip.
+    fn current_chip_index(&self) -> Option<usize> {
+        let chips = self.compact_category.chips();
+        let c = self.current_chip()?;
+        chips
+            .iter()
+            .position(|x| *x == c)
+            .or_else(|| chips.iter().position(|x| x.module() == c.module()))
+    }
+
+    /// Move to the first value of the next (`+1`) or previous (`-1`) section of the open
+    /// category, stopping at its ends: Tune's Light, Colour and Detail, as tabs.
+    pub(crate) fn step_section(&mut self, step: i32) {
+        let cat = self.compact_category;
+        let Some(i) = self.current_chip_index() else {
+            return;
+        };
+        let s = cat.section_of(i) as i32 + step;
+        if let Ok(s) = usize::try_from(s) {
+            if s < cat.sections().len() {
+                self.choose_chip(cat.chips()[cat.section_range(s).start]);
+                self.show_photo_readout(true);
+            }
+        }
+    }
+
     /// Move to the next (`+1`) or previous (`-1`) chip in the open category, stopping at
     /// its ends. A tool stays open if the chip it lands on is one.
     pub(crate) fn step_module(&mut self, step: i32) {
         let chips = self.compact_category.chips();
-        // A tool opened from a value's ⋯ steps on from that value's chip.
-        let at = |c: Chip| {
-            chips
-                .iter()
-                .position(|x| *x == c)
-                .or_else(|| chips.iter().position(|x| x.module() == c.module()))
-        };
-        let Some(i) = self.current_chip().and_then(at) else {
+        let Some(i) = self.current_chip_index() else {
             if let Some(first) = chips.first() {
                 self.choose_chip(*first);
             }

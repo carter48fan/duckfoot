@@ -3,7 +3,9 @@
 //!
 //! In Edit, with a module whose controls are values along a line (see [`crate::knobs`]):
 //!
-//! - swipe **up or down** to choose which value: a list floats over the photo;
+//! - swipe **up or down** to choose which value (up for the next, on a phone): a list
+//!   floats over the photo; on a phone in Tune it has Light, Colour and Detail as tabs
+//!   along its top, and the same finger drifting left or right moves between them;
 //! - swipe **left or right** to change it, slowly for fine steps; a readout says what it is;
 //! - **double-tap** puts it back; **hold** shows the original.
 //!
@@ -20,6 +22,10 @@ use crate::{theme, InspectorSectionId, PhotoApp};
 
 /// Travel, in points, that moves the choice on by one value.
 const CHOOSE_STEP: f32 = 40.0;
+/// Sideways travel, while choosing, that moves to the next tab of the list.
+const TAB_STEP: f32 = 56.0;
+/// The height of the list's tabs, over its rows.
+const TABS_H: f32 = 32.0;
 /// Slower than this (points per second) a slide is fine: a quarter of the change.
 const FINE_SPEED: f32 = 150.0;
 /// How long the readout stays after the finger lets go.
@@ -44,6 +50,8 @@ pub(crate) struct PhotoTouch {
     pub(crate) knob: Option<(InspectorSectionId, usize)>,
     /// Vertical travel not yet turned into a step of the choice.
     choose_travel: f32,
+    /// Sideways travel, while choosing, not yet turned into a step of the tab.
+    tab_travel: f32,
     /// The value is being changed: its undo step is open.
     adjusting: bool,
     /// When the readout or the list was last shown, and which.
@@ -100,19 +108,38 @@ impl PhotoApp {
     }
 
     /// The values a swipe up or down walks, and which of them is chosen. On a phone, under
-    /// the ruler, it is the whole group's list (all of Tune: light, colour, detail), so one
-    /// swipe reaches any value; with a tool open, or on the desktop, the module's own.
+    /// the ruler, it is the group's list (in Tune, the chosen value's section: light,
+    /// colour or detail), across modules; with a tool open, or on the desktop, the
+    /// module's own.
     pub(crate) fn swipe_list(&self) -> (Vec<(InspectorSectionId, usize)>, usize) {
         let module = self.knob_module();
         let at = self.photo_knob().map_or(0, |(i, _)| i);
         if self.layout.is_compact() && !self.compact_controls_open {
-            let list = self.compact_category.knob_list();
-            if let Some(pos) = list.iter().position(|k| *k == (module, at)) {
-                return (list, pos);
+            let cat = self.compact_category;
+            let chip = crate::categories::Chip::Knob(module, at);
+            if let Some(i) = cat.chips().iter().position(|c| *c == chip) {
+                let list = cat.knob_list(i);
+                if let Some(pos) = list.iter().position(|k| *k == (module, at)) {
+                    return (list, pos);
+                }
             }
         }
         let list = (0..knobs(module).len()).map(|i| (module, i)).collect();
         (list, at)
+    }
+
+    /// The tabs over the list of values, and which is open: on a phone, under the ruler,
+    /// in a group whose sections are each a list of their own (Tune's Light, Colour and
+    /// Detail).
+    pub(crate) fn palette_tabs(&self) -> Option<(&'static [(&'static str, usize)], usize)> {
+        let cat = self.compact_category;
+        if !self.layout.is_compact() || self.compact_controls_open || !cat.swipes_by_section() {
+            return None;
+        }
+        let (i, _) = self.photo_knob()?;
+        let chip = crate::categories::Chip::Knob(self.knob_module(), i);
+        let at = cat.chips().iter().position(|c| *c == chip)?;
+        Some((cat.sections(), cat.section_of(at)))
     }
 
     /// Move the choice `steps` along [`Self::swipe_list`], stopping at its ends.
@@ -284,8 +311,28 @@ impl PhotoApp {
             Event::Slide {
                 axis: Axis::Y,
                 delta,
+                across,
                 ..
             } if editing => {
+                // Drifting sideways while choosing moves between the list's tabs: left for
+                // the next, as a row of pages is swiped.
+                if self.palette_tabs().is_some() {
+                    let t = &mut self.photo_touch;
+                    t.tab_travel += across;
+                    if t.tab_travel.abs() >= TAB_STEP {
+                        let step = if t.tab_travel < 0.0 { 1 } else { -1 };
+                        t.tab_travel = 0.0;
+                        t.choose_travel = 0.0;
+                        self.step_section(step);
+                    }
+                }
+                // On a phone, up for the next value, as a list is scrolled; the desktop's
+                // drag keeps down for the next, as its Alt+↓ does.
+                let delta = if self.layout.is_compact() {
+                    -delta
+                } else {
+                    delta
+                };
                 let t = &mut self.photo_touch;
                 t.choose_travel += delta;
                 let mut steps = 0;
@@ -306,6 +353,10 @@ impl PhotoApp {
                 let Some((_, knob)) = self.photo_knob() else {
                     return;
                 };
+                if delta == 0.0 {
+                    // Only wobbling across: nothing to turn, and no undo step to open.
+                    return;
+                }
                 if !self.photo_touch.adjusting {
                     self.photo_touch.adjusting = true;
                     self.photo_touch.log.adjusted += 1;
@@ -356,6 +407,7 @@ impl PhotoApp {
             Event::Released => {
                 self.photo_touch.adjusting = false;
                 self.photo_touch.choose_travel = 0.0;
+                self.photo_touch.tab_travel = 0.0;
             }
             // Not editing on the photo: a sideways flick steps, one finger at fit and two
             // zoomed in (where one pans).
@@ -440,16 +492,47 @@ impl PhotoApp {
                 }
                 // As many rows as fit, the chosen one kept in view: a long list (all of
                 // Tune) scrolls under the finger rather than running off the photo.
+                let tabs = self.palette_tabs();
+                let tabs_h = if tabs.is_some() { TABS_H } else { 0.0 };
                 let row = 34.0;
-                let fit = (((rect.height() - 40.0) / row).floor() as usize).clamp(3, 9);
+                let fit = (((rect.height() - 40.0 - tabs_h) / row).floor() as usize).clamp(3, 9);
                 let shown = list.len().min(fit);
                 let first = chosen.saturating_sub(shown / 2).min(list.len() - shown);
-                let h = row * shown as f32 + 12.0;
+                let h = row * shown as f32 + 12.0 + tabs_h;
                 let panel = Rect::from_center_size(
                     rect.center(),
                     vec2(240.0_f32.min(rect.width() - 32.0), h),
                 );
                 painter.rect_filled(panel, 12.0, Color32::from_black_alpha(200));
+                if let Some((sections, open)) = tabs {
+                    // The tabs, side by side over the rows: the open one lit and underlined.
+                    let w = panel.width() / sections.len().max(1) as f32;
+                    for (s, (name, _)) in sections.iter().enumerate() {
+                        let x = panel.left() + w * (s as f32 + 0.5);
+                        let y = panel.top() + TABS_H / 2.0 + 2.0;
+                        let on = s == open;
+                        let ink = if on { theme::TEXT_HI } else { theme::TEXT_DIM };
+                        let r = painter.text(
+                            pos2(x, y),
+                            Align2::CENTER_CENTER,
+                            name.to_uppercase(),
+                            FontId::new(11.5, theme::mono_bold()),
+                            ink,
+                        );
+                        if on {
+                            painter.hline(
+                                r.x_range(),
+                                r.bottom() + 4.0,
+                                Stroke::new(2.0, theme::ACCENT),
+                            );
+                        }
+                    }
+                    painter.hline(
+                        (panel.left() + 10.0)..=(panel.right() - 10.0),
+                        panel.top() + TABS_H,
+                        Stroke::new(1.0, Color32::from_white_alpha(28)),
+                    );
+                }
                 let compact = self.layout.is_compact();
                 for (row_i, i) in (first..first + shown).enumerate() {
                     let (id, ki) = list[i];
@@ -461,7 +544,7 @@ impl PhotoApp {
                     } else {
                         k.name
                     };
-                    let y = panel.top() + 6.0 + row * (row_i as f32 + 0.5);
+                    let y = panel.top() + tabs_h + 6.0 + row * (row_i as f32 + 0.5);
                     let on = i == chosen;
                     if on {
                         let band = Rect::from_center_size(

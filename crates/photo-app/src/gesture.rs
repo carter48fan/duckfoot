@@ -40,6 +40,14 @@ impl Axis {
             Axis::Y => v.y,
         }
     }
+
+    /// The axis across this one.
+    pub fn other(self) -> Axis {
+        match self {
+            Axis::X => Axis::Y,
+            Axis::Y => Axis::X,
+        }
+    }
 }
 
 /// What the pointer is doing this frame.
@@ -59,9 +67,11 @@ pub enum Event {
     Down(Pos2),
     /// One finger moving along its locked axis: this frame's travel, and the whole of it.
     /// `speed` is points per second along the axis, over the last tenth of a second.
+    /// `across` is this frame's travel across the axis, which the lock otherwise ignores.
     Slide {
         axis: Axis,
         delta: f32,
+        across: f32,
         total: f32,
         speed: f32,
     },
@@ -175,6 +185,7 @@ impl Recogniser {
                         out.push(Event::Slide {
                             axis,
                             delta: axis.of(travel),
+                            across: axis.other().of(travel),
                             total: axis.of(travel),
                             speed: speed(&t.trail, axis),
                         });
@@ -183,10 +194,11 @@ impl Recogniser {
                         out.push(Event::Hold(t.start));
                     }
                 } else if let Some(axis) = t.axis {
-                    if axis.of(delta) != 0.0 {
+                    if delta != Vec2::ZERO {
                         out.push(Event::Slide {
                             axis,
                             delta: axis.of(delta),
+                            across: axis.other().of(delta),
                             total: axis.of(travel),
                             speed: speed(&t.trail, axis),
                         });

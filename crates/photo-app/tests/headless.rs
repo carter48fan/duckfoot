@@ -3022,18 +3022,18 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     // Fast, 60 points would be about 1 EV.
     assert!(slow > 0.0 && slow < 0.35, "a slow slide moved EV by {slow}");
 
-    // Down to choose the next value.
+    // Up to choose the next value, down for the one before.
     touch_path(
         &h,
         &mut app,
-        &line(centre, centre + egui::vec2(0.0, 50.0), 8),
+        &line(centre, centre - egui::vec2(0.0, 50.0), 8),
         0,
     );
     assert_eq!(app.photo_value(), Some("black"));
     touch_path(
         &h,
         &mut app,
-        &line(centre, centre - egui::vec2(0.0, 50.0), 8),
+        &line(centre, centre + egui::vec2(0.0, 50.0), 8),
         0,
     );
     assert_eq!(app.photo_value(), Some("EV"));
@@ -3079,8 +3079,8 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     );
     assert_ne!(app.compact_module, photo_app::InspectorSectionId::ToneCurve);
 
-    // Under the ruler, up and down walk the whole of Tune, from one module to the next:
-    // three steps down from exposure is past highlights and shadows, to whites.
+    // Under the ruler, up and down walk Tune's Light, from one module to the next: three
+    // steps up from exposure is past highlights and shadows, to whites.
     use photo_app::InspectorSectionId as M;
     app.choose_chip(Chip::Knob(M::Exposure, 0));
     for _ in 0..3 {
@@ -3089,7 +3089,7 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
     touch_path(
         &h,
         &mut app,
-        &line(centre, centre + egui::vec2(0.0, 140.0), 14),
+        &line(centre, centre - egui::vec2(0.0, 140.0), 14),
         0,
     );
     assert_eq!(app.current_chip(), Some(Chip::Knob(M::Tonal, 2)));
@@ -3108,6 +3108,18 @@ fn on_a_phone_the_photo_is_the_edit_sheets_control() {
         0,
     );
     assert!(app.stack().tonal.params.whites > whites);
+
+    // Up to open the list, then the same finger left: the list's next tab, Colour, on
+    // its first value. Right again, back to Light's first.
+    let up = centre - egui::vec2(0.0, 50.0);
+    let mut path = line(centre, up, 6);
+    path.extend(line(up, up - egui::vec2(80.0, 0.0), 8));
+    touch_path(&h, &mut app, &path, 0);
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::WhiteBalance, 0)));
+    let mut path = line(centre, up, 6);
+    path.extend(line(up, up + egui::vec2(80.0, 0.0), 8));
+    touch_path(&h, &mut app, &path, 0);
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Exposure, 0)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3317,11 +3329,11 @@ fn the_tour_waits_for_each_gesture_and_keeps_clear_of_what_it_points_at() {
 
     let stage = app.tour_card().expect("card").1;
     let centre = stage.center();
-    // Up or down: chosen.
+    // Up or down: chosen (up, as exposure is the top of its list).
     touch_path(
         &h,
         &mut app,
-        &line(centre, centre + egui::vec2(0.0, 50.0), 8),
+        &line(centre, centre - egui::vec2(0.0, 50.0), 8),
         0,
     );
     settle(&mut app);
@@ -3688,14 +3700,14 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
     app.undo();
     assert_eq!(app.stack().tonal.params.highlights, before);
 
-    // Down the ruler walks Tune's list without lifting the thumb, and turns nothing.
+    // Up the ruler walks Light's list without lifting the thumb, and turns nothing.
     let x = PORTRAIT.x / 2.0;
     touch_path(
         &h,
         &mut app,
         &line(
-            egui::pos2(x, ruler_y - 20.0),
-            egui::pos2(x, ruler_y + 50.0),
+            egui::pos2(x, ruler_y + 20.0),
+            egui::pos2(x, ruler_y - 50.0),
             8,
         ),
         0,
@@ -3703,8 +3715,42 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
     assert_eq!(
         app.current_chip(),
         Some(Chip::Knob(M::Tonal, 2)),
-        "two steps down from highlights is whites"
+        "two steps up from highlights is whites"
     );
+    // Light's list ends at vignette: more steps up stay there, not on into Colour.
+    app.choose_chip(Chip::Knob(M::Vignette, 0));
+    for _ in 0..3 {
+        h.frame_sized(&mut app, PORTRAIT, Default::default());
+    }
+    touch_path(
+        &h,
+        &mut app,
+        &line(
+            egui::pos2(x, ruler_y + 20.0),
+            egui::pos2(x, ruler_y - 50.0),
+            8,
+        ),
+        0,
+    );
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Vignette, 0)));
+    // Drifting left on the ruler while choosing: Colour's tab, nothing turned.
+    let vignette = app.stack().vignette.params.amount;
+    let mut path = line(
+        egui::pos2(x, ruler_y + 20.0),
+        egui::pos2(x, ruler_y - 20.0),
+        6,
+    );
+    path.extend(line(
+        egui::pos2(x, ruler_y - 20.0),
+        egui::pos2(x - 80.0, ruler_y - 20.0),
+        8,
+    ));
+    touch_path(&h, &mut app, &path, 0);
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::WhiteBalance, 0)));
+    assert_eq!(app.stack().vignette.params.amount, vignette);
+    // A swipe left along the bar under the ruler: the next tab, Detail.
+    flick(&h, &mut app, strip.center().y, 300.0, 120.0);
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Clarity, 0)));
     assert_eq!(app.stack().tonal.params.highlights, before);
 
     // A tool opens in the grid's place; back is the grid again, the sheet still open.
