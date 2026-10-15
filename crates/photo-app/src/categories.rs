@@ -1,10 +1,9 @@
 //! The phone's edit controls, grouped after Snapseed: four groups along the bottom bar.
 //!
 //! - **Looks**: one-tap looks, snapshots, history and copy & paste.
-//! - **Tune**: every quick value in one list, Light then Colour then Detail. One ruler turns
+//! - **Tune**: every quick value, in three lists: Light, Colour and Detail. One ruler turns
 //!   whichever is chosen; swiping up or down (on the photo, or on the ruler) walks the
-//!   whole list, so there is one thing to swipe through rather than a row of pills per
-//!   group.
+//!   chosen value's list, and tapping a section moves to another.
 //! - **Crop**: crop & rotate, then straighten, perspective and lens distortion on the
 //!   ruler.
 //! - **Tools**: the tools whose controls are not values along a line — the curve, the
@@ -46,7 +45,7 @@ use InspectorSectionId as M;
 
 const LOOKS: &[Chip] = &[Looks];
 
-/// Tune's one list, in the order a swipe walks it. [`TUNE_SECTIONS`] names its stretches.
+/// Tune's values, in order. [`TUNE_SECTIONS`] names its stretches, each its own swipe list.
 const TUNE: &[Chip] = &[
     // Light
     Knob(M::Exposure, 0),
@@ -176,9 +175,22 @@ impl Category {
             .find(|c| matches!(c, Chip::Knob(..)))
     }
 
-    /// The values it lists, in order: what a swipe up or down walks through.
-    pub(crate) fn knob_list(self) -> Vec<(InspectorSectionId, usize)> {
-        self.chips()
+    /// Whether a swipe up or down stays inside the section it starts in: Tune's Light,
+    /// Colour and Detail are each a list of their own. Crop's sections are a value or two
+    /// each, so its swipe walks the whole group.
+    pub(crate) fn swipes_by_section(self) -> bool {
+        self == Category::Tune
+    }
+
+    /// The values a swipe up or down walks from the chip at `at`, in order: its section's
+    /// when [`Self::swipes_by_section`], else the whole group's.
+    pub(crate) fn knob_list(self, at: usize) -> Vec<(InspectorSectionId, usize)> {
+        let range = if self.swipes_by_section() {
+            self.section_range(self.section_of(at))
+        } else {
+            0..self.chips().len()
+        };
+        self.chips()[range]
             .iter()
             .filter_map(|c| match *c {
                 Chip::Knob(id, i) => Some((id, i)),
@@ -269,16 +281,20 @@ pub(crate) struct Turned {
     pub value: Option<f32>,
     /// A gesture began: one undo step from here.
     pub started: bool,
-    /// Steps along the list a drag up (-) or down (+) asked for.
+    /// Steps along the list a drag down (-) or up (+) asked for.
     pub choose: i32,
     /// A drag up or down is under way: the list of values is worth showing.
     pub choosing: bool,
+    /// Steps between the list's tabs a drift right (-) or left (+) during it asked for.
+    pub tab: i32,
 }
 
 /// Travel before a drag on the ruler is taken as sideways (turning) or up and down
-/// (choosing), and how far up or down moves the choice by one.
+/// (choosing), how far up or down moves the choice by one, and how far sideways while
+/// choosing moves to the next tab.
 const DECIDE: f32 = 8.0;
 const CHOOSE_STEP: f32 = 28.0;
+const TAB_STEP: f32 = 56.0;
 
 /// How many widths of ruler the whole range spans: enough that a finger's travel is a
 /// fine change, and the whole range is two sweeps away.
@@ -287,7 +303,8 @@ const SPAN: f32 = 2.2;
 /// A ruler of ticks under a fixed amber needle. Dragging moves the ticks with the finger,
 /// so the value under the needle follows: left for more, right for less, as a dial turned
 /// by its edge. Dragging up or down instead chooses another value, as on the photo, so the
-/// thumb never has to leave the ruler. A double tap puts it back to `home`. `fine` moves
+/// thumb never has to leave the ruler; drifting sideways during that moves between the
+/// list's tabs. A double tap puts it back to `home`. `fine` moves
 /// it a tenth as far.
 pub(crate) fn ruler(
     ui: &mut egui::Ui,
@@ -330,10 +347,18 @@ pub(crate) fn ruler(
             }
             Some(false) => {
                 out.choosing = true;
+                // Up for the next value, as a list is scrolled: the finger pushes the
+                // list up and what was below comes into place.
                 while travel.y.abs() >= CHOOSE_STEP {
                     let step = travel.y.signum();
-                    out.choose += step as i32;
+                    out.choose -= step as i32;
                     travel.y -= CHOOSE_STEP * step;
+                }
+                // Drifting sideways meanwhile: the next tab to the left, as pages are swiped.
+                while travel.x.abs() >= TAB_STEP {
+                    let step = travel.x.signum();
+                    out.tab -= step as i32;
+                    travel.x -= TAB_STEP * step;
                 }
             }
             None => {}
@@ -666,13 +691,22 @@ mod tests {
         }
     }
 
-    /// Tune is one list of values, a swipe walks it; its sections and Crop's cover their
-    /// lists in order. No group but Tools needs a row of chips to scroll.
+    /// Tune is values only, and a swipe walks one section of them; its sections and Crop's
+    /// cover their lists in order. No group but Tools needs a row of chips to scroll.
     #[test]
-    fn tune_is_one_list_of_values_in_named_stretches() {
+    fn tune_is_values_in_named_stretches_each_swiped_alone() {
         let tune = Category::Tune;
         assert!(tune.chips().iter().all(|c| !c.is_tool()));
-        assert_eq!(tune.knob_list().len(), tune.chips().len());
+        for s in 0..tune.sections().len() {
+            let r = tune.section_range(s);
+            for i in r.clone() {
+                assert_eq!(tune.knob_list(i).len(), r.len(), "Tune chip {i}");
+            }
+        }
+        // Crop's swipe walks every value it has, across its sections.
+        let crop = Category::Crop;
+        let values = crop.chips().iter().filter(|c| !c.is_tool()).count();
+        assert_eq!(crop.knob_list(crop.chips().len() - 1).len(), values);
         for cat in [Category::Tune, Category::Crop] {
             let mut covered = 0;
             for s in 0..cat.sections().len() {

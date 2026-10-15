@@ -410,12 +410,14 @@ How it differs from the desktop, for now:
 - **The phone layout**, after Snapseed. Below 900 × 560 points (phones either way up,
   tablets held upright) the stage fills the screen and the bottom bar holds four groups:
   - **Looks**: one-tap looks and their strength, snapshots, history, copy & paste.
-  - **Tune**: every quick value in one list — light (exposure, highlights, shadows,
+  - **Tune**: every quick value, in three lists — light (exposure, highlights, shadows,
     whites, blacks, dehaze, vignette), colour (temperature, tint, vibrance, saturation)
     and detail (clarity, texture, sharpen, noise, colour noise). The chosen value sits
-    over a ruler; swipe up or down, on the photo or on the ruler, to walk the whole list,
-    and sideways to change it. Under the ruler, **Light · Colour · Detail** with a dot per
-    value (amber once changed) jump to a stretch; swiping that bar steps value by value.
+    over a ruler; swipe up or down, on the photo or on the ruler, to walk its list (up
+    for the next value), and sideways to change it. The list that floats over the photo
+    has **Light · Colour · Detail** as tabs: drift the same finger left or right to
+    switch. Under the ruler the same three, with a dot per value (amber once changed),
+    are tabs too: tap one, or swipe the bar for the next.
     **AUTO** beside a value is auto tone for light, auto white balance for colour.
   - **Crop**: the crop tool, then straighten, perspective and lens distortion on the
     ruler, with auto straighten / upright.
