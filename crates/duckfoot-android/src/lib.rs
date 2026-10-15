@@ -378,6 +378,10 @@ impl Platform for AndroidPlatform {
         true
     }
 
+    fn single_photo(&self) -> bool {
+        true
+    }
+
     fn exclude_gestures(&mut self, rects: &[[i32; 4]]) {
         let flat: Vec<i32> = rects.iter().flatten().copied().collect();
         self.bridge.with_env("setGestureExclusion", |env| {

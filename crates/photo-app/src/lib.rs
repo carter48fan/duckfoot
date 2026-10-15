@@ -338,6 +338,8 @@ enum Export {
     Idle,
     Writing {
         path: PathBuf,
+        /// The photo exported, as it was when the export began.
+        source: Option<PathBuf>,
         started: Instant,
         result: Receiver<Result<(), String>>,
     },
@@ -787,7 +789,7 @@ pub struct PhotoApp {
     /// The phone's bottom bar: which group of chips the Edit sheet shows.
     pub compact_category: categories::Category,
     /// The chip last chosen in each category, to come back to.
-    compact_memory: [Option<categories::Chip>; 5],
+    compact_memory: [Option<categories::Chip>; categories::Category::ALL.len()],
     /// The phone layout's Library shows its rating, flag and search filters.
     pub library_filters_open: bool,
     /// A photo was asked for from outside the Library grid (a picker, a share); when it
@@ -805,6 +807,8 @@ pub struct PhotoApp {
     /// Where a swipe across the stage began, to step photos when it ends.
     /// A photo step asked for where there was no `Gpu` to do it with.
     pending_step: Option<isize>,
+    /// The library deletion under way is the exported copies' sweep: no notice for it.
+    quiet_library_delete: bool,
     /// The photo to open in place of one just taken off the shelf, which happens where
     /// there is no `Gpu` to open it with.
     pending_open: Option<PathBuf>,
@@ -1011,8 +1015,8 @@ impl PhotoApp {
             touch_seen: false,
             compact_tab: Some(compact::Tab::Library),
             compact_module: InspectorSectionId::Exposure,
-            compact_category: categories::Category::Light,
-            compact_memory: [None; 5],
+            compact_category: categories::Category::Tune,
+            compact_memory: [None; categories::Category::ALL.len()],
             library_filters_open: false,
             edit_when_opened: false,
             compact_controls_open: false,
@@ -1020,6 +1024,7 @@ impl PhotoApp {
             compact_sheet_width: None,
             compact_sheet_fit: None,
             pending_step: None,
+            quiet_library_delete: false,
             pending_open: None,
             prefetch: None,
             step_dir: 1,
@@ -1091,8 +1096,15 @@ impl PhotoApp {
             });
         }
         self.batch_output_dir = s.batch_output_dir.filter(|d| d.is_dir());
-        // Missing photos are shelved too, and shown as missing.
-        let shelf = s.shelf;
+        // Missing photos are shelved too, and shown as missing. One photo at a time starts
+        // each session empty: the photo is chosen anew, from the gallery it lives in.
+        let shelf = if self.single_photo() {
+            // What was exported last time and still open when the app closed goes now.
+            self.sweep_exported_copies();
+            Vec::new()
+        } else {
+            s.shelf
+        };
         if !shelf.is_empty() {
             self.add_to_shelf(gpu, shelf);
             if let Some(last) = s
@@ -1112,6 +1124,7 @@ impl PhotoApp {
         if self.settings_dir.is_none() {
             return;
         }
+        let single = self.single_photo();
         let s = &mut self.settings;
         s.inspector_sections = Some(self.inspector_sections.clone());
         s.single_open = Some(self.single_open);
@@ -1124,8 +1137,14 @@ impl PhotoApp {
         s.paste = Some(self.paste_set.clone());
         s.saved_filters = self.saved_filters.clone();
         s.watched_folders = self.folder_watch.folders();
-        s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
-        s.last_open = self.loaded_path.clone();
+        if single {
+            // Nothing to come back to: the next launch starts empty.
+            s.shelf = Vec::new();
+            s.last_open = None;
+        } else {
+            s.shelf = self.shelf.iter().map(|it| it.path.clone()).collect();
+            s.last_open = self.loaded_path.clone();
+        }
         self.save_settings();
     }
 
@@ -1294,6 +1313,11 @@ impl PhotoApp {
         &self.stack
     }
 
+    /// One photo at a time, as on a phone: see [`platform::Platform::single_photo`].
+    pub fn single_photo(&self) -> bool {
+        self.platform.single_photo()
+    }
+
     /// A photo is chosen and editable: from the moment it is picked, before it decodes,
     /// and not once its decode has failed.
     pub fn can_edit(&self) -> bool {
@@ -1388,6 +1412,11 @@ impl PhotoApp {
     /// The size the photo's stage got last frame.
     pub fn stage_size(&self) -> egui::Vec2 {
         self.last_panel
+    }
+
+    /// No export is being written.
+    pub fn export_finished(&self) -> bool {
+        !matches!(self.export, Export::Writing { .. })
     }
 
     pub fn is_busy(&self) -> bool {

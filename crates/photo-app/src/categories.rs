@@ -1,8 +1,17 @@
-//! The phone's edit controls, grouped: five categories along the bottom bar, each a
-//! row of chips, and one ruler that turns whichever value the chosen chip names. A chip
-//! is a value (a [`Knob`](crate::knobs::Knob)) or a tool whose controls are not values
-//! along a line — the curve, the colour bands, masks, spots — which opens in place of the
-//! ruler. Every module is reachable from exactly the category that lists it.
+//! The phone's edit controls, grouped after Snapseed: four groups along the bottom bar.
+//!
+//! - **Looks**: one-tap looks, snapshots, history and copy & paste.
+//! - **Tune**: every quick value in one list, Light then Colour then Detail. One ruler turns
+//!   whichever is chosen; swiping up or down (on the photo, or on the ruler) walks the
+//!   whole list, so there is one thing to swipe through rather than a row of pills per
+//!   group.
+//! - **Crop**: crop & rotate, then straighten, perspective and lens distortion on the
+//!   ruler.
+//! - **Tools**: the tools whose controls are not values along a line — the curve, the
+//!   colour bands and wheels, masks, healing, removing the background — as a grid.
+//!
+//! A chip is a value (a [`Knob`](crate::knobs::Knob)) or a tool which opens in place of
+//! the ruler. Every module is reachable from exactly the group that lists it.
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Rect, Sense, Stroke};
 
@@ -12,15 +21,14 @@ use crate::{theme, widgets, InspectorSectionId};
 /// The bottom bar's groups, left to right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Category {
-    Crop,
+    Looks,
     #[default]
-    Light,
-    Colour,
-    Detail,
-    Retouch,
+    Tune,
+    Crop,
+    Tools,
 }
 
-/// One thing a category's row offers.
+/// One thing a group offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chip {
     /// A module's value, by its index in [`knobs`]: the ruler turns it.
@@ -36,14 +44,11 @@ pub enum Chip {
 use Chip::{Cutout, Knob, Looks, Tool};
 use InspectorSectionId as M;
 
-const CROP: &[Chip] = &[
-    Tool(M::Geometry),
-    Knob(M::Geometry, 0),
-    Knob(M::Geometry, 1),
-    Knob(M::Geometry, 2),
-];
+const LOOKS: &[Chip] = &[Looks];
 
-const LIGHT: &[Chip] = &[
+/// Tune's one list, in the order a swipe walks it. [`TUNE_SECTIONS`] names its stretches.
+const TUNE: &[Chip] = &[
+    // Light
     Knob(M::Exposure, 0),
     Knob(M::Tonal, 0),
     Knob(M::Tonal, 1),
@@ -51,63 +56,106 @@ const LIGHT: &[Chip] = &[
     Knob(M::Tonal, 3),
     Knob(M::Dehaze, 0),
     Knob(M::Vignette, 0),
-    Knob(M::Vignette, 1),
-    Knob(M::Exposure, 1),
-    Tool(M::ToneCurve),
-    Tool(M::Filmic3D),
-    Tool(M::Scope),
-];
-
-const COLOUR: &[Chip] = &[
+    // Colour
     Knob(M::WhiteBalance, 0),
     Knob(M::WhiteBalance, 1),
     Knob(M::Vibrance, 0),
     Knob(M::Vibrance, 1),
-    Looks,
-    Tool(M::ColorEq),
-    Tool(M::ColorBalance),
-    Tool(M::Look),
-];
-
-const DETAIL: &[Chip] = &[
+    // Detail
     Knob(M::Clarity, 0),
     Knob(M::Clarity, 1),
     Knob(M::Sharpen, 0),
     Knob(M::Denoise, 0),
     Knob(M::Denoise, 2),
+];
+
+/// Tune's stretches: a name, and where in [`TUNE`] it starts.
+const TUNE_SECTIONS: &[(&str, usize)] = &[("light", 0), ("colour", 7), ("detail", 11)];
+
+const CROP: &[Chip] = &[
+    Tool(M::Geometry),
+    Knob(M::Geometry, 0),
+    Knob(M::Geometry, 1),
+    Knob(M::Geometry, 2),
     Knob(M::Lens, 0),
 ];
 
-const RETOUCH: &[Chip] = &[Tool(M::Heal), Tool(M::Local), Cutout];
+/// Crop's stretches: the crop itself (a tool), then the values that square the photo up.
+const CROP_SECTIONS: &[(&str, usize)] = &[
+    ("crop", 0),
+    ("straighten", 1),
+    ("perspective", 2),
+    ("lens", 4),
+];
+
+const TOOLS: &[Chip] = &[
+    Tool(M::ToneCurve),
+    Tool(M::ColorEq),
+    Tool(M::ColorBalance),
+    Tool(M::Local),
+    Tool(M::Heal),
+    Cutout,
+    Tool(M::Look),
+    Tool(M::Filmic3D),
+    Tool(M::Scope),
+];
 
 impl Category {
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 4] = [
+        Category::Looks,
+        Category::Tune,
         Category::Crop,
-        Category::Light,
-        Category::Colour,
-        Category::Detail,
-        Category::Retouch,
+        Category::Tools,
     ];
 
     pub fn label(self) -> &'static str {
         crate::i18n::tr(match self {
+            Category::Looks => "cat-looks",
+            Category::Tune => "cat-tune",
             Category::Crop => "cat-crop",
-            Category::Light => "cat-light",
-            Category::Colour => "cat-colour",
-            Category::Detail => "cat-detail",
-            Category::Retouch => "cat-retouch",
+            Category::Tools => "cat-tools",
         })
     }
 
-    /// What its row offers, in order.
+    /// What it offers, in order.
     pub fn chips(self) -> &'static [Chip] {
         match self {
+            Category::Looks => LOOKS,
+            Category::Tune => TUNE,
             Category::Crop => CROP,
-            Category::Light => LIGHT,
-            Category::Colour => COLOUR,
-            Category::Detail => DETAIL,
-            Category::Retouch => RETOUCH,
+            Category::Tools => TOOLS,
         }
+    }
+
+    /// Its named stretches, as (name, first chip's index): shown in place of a row of
+    /// chips when it has them.
+    pub fn sections(self) -> &'static [(&'static str, usize)] {
+        match self {
+            Category::Tune => TUNE_SECTIONS,
+            Category::Crop => CROP_SECTIONS,
+            _ => &[],
+        }
+    }
+
+    /// Which of [`Self::sections`] the chip at `i` is in.
+    pub(crate) fn section_of(self, i: usize) -> usize {
+        self.sections()
+            .iter()
+            .rposition(|(_, start)| *start <= i)
+            .unwrap_or(0)
+    }
+
+    /// Where section `s` runs in [`Self::chips`].
+    pub(crate) fn section_range(self, s: usize) -> std::ops::Range<usize> {
+        let sections = self.sections();
+        let start = sections.get(s).map_or(0, |(_, i)| *i);
+        let end = sections.get(s + 1).map_or(self.chips().len(), |(_, i)| *i);
+        start..end
+    }
+
+    /// Whether it shows its tools as a grid, with no ruler.
+    pub fn is_grid(self) -> bool {
+        self == Category::Tools
     }
 
     pub(crate) fn index(self) -> usize {
@@ -120,12 +168,23 @@ impl Category {
         Category::ALL.get(usize::try_from(i).ok()?).copied()
     }
 
-    /// The first value in its row: what it shows when nothing in it was chosen before.
+    /// The first value it lists: what it shows when nothing in it was chosen before.
     pub(crate) fn first_knob(self) -> Option<Chip> {
         self.chips()
             .iter()
             .copied()
             .find(|c| matches!(c, Chip::Knob(..)))
+    }
+
+    /// The values it lists, in order: what a swipe up or down walks through.
+    pub(crate) fn knob_list(self) -> Vec<(InspectorSectionId, usize)> {
+        self.chips()
+            .iter()
+            .filter_map(|c| match *c {
+                Chip::Knob(id, i) => Some((id, i)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The category that lists `module`.
@@ -147,7 +206,7 @@ impl Chip {
     }
 
     /// Its name on the chip and over the ruler. A knob's own name is enough inside its
-    /// module's card; out on its own in a row it needs the module's.
+    /// module's card; out on its own in a list it needs the module's.
     pub fn label(self) -> &'static str {
         match self {
             Chip::Knob(id, i) => match (id, i) {
@@ -161,11 +220,29 @@ impl Chip {
                 (M::Denoise, 0) => "noise",
                 (M::Denoise, 2) => "colour noise",
                 (M::Lens, 0) => "distortion",
+                (M::Look, 0) => "look strength",
                 _ => knobs(id).get(i).map_or("", |k| k.name),
             },
             Chip::Tool(id) => id.title(),
             Chip::Looks => crate::i18n::tr("tab-presets"),
             Chip::Cutout => "remove background",
+        }
+    }
+
+    /// A tool's name and what it does, on its tile in the Tools grid.
+    pub(crate) fn tile(self) -> (&'static str, &'static str) {
+        match self {
+            Chip::Tool(M::ToneCurve) => ("curves", "tone, by channel"),
+            Chip::Tool(M::ColorEq) => ("colour mixer", "each hue on its own"),
+            Chip::Tool(M::ColorBalance) => ("colour grade", "tint the tones"),
+            Chip::Tool(M::Local) => ("brush & masks", "edit one part"),
+            Chip::Tool(M::Heal) => ("healing", "take out spots"),
+            Chip::Cutout => ("remove bg", "cut the subject out"),
+            Chip::Tool(M::Look) => ("LUT", "a .cube look file"),
+            Chip::Tool(M::Filmic3D) => ("filmic", "tone mapping"),
+            Chip::Tool(M::Scope) => ("scope", "histogram"),
+            Chip::Tool(M::Geometry) => ("crop & rotate", "frame, turn, flip"),
+            other => (other.label(), ""),
         }
     }
 
@@ -192,7 +269,16 @@ pub(crate) struct Turned {
     pub value: Option<f32>,
     /// A gesture began: one undo step from here.
     pub started: bool,
+    /// Steps along the list a drag up (-) or down (+) asked for.
+    pub choose: i32,
+    /// A drag up or down is under way: the list of values is worth showing.
+    pub choosing: bool,
 }
+
+/// Travel before a drag on the ruler is taken as sideways (turning) or up and down
+/// (choosing), and how far up or down moves the choice by one.
+const DECIDE: f32 = 8.0;
+const CHOOSE_STEP: f32 = 28.0;
 
 /// How many widths of ruler the whole range spans: enough that a finger's travel is a
 /// fine change, and the whole range is two sweeps away.
@@ -200,7 +286,9 @@ const SPAN: f32 = 2.2;
 
 /// A ruler of ticks under a fixed amber needle. Dragging moves the ticks with the finger,
 /// so the value under the needle follows: left for more, right for less, as a dial turned
-/// by its edge. A double tap puts it back to `home`. `fine` moves it a tenth as far.
+/// by its edge. Dragging up or down instead chooses another value, as on the photo, so the
+/// thumb never has to leave the ruler. A double tap puts it back to `home`. `fine` moves
+/// it a tenth as far.
 pub(crate) fn ruler(
     ui: &mut egui::Ui,
     name: &str,
@@ -218,14 +306,45 @@ pub(crate) fn ruler(
     let mut out = Turned::default();
     let span = (rect.width() * SPAN).max(1.0);
     let per_point = (hi - lo) / span * if fine { 0.1 } else { 1.0 };
-    if response.drag_started() {
-        out.started = true;
-    }
+    // Which way this drag goes, once it has gone far enough to tell, and its travel so far.
+    let state_id = response.id.with("axis");
     if response.dragged() {
-        let dx = response.drag_delta().x;
-        if dx != 0.0 {
-            out.value = Some((value - dx * per_point).clamp(lo, hi));
+        let d = response.drag_delta();
+        let (axis, mut travel): (Option<bool>, egui::Vec2) = ui
+            .data(|m| m.get_temp(state_id))
+            .unwrap_or((None, egui::Vec2::ZERO));
+        travel += d;
+        let axis =
+            axis.or_else(|| (travel.length() >= DECIDE).then(|| travel.x.abs() >= travel.y.abs()));
+        match axis {
+            Some(true) => {
+                if travel.x != 0.0 {
+                    // The undo step opens with the first change, not the touch.
+                    if !ui.data(|m| m.get_temp::<bool>(state_id.with("turned")).unwrap_or(false)) {
+                        out.started = true;
+                        ui.data_mut(|m| m.insert_temp(state_id.with("turned"), true));
+                    }
+                    out.value = Some((value - travel.x * per_point).clamp(lo, hi));
+                }
+                travel.x = 0.0;
+            }
+            Some(false) => {
+                out.choosing = true;
+                while travel.y.abs() >= CHOOSE_STEP {
+                    let step = travel.y.signum();
+                    out.choose += step as i32;
+                    travel.y -= CHOOSE_STEP * step;
+                }
+            }
+            None => {}
         }
+        ui.data_mut(|m| m.insert_temp(state_id, (axis, travel)));
+    }
+    if response.drag_stopped() {
+        ui.data_mut(|m| {
+            m.remove_temp::<(Option<bool>, egui::Vec2)>(state_id);
+            m.remove_temp::<bool>(state_id.with("turned"));
+        });
     }
     if response.double_clicked() {
         out.started = true;
@@ -344,59 +463,43 @@ pub(crate) fn chip(
     response
 }
 
-/// A category's icon, in strokes: crop corners, a sun, a drop, a focus frame, a wand.
+/// A group's icon, in strokes: overlapping frames, three sliders, crop corners, a grid.
 pub(crate) fn paint_icon(painter: &Painter, c: egui::Pos2, cat: Category, colour: Color32) {
     let stroke = Stroke::new(1.9, colour);
     let line = |a: egui::Vec2, b: egui::Vec2| painter.line_segment([c + a, c + b], stroke);
     match cat {
+        Category::Looks => {
+            // Two frames, one over the other: a look laid over the photo.
+            for (o, r) in [(vec2(-3.0, -3.0), 7.5), (vec2(3.0, 3.0), 7.5)] {
+                painter.rect_stroke(
+                    Rect::from_center_size(c + o, vec2(r * 2.0, r * 2.0)),
+                    2.0,
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
+        Category::Tune => {
+            // Three sliders, their knobs at different places.
+            for (y, x) in [(-7.0, 4.0), (0.0, -4.0), (7.0, 1.0)] {
+                line(vec2(-11.0, y), vec2(11.0, y));
+                painter.circle_filled(c + vec2(x, y), 3.0, colour);
+            }
+        }
         Category::Crop => {
             line(vec2(-6.0, -11.0), vec2(-6.0, 6.0));
             line(vec2(-6.0, 6.0), vec2(11.0, 6.0));
             line(vec2(-11.0, -6.0), vec2(6.0, -6.0));
             line(vec2(6.0, -6.0), vec2(6.0, 11.0));
         }
-        Category::Light => {
-            painter.circle_stroke(c, 4.5, stroke);
-            for i in 0..8 {
-                let a = i as f32 * std::f32::consts::FRAC_PI_4;
-                let d = vec2(a.cos(), a.sin());
-                line(d * 8.0, d * 11.0);
-            }
-        }
-        Category::Colour => {
-            // A drop: a circle's lower part, rising to a point.
-            let r = 6.5;
-            let centre = c + vec2(0.0, 3.0);
-            let tip = c + vec2(0.0, -11.0);
-            let steps = 20;
-            // The circle's points from where the tangents from the tip touch it.
-            let from = -30f32.to_radians();
-            let to = 210f32.to_radians();
-            let mut points = vec![tip];
-            for i in 0..=steps {
-                let a = from + (to - from) * i as f32 / steps as f32;
-                points.push(centre + vec2(a.cos(), a.sin()) * r);
-            }
-            points.push(tip);
-            painter.add(egui::Shape::line(points, stroke));
-        }
-        Category::Detail => {
-            painter.circle_stroke(c, 3.5, stroke);
-            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                let corner = vec2(10.0 * sx, 10.0 * sy);
-                line(corner, corner - vec2(5.0 * sx, 0.0));
-                line(corner, corner - vec2(0.0, 5.0 * sy));
-            }
-        }
-        Category::Retouch => {
-            line(vec2(-10.0, 10.0), vec2(3.0, -3.0));
-            for (a, b) in [
-                (vec2(7.0, -11.0), vec2(7.0, -8.0)),
-                (vec2(7.0, -2.0), vec2(7.0, 1.0)),
-                (vec2(1.0, -6.0), vec2(4.0, -6.0)),
-                (vec2(10.0, -6.0), vec2(13.0, -6.0)),
-            ] {
-                line(a, b);
+        Category::Tools => {
+            for (x, y) in [(-5.0, -5.0), (5.0, -5.0), (-5.0, 5.0), (5.0, 5.0)] {
+                painter.rect_stroke(
+                    Rect::from_center_size(c + vec2(x, y), vec2(7.5, 7.5)),
+                    1.5,
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
             }
         }
     }
@@ -417,6 +520,126 @@ pub(crate) fn paint_cell(painter: &Painter, cell: Rect, cat: Category, colour: C
         FontId::new(11.0, theme::mono_bold()),
         colour,
     );
+}
+
+/// A group's sections side by side in place of a row of chips: each its name over a dot
+/// per value, the chosen value's dot amber and large, a changed one's amber. The section
+/// the chosen value is in is lit. Nothing to scroll: every value of the group is a dot in
+/// one row, and a swipe along the row steps through them. Returns the section tapped.
+pub(crate) fn section_bar(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    cat: Category,
+    chosen: Option<usize>,
+    changed: &[bool],
+) -> Option<usize> {
+    let sections = cat.sections();
+    let n = sections.len().max(1) as f32;
+    let w = rect.width() / n;
+    let mut out = None;
+    let lit = chosen.map(|i| cat.section_of(i));
+    for (s, (name, _)) in sections.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            pos2(rect.left() + w * s as f32, rect.top()),
+            vec2(w, rect.height()),
+        );
+        let response = ui.interact(cell, ui.id().with(("section", s)), Sense::click());
+        let on = lit == Some(s);
+        widgets::describe(ui, &response, cell, || {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, *name)
+        });
+        if response.clicked() {
+            out = Some(s);
+        }
+        let painter = ui.painter();
+        let ink = if on {
+            theme::TEXT_HI
+        } else if response.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
+        painter.text(
+            pos2(cell.center().x, cell.center().y - 7.0),
+            Align2::CENTER_CENTER,
+            name.to_uppercase(),
+            FontId::new(11.5, theme::mono_bold()),
+            ink,
+        );
+        let range = cat.section_range(s);
+        let gap = 9.0;
+        let span = gap * (range.len().saturating_sub(1)) as f32;
+        let y = cell.center().y + 10.0;
+        for (k, i) in range.enumerate() {
+            let x = cell.center().x - span / 2.0 + gap * k as f32;
+            let p = pos2(x, y);
+            if chosen == Some(i) {
+                painter.circle_filled(p, 3.5, theme::ACCENT);
+            } else if changed.get(i).copied().unwrap_or(false) {
+                painter.circle_filled(p, 2.2, theme::ACCENT.gamma_multiply(0.8));
+            } else {
+                painter.circle_filled(p, 2.0, Color32::from_gray(0x55));
+            }
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    out
+}
+
+/// A tool's tile in the Tools grid: its name over what it does, amber-edged while it is
+/// changing the photo.
+pub(crate) fn tool_tile(
+    ui: &mut egui::Ui,
+    chip: Chip,
+    size: egui::Vec2,
+    changed: bool,
+) -> egui::Response {
+    let (name, sub) = chip.tile();
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    widgets::describe(ui, &response, rect, || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
+    });
+    let painter = ui.painter();
+    let hot = response.hovered() || response.is_pointer_button_down_on();
+    painter.rect(
+        rect,
+        10.0,
+        if hot { theme::BG_850 } else { theme::BG_900 },
+        Stroke::new(
+            1.0,
+            if changed {
+                theme::ACCENT.linear_multiply(0.7)
+            } else {
+                theme::BORDER
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let clip = painter.with_clip_rect(rect.shrink(2.0));
+    clip.text(
+        pos2(rect.left() + 12.0, rect.center().y - 8.0),
+        Align2::LEFT_CENTER,
+        name,
+        FontId::new(14.0, theme::sans_strong()),
+        if changed {
+            theme::ACCENT
+        } else {
+            theme::TEXT_HI
+        },
+    );
+    clip.text(
+        pos2(rect.left() + 12.0, rect.center().y + 10.0),
+        Align2::LEFT_CENTER,
+        sub,
+        FontId::proportional(11.5),
+        theme::TEXT_DIM,
+    );
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -440,6 +663,36 @@ mod tests {
                 }
                 assert!(!chip.label().is_empty(), "{chip:?} has no name");
             }
+        }
+    }
+
+    /// Tune is one list of values, a swipe walks it; its sections and Crop's cover their
+    /// lists in order. No group but Tools needs a row of chips to scroll.
+    #[test]
+    fn tune_is_one_list_of_values_in_named_stretches() {
+        let tune = Category::Tune;
+        assert!(tune.chips().iter().all(|c| !c.is_tool()));
+        assert_eq!(tune.knob_list().len(), tune.chips().len());
+        for cat in [Category::Tune, Category::Crop] {
+            let mut covered = 0;
+            for s in 0..cat.sections().len() {
+                let r = cat.section_range(s);
+                assert_eq!(r.start, covered, "{cat:?} section {s} leaves a gap");
+                assert!(!r.is_empty(), "{cat:?} section {s} is empty");
+                for i in r.clone() {
+                    assert_eq!(cat.section_of(i), s);
+                }
+                covered = r.end;
+            }
+            assert_eq!(covered, cat.chips().len());
+        }
+        // The grid's tiles each say what they are.
+        for chip in Category::Tools.chips() {
+            assert!(chip.is_tool());
+            assert!(
+                !chip.tile().1.is_empty(),
+                "{chip:?} has no line on its tile"
+            );
         }
     }
 }

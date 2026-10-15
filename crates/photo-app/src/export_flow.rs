@@ -64,6 +64,7 @@ impl PhotoApp {
 
         self.export = Export::Writing {
             path,
+            source: self.loaded_path.clone(),
             started: Instant::now(),
             result: rx,
         };
@@ -96,9 +97,10 @@ impl PhotoApp {
     }
 
     pub(crate) fn poll_export(&mut self, ctx: &egui::Context) {
-        let (outcome, path, seconds) = {
+        let (outcome, path, seconds, source) = {
             let Export::Writing {
                 path,
+                source,
                 started,
                 result,
             } = &mut self.export
@@ -106,8 +108,18 @@ impl PhotoApp {
                 return;
             };
             match result.try_recv() {
-                Ok(Ok(())) => (Some(Ok(())), path.clone(), started.elapsed().as_secs_f32()),
-                Ok(Err(e)) => (Some(Err(e)), path.clone(), started.elapsed().as_secs_f32()),
+                Ok(Ok(())) => (
+                    Some(Ok(())),
+                    path.clone(),
+                    started.elapsed().as_secs_f32(),
+                    source.take(),
+                ),
+                Ok(Err(e)) => (
+                    Some(Err(e)),
+                    path.clone(),
+                    started.elapsed().as_secs_f32(),
+                    None,
+                ),
                 Err(mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint();
                     return;
@@ -116,6 +128,7 @@ impl PhotoApp {
                     Some(Err("export thread stopped unexpectedly".to_string())),
                     path.clone(),
                     started.elapsed().as_secs_f32(),
+                    None,
                 ),
             }
         };
@@ -123,6 +136,9 @@ impl PhotoApp {
         match outcome {
             Some(Ok(())) => {
                 self.platform.export_completed(&path);
+                if let Some(source) = source {
+                    self.exported_copy(&source);
+                }
                 let msg = crate::i18n::tr_args(
                     "exported",
                     &[
