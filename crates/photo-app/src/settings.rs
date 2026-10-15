@@ -16,6 +16,8 @@ pub struct Settings {
     /// A skipped tour asked to be shown once more, on the next launch.
     #[serde(default)]
     pub tour_again: bool,
+    /// The desktop tour has been finished or skipped; until then Help is lit.
+    pub desk_tour_done: bool,
     /// The phone Edit strip's modules. `None` until the user changes them.
     pub compact_sections: Option<Vec<InspectorSectionConfig>>,
     /// The desktop inspector's modules, in order, and which are shown.
@@ -76,6 +78,7 @@ impl Default for Settings {
         Self {
             tour_done: false,
             tour_again: false,
+            desk_tour_done: false,
             compact_sections: None,
             inspector_sections: None,
             single_open: None,

@@ -157,6 +157,14 @@ fn main() -> anyhow::Result<()> {
     if let Some(step) = args.next() {
         app.show_tour_step(step.parse()?);
     }
+    // DUCKFOOT_SHOT_HELP=3: the desktop Help window on that topic (from 0).
+    if let Ok(topic) = std::env::var("DUCKFOOT_SHOT_HELP") {
+        app.show_help(topic.parse()?);
+    }
+    // DUCKFOOT_SHOT_DESK_TOUR=2: the desktop tour at that step (from 0).
+    if let Ok(step) = std::env::var("DUCKFOOT_SHOT_DESK_TOUR") {
+        app.show_desk_tour_step(step.parse()?);
+    }
     // DUCKFOOT_SHOT_SHORTCUTS=1: the `?` sheet over it all.
     app.shortcuts_open = std::env::var_os("DUCKFOOT_SHOT_SHORTCUTS").is_some();
     // DUCKFOOT_SHOT_LOOKS=1: the desktop inspector's Looks band open.

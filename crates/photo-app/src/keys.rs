@@ -73,6 +73,10 @@ impl PhotoApp {
                     .iter()
                     .any(|e| matches!(e, egui::Event::Text(t) if t == "?"))
         });
+        // Help and the tour take the keys while they show: Esc, and ← → for the tour.
+        if self.help_keys(ctx) {
+            return;
+        }
         if self.shortcuts_open {
             if sheet || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.shortcuts_open = false;

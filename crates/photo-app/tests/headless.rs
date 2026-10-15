@@ -1444,6 +1444,34 @@ fn the_stage_is_never_empty_between_photos() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every step of the desktop tour points at a part of the window that is on screen, at
+/// a laptop's size and a large monitor's, so no step's card floats over nothing.
+#[test]
+fn every_desk_tour_step_has_something_to_point_at() {
+    let dir = scratch_dir("desk-tour");
+    let photo = dir.join("a.dng");
+    write_dng(&photo, 320, 214);
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.open_path(&h.gpu(), photo.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    for size in [egui::vec2(1280.0, 720.0), egui::vec2(1920.0, 1080.0)] {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        for step in 0..app.desk_tour_len() {
+            app.show_desk_tour_step(step);
+            h.frame_sized(&mut app, size, Default::default());
+            h.frame_sized(&mut app, size, Default::default());
+            let target = app.desk_tour_target();
+            assert!(
+                target.is_some_and(|t| t.is_positive() && screen.contains_rect(t)),
+                "step {step} at {size:?} points at {target:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_next_photo_is_ready_before_it_is_chosen() {
     let dir = scratch_dir("prefetch");

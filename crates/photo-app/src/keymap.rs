@@ -180,7 +180,7 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(
         Pointer,
-        "Click a module's header",
+        "Click a module's header, on the All tab",
         "open it and close the others; `Shift`+click opens it alongside",
     ),
     s(

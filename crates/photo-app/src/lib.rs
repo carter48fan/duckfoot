@@ -26,6 +26,7 @@ mod desktop;
 mod display;
 mod export_flow;
 mod export_ui;
+mod help;
 mod i18n;
 mod icons;
 mod info;
@@ -745,6 +746,12 @@ pub struct PhotoApp {
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
+    /// The Help window, and the topic it shows.
+    pub(crate) help_open: bool,
+    pub(crate) help_topic: usize,
+    /// The desktop tour's step, while it shows, and where the parts it points at were.
+    pub(crate) desk_tour_step: Option<usize>,
+    pub(crate) desk_spots: help::DeskSpots,
     /// Blown and crushed pixels painted on the stage (J).
     pub clip_overlay: bool,
     /// The white-balance eyedropper is armed (W): the next click on the photo picks.
@@ -996,6 +1003,10 @@ impl PhotoApp {
             )),
             batch_dialog_open: false,
             shortcuts_open: false,
+            help_open: false,
+            help_topic: 0,
+            desk_tour_step: None,
+            desk_spots: help::DeskSpots::default(),
             clip_overlay: false,
             picking_wb: false,
             pending_sample: None,
@@ -1404,6 +1415,28 @@ impl PhotoApp {
         compact::TOUR_LEN
     }
 
+    /// Open the desktop Help window on topic `topic` (from 0, in the guide's order).
+    pub fn show_help(&mut self, topic: usize) {
+        self.open_help();
+        self.help_topic = topic;
+    }
+
+    /// Show the desktop tour at `step` (from 0).
+    pub fn show_desk_tour_step(&mut self, step: usize) {
+        self.desk_tour_step = Some(step);
+    }
+
+    /// What the desktop tour's step points at, as last drawn; `None` when it points at
+    /// nothing, or no tour shows.
+    pub fn desk_tour_target(&self) -> Option<egui::Rect> {
+        self.desk_tour_step.and_then(|s| self.desk_spot(s))
+    }
+
+    /// Steps in the desktop tour.
+    pub fn desk_tour_len(&self) -> usize {
+        help::DESK_TOUR_LEN
+    }
+
     /// The phone tour's step while it is showing.
     pub fn tour_step(&self) -> Option<usize> {
         self.tour_step
@@ -1765,11 +1798,14 @@ impl PhotoApp {
             self.inspector(ui);
             self.filmstrip(ui, gpu);
             self.stage_toolbar(ui);
+            self.desk_spots.stage = Some(ui.available_rect_before_wrap());
             self.workspace(ui, gpu);
             self.batch_export_dialog(ui);
             self.export_dialog(&ctx);
             self.paste_picker(&ctx);
             self.shortcuts_overlay(&ctx);
+            self.help_window(&ctx);
+            self.desk_tour(&ctx);
         }
         let ppp = ctx.pixels_per_point();
         let excluded: Vec<[i32; 4]> = self

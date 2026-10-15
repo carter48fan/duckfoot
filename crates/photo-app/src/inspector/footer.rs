@@ -111,7 +111,7 @@ impl PhotoApp {
     }
 
     pub(crate) fn inspector_footer(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("inspector_footer")
+        let footer = egui::Panel::bottom("inspector_footer")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
@@ -129,6 +129,7 @@ impl PhotoApp {
                         .color(theme::TEXT_DIM),
                 );
             });
+        self.desk_spots.footer = Some(footer.response.rect);
     }
 
     /// What an export will write, as the Export settings stand: "2048 × 1365 · JPEG q85 ·
