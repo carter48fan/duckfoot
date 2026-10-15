@@ -147,6 +147,23 @@ pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
 /// [`chip`] with its own enabled flag, for rows that must wrap: an `add_enabled_ui` scope
 /// around each chip would stop `horizontal_wrapped` from wrapping them.
 pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> Response {
+    chip_painted(ui, enabled, selected, text, false)
+}
+
+/// A [`chip`] with a hairline round it even while it is off: for a panel, where chips sit
+/// under labels and sliders. An unframed chip's text starts inside its box, so beside a
+/// label it reads as indented; framed, its edge lines up with the column.
+pub fn outlined_chip(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> Response {
+    chip_painted(ui, enabled, selected, text, true)
+}
+
+fn chip_painted(
+    ui: &mut Ui,
+    enabled: bool,
+    selected: bool,
+    text: &str,
+    outlined: bool,
+) -> Response {
     let enabled = enabled && ui.is_enabled();
     let galley = ui.painter().layout_no_wrap(
         text.to_uppercase(),
@@ -170,18 +187,23 @@ pub fn chip_enabled(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> R
     });
 
     let hovered = enabled && response.hovered();
+    let idle = if outlined {
+        Color32::from_gray(0x2a)
+    } else {
+        Color32::TRANSPARENT
+    };
     let (fill, stroke, colour) = if selected {
         (Color32::TRANSPARENT, ACCENT, ACCENT)
     } else if hovered {
-        (Color32::TRANSPARENT, Color32::TRANSPARENT, TEXT_HI)
-    } else if enabled {
         (
             Color32::TRANSPARENT,
-            Color32::TRANSPARENT,
-            Color32::from_gray(0xcc),
+            if outlined { BORDER_HI } else { idle },
+            TEXT_HI,
         )
+    } else if enabled {
+        (Color32::TRANSPARENT, idle, Color32::from_gray(0xcc))
     } else {
-        (Color32::TRANSPARENT, Color32::TRANSPARENT, TEXT_FAINT)
+        (Color32::TRANSPARENT, idle, TEXT_FAINT)
     };
     let painter = ui.painter();
     painter.rect(rect, 2, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
@@ -342,6 +364,13 @@ fn paint_tool_icon(painter: &Painter, r: Rect, tool: crate::Tool, colour: Color3
                 })
                 .collect();
             painter.add(Shape::convex_polygon(half, colour, Stroke::NONE));
+        }
+        // Scissors: two finger rings, the blades crossing above them.
+        Tool::Cutout => {
+            painter.circle_stroke(at(4.5, 14.0), 3.0, line);
+            painter.circle_stroke(at(13.5, 14.0), 3.0, line);
+            painter.line_segment([at(6.5, 11.8), at(15.0, 0.5)], line);
+            painter.line_segment([at(11.5, 11.8), at(3.0, 0.5)], line);
         }
         // Two overlapping rounds: one look laid over the photo.
         Tool::Looks => {
@@ -876,6 +905,10 @@ fn value_box(
     ui.scope(|ui| {
         // As tall as the label beside it, so the two share a baseline.
         ui.spacing_mut().interact_size.y = 16.0;
+        // No minimum width: egui centres a short number ("0.00") in its 40 pt default and
+        // lets a long one ("0.0000") run to the edge, so a column's values end at
+        // different places. Hugging the text, every value ends at the panel's edge.
+        ui.spacing_mut().interact_size.x = 0.0;
         ui.spacing_mut().button_padding = vec2(3.0, 0.0);
         let v = ui.visuals_mut();
         v.override_text_color = Some(if modified { ACCENT } else { TEXT });
@@ -1465,7 +1498,7 @@ pub fn flag_badge(ui: &mut Ui, flag: &mut photo_engine::Flag) -> Response {
 /// Visualizes the exposure response curve knee live in real-time.
 /// Shows input EV on x-axis (-3..+3) and output intensity on y-axis (0..1+).
 pub fn mini_knee_curve(ui: &mut Ui, ev: f32, rolloff: f32) {
-    let size = vec2(ui.available_width().min(240.0), 48.0);
+    let size = vec2(ui.available_width(), 48.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter();
 
@@ -1529,9 +1562,11 @@ pub fn mini_knee_curve(ui: &mut Ui, ev: f32, rolloff: f32) {
     } else {
         "Custom Rolloff"
     };
+    // Bottom right, under the shoulder: the curve rises from the bottom left, and a
+    // legend there would sit on it.
     painter.text(
-        pos2(rect.left() + 6.0, rect.top() + 4.0),
-        Align2::LEFT_TOP,
+        pos2(rect.right() - 6.0, rect.bottom() - 4.0),
+        Align2::RIGHT_BOTTOM,
         label,
         FontId::new(9.0, FontFamily::Monospace),
         TEXT_FAINT,

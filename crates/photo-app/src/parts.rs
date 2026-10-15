@@ -540,12 +540,20 @@ pub(crate) enum Tool {
     Crop,
     Heal,
     Masks,
+    /// Cutting the subject out: the cutout studio, its controls in the inspector.
+    Cutout,
     Looks,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Self; 5] =
-        [Self::Looks, Self::Edit, Self::Crop, Self::Heal, Self::Masks];
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Looks,
+        Self::Edit,
+        Self::Crop,
+        Self::Heal,
+        Self::Masks,
+        Self::Cutout,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -553,6 +561,7 @@ impl Tool {
             Self::Crop => "Crop & rotate",
             Self::Heal => "Spot heal",
             Self::Masks => "Masks",
+            Self::Cutout => "Remove background",
             Self::Looks => "Looks",
         }
     }
@@ -563,6 +572,7 @@ impl Tool {
             Self::Crop => "Crop and straighten (C)",
             Self::Heal => "Remove spots and dust",
             Self::Masks => "Change one area: brush, gradients, range",
+            Self::Cutout => "Remove the background: cut the subject out, as a PNG",
             Self::Looks => "Start from a look",
         }
     }
@@ -573,7 +583,7 @@ impl Tool {
             Self::Crop => Some(InspectorSectionId::Geometry),
             Self::Heal => Some(InspectorSectionId::Heal),
             Self::Masks => Some(InspectorSectionId::Local),
-            Self::Edit | Self::Looks => None,
+            Self::Edit | Self::Looks | Self::Cutout => None,
         }
     }
 }

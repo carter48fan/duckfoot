@@ -1,7 +1,7 @@
 //! Interactive Cutout Studio: live background removal preview, edge fine-tuning,
 //! white halo defringing, and manual Keep/Erase touch-up brushes.
 
-use egui::{pos2, RichText};
+use egui::RichText;
 use image::{DynamicImage, GenericImageView, RgbaImage};
 use photo_engine::rembg::{CutoutParams, RembgSession, TouchupDab};
 use std::path::{Path, PathBuf};
@@ -277,114 +277,46 @@ impl CutoutStudioState {
         }
     }
 
-    /// Show the floating Cutout Studio toolbar window.
-    pub fn show_hud(&mut self, ctx: &egui::Context, on_export_clicked: &mut bool) {
-        if !self.open {
-            return;
-        }
-
-        let mut open = self.open;
-        let mut outcome = (false, false);
-        egui::Window::new("✂ Cutout Studio")
-            .open(&mut open)
-            .fade_in(false)
-            .collapsible(true)
-            .resizable(false)
-            .default_width(320.0)
-            .default_pos(pos2(24.0, 60.0))
-            .show(ctx, |ui| outcome = self.controls(ui));
-
-        self.open = open;
-        let (changed, trigger_export) = outcome;
-        if changed {
-            self.update_preview_texture(ctx);
-        }
-        if trigger_export {
-            *on_export_clicked = true;
-        }
-    }
-
-    /// The studio's controls, wherever they are shown: the desktop's floating window, or
-    /// the phone's Tools sheet. Returns whether the preview needs remaking, and whether
+    /// The studio's controls, wherever they are shown: the desktop's Remove background
+    /// tool, or the phone's Tools sheet. Returns whether the preview needs remaking, and whether
     /// export was pressed.
     pub fn controls(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
         let mut trigger_export = false;
         let mut changed = false;
-        ui.spacing_mut().item_spacing.y = 7.0;
+        let caption = |ui: &mut egui::Ui, text: &str| {
+            ui.add_space(2.0);
+            ui.label(theme::tag(text).color(theme::TEXT_DIM));
+        };
 
-        // ── Preview Background ──────────────────────────────────────────────────────────
-        ui.label(
-            RichText::new("PREVIEW BACKDROP")
-                .monospace()
-                .size(10.0)
-                .color(theme::TEXT_DIM),
-        );
+        caption(ui, "show it on");
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(
-                ui,
-                self.preview_mode == CutoutPreviewMode::Checkerboard,
-                "🏁 Checker",
-            )
-            .clicked()
-            {
-                self.preview_mode = CutoutPreviewMode::Checkerboard;
-                changed = true;
-            }
-            if widgets::chip(
-                ui,
-                self.preview_mode == CutoutPreviewMode::CatalogWhite,
-                "⬜ White",
-            )
-            .clicked()
-            {
-                self.preview_mode = CutoutPreviewMode::CatalogWhite;
-                changed = true;
-            }
-            if widgets::chip(
-                ui,
-                self.preview_mode == CutoutPreviewMode::Black,
-                "⬛ Black",
-            )
-            .clicked()
-            {
-                self.preview_mode = CutoutPreviewMode::Black;
-                changed = true;
-            }
-            if widgets::chip(
-                ui,
-                self.preview_mode == CutoutPreviewMode::Rubylith,
-                "🟥 Mask",
-            )
-            .clicked()
-            {
-                self.preview_mode = CutoutPreviewMode::Rubylith;
-                changed = true;
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            for (mode, label, tip) in [
+                (
+                    CutoutPreviewMode::Checkerboard,
+                    "checker",
+                    "Transparent, as a checkerboard",
+                ),
+                (CutoutPreviewMode::CatalogWhite, "white", "On catalog white"),
+                (CutoutPreviewMode::Black, "black", "On black"),
+                (
+                    CutoutPreviewMode::Rubylith,
+                    "mask",
+                    "What it drops, washed red",
+                ),
+            ] {
+                if widgets::outlined_chip(ui, true, self.preview_mode == mode, label)
+                    .on_hover_text(tip)
+                    .clicked()
+                    && self.preview_mode != mode
+                {
+                    self.preview_mode = mode;
+                    changed = true;
+                }
             }
         });
 
-        ui.separator();
-
-        // ── Edge & Halo Tuning ─────────────────────────────────────────────────────────
-        ui.label(
-            RichText::new("EDGE & DEFRINGE TUNING")
-                .monospace()
-                .size(10.0)
-                .color(theme::TEXT_DIM),
-        );
-        if widgets::chip(
-            ui,
-            self.params.defringe_white,
-            "✨ Defringe White Lightbox Halo",
-        )
-        .on_hover_text(
-            "Removes white studio background bleed from semi-transparent perimeter pixels",
-        )
-        .clicked()
-        {
-            self.params.defringe_white = !self.params.defringe_white;
-            changed = true;
-        }
-
+        caption(ui, "edge");
         if widgets::param_slider(
             ui,
             "threshold",
@@ -393,94 +325,79 @@ impl CutoutStudioState {
             2,
             0.50,
         )
-        .on_hover_text("Neural net cutoff sensitivity (lower keeps more, higher erases more)")
+        .on_hover_text("Lower keeps more of the photo, higher drops more")
         .changed()
         {
             changed = true;
         }
-
         let mut shift_f = self.params.edge_shift as f32;
         if widgets::param_slider(ui, "edge shift", &mut shift_f, -10.0..=10.0, 0, 0.0)
-            .on_hover_text("Contract (negative) or expand (positive) the perimeter mask in pixels")
+            .on_hover_text("Pull the edge in (negative) or push it out (positive), in pixels")
             .changed()
         {
             self.params.edge_shift = shift_f.round() as i32;
             changed = true;
         }
-
         if widgets::param_slider(ui, "feather", &mut self.params.feather, 0.0..=10.0, 1, 1.0)
-            .on_hover_text("Gaussian edge feathering radius in pixels")
+            .on_hover_text("How soft the edge is, in pixels")
             .changed()
         {
             changed = true;
         }
-
-        ui.separator();
-
-        // ── Touch-up Brush ────────────────────────────────────────────────────────────
-        ui.label(
-            RichText::new("TOUCH-UP BRUSH")
-                .monospace()
-                .size(10.0)
-                .color(theme::TEXT_DIM),
-        );
-        ui.horizontal_wrapped(|ui| {
-            if widgets::chip(
-                ui,
-                self.brush_mode == CutoutBrushMode::Keep,
-                "✚ Keep (Restore)",
-            )
-            .on_hover_text("Paint on stage to restore cut off parts (e.g. chrome tailpiece)")
+        if widgets::outlined_chip(ui, true, self.params.defringe_white, "defringe white")
+            .on_hover_text("Take a white backdrop's glow out of the soft edge pixels")
             .clicked()
+        {
+            self.params.defringe_white = !self.params.defringe_white;
+            changed = true;
+        }
+
+        caption(ui, "touch up");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if widgets::outlined_chip(ui, true, self.brush_mode == CutoutBrushMode::Keep, "keep")
+                .on_hover_text("Paint on the photo to bring back what it cut away")
+                .clicked()
             {
                 self.brush_mode = CutoutBrushMode::Keep;
             }
-            if widgets::chip(
-                ui,
-                self.brush_mode == CutoutBrushMode::Erase,
-                "➖ Erase (Remove)",
-            )
-            .on_hover_text("Paint on stage to erase unwanted objects (e.g. guitar stand legs)")
-            .clicked()
+            if widgets::outlined_chip(ui, true, self.brush_mode == CutoutBrushMode::Erase, "erase")
+                .on_hover_text("Paint on the photo to take away what it kept (Alt too)")
+                .clicked()
             {
                 self.brush_mode = CutoutBrushMode::Erase;
             }
         });
-
         let mut brush_size_pct = self.brush_radius * 100.0;
         if widgets::param_slider(ui, "brush size", &mut brush_size_pct, 0.5..=20.0, 1, 3.5)
             .changed()
         {
             self.brush_radius = brush_size_pct / 100.0;
         }
-
         let mut hardness_pct = self.brush_hardness * 100.0;
         if widgets::param_slider(ui, "hardness", &mut hardness_pct, 10.0..=100.0, 0, 85.0).changed()
         {
             self.brush_hardness = hardness_pct / 100.0;
         }
-
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             let has_touchups = !self.touchups.is_empty();
-            if widgets::button_enabled(ui, has_touchups, Kind::Secondary, "↶ Undo Dab", 0.0)
-                .clicked()
-            {
+            if widgets::outlined_chip(ui, has_touchups, false, "undo stroke").clicked() {
                 self.undo_touchup(ui.ctx());
             }
-            if widgets::button_enabled(
+            if widgets::outlined_chip(
                 ui,
                 has_touchups,
-                Kind::Secondary,
-                &format!("✕ Clear ({})", self.touchups.len()),
-                0.0,
+                false,
+                &format!("clear ({})", self.touchups.len()),
             )
             .clicked()
             {
                 self.clear_touchups(ui.ctx());
             }
-            if widgets::button(ui, Kind::Secondary, "↻ Recompute", 0.0)
+            if widgets::outlined_chip(ui, true, false, "recompute")
                 .on_hover_text(
-                    "Re-render base image from current exposure/edits and recompute neural mask",
+                    "Find the subject again, from the photo with its edits as they are now",
                 )
                 .clicked()
             {
@@ -488,46 +405,33 @@ impl CutoutStudioState {
             }
         });
 
-        ui.separator();
-
-        // ── Export Output ─────────────────────────────────────────────────────────────
-        ui.label(
-            RichText::new("EXPORT OUTPUT")
-                .monospace()
-                .size(10.0)
-                .color(theme::TEXT_DIM),
-        );
-        ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, !self.export_matte_white, "Transparent PNG").clicked() {
+        caption(ui, "save as png");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if widgets::outlined_chip(ui, true, !self.export_matte_white, "transparent").clicked() {
                 self.export_matte_white = false;
             }
-            if widgets::chip(ui, self.export_matte_white, "Catalog White PNG").clicked() {
+            if widgets::outlined_chip(ui, true, self.export_matte_white, "on white").clicked() {
                 self.export_matte_white = true;
             }
         });
-
-        ui.add_space(3.0);
-        if widgets::button(ui, Kind::Primary, "💾 Export Cutout PNG…", 0.0)
-            .on_hover_text(
-                "Save full-resolution cutout image with edge tuning and manual touch-ups applied",
-            )
+        ui.add_space(2.0);
+        if widgets::button(ui, Kind::Primary, "Save cutout…", ui.available_width())
+            .on_hover_text("A full-size PNG, with the edge settings and touch-ups")
             .clicked()
         {
             trigger_export = true;
         }
 
         if let Some(status) = &self.status {
-            ui.add_space(2.0);
             ui.label(RichText::new(status).size(11.0).color(theme::TEXT_DIM));
         }
-
-        ui.add_space(2.0);
         let hint = if widgets::is_touch(ui.ctx()) {
-            "Paint on the photo to keep or erase • pinch to zoom"
+            "Paint on the photo to keep or erase · pinch to zoom"
         } else {
-            "💡 Paint on image • Alt erases • Space+drag pans • Esc closes"
+            "Paint on the photo · Alt erases · Space-drag pans · Esc closes"
         };
-        ui.label(RichText::new(hint).size(10.0).color(theme::TEXT_FAINT));
+        ui.label(theme::dim(hint).size(11.0));
         (changed, trigger_export)
     }
 }

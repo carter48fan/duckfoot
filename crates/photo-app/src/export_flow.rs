@@ -5,6 +5,22 @@ use crate::*;
 impl PhotoApp {
     /// Read the current frame back and write it, encoding off the UI thread.
     pub(crate) fn export_to(&mut self, gpu: &Gpu, path: PathBuf) {
+        // The background comes off only in the Remove background tool, which saves with
+        // its own settings: a setting kept from before it had one stays out of this.
+        let settings = photo_engine::ExportSettings {
+            remove_background: false,
+            ..self.export_settings
+        };
+        self.export_with(gpu, path, settings);
+    }
+
+    /// [`Self::export_to`] with `base` in place of the Export dialog's settings.
+    pub(crate) fn export_with(
+        &mut self,
+        gpu: &Gpu,
+        path: PathBuf,
+        base: photo_engine::ExportSettings,
+    ) {
         // Renders the current stack at full resolution, whatever the preview is at, and
         // never with the split.
         let settings = photo_engine::ExportSettings {
@@ -15,7 +31,7 @@ impl PhotoApp {
                     return;
                 }
             },
-            ..self.export_settings
+            ..base
         };
         let depth = settings.effective_depth();
         let exported = match self.engine.export_in(

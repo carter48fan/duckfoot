@@ -2314,7 +2314,7 @@ impl PhotoApp {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     let mut settings = self.export_settings;
-                    crate::export_ui::settings_editor_with(ui, &mut settings, source, false);
+                    crate::export_ui::settings_editor_with(ui, &mut settings, source, false, true);
                     self.export_settings = settings;
                 });
         }

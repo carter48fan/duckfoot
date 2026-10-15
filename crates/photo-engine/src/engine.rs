@@ -550,6 +550,9 @@ pub struct Engine {
     look_table_view: wgpu::TextureView,
     look_path: Option<String>,
     look_loaded: bool,
+    /// While set, a Remove spot that moved is healed from its source instead of filled:
+    /// see [`Engine::hold_fills`].
+    fills_held: bool,
     /// Remove spots' fills, a slot each (`heal::FILL_SLOTS` of `heal::FILL_TILE` texels).
     fill_atlas: wgpu::Texture,
     fill_atlas_view: wgpu::TextureView,
@@ -1505,6 +1508,7 @@ impl Engine {
             look_table_view,
             look_path: None,
             look_loaded: false,
+            fills_held: false,
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1881,6 +1885,14 @@ impl Engine {
         self.look_path = wanted;
     }
 
+    /// Hold off filling Remove spots that move, while one is being dragged: a fill reads
+    /// the sensor back and runs PatchMatch on the CPU, too slow to do on every move. Held,
+    /// a moved spot heals from its source until the hold is let go and the next render
+    /// fills it where it ended up.
+    pub fn hold_fills(&mut self, held: bool) {
+        self.fills_held = held;
+    }
+
     /// Whether the Look module's file read, so the look is being applied.
     pub fn look_loaded(&self) -> bool {
         self.look_loaded
@@ -1916,6 +1928,11 @@ impl Engine {
             .collect();
         let mut made = Vec::new();
         for slot in stale {
+            if self.fills_held {
+                // No fill: the shader heals a spot without one from its source.
+                made.push((slot, None));
+                continue;
+            }
             let fill = self.fill_spot(device, queue, image, &removes[slot], slot);
             if let Err(e) = &fill {
                 log::warn!("a Remove spot could not be filled ({e:#}); healed instead");

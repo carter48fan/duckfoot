@@ -20,6 +20,8 @@ impl PhotoApp {
     }
 
     pub(crate) fn pick_and_export(&mut self, ctx: &egui::Context) {
+        // A cutout's picker closed without a choice must not turn this export into one.
+        self.cutout_export = None;
         let (dir, name) = self.export_suggestion();
         self.request(ctx, platform::Request::ExportImage { dir, name });
     }
@@ -78,6 +80,13 @@ impl PhotoApp {
                     self.settings.batch_output_dir = Some(dir.clone());
                     self.batch_output_dir = Some(dir);
                     self.save_settings();
+                }
+                platform::Response::ExportImage(path) if self.cutout_export.is_some() => {
+                    self.settings.export_dir = path.parent().map(Path::to_path_buf);
+                    self.save_settings();
+                    if let Some(settings) = self.cutout_export.take() {
+                        self.export_with(gpu, path, settings);
+                    }
                 }
                 platform::Response::ExportImage(path) => {
                     self.settings.export_dir = path.parent().map(Path::to_path_buf);

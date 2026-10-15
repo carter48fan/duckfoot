@@ -103,6 +103,15 @@ impl PhotoApp {
                                         ui.spacing_mut().item_spacing.y = 6.0;
                                         self.looks_body(ui, true);
                                     }
+                                    Tool::Cutout => {
+                                        let (changed, save) = self.cutout_studio.controls(ui);
+                                        if changed {
+                                            self.cutout_studio.update_preview_texture(ui.ctx());
+                                        }
+                                        if save {
+                                            self.export_cutout(ui.ctx());
+                                        }
+                                    }
                                     tool => {
                                         if let Some(id) = tool.module() {
                                             self.tool_body(ui, id);
@@ -492,6 +501,18 @@ impl PhotoApp {
         if self.cropping {
             self.tool = Tool::Crop;
         }
+        // The studio closed another way (Esc): back to editing.
+        if self.tool == Tool::Cutout && !self.cutout_studio.open {
+            self.tool = Tool::Edit;
+        }
+    }
+
+    /// The desktop inspector on the rail tool that is `id`'s controls (spot heal, masks…),
+    /// for the screenshot tool. Does nothing for a module no tool is.
+    pub fn open_tool_for(&mut self, id: InspectorSectionId) {
+        if let Some(tool) = Tool::ALL.into_iter().find(|t| t.module() == Some(id)) {
+            self.choose_tool(tool);
+        }
     }
 
     /// Switch tools. Crop frames as soon as it is chosen, and leaving it keeps the framing.
@@ -503,6 +524,8 @@ impl PhotoApp {
         if tool == Tool::Crop && !self.cropping && self.ready_image().is_some() {
             self.begin_crop();
         }
+        // The studio's preview is on the photo only while its tool is.
+        self.cutout_studio.open = tool == Tool::Cutout;
         self.tool = tool;
     }
 

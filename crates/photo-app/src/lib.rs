@@ -639,6 +639,9 @@ pub struct PhotoApp {
     pending_spot: Option<([f32; 2], f32)>,
     /// A spot circle being dragged: its source's (true) or its own, from where, as it was.
     spot_drag: Option<(bool, egui::Pos2, photo_engine::heal::Spot)>,
+    /// Where a spot or mask-handle drag has got to: the pointer's travel, slowed to a
+    /// quarter for the frames Shift is held.
+    fine_drag: Option<egui::Pos2>,
     /// What the engine is showing, to notice a change.
     shown_dust: bool,
     /// The History list's labels for the history revision they were made from; the two
@@ -789,6 +792,9 @@ pub struct PhotoApp {
     pub batch_output_dir: Option<PathBuf>,
     /// How the single export writes: format, quality, size, depth, sharpening, metadata.
     pub export_settings: photo_engine::ExportSettings,
+    /// The Remove background tool's save, while its file picker is open: its own settings,
+    /// so saving a cutout leaves the Export dialog's as they were.
+    pub(crate) cutout_export: Option<photo_engine::ExportSettings>,
     pub color_eq_tab: ColorEqTab,
     /// Targeted Adjustment Tool (TAT) mode and active on-image drag state.
     pub tat_mode: Option<tat::TatMode>,
@@ -951,6 +957,7 @@ impl PhotoApp {
             dust_view: false,
             pending_spot: None,
             spot_drag: None,
+            fine_drag: None,
             shown_dust: false,
             history_labels: (0, Vec::new()),
             screen: photo_engine::gamut::Screen::SRGB,
@@ -1037,6 +1044,7 @@ impl PhotoApp {
             info_open: false,
             batch_output_dir: None,
             export_settings: photo_engine::ExportSettings::new(photo_engine::ExportFormat::Jpeg),
+            cutout_export: None,
             color_eq_tab: ColorEqTab::default(),
             tat_mode: None,
             tat_drag: None,
@@ -1608,10 +1616,19 @@ impl PhotoApp {
             return 0;
         };
         let density = fit * self.view.zoom * pixels_per_point;
-        if density >= 1.0 || density <= 0.0 {
-            return 0;
+        let level = if density >= 1.0 || density <= 0.0 {
+            0
+        } else {
+            ((1.0 / density).log2().floor() as u32).min(photo_engine::MAX_PREVIEW_LEVEL)
+        };
+        // A spot, mask handle or brush being dragged re-renders on every move. Zoomed in,
+        // level 0 is the whole sensor (≈100 ms a render on an iGPU), and the app runs at
+        // that speed. At level 1 it is a quarter of the pixels, still sharp enough to place
+        // by; the full one comes back when the drag lets go.
+        if self.spot_drag.is_some() || self.mask_drag.is_some() || self.painting.is_some() {
+            return level.max(1);
         }
-        ((1.0 / density).log2().floor() as u32).min(photo_engine::MAX_PREVIEW_LEVEL)
+        level
     }
 
     /// Runs the GPU work for this frame, if anything changed.
@@ -1631,6 +1648,7 @@ impl PhotoApp {
         // Zooming changes how much resolution the screen can show; the preview follows,
         // and a new preview texture needs registering with egui like a turned one does.
         let level = self.wanted_preview_level(pixels_per_point);
+        self.engine.hold_fills(self.spot_drag.is_some());
         if self.engine.set_preview_level(gpu.device, level) {
             if let Some(id) = self.texture_id.take() {
                 renderer_write(gpu).free_texture(&id);
