@@ -297,6 +297,35 @@ impl PhotoApp {
         if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::J)) {
             self.clip_overlay = !self.clip_overlay;
         }
+        if !self.layout.is_compact()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma))
+        {
+            self.preferences_open = !self.preferences_open;
+        }
+        // The shelf under the stage: F shows or hides it, G makes it a grid or a strip.
+        if !self.layout.is_compact() {
+            let (f, g) = ctx.input(|i| {
+                let plain = !i.modifiers.command && !i.modifiers.shift && !i.modifiers.alt;
+                (
+                    plain && i.key_pressed(egui::Key::F),
+                    plain && i.key_pressed(egui::Key::G),
+                )
+            });
+            if f {
+                self.strip = if self.strip == StripMode::Hidden {
+                    StripMode::Strip
+                } else {
+                    StripMode::Hidden
+                };
+            }
+            if g {
+                self.strip = if self.strip == StripMode::Grid {
+                    StripMode::Strip
+                } else {
+                    StripMode::Grid
+                };
+            }
+        }
         if ctx.input(|i| !i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S))
             && !self.layout.is_compact()
         {

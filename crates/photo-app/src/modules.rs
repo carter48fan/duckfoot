@@ -121,26 +121,24 @@ module_table! {
     Look => look;
 }
 
-/// The desktop inspector's tabs. `All` is the whole customised list, folded as before;
-/// each other tab shows its modules open. Grouping is display only: the pipeline order is
-/// fixed whichever tab is showing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The desktop inspector's sections, top to bottom. A section's everyday modules sit open
+/// in it; the deeper ones (curves, the mixer, grading…) fold into drawers inside it.
+/// Grouping is display only: the pipeline order is fixed whatever the panel shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ModuleGroup {
-    All,
-    Basic,
-    Tone,
+    Light,
     Colour,
+    Effects,
     Detail,
     Optics,
     Retouch,
 }
 
 impl ModuleGroup {
-    pub(crate) const TABS: [Self; 7] = [
-        Self::All,
-        Self::Basic,
-        Self::Tone,
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Light,
         Self::Colour,
+        Self::Effects,
         Self::Detail,
         Self::Optics,
         Self::Retouch,
@@ -148,36 +146,55 @@ impl ModuleGroup {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::All => "all",
-            Self::Basic => "basic",
-            Self::Tone => "tone",
-            Self::Colour => "colour",
-            Self::Detail => "detail",
-            Self::Optics => "optics",
-            Self::Retouch => "retouch",
+            Self::Light => "Light",
+            Self::Colour => "Colour",
+            Self::Effects => "Effects",
+            Self::Detail => "Detail",
+            Self::Optics => "Optics",
+            Self::Retouch => "Crop & retouch",
         }
     }
 
-    /// Whether `id` shows on this tab. The scope is pinned above the tabs, so none has it.
+    /// Whether `id` is in this section. The scope is pinned above them all, so none has it.
     pub(crate) fn holds(self, id: InspectorSectionId) -> bool {
-        id != InspectorSectionId::Scope && (self == Self::All || id.group() == self)
+        id != InspectorSectionId::Scope && id.group() == self
     }
 }
 
 impl InspectorSectionId {
-    /// The tab a module lives on.
+    /// The section a module lives in.
     pub(crate) fn group(self) -> ModuleGroup {
         use InspectorSectionId as I;
         match self {
-            I::WhiteBalance | I::Exposure | I::Tonal | I::Vibrance => ModuleGroup::Basic,
-            I::ToneCurve | I::Filmic3D | I::Clarity | I::Dehaze => ModuleGroup::Tone,
-            I::ColorEq | I::ColorBalance | I::Look => ModuleGroup::Colour,
+            I::Exposure | I::Tonal | I::ToneCurve | I::Filmic3D => ModuleGroup::Light,
+            I::WhiteBalance | I::Vibrance | I::ColorEq | I::ColorBalance | I::Look => {
+                ModuleGroup::Colour
+            }
+            I::Clarity | I::Dehaze | I::Vignette => ModuleGroup::Effects,
             I::Sharpen | I::Denoise => ModuleGroup::Detail,
-            I::Geometry | I::Lens | I::Vignette => ModuleGroup::Optics,
-            I::Local | I::Heal => ModuleGroup::Retouch,
-            // Pinned above the tabs; `holds` never asks.
-            I::Scope => ModuleGroup::All,
+            I::Lens => ModuleGroup::Optics,
+            I::Geometry | I::Heal | I::Local => ModuleGroup::Retouch,
+            // Pinned above the sections; `holds` never asks.
+            I::Scope => ModuleGroup::Light,
         }
+    }
+
+    /// Whether it folds into a drawer of its own inside its section, rather than laying
+    /// its controls straight into the section. The drawers are the modules most photos
+    /// never need, and the ones whose controls are a tool in themselves.
+    pub(crate) fn is_drawer(self) -> bool {
+        use InspectorSectionId as I;
+        matches!(
+            self,
+            I::ToneCurve
+                | I::Filmic3D
+                | I::ColorEq
+                | I::ColorBalance
+                | I::Look
+                | I::Geometry
+                | I::Heal
+                | I::Local
+        )
     }
 }
 
@@ -255,18 +272,15 @@ mod tests {
         }
     }
 
-    /// Every module is on exactly one tab besides All, so none can be lost to the tabs.
+    /// Every module is in exactly one section, so none can be lost from the panel.
     #[test]
-    fn every_module_has_one_tab() {
+    fn every_module_has_one_section() {
         for &id in InspectorSectionId::all() {
             if id == InspectorSectionId::Scope {
                 continue;
             }
-            let tabs = ModuleGroup::TABS
-                .iter()
-                .filter(|g| **g != ModuleGroup::All && g.holds(id))
-                .count();
-            assert_eq!(tabs, 1, "{id:?} is on {tabs} tabs");
+            let sections = ModuleGroup::ALL.iter().filter(|g| g.holds(id)).count();
+            assert_eq!(sections, 1, "{id:?} is in {sections} sections");
         }
     }
 }

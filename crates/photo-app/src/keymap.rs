@@ -129,7 +129,13 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`Ctrl+0` / `Ctrl+1` / `Z`",
         "fit / 100% / toggle between them",
     ),
+    s(
+        View,
+        "`F` / `G`",
+        "show or hide the shelf / show it as a grid (desktop)",
+    ),
     s(View, "`?` or `F1`", "this list of shortcuts"),
+    s(View, "`Ctrl+,`", "preferences (desktop)"),
     s(
         Library,
         "`0`–`5`",

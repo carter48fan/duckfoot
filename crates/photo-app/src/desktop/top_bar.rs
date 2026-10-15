@@ -1,81 +1,63 @@
-//! The desktop top bar: brand, barrel tabs, the photo pill, open and export.
+//! The desktop top bar, one line: the barrel, the stage's view tools, the open photo's name,
+//! then zoom, undo and redo, Export and a menu for the rest.
 
 use crate::*;
 
-/// The top bar's line: the brand's two lines of text, the tallest thing on it.
+/// The top bar's line: the zoom pod's height, the tallest thing on it.
 const TOP_BAR_LINE: f32 = 36.0;
 
 impl PhotoApp {
     // ── Top bar ─────────────────────────────────────────────────────────────────────────
 
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("top")
+        let shown = egui::Panel::top("top")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
-                    .inner_margin(Margin::symmetric(16, 10)),
+                    .inner_margin(Margin::symmetric(12, 6)),
             )
             // Exactly its line and margins: grown by the spacing after its last row it
             // would sit its items above its middle.
-            .exact_size(TOP_BAR_LINE + 20.0)
+            .exact_size(TOP_BAR_LINE + 12.0)
             .resizable(false)
             .show(ui, |ui| {
                 widgets::bar_line(ui, TOP_BAR_LINE, |ui| {
-                    widgets::brand_mark(ui, 26.0);
-                    ui.add_space(2.0);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        ui.label(
-                            RichText::new("DUCKFOOT")
-                                .family(theme::display())
-                                .size(15.0)
-                                .extra_letter_spacing(1.4)
-                                .color(theme::TEXT_HI),
-                        );
-                        ui.label(
-                            RichText::new("THREE BARRELS, ONE STOCK")
-                                .monospace()
-                                .size(9.0)
-                                .extra_letter_spacing(0.6)
-                                .color(Color32::from_gray(0xcc)),
-                        );
-                    });
-                    ui.add_space(12.0);
+                    self.barrel_menu(ui);
+                    ui.add_space(4.0);
+                    separator(ui);
+                    ui.add_space(4.0);
 
-                    // The other two barrels exist in the design, not in the code. Showing
-                    // them disabled is honest; showing them clickable would not be.
-                    pod(ui, |ui| {
-                        let _ = widgets::chip(ui, true, "photo");
-                        ui.add_enabled_ui(false, |ui| {
-                            widgets::chip(ui, false, "audio")
-                                .on_disabled_hover_text("Barrel 2 is design only — see DESIGN.md");
-                            widgets::chip(ui, false, "video")
-                                .on_disabled_hover_text("Barrel 3 is design only — see DESIGN.md");
-                        });
+                    // The stage's view tools: what you look at the photo with.
+                    let loaded = self.ready_image().is_some();
+                    ui.add_enabled_ui(loaded, |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        self.crop_chips(ui);
+                        if widgets::chip(ui, self.split_active, "a / b")
+                            .on_hover_text(
+                                "Before / after split (\\). Drag the divider; double-click it to centre",
+                            )
+                            .clicked()
+                        {
+                            self.split_active = !self.split_active;
+                            self.needs_render = true;
+                        }
+                        if widgets::chip(ui, self.clip_overlay, "clip")
+                            .on_hover_text("Show clipping: red where blown, blue where crushed (J)")
+                            .clicked()
+                        {
+                            self.clip_overlay = !self.clip_overlay;
+                        }
+                        self.proof_chips(ui);
                     });
-
-                    // The pill only where it fits beside the actions, as last frame measured
-                    // both; until the pill has been measured, about its usual width.
-                    let actions_key = egui::Id::new("top_bar_actions_width");
-                    let pill_key = egui::Id::new("top_bar_pill_width");
-                    let actions_w = widgets::trailing_width(ui.ctx(), actions_key);
-                    let pill_w = Some(widgets::trailing_width(ui.ctx(), pill_key))
-                        .filter(|w| w.is_finite())
-                        .unwrap_or(320.0);
-                    if actions_w + pill_w + 24.0 <= ui.available_width() {
-                        ui.add_space(10.0);
-                        ui.scope(|ui| {
-                            self.telemetry_pill(ui);
-                            widgets::remember_trailing_width(ui, pill_key);
-                        });
-                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.top_menu(ui);
+
                         let busy = matches!(self.export, Export::Writing { .. });
-                        let ready = self.ready_image().is_some() && !busy;
+                        let ready = loaded && !busy;
                         let export = ui
                             .add_enabled_ui(ready, |ui| {
-                                widgets::button(ui, Kind::Primary, "Export", 84.0).on_hover_text(
+                                widgets::button(ui, Kind::Primary, "Export", 0.0).on_hover_text(
                                     "Choose size, format and metadata, then where (Ctrl+E)",
                                 )
                             })
@@ -84,125 +66,136 @@ impl PhotoApp {
                         if export.clicked() {
                             self.export_dialog_open = true;
                         }
-                        if widgets::button(ui, Kind::Secondary, "Open RAW…", 0.0).clicked() {
-                            self.pick_and_open(ui.ctx());
-                        }
-                        ui.add_space(4.0);
 
-                        let cutout_active = self.cutout_studio.open;
-                        let cutout_ready = self.loaded_path.is_some();
-                        let cutout_btn = ui
-                            .add_enabled_ui(cutout_ready, |ui| {
-                                widgets::button(
-                                    ui,
-                                    if cutout_active {
-                                        Kind::Primary
-                                    } else {
-                                        Kind::Secondary
-                                    },
-                                    "✂ Cutout",
-                                    0.0,
-                                )
-                                .on_hover_text(
-                                    "Open Cutout Studio for background removal & touch-up",
-                                )
-                            })
-                            .inner;
-                        if cutout_btn.clicked() {
-                            self.cutout_studio.open = !self.cutout_studio.open;
-                        }
-                        ui.add_space(4.0);
-
-                        if widgets::icon(ui, "?", self.shortcuts_open, "Shortcuts (? or F1)")
-                            .clicked()
-                        {
-                            self.shortcuts_open = !self.shortcuts_open;
-                        }
-                        // Lit until the tour has been seen: offered, never started for you.
-                        let kind = if self.settings.desk_tour_done {
-                            Kind::Secondary
-                        } else {
-                            Kind::Accent
-                        };
-                        if widgets::button(ui, kind, "Help", 0.0)
-                            .on_hover_text("The guide, and a tour of the window")
-                            .clicked()
-                        {
-                            self.open_help();
-                        }
-                        ui.add_space(8.0);
-
-                        // Right-to-left, so these read undo · redo · depth on screen.
-                        ui.label(
-                            theme::num(format!("{} steps", self.history.past.len()))
-                                .size(11.0)
-                                .color(theme::TEXT_FAINT),
-                        );
+                        // Right-to-left, so these read undo · redo on screen.
                         ui.add_enabled_ui(!self.history.future.is_empty(), |ui| {
                             if widgets::icon(ui, "↷", false, "Redo (Ctrl+Shift+Z)").clicked() {
                                 self.redo();
                             }
                         });
-                        ui.add_enabled_ui(!self.history.past.is_empty(), |ui| {
-                            if widgets::icon(ui, "↶", false, "Undo (Ctrl+Z)").clicked() {
+                        let steps = self.history.past.len();
+                        ui.add_enabled_ui(steps > 0, |ui| {
+                            let tip = format!("Undo (Ctrl+Z) · {steps} steps");
+                            if widgets::icon(ui, "↶", false, &tip).clicked() {
                                 self.undo();
                             }
                         });
-                        ui.add_space(8.0);
+                        separator(ui);
+                        self.zoom_controls(ui, loaded, false);
 
-                        widgets::remember_trailing_width(ui, actions_key);
+                        // Whatever is left, centred: which photo this is.
+                        ui.allocate_ui_with_layout(
+                            ui.available_size(),
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                let name = self
+                                    .loaded_path
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                ui.add(
+                                    egui::Label::new(
+                                        theme::num(name).size(12.0).color(theme::TEXT_DIM),
+                                    )
+                                    .truncate(),
+                                );
+                            },
+                        );
                     });
                 });
             });
+        self.desk_spots.toolbar = Some(shown.response.rect);
     }
 
-    /// The session readout: camera and dimensions. Real values only.
-    pub(crate) fn telemetry_pill(&self, ui: &mut egui::Ui) {
-        egui::Frame::new()
-            .stroke(Stroke::new(1.0, Color32::from_gray(0x2a)))
-            .corner_radius(theme::RADIUS)
-            .inner_margin(Margin::symmetric(12, 5))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let sep = |ui: &mut egui::Ui| {
-                        ui.label(
-                            RichText::new("|")
-                                .monospace()
-                                .color(Color32::from_gray(0x33)),
-                        );
-                    };
-                    match self.ready_image() {
-                        Some(image) => {
-                            widgets::dot(ui, theme::ACCENT);
-                            let camera = format!("{} {}", image.make, image.model);
-                            ui.label(
-                                RichText::new(camera.trim())
-                                    .family(theme::mono_bold())
-                                    .size(11.5)
-                                    .color(theme::ACCENT),
-                            );
-                            sep(ui);
-                            ui.label(
-                                theme::num(format!("{} × {}", image.width, image.height))
-                                    .size(11.5),
-                            );
-                            sep(ui);
-                            ui.label(
-                                theme::num(format!("{:.1} MP", image.megapixels()))
-                                    .size(11.5)
-                                    .color(Color32::from_gray(0xcc)),
-                            );
-                        }
-                        None => {
-                            widgets::dot(ui, theme::TEXT_FAINT);
-                            ui.label(
-                                theme::num("no image loaded")
-                                    .size(11.5)
-                                    .color(theme::TEXT_DIM),
-                            );
-                        }
-                    }
-                });
+    /// The brand mark and which barrel this is. The other two barrels exist in the design,
+    /// not in the code: listing them disabled is honest; clickable would not be.
+    fn barrel_menu(&mut self, ui: &mut egui::Ui) {
+        widgets::brand_mark(ui, 20.0);
+        let title = RichText::new("PHOTO ▾")
+            .family(theme::mono_bold())
+            .size(12.0)
+            .extra_letter_spacing(1.0)
+            .color(theme::TEXT_HI);
+        ui.menu_button(title, |ui| {
+            let _ = widgets::chip(ui, true, "photo");
+            ui.add_enabled_ui(false, |ui| {
+                widgets::chip(ui, false, "audio")
+                    .on_disabled_hover_text("Barrel 2 is design only — see DESIGN.md");
+                widgets::chip(ui, false, "video")
+                    .on_disabled_hover_text("Barrel 3 is design only — see DESIGN.md");
             });
+        })
+        .response
+        .on_hover_text("Duckfoot: three barrels, one stock");
     }
+
+    /// ⋯: opening a photo, Cutout, Help, the shortcuts and Preferences, out of the bar's
+    /// way. Lit until the tour has been seen, as Help was: offered, never started for you.
+    fn top_menu(&mut self, ui: &mut egui::Ui) {
+        let lit = !self.settings.desk_tour_done;
+        let dots =
+            RichText::new("⋯")
+                .size(16.0)
+                .color(if lit { theme::ACCENT } else { theme::TEXT });
+        let cutout_ready = self.loaded_path.is_some();
+        ui.menu_button(dots, |ui| {
+            ui.set_min_width(200.0);
+            if menu_item(ui, "Open RAW…", "", true) {
+                self.pick_and_open(ui.ctx());
+                ui.close();
+            }
+            let cutout = if self.cutout_studio.open {
+                "Close Cutout"
+            } else {
+                "Cutout…"
+            };
+            if menu_item(ui, cutout, "", cutout_ready) {
+                self.cutout_studio.open = !self.cutout_studio.open;
+                ui.close();
+            }
+            ui.separator();
+            if menu_item(ui, "Help", "F1", true) {
+                self.open_help();
+                ui.close();
+            }
+            if menu_item(ui, "Shortcuts", "?", true) {
+                self.shortcuts_open = !self.shortcuts_open;
+                ui.close();
+            }
+            ui.separator();
+            if menu_item(ui, "Preferences…", "Ctrl+,", true) {
+                self.preferences_open = true;
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Open, Cutout, Help, shortcuts and Preferences")
+        // "⋯" is no name to hear: a reader is told what it is.
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Menu"));
+    }
+}
+
+/// A menu row: `name ········ shortcut`. True when chosen.
+fn menu_item(ui: &mut egui::Ui, name: &str, keys: &str, enabled: bool) -> bool {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add(
+            egui::Button::new(name)
+                .shortcut_text(theme::num(keys).size(11.0).color(theme::TEXT_FAINT))
+                .frame(false)
+                .min_size(vec2(ui.available_width(), 26.0)),
+        )
+        .clicked()
+    })
+    .inner
+}
+
+/// A hairline between groups on the bar.
+fn separator(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, 18.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0, theme::BORDER),
+    );
 }

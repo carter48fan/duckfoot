@@ -76,20 +76,14 @@ impl PhotoApp {
         self.shelf.iter().find(|it| &it.path == path)?.info.as_ref()
     }
 
-    /// The desktop inspector's Info band: folded to the camera and exposure until opened.
+    /// The desktop inspector's Info band: folded to its name until opened.
     pub(crate) fn info_band(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.loaded_path.clone() else {
             return;
         };
-        let info = self.open_info().cloned();
         let head = widgets::band(ui, |ui| {
+            // The exposure is under the scope already; the band only needs its name.
             ui.label(theme::head("Info"));
-            if let Some(info) = &info {
-                let line = exposure_line(info);
-                if !line.is_empty() {
-                    ui.label(theme::tag(line).color(theme::TEXT_DIM));
-                }
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let tip = if self.info_open {
                     "Fold the info away"

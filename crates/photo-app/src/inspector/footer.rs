@@ -1,23 +1,10 @@
-//! The inspector's Customize tab and its footer: format line and sidecar buttons.
+//! The inspector's Customize view (which modules show, and their order) and its footer:
+//! format line and sidecar buttons. App-wide settings are in Preferences.
 
 use crate::*;
 
 impl PhotoApp {
     pub(crate) fn customize_body(&mut self, ui: &mut egui::Ui) {
-        self.ui_scale_row(ui);
-        ui.add_space(6.0);
-        self.screen_row(ui);
-        ui.add_space(6.0);
-        if widgets::chip(ui, self.settings.xmp_sidecars, "update .xmp sidecars")
-            .on_hover_text(
-                "Write ratings, labels and keywords into the .xmp sidecar Lightroom or \
-                 darktable keeps beside a photo, leaving the rest of it alone. None is made",
-            )
-            .clicked()
-        {
-            self.settings.xmp_sidecars = !self.settings.xmp_sidecars;
-            self.save_settings();
-        }
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, Kind::Secondary, "Reset order", 0.0)
@@ -51,7 +38,7 @@ impl PhotoApp {
         ui.horizontal(|ui| {
             widgets::checkbox(ui, &mut self.single_open);
             ui.label(
-                RichText::new("One module open at a time")
+                RichText::new("One drawer open at a time")
                     .size(12.5)
                     .color(theme::TEXT),
             );
@@ -122,12 +109,6 @@ impl PhotoApp {
                 self.edit_actions(ui);
                 self.export_format_line(ui);
                 self.sidecar_buttons(ui);
-                ui.label(
-                    RichText::new("edits are non-destructive · the RAW is never written")
-                        .monospace()
-                        .size(10.0)
-                        .color(theme::TEXT_DIM),
-                );
             });
         self.desk_spots.footer = Some(footer.response.rect);
     }
@@ -149,37 +130,47 @@ impl PhotoApp {
         }
     }
 
-    /// SAVE SIDECAR and REVERT, filling the width.
+    /// One line: whether the edits are in the sidecar yet, then Save and Revert.
     pub(crate) fn sidecar_buttons(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let loaded = self.loaded_path.is_some();
             let has_sidecar = self.saved_stack.is_some();
-            let revert_w = 76.0;
-            let w = ui.available_width() - revert_w - ui.spacing().item_spacing.x;
-            ui.add_enabled_ui(loaded, |ui| {
-                if widgets::button(ui, Kind::Accent, "SAVE SIDECAR  →", w)
-                    .on_hover_text("Write this stack beside the RAW (Ctrl+S)")
-                    .clicked()
-                {
-                    self.save_current_sidecar();
-                }
-            });
-            ui.add_enabled_ui(loaded && has_sidecar, |ui| {
-                if widgets::button(ui, Kind::Secondary, "REVERT", revert_w)
-                    .on_hover_text("Reload the saved sidecar (undoable)")
-                    .clicked()
-                {
-                    self.revert_to_sidecar();
-                }
+            let (state, colour) = match self.sidecar_state() {
+                SidecarState::NoImage => ("no photo", theme::TEXT_FAINT),
+                SidecarState::Pristine => ("no edits", theme::TEXT_DIM),
+                SidecarState::Synced => ("sidecar saved", theme::TEXT_DIM),
+                SidecarState::Modified | SidecarState::Unsaved => ("not saved yet", theme::ACCENT),
+            };
+            ui.label(theme::num(state).size(11.0).color(colour));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(loaded && has_sidecar, |ui| {
+                    if widgets::button(ui, Kind::Secondary, "Revert", 0.0)
+                        .on_hover_text("Reload the saved sidecar (undoable)")
+                        .clicked()
+                    {
+                        self.revert_to_sidecar();
+                    }
+                });
+                ui.add_enabled_ui(loaded, |ui| {
+                    if widgets::button(ui, Kind::Accent, "Save", 0.0)
+                        .on_hover_text(
+                            "Write this stack beside the RAW (Ctrl+S). The RAW itself is never \
+                             written",
+                        )
+                        .clicked()
+                    {
+                        self.save_current_sidecar();
+                    }
+                });
             });
         });
     }
 
-    /// Text size for the whole interface: S M L XL XXL.
+    /// The size of the whole interface, S M L XL XXL: text, controls and spacing alike.
     pub(crate) fn ui_scale_row(&mut self, ui: &mut egui::Ui) {
         let mut chosen = None;
         ui.horizontal_wrapped(|ui| {
-            ui.label(theme::tag("text size").color(theme::TEXT_DIM));
+            ui.label(theme::tag("interface size").color(theme::TEXT_DIM));
             for (scale, label) in settings::UI_SCALES {
                 let on = (self.settings.ui_scale - scale).abs() < 0.01;
                 if widgets::chip(ui, on, label).clicked() {

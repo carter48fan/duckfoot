@@ -220,6 +220,123 @@ impl PhotoApp {
                 // Evenly spaced in mired, as Lightroom's is: a step from 3000 to 3500 K is
                 // as visible as one from 7000 to 10000 K.
                 let (m_lo, m_hi) = (1e6 / k_lo, 1e6 / k_hi);
+                // Adobe's standard lights, so a preset means the same here as in Lightroom.
+                // The one matching the current setting is lit (desktop: named).
+                let mut preset = None;
+                let as_shot = (p.tint_r - 1.0).abs() < 1e-4 && (p.tint_b - 1.0).abs() < 1e-4;
+                let lights = [
+                    ("daylight", "5500 K, tint +10", 5500.0, 10.0),
+                    ("cloudy", "6500 K, tint +10", 6500.0, 10.0),
+                    ("shade", "7500 K, tint +10", 7500.0, 10.0),
+                    ("tungsten", "2850 K incandescent", 2850.0, 0.0),
+                    ("fluoro", "3800 K, tint +21", 3800.0, 21.0),
+                    ("flash", "5500 K", 5500.0, 0.0),
+                ];
+                let lit = |pk: f32, pt: f32| {
+                    !as_shot && (kelvin - pk).abs() < 5.0 && (tint - pt).abs() < 0.5
+                };
+                if !widgets::is_touch(ui.ctx()) {
+                    // The desktop names the setting and keeps the list in a menu: one line,
+                    // not two rows of chips.
+                    let current = if as_shot {
+                        "As shot"
+                    } else {
+                        lights
+                            .iter()
+                            .find(|l| lit(l.2, l.3))
+                            .map_or("Custom", |l| l.0)
+                    };
+                    let mut current = current.to_string();
+                    if let Some(first) = current.get_mut(0..1) {
+                        first.make_ascii_uppercase();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("White balance").size(12.5).color(theme::TEXT));
+                        ui.menu_button(
+                            RichText::new(format!("{current} ▾"))
+                                .size(13.0)
+                                .color(theme::TEXT_HI),
+                            |ui| {
+                                ui.set_min_width(180.0);
+                                let row = |ui: &mut egui::Ui, name: &str, tip: String, on: bool| {
+                                    let colour = if on { theme::ACCENT } else { theme::TEXT };
+                                    ui.add(
+                                        egui::Button::new(RichText::new(name).color(colour))
+                                            .shortcut_text(
+                                                theme::num(tip).size(11.0).color(theme::TEXT_FAINT),
+                                            )
+                                            .frame(false)
+                                            .min_size(vec2(ui.available_width(), 24.0)),
+                                    )
+                                    .clicked()
+                                };
+                                if row(ui, "As shot", format!("{home_k:.0} K"), as_shot) {
+                                    preset = Some(dp);
+                                    ui.close();
+                                }
+                                if row(ui, "Auto", "whole photo".into(), false) {
+                                    self.pending_sample = Some(crate::Sample::AutoWb);
+                                    ui.close();
+                                }
+                                for (label, tip, pk, pt) in lights {
+                                    let wb = scale.white_balance(pk, pt);
+                                    let mut name = label.to_string();
+                                    if let Some(first) = name.get_mut(0..1) {
+                                        first.make_ascii_uppercase();
+                                    }
+                                    let chosen = ui
+                                        .add_enabled_ui(wb.is_some(), |ui| {
+                                            row(ui, &name, tip.to_string(), lit(pk, pt))
+                                        })
+                                        .inner;
+                                    if chosen {
+                                        preset = wb;
+                                        ui.close();
+                                    }
+                                }
+                            },
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::chip(ui, self.picking_wb, "pick")
+                                .on_hover_text("Click something that should be grey (W)")
+                                .clicked()
+                            {
+                                self.picking_wb = !self.picking_wb;
+                            }
+                        });
+                    });
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                        if widgets::chip(ui, self.picking_wb, "pick")
+                            .on_hover_text("Click something that should be grey (W)")
+                            .clicked()
+                        {
+                            self.picking_wb = !self.picking_wb;
+                        }
+                        if widgets::chip(ui, false, "auto")
+                            .on_hover_text("Balance the whole photo")
+                            .clicked()
+                        {
+                            self.pending_sample = Some(crate::Sample::AutoWb);
+                        }
+                        if widgets::chip(ui, as_shot, "as shot")
+                            .on_hover_text(format!("What the camera metered: {home_k:.0} K"))
+                            .clicked()
+                        {
+                            preset = Some(dp);
+                        }
+                        for (label, tip, pk, pt) in lights {
+                            let wb = scale.white_balance(pk, pt);
+                            let chip = widgets::chip_enabled(ui, wb.is_some(), lit(pk, pt), label)
+                                .on_hover_text(tip);
+                            if chip.clicked() {
+                                preset = wb;
+                            }
+                        }
+                    });
+                }
+
                 let k = widgets::scaled_slider(
                     ui,
                     "temp (K)",
@@ -260,47 +377,6 @@ impl PhotoApp {
                 }
                 track!(both);
 
-                // Presets as chips; the one matching the current setting is lit. Adobe's
-                // standard lights, so a preset means the same here as in Lightroom.
-                let mut preset = None;
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                    let as_shot = (p.tint_r - 1.0).abs() < 1e-4 && (p.tint_b - 1.0).abs() < 1e-4;
-                    if widgets::chip(ui, self.picking_wb, "pick")
-                        .on_hover_text("Click something that should be grey (W)")
-                        .clicked()
-                    {
-                        self.picking_wb = !self.picking_wb;
-                    }
-                    if widgets::chip(ui, false, "auto")
-                        .on_hover_text("Balance the whole photo")
-                        .clicked()
-                    {
-                        self.pending_sample = Some(crate::Sample::AutoWb);
-                    }
-                    if widgets::chip(ui, as_shot, "as shot")
-                        .on_hover_text(format!("What the camera metered: {home_k:.0} K"))
-                        .clicked()
-                    {
-                        preset = Some(dp);
-                    }
-                    for (label, tip, pk, pt) in [
-                        ("daylight", "5500 K, tint +10", 5500.0, 10.0),
-                        ("cloudy", "6500 K, tint +10", 6500.0, 10.0),
-                        ("shade", "7500 K, tint +10", 7500.0, 10.0),
-                        ("tungsten", "2850 K incandescent", 2850.0, 0.0),
-                        ("fluoro", "3800 K, tint +21", 3800.0, 21.0),
-                        ("flash", "5500 K", 5500.0, 0.0),
-                    ] {
-                        let lit = !as_shot && (kelvin - pk).abs() < 5.0 && (tint - pt).abs() < 0.5;
-                        let wb = scale.white_balance(pk, pt);
-                        let chip =
-                            widgets::chip_enabled(ui, wb.is_some(), lit, label).on_hover_text(tip);
-                        if chip.clicked() {
-                            preset = wb;
-                        }
-                    }
-                });
                 if let Some(wb) = preset {
                     *p = wb;
                     discrete!();
@@ -353,8 +429,17 @@ impl PhotoApp {
                 let p = &mut self.stack.exposure.params;
                 let dp = d.exposure.params;
 
+                // The desktop shows the modes as tabs under a caption; the phone as chips.
+                let touch = widgets::is_touch(ui.ctx());
+                if !touch {
+                    ui.label(theme::tag("tone mapping").color(theme::TEXT_DIM));
+                }
                 ui.horizontal(|ui| {
-                    ui.label(theme::tag("mode").color(theme::TEXT_DIM));
+                    if touch {
+                        ui.label(theme::tag("mode").color(theme::TEXT_DIM));
+                    }
+                    let tab_w =
+                        ((ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0).floor();
                     let modes = [
                         (
                             photo_engine::params::ExposureMode::ClassicLinear,
@@ -379,7 +464,12 @@ impl PhotoApp {
                     ];
                     for (m, label, tip) in modes {
                         let sel = p.mode == m;
-                        if widgets::chip(ui, sel, label).on_hover_text(tip).clicked() {
+                        let choice = if touch {
+                            widgets::chip(ui, sel, label)
+                        } else {
+                            widgets::tab(ui, sel, label, tab_w)
+                        };
+                        if choice.on_hover_text(tip).clicked() {
                             p.mode = m;
                             match m {
                                 photo_engine::params::ExposureMode::ClassicLinear => p.rolloff = 0.0,

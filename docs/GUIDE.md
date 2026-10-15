@@ -17,21 +17,23 @@ instructions beside the photo, so you can always go back to how it came out of t
 
 The window has five parts:
 
-- **Top bar**: open photos, undo and redo, and **Export** to save a finished copy.
+- **Top bar**: the view tools (crop, before / after, clipping), zoom, undo and redo, and
+  **Export** to save a finished copy. The **⋯** menu has Open RAW…, Cutout, Help and the
+  shortcuts.
 - **Photo**: the big picture in the middle.
-- **Filmstrip**: the row of small pictures under the photo. Click one to open it.
+- **Shelf**: the row of small pictures under the photo. Click one to open it.
 - **Editing panel**: everything on the right. This is where you change how the photo looks.
-- **Shelf**: the thin strip of icons on the far left, for your list of photos, folders,
-  snapshots and history.
+- **Left strip**: shows, hides or enlarges the shelf, and opens your folders and the photo's
+  history and snapshots.
 
 New here? Click **Take the tour** in Help. It points at each part in turn and takes about
 a minute.
 
 ## Your first edit
 
-1. Click **Open RAW…** in the top bar and choose a photo. (Any photo works, not just RAW
-   files.) You can also drag photos from a folder onto the window.
-2. Look at the editing panel on the right. It starts on the **Basic** tab.
+1. Click **⋯** at the right of the top bar, then **Open RAW…**, and choose a photo. (Any
+   photo works, not just RAW files.) You can also drag photos from a folder onto the window.
+2. Look at the editing panel on the right. **Light** is at the top.
 3. Drag the **exposure** slider to the right to brighten the photo, or left to darken it.
 4. If the colours look too blue or too orange, move **temp** under **white balance**.
 5. Not sure? Press **Ctrl+Z** to undo. Double-click any slider to put it back where it started.
@@ -41,7 +43,7 @@ That's it. Your edits are saved on their own as you go.
 
 ## Bringing photos in
 
-- **Open RAW…** in the top bar opens one photo.
+- **Open RAW…** in the top bar's **⋯** menu opens one photo.
 - **Drag and drop**: drag photos from your file manager onto the Duckfoot window. They are
   added to your shelf, and the first one opens.
 - **The + on the left strip** adds more photos to the shelf.
@@ -54,13 +56,15 @@ won't open, the bar at the bottom of the window says which file and why.
 
 ## Choosing and sorting photos
 
-The filmstrip under the photo shows every photo on your shelf. Click a picture to open it.
-The **left and right arrow keys** step to the previous or next photo.
+The shelf under the photo shows every photo you have brought in. Click a picture to open it.
+The **left and right arrow keys** step to the previous or next photo. The top two buttons on
+the left strip hide the shelf (**F**) or show it as a big grid (**G**).
 
-To find the good ones quickly:
+To find the good ones quickly, click the button at the start of the shelf (it shows how
+many photos are showing, such as **12/22**). In the grid, these are along its top.
 
 - **Stars**: press **1** to **5** to give the open photo a rating, or **0** to clear it.
-  The stars in the filmstrip's top line show only photos rated that high or higher.
+  The stars show only photos rated that high or higher.
 - **Flags**: press **P** to mark a photo as a *pick* (a keeper) or **X** to *reject* it.
   **U** clears the flag. The **Flags** buttons show picks only, hide rejects, and so on.
 - **Colour labels**: press **6**, **7**, **8** or **9** for red, yellow, green or blue.
@@ -73,19 +77,24 @@ To pick several photos at once, hold **Ctrl** and click each one, or click one a
 
 ## The editing panel
 
-Everything that changes how the photo looks is on the right, sorted into tabs:
+Everything that changes how the photo looks is on the right, in one list of sections:
 
-- **Basic**: brightness, colour temperature, shadows and highlights, how vivid the colours are.
-- **Tone**: contrast, the tone curve, clarity and haze.
-- **Colour**: change one colour at a time (make the sky bluer, say), colour grading, and looks.
+- **Light**: brightness, shadows and highlights, and (in drawers) the tone curve and filmic.
+- **Colour**: colour temperature, how vivid the colours are, and (in drawers) changing one
+  colour at a time, colour grading, and looks.
+- **Effects**: clarity, texture, haze, and darkening or lightening the corners.
 - **Detail**: sharpening and noise reduction for grainy low-light photos.
-- **Optics**: crop and straighten, lens corrections, and darkening or lightening the corners.
-- **Retouch**: brush on changes in one area, and remove spots or dust.
-- **All**: every tool in one long list, folded so you open one at a time.
+- **Optics**: lens corrections.
 
-Each tool is a box with a **tick box** on the left. A tick means it is switched on. Moving
-any of its sliders switches it on for you. Untick it to see the photo without that tool.
-The number beside a tab name tells you how many of its tools are on.
+Crop, spot healing and masks (changes brushed onto one area) are **tools** on the strip at
+the window's right edge, with **Looks** and **Edit** (this list). Choose one and the panel
+shows it.
+
+Click a section's name to fold it away. The less-used tools are **drawers** inside a
+section: click one to open it. Moving any slider switches its tool on for you. Each section
+and each drawer has a **switch** at its right: switch it off to see the photo without it.
+Your settings are kept, and switching it back on brings them back. An amber dot beside a
+section's name means something in it has been changed.
 
 **Sliders:**
 
@@ -96,27 +105,30 @@ The number beside a tab name tells you how many of its tools are on.
 
 ## Choosing which tools show
 
-Too many tools? Click the **gear** (⚙) beside *Pipeline* in the editing panel. There you can:
+Too many tools? Click the **gear** (⚙) beside *Edit* in the editing panel. There you can:
 
-- Untick tools you never use, so they disappear from every tab.
+- Untick tools you never use, so they disappear from the panel.
 - Move tools up or down to change their order.
 - Click **Essentials** to show only the handful most people need, or **Show all** to bring
   everything back.
-- Change the **text size** of the whole app.
 
 Click the gear again to go back to editing. This only changes what you *see*. Hidden
 tools still work if they were already switched on.
 
+**Preferences** (in the top bar's **⋯** menu, or **Ctrl+,**) has the settings for the
+whole app: the **interface size**, which makes text, controls and the space around them
+bigger or smaller together; the shelf; your screen; and the tour.
+
 ## Cropping and straightening
 
-1. Click **Crop** above the photo, or press **C**.
+1. Click **Crop** in the top bar or the crop tool at the right edge, or press **C**.
 2. Drag the corners or edges to frame the picture. Drag inside the frame to move it.
 3. Pick a shape (*1:1* for a square, *4:5*, *3:2*, *16:9* and so on) from the buttons
    that appear, or press **X** to turn the shape on its side.
 4. Press **Enter** to keep the crop, or **Esc** to cancel.
 
-To straighten a tilted horizon, use **Straighten** under **crop & rotate** on the
-**Optics** tab. **[** and **]** turn the photo a quarter turn left or right. **H** mirrors it.
+To straighten a tilted horizon, use **Straighten** in the crop tool. **[** and **]** turn
+the photo a quarter turn left or right. **H** mirrors it.
 
 ## Comparing before and after
 
@@ -132,7 +144,7 @@ Above the photo:
 
 ## Starting from a look
 
-Not sure where to begin? Open **Looks** in the editing panel (below the tools) and pick a
+Not sure where to begin? Choose **Looks** (the top tool at the right edge) and pick a
 style: *vivid*, *warm*, *film*, *mono*, *noir* and others. A look is just a starting
 point. Change any slider afterwards, or undo it with **Ctrl+Z**.
 
@@ -184,7 +196,7 @@ Exporting makes a new picture file you can share, print or post.
 
 The line above **Save sidecar** shows what an export will make. Click it to change the settings.
 
-**Many photos at once:** select them in the filmstrip (Ctrl+click), then click
+**Many photos at once:** select them on the shelf (Ctrl+click), then click
 **Export Batch**. You can save several versions of each (a large one and a small one, for
 example) and choose how the new files are named.
 
@@ -217,4 +229,4 @@ Shortcuts don't fire while you're typing in a box, such as Search.
   tick it, or click **Show all**.
 - **The text is too small.** Click the gear (⚙) and choose a larger **text size**.
 - **The app feels slow.** Very large photos take a moment to open the first time. The next
-  photo in the filmstrip is prepared while you look at this one, so stepping forward is quick.
+  photo on the shelf is prepared while you look at this one, so stepping forward is quick.

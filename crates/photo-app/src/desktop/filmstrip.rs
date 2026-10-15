@@ -1,4 +1,4 @@
-//! The stage toolbar and the filmstrip under the stage.
+//! The crop row under the top bar, the zoom controls, and the filmstrip under the stage.
 
 use crate::*;
 
@@ -28,90 +28,27 @@ impl PhotoApp {
         }
     }
 
+    /// The view tools are on the top bar. While framing a crop, its shapes and guide need a
+    /// row of their own under it, shown only then.
     pub(crate) fn stage_toolbar(&mut self, ui: &mut egui::Ui) {
-        // A pod of icons: 30 and its margin and hairline.
-        const STAGE_TOOLBAR_LINE: f32 = 36.0;
-        let panel = egui::Panel::top("stage_toolbar")
+        if !self.cropping {
+            return;
+        }
+        egui::Panel::top("stage_toolbar")
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_950)
                     .inner_margin(Margin::symmetric(16, 8)),
             )
-            .resizable(false);
-        // One line and its margins, exactly, but while framing a crop, which adds a row.
-        let panel = if self.cropping {
-            panel
-        } else {
-            panel.exact_size(STAGE_TOOLBAR_LINE + 16.0)
-        };
-        let shown = panel.show(ui, |ui| {
-                let loaded = self.ready_image().is_some();
-                let zoom_key = egui::Id::new("stage_zoom_width");
-                let zoom_w = widgets::trailing_width(ui.ctx(), zoom_key);
-                // One line (G-01): zoom at the right end when it fits beside the rest, as
-                // measured last frame; otherwise after them, the line scrolling sideways.
-                let beside_key = egui::Id::new("stage_zoom_beside");
-                let chips_w = widgets::trailing_width(ui.ctx(), beside_key);
-                let zoom_beside = chips_w + zoom_w + 12.0 <= ui.available_width();
-                let line = |app: &mut Self, ui: &mut egui::Ui| {
-                    ui.scope(|ui| {
-                        ui.add_enabled_ui(loaded, |ui| {
-                            app.crop_chips(ui);
-                            if widgets::chip(ui, app.split_active, "a / b")
-                                .on_hover_text("Before / after split (\\). Drag the divider; double-click it to centre")
-                                .clicked()
-                            {
-                                app.split_active = !app.split_active;
-                                app.needs_render = true;
-                            }
-                            if widgets::chip(ui, app.clip_overlay, "clip")
-                                .on_hover_text("Show clipping: red where blown, blue where crushed (J)")
-                                .clicked()
-                            {
-                                app.clip_overlay = !app.clip_overlay;
-                            }
-                            app.proof_chips(ui);
-                        });
-                        widgets::remember_trailing_width(ui, beside_key);
-                    });
-                    if zoom_beside {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.scope(|ui| {
-                                app.zoom_controls(ui, loaded, false);
-                                widgets::remember_trailing_width(ui, zoom_key);
-                            });
-                        });
-                    } else {
-                        ui.add_space(12.0);
-                        ui.scope(|ui| {
-                            app.zoom_controls(ui, loaded, true);
-                            widgets::remember_trailing_width(ui, zoom_key);
-                        });
-                    }
-                };
-                if zoom_beside {
-                    widgets::bar_line(ui, STAGE_TOOLBAR_LINE, |ui| line(self, ui));
-                } else {
-                    egui::ScrollArea::horizontal()
-                        .id_salt("stage_toolbar_line")
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            widgets::bar_line(ui, STAGE_TOOLBAR_LINE, |ui| line(self, ui));
-                        });
-                }
-                // Framing a crop: its shapes and guide on a row of their own, which the
-                // row above has no room for.
-                if self.cropping {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| self.crop_shape_chips(ui));
-                }
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| self.crop_shape_chips(ui));
             });
-        self.desk_spots.toolbar = Some(shown.response.rect);
     }
 
     /// − % + FIT 1:1 as they read: laid out right to left at the end of the line, or left
     /// to right (`ltr`) after the rest.
-    fn zoom_controls(&mut self, ui: &mut egui::Ui, loaded: bool, ltr: bool) {
+    pub(crate) fn zoom_controls(&mut self, ui: &mut egui::Ui, loaded: bool, ltr: bool) {
         ui.add_enabled_ui(loaded, |ui| {
             let buttons = |app: &mut Self, ui: &mut egui::Ui| {
                 let order: [bool; 2] = if ltr { [false, true] } else { [true, false] };
@@ -252,11 +189,30 @@ impl PhotoApp {
         displayed
     }
 
+    /// The shelf under the stage, as the left rail set it: nothing, a strip of tiles with
+    /// its filters behind one button, or a grid with room for them out in the open.
     pub(crate) fn filmstrip(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
+        let grid = match self.strip {
+            StripMode::Hidden => {
+                self.desk_spots.filmstrip = None;
+                return;
+            }
+            StripMode::Strip => false,
+            StripMode::Grid => true,
+        };
         let displayed = self.displayed_indices();
         let mut action_export = false;
 
-        let strip = egui::Panel::bottom("filmstrip")
+        // Two panels, not one changing shape: each keeps its own height.
+        let panel = if grid {
+            egui::Panel::bottom("shelf_grid")
+                .resizable(true)
+                .default_size((ui.available_height() * 0.45).max(240.0))
+                .min_size(200.0)
+        } else {
+            egui::Panel::bottom("filmstrip").resizable(false)
+        };
+        let strip = panel
             .frame(egui::Frame::new().fill(theme::BG_950).inner_margin(Margin {
                 left: 16,
                 right: 16,
@@ -266,97 +222,157 @@ impl PhotoApp {
             .show(ui, |ui| {
                 let count = self.selection.count();
                 let mut clear = false;
-                // The title, then the filters, find and sort, and what to do with a
-                // selection, each group on the line it fits on as last frame measured it,
-                // else starting the next. The stack's own actions are in the inspector.
-                let mut parts = vec![Part::Stars, Part::Flags, Part::Labels, Part::Order];
-                if count > 0 {
-                    parts.push(Part::Selection);
-                }
-                let mut next = 0;
-                let mut first_line = true;
-                while next < parts.len() {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if first_line {
-                            ui.label(theme::head("Filmstrip").color(theme::ACCENT));
-                            let developed = self.shelf.iter().filter(|it| it.has_sidecar).count();
-                            ui.label(
-                                theme::num(format!("{}/{}", displayed.len(), self.shelf.len()))
-                                    .size(11.0)
-                                    .color(Color32::from_gray(0xcc)),
-                            )
-                            .on_hover_text(format!("{developed} with a sidecar"));
-                        }
-                        let mut placed = 0;
-                        while let Some(&part) = parts.get(next) {
-                            let key = egui::Id::new(("filmstrip_part_width", part as u8));
-                            let w = widgets::trailing_width(ui.ctx(), key);
-                            // Always at least one per line, so a too-narrow stage still moves on.
-                            if (placed > 0 || first_line) && w + 14.0 > ui.available_width() {
-                                break;
-                            }
-                            ui.add_space(6.0);
-                            ui.scope(|ui| {
-                                ui.horizontal(|ui| match part {
-                                    Part::Stars => self.star_filter(ui),
-                                    Part::Flags => self.flag_filter(ui),
-                                    Part::Labels => self.label_filter(ui),
-                                    Part::Order => {
-                                        self.search_field(ui, 150.0);
-                                        self.sort_controls(ui, false);
-                                    }
-                                    Part::Selection => {
-                                        if widgets::button(
-                                            ui,
-                                            Kind::Primary,
-                                            &format!("Export Batch ({count})"),
-                                            0.0,
-                                        )
-                                        .clicked()
-                                        {
-                                            action_export = true;
-                                        }
-                                        if widgets::button(ui, Kind::Secondary, "Deselect", 0.0)
-                                            .clicked()
-                                        {
-                                            clear = true;
-                                        }
-                                    }
-                                });
-                                widgets::remember_trailing_width(ui, key);
-                            });
-                            placed += 1;
-                            next += 1;
-                        }
-                    });
-                    first_line = false;
-                    if next < parts.len() {
-                        ui.add_space(4.0);
+                if !grid {
+                    self.strip_line(ui, &displayed, count, &mut action_export, &mut clear);
+                } else {
+                    // The title, then the filters, find and sort, and what to do with a
+                    // selection, each group on the line it fits on as last frame measured it,
+                    // else starting the next. The stack's own actions are in the inspector.
+                    let mut parts = vec![Part::Stars, Part::Flags, Part::Labels, Part::Order];
+                    if count > 0 {
+                        parts.push(Part::Selection);
                     }
-                }
-                if !self.saved_filters.is_empty()
-                    || self.filtering()
-                    || self.saved_filter_draft.is_some()
-                {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        self.saved_filters_row(ui);
-                    });
+                    let mut next = 0;
+                    let mut first_line = true;
+                    while next < parts.len() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if first_line {
+                                ui.label(theme::head("Shelf").color(theme::ACCENT));
+                                let developed =
+                                    self.shelf.iter().filter(|it| it.has_sidecar).count();
+                                ui.label(
+                                    theme::num(format!("{}/{}", displayed.len(), self.shelf.len()))
+                                        .size(11.0)
+                                        .color(Color32::from_gray(0xcc)),
+                                )
+                                .on_hover_text(format!("{developed} with a sidecar"));
+                            }
+                            let mut placed = 0;
+                            while let Some(&part) = parts.get(next) {
+                                let key = egui::Id::new(("filmstrip_part_width", part as u8));
+                                let w = widgets::trailing_width(ui.ctx(), key);
+                                // Always at least one per line, so a too-narrow stage still moves on.
+                                if (placed > 0 || first_line) && w + 14.0 > ui.available_width() {
+                                    break;
+                                }
+                                ui.add_space(6.0);
+                                ui.scope(|ui| {
+                                    ui.horizontal(|ui| match part {
+                                        Part::Stars => self.star_filter(ui),
+                                        Part::Flags => self.flag_filter(ui),
+                                        Part::Labels => self.label_filter(ui),
+                                        Part::Order => {
+                                            self.search_field(ui, 150.0);
+                                            self.sort_controls(ui, false);
+                                        }
+                                        Part::Selection => {
+                                            if widgets::button(
+                                                ui,
+                                                Kind::Primary,
+                                                &format!("Export Batch ({count})"),
+                                                0.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                action_export = true;
+                                            }
+                                            if widgets::button(ui, Kind::Secondary, "Deselect", 0.0)
+                                                .clicked()
+                                            {
+                                                clear = true;
+                                            }
+                                        }
+                                    });
+                                    widgets::remember_trailing_width(ui, key);
+                                });
+                                placed += 1;
+                                next += 1;
+                            }
+                        });
+                        first_line = false;
+                        if next < parts.len() {
+                            ui.add_space(4.0);
+                        }
+                    }
+                    if !self.saved_filters.is_empty()
+                        || self.filtering()
+                        || self.saved_filter_draft.is_some()
+                    {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            self.saved_filters_row(ui);
+                        });
+                    }
                 }
                 if clear {
                     self.selection.clear();
                 }
                 ui.add_space(6.0);
 
-                self.film_tiles(ui, gpu, &displayed);
+                self.film_tiles_in(ui, gpu, &displayed, grid);
             });
         self.desk_spots.filmstrip = Some(strip.response.rect);
 
         if action_export {
             self.batch_dialog_open = true;
         }
+    }
+
+    /// The strip's one line: a filter button saying how many of the shelf show (its
+    /// filters, find and sort in a popover), and what to do with a selection.
+    fn strip_line(
+        &mut self,
+        ui: &mut egui::Ui,
+        displayed: &[usize],
+        count: usize,
+        action_export: &mut bool,
+        clear: &mut bool,
+    ) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let shown = format!("{}/{} ▾", displayed.len(), self.shelf.len());
+            let kind = if self.filtering() {
+                Kind::Accent
+            } else {
+                Kind::Secondary
+            };
+            let button = widgets::button(ui, kind, &shown, 0.0)
+                .on_hover_text("Filter, find and sort the shelf");
+            egui::Popup::from_toggle_button_response(&button)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    ui.set_min_width(380.0);
+                    ui.spacing_mut().item_spacing = vec2(8.0, 10.0);
+                    ui.horizontal(|ui| self.star_filter(ui));
+                    ui.horizontal(|ui| self.flag_filter(ui));
+                    ui.horizontal(|ui| self.label_filter(ui));
+                    ui.horizontal(|ui| {
+                        self.search_field(ui, 150.0);
+                        self.sort_controls(ui, false);
+                    });
+                    if !self.saved_filters.is_empty()
+                        || self.filtering()
+                        || self.saved_filter_draft.is_some()
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            self.saved_filters_row(ui);
+                        });
+                    }
+                });
+            if count > 0 {
+                if widgets::button(ui, Kind::Primary, &format!("Export Batch ({count})"), 0.0)
+                    .clicked()
+                {
+                    *action_export = true;
+                }
+                if widgets::button(ui, Kind::Secondary, "Deselect", 0.0).clicked() {
+                    *clear = true;
+                }
+            }
+        });
     }
 
     /// Whether anything hides photos: sorting is not filtering.
@@ -586,7 +602,20 @@ impl PhotoApp {
 
     /// The strip of thumbnails, and what clicking and long-pressing them does.
     pub(crate) fn film_tiles(&mut self, ui: &mut egui::Ui, gpu: &Gpu, displayed: &[usize]) {
+        self.film_tiles_in(ui, gpu, displayed, false);
+    }
+
+    /// The shelf's tiles: one row scrolled sideways, or (`grid`) as many rows as they take,
+    /// scrolled down.
+    pub(crate) fn film_tiles_in(
+        &mut self,
+        ui: &mut egui::Ui,
+        gpu: &Gpu,
+        displayed: &[usize],
+        grid: bool,
+    ) {
         let mut to_open = None;
+        let mut action_remove = None;
         let mut action_shift = None;
         let mut action_ctrl = None;
         let mut action_single = None;
@@ -596,8 +625,12 @@ impl PhotoApp {
         let mut action_copy = None;
         let mut action_label = None;
 
-        egui::ScrollArea::horizontal()
-            .auto_shrink([false, true])
+        let area = if grid {
+            egui::ScrollArea::vertical().auto_shrink([false, false])
+        } else {
+            egui::ScrollArea::horizontal().auto_shrink([false, true])
+        };
+        area.id_salt(("film_tiles", grid))
             .show_viewport(ui, |ui, viewport| {
                 if self.shelf.is_empty() {
                     let (rect, _) =
@@ -634,8 +667,26 @@ impl PhotoApp {
                 // size, so which ones are in view is arithmetic.
                 let origin = ui.max_rect().left_top();
                 let total = displayed.len();
-                ui.set_min_size(vec2(total as f32 * FILM_STRIDE - FILM_GAP, FILM_TILE.y));
-                let visible = visible_tiles(viewport.x_range(), total);
+                // A grid puts as many tiles in a row as fit; a strip all of them.
+                let row_stride = FILM_TILE.y + FILM_GAP;
+                let cols = if grid {
+                    (((ui.available_width() + FILM_GAP) / FILM_STRIDE).floor() as usize).max(1)
+                } else {
+                    total.max(1)
+                };
+                let visible = if grid {
+                    let rows = total.div_ceil(cols);
+                    ui.set_min_size(vec2(
+                        ui.available_width(),
+                        rows as f32 * row_stride - FILM_GAP,
+                    ));
+                    let first = (viewport.min.y / row_stride).floor().max(0.0) as usize;
+                    let last = (viewport.max.y / row_stride).ceil().max(0.0) as usize;
+                    (first * cols).min(total)..(last * cols).min(total)
+                } else {
+                    ui.set_min_size(vec2(total as f32 * FILM_STRIDE - FILM_GAP, FILM_TILE.y));
+                    visible_tiles(viewport.x_range(), total)
+                };
                 // Thumbnails for what is in view and a stretch either side, as they are
                 // needed rather than a whole roll's at once (WP5.2).
                 const PREFETCH: usize = 24;
@@ -679,7 +730,11 @@ impl PhotoApp {
                     };
                     let pending = loading == Some(&item.path);
                     let tile_rect = Rect::from_min_size(
-                        origin + vec2(slot as f32 * FILM_STRIDE, 0.0),
+                        origin
+                            + vec2(
+                                (slot % cols) as f32 * FILM_STRIDE,
+                                (slot / cols) as f32 * row_stride,
+                            ),
                         FILM_TILE,
                     );
                     // Keyed by the photo, not by position among the tiles drawn this
@@ -773,6 +828,11 @@ impl PhotoApp {
                             action_export = true;
                             ui.close();
                         }
+                        ui.separator();
+                        if ui.button("Remove from shelf").clicked() {
+                            action_remove = Some(item.path.clone());
+                            ui.close();
+                        }
                     });
                 }
             });
@@ -813,6 +873,16 @@ impl PhotoApp {
                 self.set_label_for_paths(&[path], Some(label));
             }
         }
+        if let Some(path) = action_remove {
+            // The selection with it, if it was part of one, as the other actions do.
+            let paths = if self.selection.is_selected(&path) {
+                self.selection.selected.iter().cloned().collect()
+            } else {
+                vec![path]
+            };
+            self.remove_from_shelf(&paths);
+            return;
+        }
         if let Some(path) = action_copy {
             self.make_virtual_copy(gpu, &path);
             return;
@@ -822,18 +892,17 @@ impl PhotoApp {
         }
     }
 
-    /// Copy · Paste · Modules… · Previous · Reset all · Paste to all: what you do to the
-    /// stack as a whole, in the inspector's footer beside Save sidecar. Undo and Redo are
-    /// in the top bar.
+    /// The stack's actions, one row: Copy, Paste, Reset all, and ⋯ for what pastes,
+    /// Previous and Paste to all.
     pub(crate) fn edit_actions(&mut self, ui: &mut egui::Ui) {
         let loaded = self.loaded_path.is_some();
         let has_clip = self.clipboard_stack.is_some();
         let n = self.shelf.len();
         let gap = ui.spacing().item_spacing.x;
-        // Two to a row, equal widths: three left "Paste to all 22" no room for its label.
-        let w = ((ui.available_width() - gap) / 2.0).floor();
+        let more_w = 36.0;
+        let w = ((ui.available_width() - more_w - 3.0 * gap) / 3.0).floor();
         use widgets::button_enabled as button;
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             if button(ui, loaded, Kind::Secondary, "Copy", w)
                 .on_hover_text("Copy this image's adjustments (Ctrl+C)")
                 .clicked()
@@ -846,61 +915,73 @@ impl PhotoApp {
             {
                 self.paste_adjustments();
             }
-            let tip = format!(
-                "Choose what Paste, Previous and Paste to all carry: now {} (Ctrl+Shift+V)",
-                self.paste_set.describe()
-            );
-            if widgets::button(ui, Kind::Secondary, "Modules…", w)
-                .on_hover_text(tip)
-                .clicked()
-            {
-                self.paste_picker_open = !self.paste_picker_open;
-            }
-            if button(
-                ui,
-                self.can_same_as_previous(),
-                Kind::Secondary,
-                "Previous",
-                w,
-            )
-            .on_hover_text(
-                "The same edits as the photo open before this one; crop and rotation \
-                     stay (Ctrl+Alt+V)",
-            )
-            .clicked()
-            {
-                self.same_as_previous();
-            }
             if button(ui, loaded, Kind::Secondary, "Reset all", w)
                 .on_hover_text("Every module back to default (undoable)")
                 .clicked()
             {
                 self.reset_to_default();
             }
-            if self.can_undo_paste_to_all() {
-                if button(ui, true, Kind::Secondary, "Undo paste", w)
-                    .on_hover_text("Put back every sidecar the paste to all replaced")
+            let more = widgets::button(ui, Kind::Secondary, "⋯", more_w)
+                .on_hover_text("What pastes, the previous photo's edits, paste to all");
+            egui::Popup::from_toggle_button_response(&more)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(230.0);
+                    let tip = format!(
+                        "Choose what Paste, Previous and Paste to all carry: now {} \
+                         (Ctrl+Shift+V)",
+                        self.paste_set.describe()
+                    );
+                    if more_item(ui, true, "Choose what pastes…", "Ctrl+Shift+V")
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.paste_picker_open = !self.paste_picker_open;
+                    }
+                    if more_item(
+                        ui,
+                        self.can_same_as_previous(),
+                        "Same as previous",
+                        "Ctrl+Alt+V",
+                    )
+                    .on_hover_text(
+                        "The same edits as the photo open before this one; crop and \
+                             rotation stay",
+                    )
                     .clicked()
-                {
-                    self.undo_paste_to_all();
-                }
-            } else if button(
-                ui,
-                has_clip && n > 0,
-                Kind::Accent,
-                &format!("Paste to all {n}"),
-                w,
-            )
-            .on_hover_text(
-                "Paste the copied look onto every shelf photo; each keeps its own crop and \
-                 rotation",
-            )
-            .clicked()
-            {
-                self.paste_to_all_in_shelf();
-            }
+                    {
+                        self.same_as_previous();
+                    }
+                    if self.can_undo_paste_to_all() {
+                        if more_item(ui, true, "Undo paste to all", "")
+                            .on_hover_text("Put back every sidecar the paste to all replaced")
+                            .clicked()
+                        {
+                            self.undo_paste_to_all();
+                        }
+                    } else if more_item(ui, has_clip && n > 0, &format!("Paste to all {n}"), "")
+                        .on_hover_text(
+                            "Paste the copied look onto every shelf photo; each keeps its own \
+                             crop and rotation",
+                        )
+                        .clicked()
+                    {
+                        self.paste_to_all_in_shelf();
+                    }
+                });
         });
     }
+}
+
+/// A row in the actions' ⋯ menu: `name ········ keys`.
+fn more_item(ui: &mut egui::Ui, enabled: bool, name: &str, keys: &str) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(name)
+            .shortcut_text(theme::num(keys).size(11.0).color(theme::TEXT_FAINT))
+            .frame(false)
+            .min_size(vec2(ui.available_width(), 26.0)),
+    )
 }
 
 /// The groups on the filmstrip's header lines, in order.

@@ -196,222 +196,6 @@ pub(crate) fn list_row(
     response
 }
 
-/// A shelved file: icon, name, size badge, and a status dot. The size badge turns into a
-/// remove button under the pointer. Returns `(response, removed)`.
-pub(crate) const SHELF_ROW_HEIGHT: f32 = 30.0;
-
-pub(crate) fn shelf_row(
-    ui: &mut egui::Ui,
-    item: &ShelfItem,
-    active: bool,
-    selected: bool,
-    status: Option<Color32>,
-) -> (egui::Response, bool) {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), SHELF_ROW_HEIGHT), Sense::click());
-    widgets::describe(ui, &response, rect, || {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            true,
-            active || selected,
-            photo_description(item),
-        )
-    });
-    let hovered = ui.rect_contains_pointer(rect);
-
-    let badge_text = if item.missing {
-        "missing".to_string()
-    } else {
-        format_bytes(item.bytes)
-    };
-    let badge_font = FontId::monospace(10.5);
-    let badge_galley = ui
-        .painter()
-        .layout_no_wrap(badge_text, badge_font, Color32::PLACEHOLDER);
-    let badge = Rect::from_min_size(
-        pos2(
-            rect.right() - 6.0 - badge_galley.size().x - 10.0,
-            rect.center().y - 9.0,
-        ),
-        vec2(badge_galley.size().x + 10.0, 18.0),
-    );
-    // With a mouse the badge turns into Remove under the pointer. On touch there is no
-    // hover to warn first, so a tap near the edge would remove the photo: there it stays
-    // a size badge, and removing is in the row's menu.
-    let remove_sense = if widgets::is_touch(ui.ctx()) {
-        Sense::hover()
-    } else {
-        Sense::click()
-    };
-    let remove = ui.interact(badge, response.id.with("remove"), remove_sense);
-
-    let painter = ui.painter();
-    let border = if active {
-        theme::ACCENT
-    } else if selected {
-        theme::ACCENT.linear_multiply(0.8)
-    } else if hovered {
-        theme::BORDER_HI
-    } else {
-        Color32::from_gray(0x20)
-    };
-    let fill = if active {
-        theme::BG_900
-    } else if selected {
-        theme::ACCENT.linear_multiply(0.12)
-    } else if hovered {
-        Color32::from_gray(0x0c)
-    } else {
-        theme::BG_950
-    };
-    painter.rect(
-        rect,
-        3.0,
-        fill,
-        Stroke::new(if active || selected { 1.5 } else { 1.0 }, border),
-        egui::StrokeKind::Inside,
-    );
-
-    let is_raster = photo_engine::is_raster_path(&item.path);
-    painter.text(
-        rect.left_center() + vec2(14.0, 0.0),
-        Align2::CENTER_CENTER,
-        if is_raster { "🖼" } else { "📷" },
-        FontId::proportional(13.0),
-        if active {
-            theme::ACCENT
-        } else {
-            Color32::from_gray(0x88)
-        },
-    );
-
-    let mut right_cursor = badge.left() - 6.0;
-
-    if let Some(colour) = status {
-        painter.circle_filled(pos2(right_cursor - 4.0, rect.center().y), 3.0, colour);
-        right_cursor -= 12.0;
-    }
-
-    if item.metadata.rating > 0 {
-        let r_text = format!("★{}", item.metadata.rating);
-        let r_galley =
-            painter.layout_no_wrap(r_text, FontId::new(10.5, theme::mono_bold()), theme::ACCENT);
-        painter.galley(
-            pos2(
-                right_cursor - r_galley.size().x,
-                rect.center().y - r_galley.size().y / 2.0,
-            ),
-            r_galley.clone(),
-            theme::ACCENT,
-        );
-        right_cursor -= r_galley.size().x + 6.0;
-    }
-
-    match item.metadata.flag {
-        photo_engine::Flag::Pick => {
-            let f_rect =
-                Rect::from_center_size(pos2(right_cursor - 7.0, rect.center().y), vec2(14.0, 14.0));
-            painter.rect(
-                f_rect,
-                2.0,
-                theme::BG_850,
-                Stroke::new(1.0, theme::LIME),
-                egui::StrokeKind::Inside,
-            );
-            painter.text(
-                f_rect.center(),
-                Align2::CENTER_CENTER,
-                "P",
-                FontId::new(9.0, theme::mono_bold()),
-                theme::LIME,
-            );
-            right_cursor -= 18.0;
-        }
-        photo_engine::Flag::Reject => {
-            let f_rect =
-                Rect::from_center_size(pos2(right_cursor - 7.0, rect.center().y), vec2(14.0, 14.0));
-            painter.rect(
-                f_rect,
-                2.0,
-                theme::BG_850,
-                Stroke::new(1.0, theme::DANGER),
-                egui::StrokeKind::Inside,
-            );
-            painter.text(
-                f_rect.center(),
-                Align2::CENTER_CENTER,
-                "X",
-                FontId::new(9.0, theme::mono_bold()),
-                theme::DANGER,
-            );
-            right_cursor -= 18.0;
-        }
-        photo_engine::Flag::Unflagged => {}
-    }
-
-    let (family, colour) = if active {
-        (theme::mono_bold(), theme::ACCENT)
-    } else if item.missing {
-        (egui::FontFamily::Monospace, theme::TEXT_FAINT)
-    } else {
-        (egui::FontFamily::Monospace, theme::TEXT)
-    };
-    let mut job = egui::text::LayoutJob::single_section(
-        item.name.clone(),
-        egui::TextFormat::simple(FontId::new(12.0, family), colour),
-    );
-    let name_left = rect.left() + 30.0;
-    job.wrap = egui::text::TextWrapping::truncate_at_width((right_cursor - name_left).max(10.0));
-    let galley = painter.layout_job(job);
-    painter.galley(
-        pos2(name_left, rect.center().y - galley.size().y / 2.0),
-        galley,
-        colour,
-    );
-
-    if hovered && !widgets::is_touch(ui.ctx()) {
-        let hot = remove.hovered();
-        painter.rect(
-            badge,
-            3.0,
-            if hot {
-                theme::DANGER.linear_multiply(0.2)
-            } else {
-                theme::BG_850
-            },
-            Stroke::new(1.0, if hot { theme::DANGER } else { theme::RAIL }),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            "× remove",
-            FontId::monospace(10.0),
-            if hot { theme::DANGER } else { theme::TEXT_DIM },
-        );
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    } else {
-        painter.rect(
-            badge,
-            3.0,
-            theme::BG_850,
-            Stroke::new(1.0, theme::RAIL),
-            egui::StrokeKind::Inside,
-        );
-        painter.galley(
-            badge.center() - badge_galley.size() / 2.0,
-            badge_galley,
-            if active {
-                theme::TEXT
-            } else {
-                Color32::from_gray(0x88)
-            },
-        );
-    }
-
-    (response, remove.clicked())
-}
-
 /// The camera's own rendering of the photo being opened, fitted to the stage, until the
 /// real decode replaces it. Not interactive: there is nothing to edit yet.
 pub(crate) fn stage_preview(
@@ -734,5 +518,62 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
         format!("{:.0} KB", b / 1e3)
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// How the shelf shows under the stage on the desktop: not at all, as a strip, or as a
+/// grid. One shelf, three heights; the left rail chooses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) enum StripMode {
+    Hidden,
+    #[default]
+    Strip,
+    Grid,
+}
+
+/// What the desktop inspector is showing, chosen on the tool rail beside it: the editing
+/// sections, or one tool that works on the photo itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum Tool {
+    #[default]
+    Edit,
+    Crop,
+    Heal,
+    Masks,
+    Looks,
+}
+
+impl Tool {
+    pub(crate) const ALL: [Self; 5] =
+        [Self::Looks, Self::Edit, Self::Crop, Self::Heal, Self::Masks];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit",
+            Self::Crop => "Crop & rotate",
+            Self::Heal => "Spot heal",
+            Self::Masks => "Masks",
+            Self::Looks => "Looks",
+        }
+    }
+
+    pub(crate) fn tip(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit: light, colour, effects, detail, optics",
+            Self::Crop => "Crop and straighten (C)",
+            Self::Heal => "Remove spots and dust",
+            Self::Masks => "Change one area: brush, gradients, range",
+            Self::Looks => "Start from a look",
+        }
+    }
+
+    /// The module a tool is the controls of, if it is one.
+    pub(crate) fn module(self) -> Option<InspectorSectionId> {
+        match self {
+            Self::Crop => Some(InspectorSectionId::Geometry),
+            Self::Heal => Some(InspectorSectionId::Heal),
+            Self::Masks => Some(InspectorSectionId::Local),
+            Self::Edit | Self::Looks => None,
+        }
     }
 }
