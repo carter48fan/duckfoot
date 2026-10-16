@@ -1735,7 +1735,7 @@ fn a_screen_reader_is_told_what_each_control_is() {
         .filter_map(|(_, n)| n.label().map(|l| (l.to_string(), n.numeric_value())))
         .collect();
     let has = |want: &str| labels.iter().any(|(l, _)| l == want);
-    for want in ["Export", "Menu", "a.dng", "PHOTO ▾"] {
+    for want in ["Export", "Duckfoot menu", "a.dng"] {
         assert!(has(want), "no {want:?} among {labels:?}");
     }
     // A slider says its name and its value, not its position along the rail.

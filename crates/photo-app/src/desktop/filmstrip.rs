@@ -4,8 +4,9 @@ use crate::*;
 
 use super::top_bar;
 
-/// Room kept at the right of the shelf's first line for its + and gear menus.
-const SHELF_ACTIONS_W: f32 = 84.0;
+/// Room kept at the right of the shelf's first line for its + and gear menus: two 30-point
+/// buttons and the gap between, and a margin of the lines' own.
+const SHELF_ACTIONS_W: f32 = 30.0 + 4.0 + 30.0 + 10.0;
 
 impl PhotoApp {
     // ── Stage toolbar, canvas and filmstrip (centre) ────────────────────────────────────
@@ -360,12 +361,19 @@ impl PhotoApp {
     }
 
     /// The end of the shelf's first line: + to add photos or a folder, and the gear to
-    /// choose how the shelf shows.
+    /// choose how the shelf shows. Both are drawn, 30 points square like the filter button
+    /// they share the line with, so each sits on that line's midline and its own centre.
     fn shelf_actions(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Right to left: the gear is added first, to read + then gear.
         let shown = self.strip;
-        ui.menu_button(RichText::new("⚙").size(15.0).color(theme::TEXT), |ui| {
-            ui.set_min_width(200.0);
+        let gear = widgets::icon_drawn(
+            ui,
+            false,
+            "How the shelf shows: a strip, a grid, or hidden",
+            widgets::paint_gear,
+        );
+        widgets::menu_popup(&gear, top_bar::MENU_W, |ui| {
             for (mode, name, keys) in [
                 (StripMode::Strip, "Strip", ""),
                 (StripMode::Grid, "Grid", "G"),
@@ -381,12 +389,14 @@ impl PhotoApp {
                     ui.close();
                 }
             }
-        })
-        .response
-        .on_hover_text("How the shelf shows: a strip, a grid, or hidden")
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Shelf view"));
-        ui.menu_button(RichText::new("+").size(16.0).color(theme::TEXT), |ui| {
-            ui.set_min_width(200.0);
+        });
+        let add = widgets::icon_drawn(
+            ui,
+            false,
+            "Add photos, or every photo in a folder and its folders",
+            |painter, rect, colour| widgets::paint_plus(painter, rect, colour, 5.5),
+        );
+        widgets::menu_popup(&add, top_bar::MENU_W, |ui| {
             if top_bar::menu_item(ui, "Add photos…", "", true) {
                 self.pick_and_shelve(ui.ctx());
                 ui.close();
@@ -395,11 +405,6 @@ impl PhotoApp {
                 self.pick_folder_and_shelve(ui.ctx());
                 ui.close();
             }
-        })
-        .response
-        .on_hover_text("Add photos, or every photo in a folder and its folders")
-        .widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Add to the shelf")
         });
     }
 
@@ -699,6 +704,7 @@ impl PhotoApp {
     ) {
         let mut to_open = None;
         let mut action_remove = None;
+        let mut action_take_off = None;
         let mut action_shift = None;
         let mut action_ctrl = None;
         let mut action_single = None;
@@ -831,6 +837,34 @@ impl PhotoApp {
                             |ui| film_tile(ui, item, active, selected, pending, picture),
                         )
                         .inner;
+                    // The × in the tile's corner while the pointer is on it, made after the
+                    // tile so it is on top: its click is not the tile's.
+                    if !widgets::is_touch(ui.ctx()) {
+                        let spot = Rect::from_min_size(
+                            tile_rect.right_top() + vec2(-23.0, 5.0),
+                            egui::Vec2::splat(18.0),
+                        );
+                        let cross = ui
+                            .interact(spot, tile_resp.id.with("remove"), Sense::click())
+                            .on_hover_text("Take off the shelf (the file stays where it is)");
+                        if tile_resp.hovered() || cross.hovered() {
+                            let painter = ui.painter();
+                            painter.circle_filled(
+                                spot.center(),
+                                9.0,
+                                if cross.hovered() {
+                                    theme::DANGER
+                                } else {
+                                    Color32::from_black_alpha(190)
+                                },
+                            );
+                            widgets::paint_cross(painter, spot, theme::TEXT_HI, 3.0);
+                        }
+                        if cross.clicked() {
+                            action_take_off = Some(item.path.clone());
+                            continue;
+                        }
+                    }
                     let tile_resp = match item.info.as_ref().map(crate::info::one_line) {
                         Some(line) if !line.is_empty() => {
                             tile_resp.on_hover_text(format!("{}\n{line}", item.name))
@@ -955,6 +989,10 @@ impl PhotoApp {
             } else {
                 self.set_label_for_paths(&[path], Some(label));
             }
+        }
+        if let Some(path) = action_take_off {
+            self.remove_from_shelf(&[path]);
+            return;
         }
         if let Some(path) = action_remove {
             // The selection with it, if it was part of one, as the other actions do.

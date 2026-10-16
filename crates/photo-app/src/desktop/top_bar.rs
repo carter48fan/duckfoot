@@ -1,5 +1,5 @@
-//! The desktop top bar, one line: the barrel, the stage's view tools, the open photo's name,
-//! then zoom, undo and redo, Export and a menu for the rest.
+//! The desktop top bar, one line: the logo (the app's one menu), the stage's view tools, the
+//! open photo's name, then zoom, undo and redo, and Export.
 
 use crate::*;
 
@@ -22,7 +22,7 @@ impl PhotoApp {
             .resizable(false)
             .show(ui, |ui| {
                 widgets::bar_line(ui, TOP_BAR_LINE, |ui| {
-                    self.barrel_menu(ui);
+                    self.app_menu(ui);
                     ui.add_space(4.0);
                     separator(ui);
                     ui.add_space(4.0);
@@ -51,8 +51,6 @@ impl PhotoApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.top_menu(ui);
-
                         let busy = matches!(self.export, Export::Writing { .. });
                         let ready = loaded && !busy;
                         let export = ui
@@ -108,41 +106,44 @@ impl PhotoApp {
         self.desk_spots.toolbar = Some(shown.response.rect);
     }
 
-    /// The brand mark and which barrel this is. The other two barrels exist in the design,
-    /// not in the code: listing them disabled is honest; clickable would not be.
-    fn barrel_menu(&mut self, ui: &mut egui::Ui) {
-        widgets::brand_mark(ui, 20.0);
-        let title = RichText::new("PHOTO ▾")
-            .family(theme::mono_bold())
-            .size(12.0)
-            .extra_letter_spacing(1.0)
-            .color(theme::TEXT_HI);
-        ui.menu_button(title, |ui| {
-            let _ = widgets::chip(ui, true, "photo");
-            ui.add_enabled_ui(false, |ui| {
-                widgets::chip(ui, false, "audio")
-                    .on_disabled_hover_text("Barrel 2 is design only — see DESIGN.md");
-                widgets::chip(ui, false, "video")
-                    .on_disabled_hover_text("Barrel 3 is design only — see DESIGN.md");
-            });
-        })
-        .response
-        .on_hover_text("Duckfoot: three barrels, one stock");
-    }
+    /// The logo, as a button: the app's one menu. Opening and adding photos, Cutout, Help,
+    /// the shortcuts and Preferences, and which barrel this is. The other two barrels exist
+    /// in the design, not in the code: listing them disabled is honest; clickable would not
+    /// be. A dot on the mark until the tour has been seen, as Help was: offered, never
+    /// started for you.
+    fn app_menu(&mut self, ui: &mut egui::Ui) {
+        let (rect, response) =
+            widgets::allocate_control(ui, egui::Vec2::splat(TOP_BAR_LINE), Sense::click());
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+        if open || response.hovered() {
+            ui.painter().rect_filled(rect, 3.0, theme::BG_850);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        widgets::paint_brand_mark(
+            ui.painter(),
+            Rect::from_center_size(rect.center(), egui::Vec2::splat(22.0)),
+        );
+        if !self.settings.desk_tour_done {
+            ui.painter()
+                .circle_filled(rect.right_top() + vec2(-6.0, 6.0), 3.0, theme::LIME);
+        }
+        widgets::describe(ui, &response, rect, || {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Duckfoot menu")
+        });
+        let response = response.on_hover_text("Duckfoot: open, Cutout, Help and Preferences");
 
-    /// ⋯: opening a photo, Cutout, Help, the shortcuts and Preferences, out of the bar's
-    /// way. Lit until the tour has been seen, as Help was: offered, never started for you.
-    fn top_menu(&mut self, ui: &mut egui::Ui) {
-        let lit = !self.settings.desk_tour_done;
-        let dots =
-            RichText::new("⋯")
-                .size(16.0)
-                .color(if lit { theme::ACCENT } else { theme::TEXT });
         let cutout_ready = self.loaded_path.is_some();
-        ui.menu_button(dots, |ui| {
-            ui.set_min_width(200.0);
+        widgets::menu_popup(&response, MENU_W, |ui| {
             if menu_item(ui, "Open RAW…", "", true) {
                 self.pick_and_open(ui.ctx());
+                ui.close();
+            }
+            if menu_item(ui, "Add photos…", "", true) {
+                self.pick_and_shelve(ui.ctx());
+                ui.close();
+            }
+            if menu_item(ui, "Add a folder…", "", true) {
+                self.pick_folder_and_shelve(ui.ctx());
                 ui.close();
             }
             let cutout = if self.cutout_studio.open {
@@ -163,18 +164,20 @@ impl PhotoApp {
                 self.shortcuts_open = !self.shortcuts_open;
                 ui.close();
             }
-            ui.separator();
             if menu_item(ui, "Preferences…", "Ctrl+,", true) {
                 self.preferences_open = true;
                 ui.close();
             }
-        })
-        .response
-        .on_hover_text("Open, Cutout, Help, shortcuts and Preferences")
-        // "⋯" is no name to hear: a reader is told what it is.
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Menu"));
+            ui.separator();
+            menu_item(ui, "✓ Photo", "", true);
+            menu_item(ui, "   Audio", "design only", false);
+            menu_item(ui, "   Video", "design only", false);
+        });
     }
 }
+
+/// The width of the app's menus: wide enough for the longest name and its keys.
+pub(crate) const MENU_W: f32 = 220.0;
 
 /// A menu row: `name ········ shortcut`. True when chosen.
 pub(crate) fn menu_item(ui: &mut egui::Ui, name: &str, keys: &str, enabled: bool) -> bool {

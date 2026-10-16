@@ -67,7 +67,11 @@ impl PhotoApp {
                     } else {
                         "Choose which modules show, and their order"
                     };
-                    if widgets::icon(ui, "⚙", self.customize_open, tip).clicked() {
+                    if widgets::icon_drawn(ui, self.customize_open, tip, |painter, rect, colour| {
+                        widgets::paint_gear(painter, rect, colour)
+                    })
+                    .clicked()
+                    {
                         self.customize_open = !self.customize_open;
                     }
                     // Fold every section, or open them all if any is folded.

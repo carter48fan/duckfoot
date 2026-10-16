@@ -18,8 +18,8 @@ instructions beside the photo, so you can always go back to how it came out of t
 The window has five parts:
 
 - **Top bar**: the view tools (crop, before / after, clipping), zoom, undo and redo, and
-  **Export** to save a finished copy. The **⋯** menu has Open RAW…, Cutout, Help and the
-  shortcuts.
+  **Export** to save a finished copy. The Duckfoot logo at its left end is the app's menu:
+  Open RAW…, Add photos…, Add a folder…, Cutout, Help, the shortcuts and Preferences.
 - **Photo**: the big picture in the middle.
 - **Shelf**: the row of small pictures under the photo. Click one to open it.
 - **Editing panel**: everything on the right. This is where you change how the photo looks.
@@ -44,7 +44,7 @@ That's it. Your edits are saved on their own as you go.
 
 ## Bringing photos in
 
-- **Open RAW…** in the top bar's **⋯** menu opens one photo.
+- **Open RAW…** in the menu under the Duckfoot logo opens one photo.
 - **Drag and drop**: drag photos from your file manager onto the Duckfoot window. They are
   added to your shelf, and the first one opens.
 - **The + at the right end of the shelf** adds photos (**Add photos…**) or a whole folder
@@ -116,7 +116,7 @@ Too many tools? Click the **gear** (⚙) beside *Edit* in the editing panel. The
 Click the gear again to go back to editing. This only changes what you *see*. Hidden
 tools still work if they were already switched on.
 
-**Preferences** (in the top bar's **⋯** menu, or **Ctrl+,**) has the settings for the
+**Preferences** (in the menu under the Duckfoot logo, or **Ctrl+,**) has the settings for the
 whole app: the **interface size**, which makes text, controls and the space around them
 bigger or smaller together; the shelf; your screen; and the tour.
 

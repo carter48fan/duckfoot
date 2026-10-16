@@ -113,6 +113,29 @@ pub(crate) fn list_row(
     style: RowStyle,
     right: Option<(&str, Color32)>,
 ) -> egui::Response {
+    list_row_with(ui, label, style, right, None).0
+}
+
+/// [`list_row`] that can be taken away: while the pointer is on the row a × takes the tag's
+/// place at the right end, and the bool is true on the frame it is clicked. `remove` is the
+/// tooltip for the ×; touch has no hover to reveal it, so there it is left out.
+pub(crate) fn removable_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    style: RowStyle,
+    right: Option<(&str, Color32)>,
+    remove: &str,
+) -> (egui::Response, bool) {
+    list_row_with(ui, label, style, right, Some(remove))
+}
+
+fn list_row_with(
+    ui: &mut egui::Ui,
+    label: &str,
+    style: RowStyle,
+    right: Option<(&str, Color32)>,
+    remove: Option<&str>,
+) -> (egui::Response, bool) {
     // A finger's height on touch, where these are the phone's Snapshots and History.
     let height = if widgets::is_touch(ui.ctx()) {
         widgets::MIN_TOUCH_TARGET
@@ -133,7 +156,17 @@ pub(crate) fn list_row(
             text,
         )
     });
-    let hovered = response.hovered() && style != RowStyle::Now;
+    // The × is made after the row, so it is on top of it: a click on it is not the row's.
+    let cross = remove.filter(|_| !widgets::is_touch(ui.ctx())).map(|tip| {
+        let hit = Rect::from_center_size(
+            rect.right_center() - vec2(14.0, 0.0),
+            egui::Vec2::splat(20.0),
+        );
+        ui.interact(hit, response.id.with("remove"), Sense::click())
+            .on_hover_text(tip)
+    });
+    let on_row = response.hovered() || cross.as_ref().is_some_and(|c| c.hovered());
+    let hovered = on_row && style != RowStyle::Now;
     let painter = ui.painter();
     match style {
         RowStyle::Now => {
@@ -181,7 +214,24 @@ pub(crate) fn list_row(
         FontId::new(11.5, family),
         colour,
     );
-    if let Some((tag, tag_colour)) = right {
+    let mut removed = false;
+    if let (Some(cross), true) = (&cross, on_row) {
+        let lit = cross.hovered();
+        let spot = Rect::from_center_size(
+            rect.right_center() - vec2(14.0, 0.0),
+            egui::Vec2::splat(18.0),
+        );
+        if lit {
+            painter.rect_filled(spot, 3.0, theme::BORDER_HI);
+        }
+        widgets::paint_cross(
+            painter,
+            spot,
+            if lit { theme::DANGER } else { theme::TEXT_DIM },
+            3.5,
+        );
+        removed = cross.clicked();
+    } else if let Some((tag, tag_colour)) = right {
         painter.text(
             rect.right_center() - vec2(8.0, 0.0),
             Align2::RIGHT_CENTER,
@@ -193,7 +243,7 @@ pub(crate) fn list_row(
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    response
+    (response, removed)
 }
 
 /// The camera's own rendering of the photo being opened, fitted to the stage, until the

@@ -222,7 +222,7 @@ const TOUR: [TourStep; 8] = [
         spot: Spot::Export,
         title: "Share it",
         body: "When you like it, Export saves a copy to share or print. Made a mistake? The \
-               curved arrow beside it undoes anything. Help is in the ⋯ menu at its end.",
+               curved arrow beside it undoes anything. Help is in the menu under the Duckfoot logo, top left.",
     },
 ];
 
@@ -575,7 +575,7 @@ impl PhotoApp {
                         ui.label(
                             RichText::new(
                                 "New here? The tour points at each part of the window and \
-                                 takes about a minute. Help is always in the ⋯ menu.",
+                                 takes about a minute. Help is always in the top bar's menu.",
                             )
                             .size(14.0)
                             .color(theme::TEXT_DIM),

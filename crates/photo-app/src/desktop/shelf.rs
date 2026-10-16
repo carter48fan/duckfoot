@@ -49,7 +49,7 @@ impl PhotoApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 widgets::band(ui, |ui| {
-                    ui.label(theme::head("History"));
+                    ui.label(theme::head("Library"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if widgets::icon(ui, "‹", false, "Fold this panel away").clicked() {
                             self.shelf_open = false;
@@ -83,6 +83,7 @@ impl PhotoApp {
         let shown = self.displayed_indices();
         let count = self.shelf.len();
         let mut open = None;
+        let mut remove = None;
         group(
             ui,
             "Photos",
@@ -135,9 +136,16 @@ impl PhotoApp {
                                 0 => String::new(),
                                 r => format!("{r}★"),
                             };
-                            let row =
-                                list_row(ui, &item.name, style, Some((&stars, theme::TEXT_DIM)));
-                            if row.clicked() && style != RowStyle::Now {
+                            let (row, removed) = removable_row(
+                                ui,
+                                &item.name,
+                                style,
+                                Some((&stars, theme::TEXT_DIM)),
+                                "Take off the shelf (the file stays where it is)",
+                            );
+                            if removed {
+                                remove = Some(item.path.clone());
+                            } else if row.clicked() && style != RowStyle::Now {
                                 open = Some(item.path.clone());
                             }
                         }
@@ -145,6 +153,10 @@ impl PhotoApp {
                 ui.add_space(2.0);
             },
         );
+        if let Some(path) = remove {
+            self.remove_from_shelf(&[path]);
+            return;
+        }
         // Opened at the end of the frame, where the GPU is at hand.
         if open.is_some() {
             self.pending_open = open;
@@ -196,7 +208,9 @@ impl PhotoApp {
                         egui::TextEdit::singleline(&mut self.new_snapshot_name)
                             .hint_text("name this state…")
                             .font(egui::TextStyle::Monospace)
-                            .desired_width(field_w.max(40.0)),
+                            .desired_width(field_w.max(40.0))
+                            .min_size(vec2(0.0, widgets::sized(ui, 30.0, 40.0)))
+                            .vertical_align(egui::Align::Center),
                     );
                     let submitted =
                         edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
