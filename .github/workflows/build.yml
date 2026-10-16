@@ -264,7 +264,7 @@ jobs:
         with:
           key: linux
 
-      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
       - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package tarball and AppImage
@@ -281,9 +281,9 @@ jobs:
             echo "Duckfoot for Linux (x86_64), built from ${GITHUB_SHA}."
             echo
             echo "Run ./duckfoot, or ./duckfoot photo.ARW. Needs a Vulkan driver, Wayland or X11,"
-            echo "and xdg-desktop-portal for the file dialog. More: the README in the repository."
+            echo "and xdg-desktop-portal for the file dialog. More: https://github.com/carter48fan/duckfoot."
           } > "$dir/README.txt"
-          # README.md promises libc, libm and libgcc_s only; say so if that ever changes.
+          # docs/BUILDING.md promises libc, libm and libgcc_s only; say so if that ever changes.
           echo "Linked against:"
           ldd "$dir/duckfoot"
           tar czf "dist/$dir.tar.gz" "$dir"
@@ -331,7 +331,7 @@ jobs:
         with:
           key: windows
 
-      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
       - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package
@@ -388,7 +388,7 @@ jobs:
         with:
           key: macos
 
-      # HEIF/HEIC on: see README → Legal, HEVC patents.
+      # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
       - run: cargo build --release --locked -p duckfoot --features heif
 
       - name: Package macOS app and dmg
@@ -418,8 +418,21 @@ jobs:
           </dict>
           </plist>
           PLIST
-          hdiutil create -volname Duckfoot -srcfolder "$app" -ov -format UDZO dist/duckfoot-macos.dmg
-          (cd dist && zip -r duckfoot-macos.zip Duckfoot.app)
+
+          # Apple Silicon refuses an unsigned app that arrived through a browser or chat
+          # app with "is damaged and can't be opened", which has no way past it. An ad-hoc
+          # signature (no paid certificate) turns that into the ordinary "unidentified
+          # developer" prompt that right-click → Open gets through. Sign before packaging.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # The dmg holds the app and a shortcut to /Applications, to drag it onto.
+          stage=dist/dmg
+          mkdir -p "$stage"
+          cp -R "$app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname Duckfoot -srcfolder "$stage" -ov -format UDZO dist/duckfoot-macos.dmg
+          (cd dist && ditto -c -k --keepParent Duckfoot.app duckfoot-macos.zip)
 
       - name: Attach to the draft release
         if: needs.version.outputs.is_release == 'true'
