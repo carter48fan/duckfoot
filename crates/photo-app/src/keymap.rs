@@ -1,5 +1,5 @@
 //! Every shortcut and pointer gesture, in one table. The `?` overlay draws it and the
-//! README's Controls section is generated from it (a test fails when they differ), so the
+//! Controls table in `docs/SHORTCUTS.md` is generated from it (a test fails when they differ), so the
 //! three can no longer drift apart. `keys.rs` is what acts on the keys.
 
 use crate::*;
@@ -35,7 +35,7 @@ impl Group {
 
 pub(crate) struct Shortcut {
     pub group: Group,
-    /// As the README writes it: `Ctrl`, which the overlay shows as `⌘` on a Mac.
+    /// As the docs write it: `Ctrl`, which the overlay shows as `⌘` on a Mac.
     pub keys: &'static str,
     pub action: &'static str,
 }
@@ -212,7 +212,7 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
 ];
 
-/// The README's Controls table, as it should read.
+/// The Controls table in `docs/SHORTCUTS.md`, as it should read.
 #[cfg(test)]
 pub(crate) fn markdown() -> String {
     let mut out = String::from("| | |\n|---|---|\n");
@@ -225,7 +225,7 @@ pub(crate) fn markdown() -> String {
     out
 }
 
-/// The keys as this platform names them, without the README's backticks.
+/// The keys as this platform names them, without the docs' backticks.
 fn display_keys(keys: &str) -> String {
     let plain = keys.replace('`', "");
     if cfg!(target_os = "macos") {
@@ -345,30 +345,30 @@ mod tests {
     const START: &str = "<!-- keymap:start (generated from crates/photo-app/src/keymap.rs) -->\n";
     const END: &str = "<!-- keymap:end -->";
 
-    /// `DUCKFOOT_BLESS=1 cargo test -p photo-app readme` rewrites the README's table.
+    /// `DUCKFOOT_BLESS=1 cargo test -p photo-app shortcuts_doc` rewrites the table in docs/SHORTCUTS.md.
     #[test]
-    fn readme_controls_are_the_keymap() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
-        let readme = std::fs::read_to_string(&path).unwrap();
-        let start = readme
+    fn shortcuts_doc_is_the_keymap() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SHORTCUTS.md");
+        let doc = std::fs::read_to_string(&path).unwrap();
+        let start = doc
             .find(START)
-            .expect("README has no keymap:start marker")
+            .expect("docs/SHORTCUTS.md has no keymap:start marker")
             + START.len();
         let end = start
-            + readme[start..]
+            + doc[start..]
                 .find(END)
-                .expect("README has no keymap:end marker");
+                .expect("docs/SHORTCUTS.md has no keymap:end marker");
         let want = markdown();
-        if readme[start..end] == want {
+        if doc[start..end] == want {
             return;
         }
         if std::env::var_os("DUCKFOOT_BLESS").is_some() {
-            let updated = format!("{}{}{}", &readme[..start], want, &readme[end..]);
+            let updated = format!("{}{}{}", &doc[..start], want, &doc[end..]);
             std::fs::write(&path, updated).unwrap();
             return;
         }
         panic!(
-            "README's Controls table differs from keymap.rs; \
+            "docs/SHORTCUTS.md differs from keymap.rs; \
              run with DUCKFOOT_BLESS=1 to regenerate it"
         );
     }
