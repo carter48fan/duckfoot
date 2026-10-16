@@ -1,0 +1,45 @@
+DUCKFOOT FOR MAC: INSTALL AND OPEN
+==================================
+
+Duckfoot is built for Macs with Apple Silicon (M1, M2, M3 and later).
+It does not run on older Intel Macs.
+
+
+1. INSTALL
+
+   Drag Duckfoot onto the Applications folder in this window.
+
+
+2. OPEN IT THE FIRST TIME
+
+   Duckfoot isn't signed by a registered Apple developer yet, so macOS
+   blocks it the first time. This is expected, and it only happens once.
+
+   a. Open Duckfoot from Applications. macOS shows a message saying it
+      could not verify Duckfoot. Click Done (not Move to Trash).
+
+   b. Open the Apple menu > System Settings > Privacy & Security.
+
+   c. Scroll down to the Security section. You will see a message that
+      "Duckfoot" was blocked. Click Open Anyway.
+
+   d. Enter your password or use Touch ID, then click Open in the box
+      that appears.
+
+   From then on, Duckfoot opens like any other app.
+
+   On macOS 14 and earlier you can instead right-click (or Control-click)
+   Duckfoot in Applications, choose Open, then click Open again.
+
+
+IF MACOS SAYS "DUCKFOOT IS DAMAGED AND CAN'T BE OPENED"
+-------------------------------------------------------
+
+   The app isn't damaged. macOS is being cautious about a download from
+   the internet and offers no button to continue. Don't move it to the
+   Trash. Open Terminal (Applications > Utilities), paste this line,
+   press Return, then open Duckfoot again:
+
+       xattr -dr com.apple.quarantine /Applications/Duckfoot.app
+
+   It removes the "downloaded from the internet" mark from Duckfoot only.

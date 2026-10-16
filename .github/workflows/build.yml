@@ -426,11 +426,13 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
 
-          # The dmg holds the app and a shortcut to /Applications, to drag it onto.
+          # The dmg holds the app, a shortcut to /Applications to drag it onto, and the
+          # steps for getting past Gatekeeper (Privacy & Security > Open Anyway).
           stage=dist/dmg
           mkdir -p "$stage"
           cp -R "$app" "$stage/"
           ln -s /Applications "$stage/Applications"
+          cp brand/macos-install.txt "$stage/How to open Duckfoot.txt"
           hdiutil create -volname Duckfoot -srcfolder "$stage" -ov -format UDZO dist/duckfoot-macos.dmg
           (cd dist && ditto -c -k --keepParent Duckfoot.app duckfoot-macos.zip)
 

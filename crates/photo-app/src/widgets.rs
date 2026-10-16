@@ -409,6 +409,74 @@ pub fn icon(ui: &mut Ui, glyph: &str, active: bool, tooltip: &str) -> Response {
     response.on_hover_text(tooltip)
 }
 
+/// [`icon`] with a drawn glyph instead of a font's: `paint` gets the button's painter, its
+/// rect and the colour for its state. A drawn glyph sits on the button's exact centre; a
+/// font's sits wherever its metrics put it, which is what made ⚙ and + look off-centre.
+pub fn icon_drawn(
+    ui: &mut Ui,
+    active: bool,
+    tooltip: &str,
+    paint: impl FnOnce(&Painter, Rect, Color32),
+) -> Response {
+    let enabled = ui.is_enabled();
+    let (rect, response) = allocate_control(ui, Vec2::splat(sized(ui, 30.0, 40.0)), Sense::click());
+    describe(ui, &response, rect, || {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, tooltip)
+    });
+    let hovered = enabled && response.hovered();
+    let colour = match (enabled, active, hovered) {
+        (false, ..) => TEXT_FAINT,
+        (true, true, _) | (true, false, true) => ACCENT,
+        (true, false, false) => Color32::from_gray(0xcc),
+    };
+    paint(ui.painter(), rect, colour);
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// A + centred in `rect`, `arm` points from the middle to each end.
+pub fn paint_plus(painter: &Painter, rect: Rect, colour: Color32, arm: f32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, colour);
+    painter.hline(c.x - arm..=c.x + arm, c.y, stroke);
+    painter.vline(c.x, c.y - arm..=c.y + arm, stroke);
+}
+
+/// A × centred in `rect`, `arm` points from the middle along each diagonal.
+pub fn paint_cross(painter: &Painter, rect: Rect, colour: Color32, arm: f32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, colour);
+    painter.line_segment([c + vec2(-arm, -arm), c + vec2(arm, arm)], stroke);
+    painter.line_segment([c + vec2(-arm, arm), c + vec2(arm, -arm)], stroke);
+}
+
+/// A gear centred in `rect`: a ring with eight teeth.
+pub fn paint_gear(painter: &Painter, rect: Rect, colour: Color32) {
+    let c = rect.center();
+    painter.circle_stroke(c, 4.0, Stroke::new(1.5, colour));
+    for k in 0..8 {
+        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+        let dir = vec2(a.cos(), a.sin());
+        painter.line_segment([c + dir * 4.5, c + dir * 6.5], Stroke::new(2.0, colour));
+    }
+}
+
+/// The menu under `anchor`, `width` wide. A popup lays its rows out to the room it is given,
+/// so rows that stretch to the available width (see `menu_item`) made every menu as wide as
+/// the window; the width is set here, once, for all of them.
+pub fn menu_popup<R>(
+    anchor: &Response,
+    width: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<InnerResponse<R>> {
+    egui::Popup::menu(anchor).width(width).show(|ui| {
+        ui.set_width(width);
+        add(ui)
+    })
+}
+
 /// A 14px check box: amber with a black tick when on, black with a hairline when off.
 pub fn paint_checkbox(painter: &Painter, rect: Rect, on: bool, hovered: bool) {
     if on {
@@ -1080,15 +1148,18 @@ pub fn bar_line<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> 
     shown.inner
 }
 
-/// A full-bleed header band: `BG_925`, a hairline underneath, contents laid out left to right.
+/// The height of a panel's header band.
+pub const BAND_H: f32 = 40.0;
+
+/// A full-bleed header band: `BG_925`, a hairline underneath, contents laid out left to right
+/// on one midline. Every band is the same height, so the left and right panels' headers sit
+/// level: a band that grew with its tallest item would centre the items added before it on
+/// a shorter line (see [`bar_line`]).
 pub fn band<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let inner = Frame::new()
         .fill(BG_925)
-        .inner_margin(Margin::symmetric(14, 10))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(add).inner
-        });
+        .inner_margin(Margin::symmetric(12, 0))
+        .show(ui, |ui| bar_line(ui, BAND_H, add));
     let r = inner.response.rect;
     ui.painter()
         .hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, BORDER));
@@ -1387,12 +1458,17 @@ pub fn dot(ui: &mut Ui, colour: Color32) {
 /// Same geometry as the SVG, minus its background tile, scaled so the strokes fill `size`.
 pub fn brand_mark(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_brand_mark(ui.painter(), rect);
+}
+
+/// [`brand_mark`] centred in `rect`, scaled to its height.
+pub fn paint_brand_mark(painter: &Painter, rect: Rect) {
+    let size = rect.height();
     // The drawn strokes span x 135..377, y 75..431 of the SVG's 512-unit viewBox.
     let scale = size / 356.0;
     let at = |x: f32, y: f32| rect.center() + vec2(x - 256.0, y - 253.0) * scale;
     let width = 34.0 * scale;
     let breech = at(256.0, 292.0);
-    let painter = ui.painter();
     for (x, y) in [
         (256.0, 92.0),
         (152.0, 156.0),
