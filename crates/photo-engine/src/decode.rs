@@ -757,6 +757,16 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
     let mut raw = rawler::decode(raw_source, &RawDecodeParams::default())
         .map_err(|e| anyhow!("not a supported RAW file (rawler): {e:?}"))?;
 
+    let raw_orientation = tiff_orientation(raw_source.buf())
+        .or_else(|| {
+            rawler::get_decoder(raw_source)
+                .ok()
+                .and_then(|d| d.raw_metadata(raw_source, &RawDecodeParams::default()).ok())
+                .and_then(|m| m.exif.orientation)
+                .map(orientation_from_exif)
+        })
+        .unwrap_or_else(|| orientation_geometry_rawler(raw.orientation));
+
     // A linear DNG. Canon's sRAW/mRAW comes out of rawler with three components too, but
     // through its own YCbCr conversion, whose white balance this has not been checked
     // against, so it is still refused below.
@@ -766,7 +776,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             rawler::rawimage::RawPhotometricInterpretation::LinearRaw
         )
     {
-        return linear_rawler(raw);
+        return linear_rawler(raw, raw_orientation);
     }
     if raw.cpp != 1 {
         bail!(
@@ -890,7 +900,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
             cam_profiled: None,
             cam_profiled_v2: None,
             daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
-            orientation: orientation_geometry_rawler(raw.orientation),
+            orientation: raw_orientation,
             make,
             model,
             warp: None,
@@ -903,7 +913,7 @@ fn decode_reader_rawler(raw_source: &RawSource) -> Result<Decoded> {
 
 /// A linear DNG (three components a pixel: ProRAW, an HDR merge), already demosaiced: its
 /// samples cropped and normalised into [`CfaImage::linear`], its colour read as a mosaic's.
-fn linear_rawler(mut raw: rawler::RawImage) -> Result<Decoded> {
+fn linear_rawler(mut raw: rawler::RawImage, raw_orientation: Geometry) -> Result<Decoded> {
     let (samples, float): (Vec<f32>, bool) =
         match std::mem::replace(&mut raw.data, rawler::RawImageData::Integer(Vec::new())) {
             rawler::RawImageData::Integer(d) => (d.into_iter().map(f32::from).collect(), false),
@@ -978,7 +988,7 @@ fn linear_rawler(mut raw: rawler::RawImage) -> Result<Decoded> {
             cam_profiled: None,
             cam_profiled_v2: None,
             daylight_wb: daylight_multipliers(&xyz_to_cam).unwrap_or(wb),
-            orientation: orientation_geometry_rawler(raw.orientation),
+            orientation: raw_orientation,
             make: pick(raw.clean_make, raw.make),
             model: pick(raw.clean_model, raw.model),
             warp: None,

@@ -1062,27 +1062,26 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (sharpen > 0.0) {
-        // Sharpening is a one-pixel kernel at full resolution. A reduced preview has to
-        // show what that export looks like once shrunk to the screen — and a Laplacian
-        // averages to almost nothing under a shrink: the Laplacian of a level-L texel is
-        // 4^L times the average of the full-resolution ones under it. So it is taken at
-        // this level's scale and scaled back by 4^-L, which is exact at 1:1 and faithful
-        // at fit, where sharpening is correctly all but invisible.
-        // All four channels: the neutral in `a` is part of the pixel's light too.
-        // Through the heal spots too, or a healed spot's edge would read as detail.
-        let step = exp2(lod);
+        let radius = max(u.sharpen.y, 0.5);
+        let step = radius * exp2(lod);
         let s_up = spot_sample_fast(src - vec2<f32>(0.0, step), lod);
         let s_dn = spot_sample_fast(src + vec2<f32>(0.0, step), lod);
         let s_lf = spot_sample_fast(src - vec2<f32>(step, 0.0), lod);
         let s_rt = spot_sample_fast(src + vec2<f32>(step, 0.0), lod);
-        let laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
+        var laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
+
+        // Edge masking: if masking > 0.0, attenuate sharpening on flat regions and sensor noise
+        if (u.sharpen.w > 0.0) {
+            let edge = length(vec2<f32>(s_rt.g - s_lf.g, s_dn.g - s_up.g));
+            let mask_thresh = u.sharpen.w * 0.002;
+            let edge_factor = smoothstep(mask_thresh * 0.5, mask_thresh * 2.0, edge);
+            laplacian = laplacian * edge_factor;
+        }
+
         if (enabled(FLAG_RENDER_V2)) {
-            // Held to the neighbourhood, overshooting it by at most half its own range:
-            // a halo is limited by the local contrast, and a highlight reconstructed past
-            // twice white (V1's fixed ceiling) keeps its value.
             let lo = min(s, min(min(s_up, s_dn), min(s_lf, s_rt)));
             let hi = max(s, max(max(s_up, s_dn), max(s_lf, s_rt)));
-            let room = (hi - lo) * 0.5;
+            let room = (hi - lo) * 1.0;
             s = clamp(s + laplacian * sharpen, max(lo - room, vec4<f32>(0.0)), hi + room);
         } else {
             s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
@@ -1150,16 +1149,40 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (enabled(FLAG_TONAL)) {
-        let luma = luma(c);
-        let s_weight = 1.0 - smoothstep(0.0, 0.5, luma);
-        let h_weight = smoothstep(0.35, 1.0, luma);
-        let w_weight = smoothstep(0.7, 1.2, luma);
-        let b_weight = 1.0 - smoothstep(0.0, 0.2, luma);
+        let y = max(luma(c), 1e-5);
 
-        let s_factor = 1.0 + u.tonal.y * s_weight * 0.75;
-        let h_factor = 1.0 + u.tonal.x * h_weight * 0.6;
-        let w_factor = 1.0 + u.tonal.z * w_weight * 0.5;
-        let b_offset = u.tonal.w * b_weight * 0.05;
+        // --- Highlights recovery / boost ---
+        // When u.tonal.x < 0 (recovery): applies a smooth rational shoulder on excess luma above 0.35,
+        // compressing super-white highlights (up to 4.0+) into the display range (< 1.0).
+        // When u.tonal.x > 0 (boost): gently boosts bright speculars towards white.
+        var h_factor = 1.0;
+        if (u.tonal.x < 0.0) {
+            if (y > 0.35) {
+                let over = y - 0.35;
+                let compressed = over / (1.0 + over * (-u.tonal.x) * 1.5);
+                h_factor = (0.35 + compressed) / y;
+            }
+        } else if (u.tonal.x > 0.0) {
+            let h_weight = smoothstep(0.35, 1.2, y);
+            h_factor = 1.0 + u.tonal.x * h_weight * 0.5;
+        }
+
+        // --- Shadows isolation ---
+        // Evaluates a perceptual bell curve peaked at ~15% luminance (Zone III).
+        // Anchors true black (0.0) so blacks stay deep, and anchors mid-greys (0.18 linear / 50% display)
+        // to prevent overall exposure drift.
+        let p = sqrt(y);
+        let t = clamp(p / 0.5, 0.0, 1.0);
+        let s_weight = 4.0 * t * (1.0 - t);
+        let s_gain = select(0.7, 1.5, u.tonal.y > 0.0);
+        let s_factor = 1.0 + u.tonal.y * s_weight * s_gain;
+
+        // --- Whites (diffuse clipping threshold) & Blacks (black floor offset) ---
+        let w_weight = smoothstep(0.6, 1.4, y);
+        let w_factor = 1.0 + u.tonal.z * w_weight * 0.6;
+
+        let b_weight = 1.0 - smoothstep(0.0, 0.15, y);
+        let b_offset = u.tonal.w * b_weight * 0.06;
 
         c = max(vec3<f32>(0.0), (c + vec3<f32>(b_offset)) * max(s_factor * h_factor * w_factor, 0.01));
         bad = bad || not_finite(c);

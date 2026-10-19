@@ -3492,7 +3492,12 @@ impl Engine {
                     0.0,
                     0.0,
                 ],
-                sharpen: [stack.sharpen.params.amount, 0.0, 0.0, 0.0],
+                sharpen: [
+                    stack.sharpen.params.amount,
+                    stack.sharpen.params.radius,
+                    stack.sharpen.params.detail,
+                    stack.sharpen.params.masking,
+                ],
                 dest: [target.0 as f32, target.1 as f32, level as f32, base as f32],
                 detail: [
                     stack.clarity.params.clarity,
@@ -5083,7 +5088,8 @@ impl Engine {
         luma.sort_by(f32::total_cmp);
         let at = |q: f32| luma[((luma.len() - 1) as f32 * q) as usize];
         let median = at(0.5).max(1e-5);
-        let ev = (0.18 / median).log2().clamp(-4.0, 4.0);
+        let max_ev = stack.exposure.params.effective_max_ev();
+        let ev = (0.18 / median).log2().clamp(-max_ev, max_ev);
         let gain = ev.exp2();
         let (high, low) = (at(0.998) * gain, at(0.005) * gain);
         let mut tonal = crate::params::Tonal::default();

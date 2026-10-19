@@ -845,7 +845,11 @@ impl PhotoApp {
             self.selection.select_single(path.to_path_buf());
         }
 
-        self.baseline = PhotoStack::default();
+        self.baseline = if photo_engine::is_raster_path(path) {
+            PhotoStack::default()
+        } else {
+            PhotoStack::for_raw()
+        };
         self.orientation_pending = true;
         self.stack = saved.clone().unwrap_or_else(|| self.baseline.clone());
         self.saved_stack = saved;
@@ -1138,6 +1142,7 @@ impl PhotoApp {
         if let Some(id) = self.texture_id.take() {
             self.retired_textures.push(id);
         }
+        self.texture_filter = None;
         self.engine.unload();
     }
 

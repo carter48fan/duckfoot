@@ -107,13 +107,9 @@ fn set_ev(s: &mut PhotoStack, _: &WhiteScale, v: f32) {
     s.exposure.params.ev = v;
 }
 
-/// ±4 EV, or ±8 with the extended range on, as the sheet's slider.
+/// ±5 EV (or user max_ev/extended_range), as the sheet's slider.
 fn ev_range(s: &PhotoStack) -> (f32, f32) {
-    let max = if s.exposure.params.extended_range {
-        8.0
-    } else {
-        4.0
-    };
+    let max = s.exposure.params.effective_max_ev();
     (-max, max)
 }
 
@@ -161,8 +157,8 @@ const WHITE_BALANCE: &[Knob] = &[
 const EXPOSURE: &[Knob] = &[
     Knob {
         name: "EV",
-        lo: -8.0,
-        hi: 8.0,
+        lo: -10.0,
+        hi: 10.0,
         decimals: 2,
         get: ev,
         set: set_ev,
@@ -197,7 +193,12 @@ const VIBRANCE: &[Knob] = &[
     knob!("saturation", -1.0, 1.0, 2, vibrance.params.saturation),
 ];
 
-const SHARPEN: &[Knob] = &[knob!("amount", 0.0, 2.0, 2, sharpen.params.amount)];
+const SHARPEN: &[Knob] = &[
+    knob!("amount", 0.0, 2.0, 2, sharpen.params.amount),
+    knob!("radius", 0.5, 3.0, 1, sharpen.params.radius),
+    knob!("detail", 0.0, 100.0, 0, sharpen.params.detail),
+    knob!("masking", 0.0, 100.0, 0, sharpen.params.masking),
+];
 
 const LOOK: &[Knob] = &[knob!("amount", 0.0, 1.0, 2, look.params.amount)];
 
