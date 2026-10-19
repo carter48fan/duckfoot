@@ -491,7 +491,7 @@ impl PhotoApp {
                     widgets::mini_knee_curve(ui, p.ev, p.rolloff);
                 }
 
-                let max_ev = if p.extended_range { 8.0 } else { 4.0 };
+                let max_ev = p.effective_max_ev();
                 track!(widgets::param_slider(
                     ui,
                     "EV",
@@ -520,8 +520,8 @@ impl PhotoApp {
                     ));
                 }
 
-                // The section's two buttons on one line: auto at the start, the EV
-                // slider's range at the end.
+                // The section's buttons on one line: auto tone at the start, the EV
+                // slider's range chips at the end.
                 let mut auto = false;
                 widgets::bar_line(ui, 28.0, |ui| {
                     if widgets::outlined_chip(ui, ready, false, "auto tone")
@@ -534,16 +534,21 @@ impl PhotoApp {
                         auto = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::outlined_chip(ui, true, p.extended_range, "±8 EV")
-                            .on_hover_text(if p.extended_range {
-                                "The EV slider reaches ±8 stops. Click for ±4"
-                            } else {
-                                "Let the EV slider reach ±8 stops instead of ±4"
-                            })
-                            .clicked()
-                        {
-                            p.extended_range = !p.extended_range;
-                            discrete!();
+                        let cur_max = p.effective_max_ev();
+                        for &(ev_val, label, tip) in &[
+                            (10.0, "±10 EV", "Studio / technical range: ±10 stops"),
+                            (8.0, "±8 EV", "Extended range: ±8 stops"),
+                            (5.0, "±5 EV", "Lightroom standard: ±5 stops"),
+                        ] {
+                            let active = (cur_max - ev_val).abs() < 0.1;
+                            if widgets::outlined_chip(ui, true, active, label)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                p.max_ev = ev_val;
+                                p.extended_range = ev_val > 5.0;
+                                discrete!();
+                            }
                         }
                     });
                 });
@@ -965,6 +970,30 @@ impl PhotoApp {
                     0.0..=2.0,
                     2,
                     dp.amount
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "radius",
+                    &mut p.radius,
+                    0.5..=3.0,
+                    1,
+                    dp.radius
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "detail",
+                    &mut p.detail,
+                    0.0..=100.0,
+                    0,
+                    dp.detail
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "masking",
+                    &mut p.masking,
+                    0.0..=100.0,
+                    0,
+                    dp.masking
                 ));
             }
             InspectorSectionId::Denoise => {

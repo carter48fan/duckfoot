@@ -47,6 +47,10 @@ pub enum ExposureMode {
     Custom,
 }
 
+fn default_max_ev() -> f32 {
+    5.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Exposure {
     pub ev: f32,
@@ -56,9 +60,11 @@ pub struct Exposure {
     /// Highlight shoulder compression (0.0 = linear / Classic, 0.5 = Modern, 1.0 = Filmic).
     #[serde(default)]
     pub rolloff: f32,
-    /// Toggle between standard +/-4 EV and studio extended +/-8 EV range.
+    /// Toggle between standard +/-5 EV and studio extended +/-8 EV range.
     #[serde(default)]
     pub extended_range: bool,
+    #[serde(default = "default_max_ev")]
+    pub max_ev: f32,
 }
 
 impl Default for Exposure {
@@ -69,6 +75,19 @@ impl Default for Exposure {
             mode: ExposureMode::ClassicLinear,
             rolloff: 0.0,
             extended_range: false,
+            max_ev: 5.0,
+        }
+    }
+}
+
+impl Exposure {
+    pub fn effective_max_ev(&self) -> f32 {
+        if self.max_ev > 0.0 {
+            self.max_ev
+        } else if self.extended_range {
+            8.0
+        } else {
+            5.0
         }
     }
 }
@@ -429,16 +448,38 @@ impl Default for Vignette {
     }
 }
 
+fn default_sharpen_radius() -> f32 {
+    1.0
+}
+
+fn default_sharpen_detail() -> f32 {
+    25.0
+}
+
 /// Capture unsharp masking / detail clarity.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Sharpen {
-    /// Amount of high-frequency detail boost.
+    /// Amount of high-frequency detail boost (0.0..=1.5).
     pub amount: f32,
+    /// Unsharp mask halo radius in pixels (0.5..=3.0).
+    #[serde(default = "default_sharpen_radius")]
+    pub radius: f32,
+    /// High-frequency detail suppression vs edge emphasis (0.0..=100.0).
+    #[serde(default = "default_sharpen_detail")]
+    pub detail: f32,
+    /// Edge masking threshold to avoid sharpening flat areas/noise (0.0..=100.0).
+    #[serde(default)]
+    pub masking: f32,
 }
 
 impl Default for Sharpen {
     fn default() -> Self {
-        Self { amount: 0.0 }
+        Self {
+            amount: 0.0,
+            radius: 1.0,
+            detail: 25.0,
+            masking: 0.0,
+        }
     }
 }
 
@@ -794,6 +835,24 @@ impl Default for PhotoStack {
             heal: Module::new(false, crate::heal::Spots::default()),
             look: Module::new(false, Look::default()),
         }
+    }
+}
+
+impl PhotoStack {
+    /// A stack for newly opened RAW camera files, enabling standard capture sharpening
+    /// matching Adobe Photoshop / Camera Raw defaults (Amount 0.40, Radius 1.0, Detail 25.0).
+    pub fn for_raw() -> Self {
+        let mut s = Self::default();
+        s.sharpen = Module::new(
+            true,
+            Sharpen {
+                amount: 0.40,
+                radius: 1.0,
+                detail: 25.0,
+                masking: 0.0,
+            },
+        );
+        s
     }
 }
 

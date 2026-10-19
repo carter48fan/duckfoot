@@ -544,6 +544,7 @@ pub struct PhotoApp {
     stack: PhotoStack,
     history: History,
     texture_id: Option<egui::TextureId>,
+    texture_filter: Option<wgpu::FilterMode>,
     /// The photo textures let go of this frame, freed at the start of the next.
     retired_textures: Vec<egui::TextureId>,
     /// Set whenever the stack changes; cleared once the GPU has re-rendered.
@@ -910,6 +911,7 @@ impl PhotoApp {
             stack: PhotoStack::default(),
             history: History::new(),
             texture_id: None,
+            texture_filter: None,
             retired_textures: Vec::new(),
             needs_render: false,
             error: None,
@@ -1723,36 +1725,53 @@ impl PhotoApp {
             self.needs_render = true;
         }
 
-        if !self.needs_render {
-            return;
-        }
-        let started = Instant::now();
-        // Framing a crop shows the whole frame with no divider, so no split either.
-        let split_x = if self.split_active && !self.cropping {
-            Some(self.split_pos)
+        // When zoomed in at or above 1:1 (100%), switch to nearest-neighbour sampling
+        // so inspection is pixel-crisp with no bilinear blur.
+        let is_magnified = self
+            .fit_scale()
+            .map_or(false, |fit| fit * self.view.zoom * pixels_per_point >= 0.99);
+        let wanted_filter = if is_magnified {
+            wgpu::FilterMode::Nearest
         } else {
-            None
+            wgpu::FilterMode::Linear
         };
-        // Held on a phone: the original, in the frame it is edited in.
-        if self.photo_touch.holding {
-            let original = PhotoStack {
-                geometry: self.stack.geometry,
-                ..self.baseline.clone()
-            };
-            self.engine.render(gpu.device, gpu.queue, &original, None);
-        } else {
-            self.engine
-                .render(gpu.device, gpu.queue, &self.stack, split_x);
+        if self.texture_filter != Some(wanted_filter) {
+            if let Some(id) = self.texture_id.take() {
+                renderer_write(gpu).free_texture(&id);
+            }
+            self.texture_filter = Some(wanted_filter);
         }
-        self.render_ms = started.elapsed().as_secs_f32() * 1000.0;
-        self.needs_render = false;
+
+        if self.needs_render {
+            let started = Instant::now();
+            // Framing a crop shows the whole frame with no divider, so no split either.
+            let split_x = if self.split_active && !self.cropping {
+                Some(self.split_pos)
+            } else {
+                None
+            };
+            // Held on a phone: the original, in the frame it is edited in.
+            if self.photo_touch.holding {
+                let original = PhotoStack {
+                    geometry: self.stack.geometry,
+                    ..self.baseline.clone()
+                };
+                self.engine.render(gpu.device, gpu.queue, &original, None);
+            } else {
+                self.engine
+                    .render(gpu.device, gpu.queue, &self.stack, split_x);
+            }
+            self.render_ms = started.elapsed().as_secs_f32() * 1000.0;
+            self.needs_render = false;
+        }
 
         if self.texture_id.is_none() && self.ready_image().is_some() {
             if let Some(view) = self.engine.display_view() {
+                let filter = self.texture_filter.unwrap_or(wgpu::FilterMode::Linear);
                 let id = renderer_write(gpu).register_native_texture(
                     gpu.device,
                     view,
-                    wgpu::FilterMode::Linear,
+                    filter,
                 );
                 self.texture_id = Some(id);
                 // The photo replaces its stand-in from this frame.
