@@ -1618,7 +1618,10 @@ impl PhotoApp {
             return 0;
         };
         let density = fit * self.view.zoom * pixels_per_point;
-        let level = if density >= 1.0 || density <= 0.0 {
+        let is_cropped = !self.stack.geometry.crop.is_full_frame();
+        // Use full level 0 when cropped or when density >= 0.5 (zoom >= 50%) for maximum acuity
+        // matching Adobe Photoshop at the same crop and zoom settings.
+        let level = if density >= 0.5 || is_cropped || density <= 0.0 {
             0
         } else {
             ((1.0 / density).log2().floor() as u32).min(photo_engine::MAX_PREVIEW_LEVEL)
@@ -1729,7 +1732,7 @@ impl PhotoApp {
         // so inspection is pixel-crisp with no bilinear blur.
         let is_magnified = self
             .fit_scale()
-            .map_or(false, |fit| fit * self.view.zoom * pixels_per_point >= 0.99);
+            .is_some_and(|fit| fit * self.view.zoom * pixels_per_point >= 0.99);
         let wanted_filter = if is_magnified {
             wgpu::FilterMode::Nearest
         } else {

@@ -842,17 +842,18 @@ impl PhotoStack {
     /// A stack for newly opened RAW camera files, enabling standard capture sharpening
     /// matching Adobe Photoshop / Camera Raw defaults (Amount 0.40, Radius 1.0, Detail 25.0).
     pub fn for_raw() -> Self {
-        let mut s = Self::default();
-        s.sharpen = Module::new(
-            true,
-            Sharpen {
-                amount: 0.40,
-                radius: 1.0,
-                detail: 25.0,
-                masking: 0.0,
-            },
-        );
-        s
+        Self {
+            sharpen: Module::new(
+                true,
+                Sharpen {
+                    amount: 0.40,
+                    radius: 1.0,
+                    detail: 25.0,
+                    masking: 0.0,
+                },
+            ),
+            ..Default::default()
+        }
     }
 }
 

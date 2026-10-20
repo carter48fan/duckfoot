@@ -1068,7 +1068,19 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s_dn = spot_sample_fast(src + vec2<f32>(0.0, step), lod);
         let s_lf = spot_sample_fast(src - vec2<f32>(step, 0.0), lod);
         let s_rt = spot_sample_fast(src + vec2<f32>(step, 0.0), lod);
-        var laplacian = (s * 4.0 - (s_up + s_dn + s_lf + s_rt)) * exp2(-2.0 * lod);
+        let diag_step = step * 0.70710678;
+        let s_ul = spot_sample_fast(src + vec2<f32>(-diag_step, -diag_step), lod);
+        let s_ur = spot_sample_fast(src + vec2<f32>(diag_step, -diag_step), lod);
+        let s_dl = spot_sample_fast(src + vec2<f32>(-diag_step, diag_step), lod);
+        let s_dr = spot_sample_fast(src + vec2<f32>(diag_step, diag_step), lod);
+
+        // Circular isotropic 8-tap surround (equidistant at radius `step`)
+        let surround = (s_up + s_dn + s_lf + s_rt + s_ul + s_ur + s_dl + s_dr) * 0.125;
+        var laplacian = (s - surround) * 4.0 * exp2(-2.0 * lod);
+
+        // Detail slider (u.sharpen.z, 0..100, default 25): emphasizes fine micro-contrast textures
+        let detail_scale = 1.0 + (u.sharpen.z / 25.0 - 1.0) * 0.4;
+        laplacian = laplacian * max(detail_scale, 0.2);
 
         // Edge masking: if masking > 0.0, attenuate sharpening on flat regions and sensor noise
         if (u.sharpen.w > 0.0) {
@@ -1081,7 +1093,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         if (enabled(FLAG_RENDER_V2)) {
             let lo = min(s, min(min(s_up, s_dn), min(s_lf, s_rt)));
             let hi = max(s, max(max(s_up, s_dn), max(s_lf, s_rt)));
-            let room = (hi - lo) * 1.0;
+            let room_mult = 1.0 + (u.sharpen.z / 25.0) * 0.5;
+            let room = (hi - lo) * room_mult;
             s = clamp(s + laplacian * sharpen, max(lo - room, vec4<f32>(0.0)), hi + room);
         } else {
             s = clamp(s + laplacian * sharpen, vec4<f32>(0.0), vec4<f32>(2.0));
