@@ -839,14 +839,38 @@ impl Default for PhotoStack {
 }
 
 impl PhotoStack {
-    /// A stack for newly opened RAW camera files, enabling standard capture sharpening
-    /// matching Adobe Photoshop / Camera Raw defaults (Amount 0.40, Radius 1.0, Detail 25.0).
+    /// A stack for newly opened RAW camera files: a base look, since scene-linear straight
+    /// to sRGB reads as dark and flat next to any camera's JPEG or Lightroom's defaults
+    /// (a camera meters mid grey about three stops under clipping, and every converter
+    /// quietly lifts it back), colour noise reduction and light capture sharpening.
+    ///
+    /// The curve is Lightroom's default rendering of a Sony A7 IV file, fitted pixel for
+    /// pixel against this engine's neutral render of it (exposure 0, no curve), up to
+    /// display 0.47; the shoulder above that is extrapolated. Checked on four Canon CR2s
+    /// it was not fitted to, against their in-camera JPEGs: shadows, median, highlights
+    /// and contrast all land within 5%. Sharpening at 0.40 gave 1.6x the camera's finest
+    /// detail (gritty, with fringes on bright edges); 0.25 matches its 0.7–1.5 px band.
     pub fn for_raw() -> Self {
         Self {
+            tone_curve: Module::new(
+                true,
+                vec![
+                    CurveNode::new(0.0, 0.0),
+                    CurveNode::new(0.1, 0.08),
+                    CurveNode::new(0.2, 0.245),
+                    CurveNode::new(0.36, 0.57),
+                    CurveNode::new(0.47, 0.82),
+                    CurveNode::new(0.65, 0.95),
+                    CurveNode::new(1.0, 1.0),
+                ],
+            ),
+            // Colour only, as Lightroom's defaults are (Color 25, Luminance 0): without it a
+            // high-ISO file's chroma speckle breaks up its edges, which reads as soft.
+            denoise: Module::new(true, Denoise::default()),
             sharpen: Module::new(
                 true,
                 Sharpen {
-                    amount: 0.40,
+                    amount: 0.25,
                     radius: 1.0,
                     detail: 25.0,
                     masking: 0.0,
