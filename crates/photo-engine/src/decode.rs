@@ -325,6 +325,17 @@ impl RawDecoder for RawlerBackend {
     /// the whole file in memory twice and copies it twice before decoding starts, which
     /// on a 60 MB RAW is several times the cost of an uncompressed decode itself.
     fn decode_file(&self, path: &Path) -> Result<CfaImage> {
+        const MAX_RAW_BYTES: u64 = 512 << 20;
+        let len = std::fs::metadata(path)
+            .with_context(|| format!("{}: could not be read", path.display()))?
+            .len();
+        if len > MAX_RAW_BYTES {
+            bail!(
+                "{}: file size ({} MB) exceeds the 512 MB RAW limit",
+                path.display(),
+                len >> 20
+            );
+        }
         let source = RawSource::new(path)
             .with_context(|| format!("{}: could not be read", path.display()))?;
         decode_source_rawler(&source).with_context(|| format!("{}", path.display()))

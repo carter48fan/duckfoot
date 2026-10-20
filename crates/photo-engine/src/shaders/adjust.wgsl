@@ -240,6 +240,47 @@ fn curve_display(v: f32) -> f32 {
     return curve_display_row(v, 0);
 }
 
+// The 7-node Fritsch–Carlson monotone cubic spline of `PhotoStack::for_raw().tone_curve`,
+// evaluated in display space for the "before" half of a RAW split view.
+const RAW_CURVE_X = array<f32, 7>(0.0, 0.1, 0.2, 0.36, 0.47, 0.65, 1.0);
+const RAW_CURVE_Y = array<f32, 7>(0.0, 0.08, 0.245, 0.57, 0.82, 0.95, 1.0);
+const RAW_CURVE_M = array<f32, 7>(0.8, 1.225, 1.840625, 2.1519886, 1.4974748, 0.42857143, 0.14285715);
+
+fn raw_base_curve1(v: f32) -> f32 {
+    var e = 0.0;
+    if (v > 0.0031308) {
+        e = 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+    } else if (v > 0.0) {
+        e = v * 12.92;
+    }
+    if (e <= 0.0) {
+        return 0.0;
+    }
+    if (e >= 1.0) {
+        return srgb_to_linear1(1.0 + (e - 1.0));
+    }
+    var seg = 0u;
+    for (var i = 0u; i < 5u; i = i + 1u) {
+        if (e > RAW_CURVE_X[i + 1u]) {
+            seg = i + 1u;
+        }
+    }
+    let x0 = RAW_CURVE_X[seg];
+    let h = RAW_CURVE_X[seg + 1u] - x0;
+    let t = clamp((e - x0) / h, 0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * RAW_CURVE_Y[seg]
+        + (t3 - 2.0 * t2 + t) * h * RAW_CURVE_M[seg]
+        + (-2.0 * t3 + 3.0 * t2) * RAW_CURVE_Y[seg + 1u]
+        + (t3 - t2) * h * RAW_CURVE_M[seg + 1u];
+    return srgb_to_linear1(y);
+}
+
+fn raw_base_curve(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(raw_base_curve1(c.r), raw_base_curve1(c.g), raw_base_curve1(c.b));
+}
+
 // Mid grey, and what the display shows it as with filmic off: sRGB-encoded 0.18, 118/255.
 const MID_GREY: f32 = 0.18;
 const MID_GREY_DISPLAY: f32 = 0.46135;
@@ -1043,6 +1084,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             let raw = textureSampleLevel(original, sensor_sampler, uv, lod);
             var bc = balanced(raw, u.as_shot_wb.rgb);
             bc = vec3<f32>(dot(u.cam0.rgb, bc), dot(u.cam1.rgb, bc), dot(u.cam2.rgb, bc));
+            if (u.split.w > 0.5) {
+                bc = raw_base_curve(bc);
+            }
             return finish(bc, out_px);
         }
     }

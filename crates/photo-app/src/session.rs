@@ -340,7 +340,7 @@ impl PhotoApp {
             return;
         }
         let look = match photo_engine::load_sidecar(&prev) {
-            Ok(stack) => stack.unwrap_or_default(),
+            Ok(stack) => stack.unwrap_or_else(|| PhotoStack::for_path(&prev)),
             Err(e) => {
                 self.error = Some(format!("{}: {e:#}", file_name(&prev)));
                 return;
@@ -391,7 +391,7 @@ impl PhotoApp {
                     geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(
                         &path,
                     )),
-                    ..PhotoStack::default()
+                    ..PhotoStack::for_path(&path)
                 });
                 data.stack = Some(self.pasted_onto(&copied, &own));
             });
@@ -483,7 +483,7 @@ impl PhotoApp {
         // An unedited photo's copy starts from the camera's orientation, as it would.
         let stack = stack.unwrap_or_else(|| PhotoStack {
             geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(of)),
-            ..PhotoStack::default()
+            ..PhotoStack::for_path(of)
         });
         if let Err(e) = photo_engine::save_sidecar_full(&copy, Some(&stack), &metadata) {
             self.error = Some(format!("Could not make a copy of {}: {e:#}", file_name(of)));
@@ -845,11 +845,7 @@ impl PhotoApp {
             self.selection.select_single(path.to_path_buf());
         }
 
-        self.baseline = if photo_engine::is_raster_path(path) {
-            PhotoStack::default()
-        } else {
-            PhotoStack::for_raw()
-        };
+        self.baseline = PhotoStack::for_path(path);
         self.orientation_pending = true;
         self.stack = saved.clone().unwrap_or_else(|| self.baseline.clone());
         self.saved_stack = saved;

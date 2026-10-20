@@ -31,7 +31,7 @@ impl PhotoApp {
         }
 
         // Where each control returns to on double-click.
-        let d = PhotoStack::default();
+        let d = self.baseline.clone();
 
         match id {
             InspectorSectionId::Scope => {
@@ -652,7 +652,9 @@ impl PhotoApp {
                     ui.label(theme::tag(hint).color(theme::TEXT_FAINT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_reset = match chan {
-                            CurveChannel::Rgb => self.stack.tone_curve.params != identity_nodes(),
+                            CurveChannel::Rgb => {
+                                self.stack.tone_curve.params != d.tone_curve.params
+                            }
                             CurveChannel::Red => {
                                 self.stack.rgb_curves.params.red != identity_nodes()
                             }
@@ -667,7 +669,7 @@ impl PhotoApp {
                             if widgets::outlined_chip(ui, true, false, "reset").clicked() {
                                 match chan {
                                     CurveChannel::Rgb => {
-                                        self.stack.tone_curve.params = identity_nodes()
+                                        self.stack.tone_curve.params = d.tone_curve.params.clone()
                                     }
                                     CurveChannel::Red => {
                                         self.stack.rgb_curves.params.red = identity_nodes()

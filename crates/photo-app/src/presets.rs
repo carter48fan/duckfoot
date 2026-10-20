@@ -223,6 +223,19 @@ pub fn apply(base: &PhotoStack, look: &Look, strength: f32) -> PhotoStack {
     target.vibrance = d.vibrance.clone();
     target.vignette = d.vignette.clone();
     (look.build)(&mut target);
+    if !target.tone_curve.enabled {
+        // A look without a curve of its own (warm, cool, mono, dramatic) keeps the
+        // photo's baseline curve — notably a RAW's 7-node base curve — rather than
+        // flattening it back to a linear diagonal.
+        target.tone_curve = base.tone_curve.clone();
+        target.curve_domain = base.curve_domain;
+    } else if base.tone_curve.enabled
+        && base.tone_curve.params != photo_engine::curve::identity_nodes()
+    {
+        // Looks draw their S-curves and fades relative to a 0..1 diagonal; on a RAW
+        // (or a photo that already carries a curve), layer the look's curve over it.
+        target.tone_curve.params = compose_curve(&base.tone_curve.params, &target.tone_curve.params);
+    }
 
     let mut out = base.clone();
     macro_rules! blend {
@@ -354,6 +367,22 @@ fn lerp_curve(a: &[CurveNode], b: &[CurveNode], t: f32) -> Vec<CurveNode> {
         .collect()
 }
 
+/// Layer `outer` over `inner`: `outer(inner(x))` at every node of either curve.
+fn compose_curve(inner: &[CurveNode], outer: &[CurveNode]) -> Vec<CurveNode> {
+    let (li, lo) = (
+        photo_engine::curve::build_lut(inner),
+        photo_engine::curve::build_lut(outer),
+    );
+    let at =
+        |lut: &[f32], x: f32| lut[(x.clamp(0.0, 1.0) * (lut.len() - 1) as f32).round() as usize];
+    let mut xs: Vec<f32> = inner.iter().chain(outer.iter()).map(|n| n.x).collect();
+    xs.sort_by(|p, q| p.total_cmp(q));
+    xs.dedup_by(|p, q| (*p - *q).abs() < 0.02);
+    xs.into_iter()
+        .map(|x| CurveNode::new(x, at(&lo, at(&li, x)).clamp(0.0, 1.0)))
+        .collect()
+}
+
 // ── What a look is made of ──────────────────────────────────────────────────────────────
 
 fn tonal(s: &mut PhotoStack, highlights: f32, shadows: f32, whites: f32, blacks: f32) {
@@ -461,5 +490,21 @@ mod tests {
                 assert!((0.0..=1.0).contains(&n.x) && (0.0..=1.0).contains(&n.y));
             }
         }
+    }
+
+    #[test]
+    fn looks_keep_or_layer_over_a_raw_base_curve() {
+        let raw = PhotoStack::for_raw();
+        let warm = LOOKS.iter().find(|l| l.name == "warm").unwrap();
+        let after_warm = apply(&raw, warm, 1.0);
+        assert_eq!(after_warm.tone_curve, raw.tone_curve);
+
+        let matte = LOOKS.iter().find(|l| l.name == "matte").unwrap();
+        let after_matte = apply(&raw, matte, 1.0);
+        assert!(after_matte.tone_curve.enabled);
+        let lut = photo_engine::curve::build_lut(&after_matte.tone_curve.params);
+        // Faded blacks from matte (0.07) and lifted midtones from the RAW base curve (~0.57 at 0.36).
+        assert!((lut[0] - 0.07).abs() < 0.01);
+        assert!(lut[368] > 0.50);
     }
 }

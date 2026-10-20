@@ -190,6 +190,9 @@ pub fn parse_cube(input: &str) -> Result<Lut3D> {
                 .ok_or_else(|| anyhow!("Missing LUT_3D_SIZE value"))?
                 .parse()
                 .map_err(|e| anyhow!("Invalid LUT_3D_SIZE: {e}"))?;
+            if !(2..=256).contains(&s) {
+                bail!("LUT_3D_SIZE {s} is out of range (2..=256)");
+            }
             size = Some(s);
             is_3d = true;
         } else if first.eq_ignore_ascii_case("LUT_1D_SIZE") {
@@ -198,6 +201,9 @@ pub fn parse_cube(input: &str) -> Result<Lut3D> {
                 .ok_or_else(|| anyhow!("Missing LUT_1D_SIZE value"))?
                 .parse()
                 .map_err(|e| anyhow!("Invalid LUT_1D_SIZE: {e}"))?;
+            if !(2..=65_536).contains(&s) {
+                bail!("LUT_1D_SIZE {s} is out of range (2..=65536)");
+            }
             size = Some(s);
             is_3d = false;
         } else if first.eq_ignore_ascii_case("DOMAIN_MIN") {
@@ -229,6 +235,10 @@ pub fn parse_cube(input: &str) -> Result<Lut3D> {
                 .parse()?;
             domain_max = [r, g, b];
         } else if let Ok(r) = first.parse::<f32>() {
+            const MAX_LUT_ENTRIES: usize = 256 * 256 * 256;
+            if table.len() >= MAX_LUT_ENTRIES {
+                bail!("LUT file exceeds maximum entry count ({MAX_LUT_ENTRIES})");
+            }
             let g: f32 = parts
                 .next()
                 .ok_or_else(|| anyhow!("Missing green channel in data row: {line}"))?
@@ -352,5 +362,12 @@ LUT_3D_SIZE 2
         let squared = parse_cube(&text).unwrap().bake();
         let [r, ..] = squared.at([0.5, 0.0, 0.0]);
         assert!((r - 0.25).abs() < 0.02, "half squared is {r}");
+    }
+
+    #[test]
+    fn rejects_oversized_lut_dimensions() {
+        assert!(parse_cube("LUT_3D_SIZE 1000\n0.0 0.0 0.0\n").is_err());
+        assert!(parse_cube("LUT_3D_SIZE 1\n0.0 0.0 0.0\n").is_err());
+        assert!(parse_cube("LUT_1D_SIZE 100000\n0.0 0.0 0.0\n").is_err());
     }
 }
