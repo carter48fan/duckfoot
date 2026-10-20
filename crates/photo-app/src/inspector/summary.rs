@@ -90,14 +90,19 @@ pub(crate) fn summarise(
         }
         S::ToneCurve => {
             let nodes = &s.tone_curve.params;
-            let rgb_mod = s.rgb_curves.params != d.rgb_curves.params;
-            let modified = *nodes != d.tone_curve.params || rgb_mod;
+            let rgb_mod = s.rgb_curves.params != d.rgb_curves.params
+                || s.rgb_curves.enabled != d.rgb_curves.enabled;
+            let tc_mod =
+                *nodes != d.tone_curve.params || s.tone_curve.enabled != d.tone_curve.enabled;
+            let modified = tc_mod || rgb_mod;
             let text = if rgb_mod && *nodes != d.tone_curve.params {
                 format!("{} pts + RGB", nodes.len())
             } else if rgb_mod {
                 "RGB curves".to_string()
             } else if *nodes != d.tone_curve.params {
                 format!("{} pts", nodes.len())
+            } else if nodes.len() > 2 {
+                "base curve".to_string()
             } else {
                 "linear".to_string()
             };
@@ -183,7 +188,10 @@ pub(crate) fn summarise(
         }
         S::Sharpen => {
             let p = &s.sharpen.params;
-            (format!("amount {:.2}", p.amount), *p != d.sharpen.params)
+            (
+                format!("amount {:.2}", p.amount),
+                *p != d.sharpen.params || s.sharpen.enabled != d.sharpen.enabled,
+            )
         }
         S::Denoise => {
             let p = &s.denoise.params;
@@ -192,7 +200,10 @@ pub(crate) fn summarise(
             } else {
                 format!("lum {:.0} · col {:.0}", p.luminance, p.color)
             };
-            (text, *p != d.denoise.params)
+            (
+                text,
+                *p != d.denoise.params || s.denoise.enabled != d.denoise.enabled,
+            )
         }
         S::Lens => {
             let p = &s.lens.params;

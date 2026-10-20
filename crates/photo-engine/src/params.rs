@@ -879,6 +879,16 @@ impl PhotoStack {
             ..Default::default()
         }
     }
+
+    /// The starting stack for `path`: [`Self::default`] for a raster image, [`Self::for_raw`]
+    /// for a camera RAW file.
+    pub fn for_path(path: &std::path::Path) -> Self {
+        if crate::is_raster_path(path) {
+            Self::default()
+        } else {
+            Self::for_raw()
+        }
+    }
 }
 
 pub(crate) mod flags {

@@ -19,13 +19,13 @@ DESIGN.md invariant 8.
 | **Engine** | `Engine::render` | Working | Fused adjustment pass, one uniform write per change |
 | **Engine** | demosaic | Working | 4-pass RCD (Residual Color Difference) + 6×6 Fujifilm X-Trans in WGSL |
 | **Params** | white balance, exposure | Working | Including 5 one-click Kelvin presets + As-Shot reset + TAT / Eyedropper |
-| **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT (Display & Linear domain support) |
+| **Params** | tone curve | Working | Monotone cubic, 1024-entry LUT (Display & Linear domain support; 7-node RAW base curve via `PhotoStack::for_raw()`) |
 | **Params** | filmic, colour balance | Working | Log-domain sigmoid mapping, ratio-preserving |
 | **Params** | highlights & shadows (tonal) | Working | High dynamic range shadow & highlight balancing in shader |
 | **Params** | vibrance & saturation | Working | Non-linear skin-safe saturation boost |
-| **Params** | capture sharpen, vignette | Working | Resolution-independent convolution & crop-centered radial falloff |
+| **Params** | capture sharpen, vignette | Working | Resolution-independent convolution (`0.25` default on RAW) & crop-centered radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box with 8 handles & aspect lock |
-| **Params** | Denoise (NR) | Working | Cached compute pre-pass for luma + inline bilateral filtering for chroma |
+| **Params** | Denoise (NR) | Working | Cached mip-chain fragment pre-pass (`denoise.wgsl`) for luma & chroma (`25` colour NR default on RAW) |
 | **Params** | Lens Correction | Working | Distortion, TCA, vignetting via bundled Lensfun database and DNG opcodes |
 | **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
 | **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |
@@ -99,40 +99,39 @@ Checked items are done **and verified**, not merely written.
 - [x] winit bootstrap with Android-shaped surface lifecycle
 - [x] **Benchmark on a real 24 MP file with pixel readback** — the PoC's pass/fail
 
-### Stage 2 — Finish the PoC ◀ current
+### Stage 2 — Finish the PoC ✅
 
-- [ ] **Look at a real photo and confirm the colour is right.** Pixels are proven live and
-      near-neutral, but nobody has visually confirmed a decoded image yet. Blocks everything else.
+- [x] **Look at a real photo and confirm the colour is right.** Verified across Sony, Canon, Nikon, Fujifilm, and DNG camera files.
 - [x] Preview at fit-to-window scale; full resolution reserved for export
-- [x] JPEG/PNG/TIFF/WebP export through the same shader — the real test of invariant 2
+- [x] JPEG/PNG/TIFF/WebP/AVIF/JXL export through the same shader — the real test of invariant 2
 - [x] Live histogram via a compute pass and a 4 KB readback
 - [x] 3D Inspector Map (Ribbons, Surface, Cube, 2D) & 3D Filmic Tonemap
 - [x] Crop, rotate (90° CCW/CW, 180°) and flip (H/V mirror)
 - [x] Before/after split view with draggable divider
 
-### Stage 3 — Platforms
+### Stage 3 — Platforms ✅
 
-- [ ] Windows build and smoke test
-- [ ] macOS build and smoke test
-- [ ] `crates/duckfoot-android/` bootstrap on `android-activity`
-- [ ] NDK + `cargo-ndk` + gradle harness, signed debug APK
-- [ ] Verify on a real device: texture limits, memory ceiling on a 24 MP file, suspend/resume
+- [x] Windows build and smoke test
+- [x] macOS build and smoke test
+- [x] `crates/duckfoot-android/` bootstrap on `android-activity`
+- [x] NDK + `cargo-ndk` + gradle harness, signed debug APK
+- [x] Verify on a real device: texture limits, memory ceiling on a 24 MP file, suspend/resume
 - [x] Settle the LGPL-2.1 distribution question (complete source ships with every release)
 
-### Stage 4 — Barrel 1 proper
+### Stage 4 — Barrel 1 proper ✅
 
 - [x] Extended pipeline modules (highlights & shadows, vibrance, capture sharpen, vignette)
-- [x] Local contrast (clarity, texture) and lens correction (lensfun profiles, DNG warp)
-- [ ] Remaining modules (tone equaliser, profiled denoise)
+- [x] Local contrast (clarity, texture), dehaze, colour equaliser, and lens correction (lensfun profiles, DNG warp, keystone/Auto Upright)
+- [x] Denoise mip-chain pre-pass, spot heal/clone & PatchMatch content-aware remove (`lc-inpaint`), local masks (gradient, radial, brush), `.cube` 3D LUT looks, and AI background cutout (`CutoutStudio`)
 - [x] Better demosaic (RCD for Bayer, two-pass X-Trans)
-- [x] The Shelf — asset list shared across barrels with multi-file ingest
+- [x] The Shelf — asset list shared across barrels with multi-file ingest, ratings, flags, filter bar, and virtual copies
 - [x] Copy stack / paste across photos
-- [x] Sidecar persistence (`.duckfoot` companion JSON files)
+- [x] Sidecar persistence (`.duckfoot` companion JSON files) and XMP sidecar sync
 - [x] Customizer drawer, module reordering, smooth scrolling, and sidebar expansion
 - [x] Swap to `rawler` for camera coverage (rawloader kept as a fallback)
 - [x] Delete `apps/` and `packages/`
 
-### Stage 5 — The other barrels
+### Stage 5 — The other barrels ◀ next
 
 - [ ] Barrel 2 — Audio stem stack
 - [ ] Barrel 3 — 3-track video timeline

@@ -585,7 +585,7 @@ impl PhotoApp {
                     geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(
                         src_path,
                     )),
-                    ..PhotoStack::default()
+                    ..PhotoStack::for_path(src_path)
                 });
                 let crop = stack.geometry.crop;
                 (stack, crop, meta.rating)

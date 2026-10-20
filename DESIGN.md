@@ -14,14 +14,13 @@ run opens on one welcome card that offers its tour, with Skip; after that the sa
 
 ## Where this document is aimed right now
 
-Duckfoot is being rebuilt as a **native Rust application on wgpu**. The current work is
-a **proof of concept for Barrel 1 only** — the photo studio and RAW processor — running
-on Linux. Audio and Video are design, not code, and nothing in this repo should claim
-otherwise.
+Duckfoot is built as a **native Rust application on wgpu**. **Barrel 1 — the photo studio
+and RAW processor — is shipping (`v0.3.x`)** across Linux, Windows, macOS, and Android.
+Audio and Video are design, not code, and nothing in this repo should claim otherwise.
 
-The PoC has one question to answer: *can a fixed-order RAW pipeline on the GPU stay
-genuinely interactive on a full-resolution sensor image?* Everything here is subordinate
-to answering that.
+Barrel 1 was built to answer one foundational question: *can a fixed-order RAW pipeline on
+the GPU stay genuinely interactive on a full-resolution sensor image?* Everything in the
+engine is subordinate to that goal.
 
 The three barrels remain the product thesis, and Barrel 1 is built so the other two can
 land beside it later without redesign. They are described at the end of this document so
@@ -47,10 +46,10 @@ the hardware least able to absorb it.
 
 | Platform | Status | Shell |
 |---|---|---|
-| Linux (Wayland/X11) | PoC target | `winit` + `egui-winit` |
-| Windows | planned | same, new bootstrap |
-| macOS | planned | same, new bootstrap |
-| Android (APK) | planned | `winit` + `android-activity`, same UI code |
+| Linux (Wayland/X11) | shipping | `winit` + `egui-winit` |
+| Windows | shipping | same, desktop bootstrap |
+| macOS | shipping | same, desktop bootstrap |
+| Android (APK) | shipping | `winit` + `android-activity`, same UI code |
 
 All four run the same engine crate and the same egui UI. Only the entry point differs.
 This is the entire reason for the crate split described below — an Android build must be
@@ -84,26 +83,30 @@ makes the Android bootstrap a small file instead of a fork.
                                   │
               ┌───────────────────┘
               ▼
-        PASS 1  demosaic          ──►  SENSOR TEXTURE  RGBA16Float, immutable
+        PASS 1  demosaic          ──►  SENSOR TEXTURE  RGBA16Float + mip chain, immutable
               │                         RCD, four passes, for Bayer;
               │                         two passes of its own for X-Trans
               │                         linear camera-native RGB
               │                         highlight reconstruction (neutral in A)
               │
+              ├─► PASS 1b (cached when Denoise changes) ──► DENOISED SENSOR + mips
+              │
               ▼
         PASS 2  the adjustment chain — ONE fragment shader, ONE pass
-              │   levels · white balance · camera→working matrix · exposure
-              │   tone curve (1D LUT texture) · filmic · colour eq · saturation
-              │   · colour balance (after saturation, so black and white can be toned)
+              │   geometry/perspective/lens warp · spot heal/clone & PatchMatch atlas
+              │   white balance · camera→Rec.2020 matrix · exposure · local masks (×8)
+              │   highlights/shadows/whites/blacks · clarity/texture/dehaze · capture sharpen
+              │   tone curve & RGB curves (1D LUT) · filmic · colour eq · vibrance/saturation
+              │   · colour balance · vignette · 3D .cube look · soft proofing
               │   all driven by ONE uniform buffer
               ▼
-        PASS 3  output transform → sRGB ──► egui texture, presented
+        PASS 3  output transform → display/export space ──► egui texture, presented
               │
               └─► PASS 2b (compute, atomics) ──► histogram buffer, 4 KB readback
 ```
 
-**Passes 1 is run once per image. Pass 2 and 3 run per frame. Nothing is read back per
-frame except 4 KB of histogram bins.**
+**Pass 1 runs once per image (and Pass 1b only when Denoise changes). Pass 2 runs per frame.
+Nothing is read back per frame except 4 KB of histogram bins.**
 
 ## Why the whole chain is one shader pass
 
@@ -113,8 +116,9 @@ DESIGN's Barrel 1 rule has always been that **the module stack is fixed-order an
 rearrangeable** — that is the line that stops the photo studio becoming a node graph.
 
 A fixed order means the chain is known at compile time. A known chain can be **fused into
-a single fragment shader**: one texture read and one texture write per pixel for the
-entire fourteen-module stack, instead of a round trip to VRAM per module.
+a single fragment shader**: one texture read (plus small neighbourhood taps where spatial
+modules are enabled) and one texture write per pixel for the entire seventeen-module stack,
+instead of a round trip to VRAM per module.
 
 The old JS implementation allocated a buffer per module. At preview scale that is ~20 MB
 of traffic per enabled module per frame. Fusing the chain makes the pipeline

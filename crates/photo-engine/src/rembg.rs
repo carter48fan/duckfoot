@@ -322,42 +322,51 @@ impl RembgSession {
         Ok(pred_320)
     }
 
-    /// Compute an alpha mask from a cached 320x320 prediction with fine-tuning parameters and touch-ups.
-    pub fn compute_mask_from_prediction(
+    /// Upscale a 320x320 normalized probability map once to `(orig_w, orig_h)` so interactive
+    /// slider drags and brush strokes do not re-run bicubic interpolation on every frame.
+    pub fn upscale_prediction(pred_320: &[f32], orig_w: u32, orig_h: u32) -> GrayImage {
+        let mut raw_320 = GrayImage::new(320, 320);
+        for (dst, &v) in raw_320.as_mut().iter_mut().zip(pred_320.iter()) {
+            *dst = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        if orig_w == 320 && orig_h == 320 {
+            raw_320
+        } else {
+            DynamicImage::ImageLuma8(raw_320)
+                .resize_exact(orig_w, orig_h, FilterType::CatmullRom)
+                .to_luma8()
+        }
+    }
+
+    /// Compute an alpha mask from a pre-upscaled probability image with fine-tuning parameters and touch-ups.
+    pub fn compute_mask_from_upscaled(
         &self,
-        pred_320: &[f32],
-        orig_w: u32,
-        orig_h: u32,
+        pred_upscaled: &GrayImage,
         params: &CutoutParams,
         touchups: &[TouchupDab],
     ) -> Result<GrayImage> {
         let t = params.threshold.clamp(0.01, 0.99);
-        let feather_norm = (params.feather / 100.0).clamp(0.005, 0.45);
-        let t_low = (t - feather_norm).max(0.0);
-        let t_high = (t + feather_norm).min(1.0);
+        // Tight anti-aliasing span in probability space; spatial edge softening in pixels
+        // is performed after morphological shift and brush touch-ups via `spatial_feather`.
+        let aa_half = 0.015;
+        let t_low = (t - aa_half).max(0.0);
+        let t_high = (t + aa_half).min(1.0);
         let span = (t_high - t_low).max(1e-5);
 
-        let mut mask_320 = GrayImage::new(320, 320);
-        for y in 0..320 {
-            for x in 0..320 {
-                let v = pred_320[y * 320 + x];
-                let smooth = if v <= t_low {
-                    0.0
-                } else if v >= t_high {
-                    1.0
-                } else {
-                    let s = (v - t_low) / span;
-                    s * s * (3.0 - 2.0 * s)
-                };
-                mask_320.put_pixel(x as u32, y as u32, Luma([(smooth * 255.0).round() as u8]));
-            }
+        let (orig_w, orig_h) = pred_upscaled.dimensions();
+        let mut mask_orig = GrayImage::new(orig_w, orig_h);
+        for (dst, &src_u8) in mask_orig.as_mut().iter_mut().zip(pred_upscaled.as_raw()) {
+            let v = src_u8 as f32 / 255.0;
+            let smooth = if v <= t_low {
+                0.0
+            } else if v >= t_high {
+                1.0
+            } else {
+                let s = (v - t_low) / span;
+                s * s * (3.0 - 2.0 * s)
+            };
+            *dst = (smooth * 255.0).round() as u8;
         }
-
-        // Upscale back to original image size
-        let mask_dyn = DynamicImage::ImageLuma8(mask_320);
-        let mut mask_orig = mask_dyn
-            .resize_exact(orig_w, orig_h, FilterType::CatmullRom)
-            .to_luma8();
 
         if params.edge_shift != 0 {
             morphological_shift(&mut mask_orig, params.edge_shift);
@@ -367,7 +376,24 @@ impl RembgSession {
             apply_touchups(&mut mask_orig, touchups);
         }
 
+        if params.feather >= 0.5 {
+            spatial_feather(&mut mask_orig, params.feather);
+        }
+
         Ok(mask_orig)
+    }
+
+    /// Compute an alpha mask from a cached 320x320 prediction with fine-tuning parameters and touch-ups.
+    pub fn compute_mask_from_prediction(
+        &self,
+        pred_320: &[f32],
+        orig_w: u32,
+        orig_h: u32,
+        params: &CutoutParams,
+        touchups: &[TouchupDab],
+    ) -> Result<GrayImage> {
+        let upscaled = Self::upscale_prediction(pred_320, orig_w, orig_h);
+        self.compute_mask_from_upscaled(&upscaled, params, touchups)
     }
 
     /// Compute an alpha mask with full fine-tuning parameters and touch-up points.
@@ -545,6 +571,46 @@ fn morphological_shift(mask: &mut GrayImage, shift: i32) {
                 }
             }
             dst[row_start + x] = val;
+        }
+    }
+}
+
+/// Two-pass separable box blur (tent filter) across a radius of `feather` pixels.
+fn spatial_feather(mask: &mut GrayImage, feather: f32) {
+    let r = (feather.round() as usize).clamp(1, 20);
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut temp = vec![0u8; w * h];
+    for _ in 0..2 {
+        let src = mask.as_raw();
+        for y in 0..h {
+            let row = y * w;
+            for x in 0..w {
+                let x_min = x.saturating_sub(r);
+                let x_max = (x + r).min(w - 1);
+                let mut sum = 0u32;
+                for kx in x_min..=x_max {
+                    sum += src[row + kx] as u32;
+                }
+                let count = (x_max - x_min + 1) as u32;
+                temp[row + x] = ((sum + count / 2) / count) as u8;
+            }
+        }
+        let dst = mask.as_mut();
+        for y in 0..h {
+            let y_min = y.saturating_sub(r);
+            let y_max = (y + r).min(h - 1);
+            let count = (y_max - y_min + 1) as u32;
+            let row = y * w;
+            for x in 0..w {
+                let mut sum = 0u32;
+                for ky in y_min..=y_max {
+                    sum += temp[ky * w + x] as u32;
+                }
+                dst[row + x] = ((sum + count / 2) / count) as u8;
+            }
         }
     }
 }

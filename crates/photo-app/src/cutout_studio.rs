@@ -35,6 +35,7 @@ pub struct CutoutStudioState {
     pub touchups: Vec<TouchupDab>,
     pub export_matte_white: bool,
     pub cached_pred_320: Option<Vec<f32>>,
+    pub cached_upscaled_pred: Option<image::GrayImage>,
     pub cached_source_path: Option<PathBuf>,
     pub preview_texture: Option<egui::TextureHandle>,
     pub preview_base_rgba: Option<RgbaImage>,
@@ -58,6 +59,7 @@ impl Default for CutoutStudioState {
             touchups: Vec::new(),
             export_matte_white: false,
             cached_pred_320: None,
+            cached_upscaled_pred: None,
             cached_source_path: None,
             preview_texture: None,
             preview_base_rgba: None,
@@ -70,6 +72,7 @@ impl CutoutStudioState {
     /// Invalidate caches when changing loaded photo.
     pub fn reset_cache(&mut self) {
         self.cached_pred_320 = None;
+        self.cached_upscaled_pred = None;
         self.cached_source_path = None;
         self.preview_texture = None;
         self.preview_base_rgba = None;
@@ -81,6 +84,7 @@ impl CutoutStudioState {
     pub fn invalidate_prediction(&mut self) {
         self.cached_source_path = None;
         self.cached_pred_320 = None;
+        self.cached_upscaled_pred = None;
         self.preview_texture = None;
         self.preview_base_rgba = None;
         self.status = None;
@@ -97,6 +101,7 @@ impl CutoutStudioState {
             self.touchups.clear();
         }
         self.cached_pred_320 = None;
+        self.cached_upscaled_pred = None;
         self.cached_source_path = Some(path.to_path_buf());
         self.preview_texture = None;
         self.preview_base_rgba = None;
@@ -124,6 +129,8 @@ impl CutoutStudioState {
         match RembgSession::auto() {
             Ok(session) => match session.raw_prediction_320(&preview_img) {
                 Ok(pred) => {
+                    self.cached_upscaled_pred =
+                        Some(RembgSession::upscale_prediction(&pred, pw, ph));
                     self.cached_pred_320 = Some(pred);
                     self.update_preview_texture(ctx);
                     self.status = Some(
@@ -196,12 +203,22 @@ impl CutoutStudioState {
             return;
         };
         let (w, h) = base_rgba.dimensions();
+        if self
+            .cached_upscaled_pred
+            .as_ref()
+            .is_none_or(|up| up.dimensions() != (w, h))
+        {
+            self.cached_upscaled_pred = Some(RembgSession::upscale_prediction(pred, w, h));
+        }
+        let Some(upscaled) = &self.cached_upscaled_pred else {
+            return;
+        };
 
         let Ok(session) = RembgSession::auto() else {
             return;
         };
         let Ok(mask) =
-            session.compute_mask_from_prediction(pred, w, h, &self.params, &self.touchups)
+            session.compute_mask_from_upscaled(upscaled, &self.params, &self.touchups)
         else {
             return;
         };

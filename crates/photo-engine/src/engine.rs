@@ -231,6 +231,8 @@ pub struct LoadedImage {
     /// The sensor's own dimensions, which never change once decoded.
     pub sensor_width: u32,
     pub sensor_height: u32,
+    /// True when loaded from a camera CFA mosaic, false for a raster file.
+    is_raw: bool,
     geometry: Geometry,
     pub make: String,
     pub model: String,
@@ -1871,10 +1873,18 @@ impl Engine {
         }
         self.look_loaded = false;
         if let Some(path) = &wanted {
-            match std::fs::read_to_string(path)
-                .map_err(anyhow::Error::from)
-                .and_then(|text| crate::lut3d::parse_cube(&text))
-            {
+            const MAX_CUBE_BYTES: u64 = 16 << 20;
+            let read_cube = || -> Result<crate::lut3d::Lut3D> {
+                use std::io::Read;
+                let file = std::fs::File::open(path)?;
+                let mut text = String::new();
+                file.take(MAX_CUBE_BYTES + 1).read_to_string(&mut text)?;
+                if text.len() as u64 > MAX_CUBE_BYTES {
+                    anyhow::bail!("LUT file exceeds 16 MiB limit");
+                }
+                crate::lut3d::parse_cube(&text)
+            };
+            match read_cube() {
                 Ok(lut) => {
                     write_table(queue, &self.look_table, &lut.bake());
                     self.look_loaded = true;
@@ -2089,6 +2099,55 @@ impl Engine {
             }
             // The preview shows the photo without noise reduction rather than nothing.
             Err(e) => log::error!("{e:#}; previewing without noise reduction"),
+        }
+    }
+
+    /// Prepare noise reduction for an export at `level`. Reuses the preview's denoised
+    /// texture when it already covers `level` with the same parameters; otherwise allocates
+    /// a temporary one for the call, stepping down one mip level (1/4 VRAM) or falling back
+    /// to the un-denoised sensor if the GPU refuses the full-resolution allocation.
+    fn export_denoise(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        level: u32,
+    ) -> (Option<Denoised>, Option<u32>) {
+        let Some(image) = &self.image else {
+            return (None, None);
+        };
+        let Some((params, local)) =
+            denoise_wanted(stack, (image.sensor_width, image.sensor_height))
+        else {
+            return (None, None);
+        };
+        let level = level.min(image.mip_levels.saturating_sub(1));
+        if let Some((d, _)) = &image.denoised {
+            if d.base == level && d.params == params && d.local == local {
+                return (None, Some(d.base));
+            }
+        }
+        match self.make_denoised(device, queue, &params, &local, level, None) {
+            Ok(d) => {
+                let base = d.base;
+                (Some(d), Some(base))
+            }
+            Err(e) => {
+                let fallback = (level + 1).min(image.mip_levels.saturating_sub(1));
+                if fallback > level {
+                    if let Ok(d) =
+                        self.make_denoised(device, queue, &params, &local, fallback, None)
+                    {
+                        log::warn!(
+                            "{e:#}; exporting noise reduction at mip level {fallback} instead"
+                        );
+                        let base = d.base;
+                        return (Some(d), Some(base));
+                    }
+                }
+                log::warn!("{e:#}; exporting without noise reduction");
+                (None, None)
+            }
         }
     }
 
@@ -2412,6 +2471,7 @@ impl Engine {
         // RCD left to run a slice at a time, when this photo opens progressively.
         let mut deferred = None;
         let mut rcd_left = None;
+        let is_raw = matches!(pixels, UploadedPixels::Mosaic { .. });
         match pixels {
             UploadedPixels::Mosaic {
                 texture: mosaic,
@@ -2610,6 +2670,7 @@ impl Engine {
             height: out_h,
             sensor_width: width,
             sensor_height: height,
+            is_raw,
             geometry,
             make,
             model,
@@ -2833,13 +2894,8 @@ impl Engine {
             .geometry
             .output_size(image.sensor_width, image.sensor_height);
         check_size(device, out_w, out_h)?;
-        let denoised = match denoise_wanted(stack, (image.sensor_width, image.sensor_height)) {
-            Some((params, local)) => {
-                Some(self.make_denoised(device, queue, &params, &local, 0, None)?)
-            }
-            None => None,
-        };
-        let sizes = ((out_w, out_h), (out_w, out_h), 0, 0);
+        let (denoised, denoise_base) = self.export_denoise(device, queue, stack, 0);
+        let sizes = ((out_w, out_h), (out_w, out_h), 0, denoise_base.unwrap_or(0));
         let target = Target {
             out: crate::gamut::Screen::of(space),
             proof: None,
@@ -2852,7 +2908,13 @@ impl Engine {
         };
         let rect = stack.geometry.crop.to_pixels(out_w, out_h);
         let mut map = crate::gainmap::Measure::new(rect.2, rect.3);
-        let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
+        let sensor = denoised
+            .as_ref()
+            .map(|d| &d.view)
+            .or_else(|| {
+                denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view))
+            })
+            .unwrap_or(&image.sensor_view);
         let texel = DEEP_OUTPUT_FORMAT.block_copy_size(None).unwrap_or(8);
         self.render_bands_into(
             device,
@@ -2927,15 +2989,12 @@ impl Engine {
             let ratio = (rw / tw.max(1)).min(rh / th.max(1)).max(1);
             ratio.ilog2().min(image.mip_levels.saturating_sub(1))
         });
-        // Noise reduction at the level drawn, for this export only.
-        let denoised = match denoise_wanted(stack, (image.sensor_width, image.sensor_height)) {
-            Some((params, local)) => {
-                Some(self.make_denoised(device, queue, &params, &local, level, None)?)
-            }
-            None => None,
-        };
+        // Noise reduction at the level drawn, reusing the preview's denoised texture when it
+        // already covers `level`, or stepping down to a coarser mip / un-denoised sensor if
+        // the GPU refuses a full-resolution allocation.
+        let (denoised, denoise_base) = self.export_denoise(device, queue, stack, level);
         let drawn = scaled(out_w, out_h, level);
-        let sizes = ((out_w, out_h), drawn, level, level);
+        let sizes = ((out_w, out_h), drawn, level, denoise_base.unwrap_or(0));
         // 8-bit is dithered like the preview; 16-bit has no steps to hide.
         let target = Target {
             out: crate::gamut::Screen::of(space),
@@ -2954,15 +3013,20 @@ impl Engine {
             (OUTPUT_FORMAT, &self.adjust_pipeline)
         };
         let texel = format.block_copy_size(None).unwrap_or(4);
+        let sensor = denoised
+            .as_ref()
+            .map(|d| &d.view)
+            .or_else(|| {
+                denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view))
+            })
+            .unwrap_or(&image.sensor_view);
         let Some((tw, th)) = resize_to else {
-            let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
             let pixels =
                 self.render_bands(device, queue, image, sensor, pipeline, format, rect, texel)?;
             return Ok((rw, rh, pixels));
         };
         let full = scoped(device, "export render", || {
             let full = output_texture_as(device, drawn.0, drawn.1, format);
-            let sensor = denoised.as_ref().map_or(&image.sensor_view, |d| &d.view);
             let bind = self.adjust_bind(
                 device,
                 sensor,
@@ -3472,7 +3536,7 @@ impl Engine {
                     if g.mirror_v { -1.0 } else { 1.0 },
                 ],
                 turns: [g.quarter_turns as u32, 0, 0, 0],
-                split: [split_x.unwrap_or(-1.0), 0.0, 0.0, 0.0],
+                split: [split_x.unwrap_or(-1.0), 0.0, 0.0, f32::from(image.is_raw)],
                 as_shot_wb: [image.wb[0], image.wb[1], image.wb[2], 0.0],
                 tonal: [
                     stack.tonal.params.highlights,
