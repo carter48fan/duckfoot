@@ -593,10 +593,10 @@ impl PhotoApp {
                 let slack = ((img * scale - rect.size()) * 0.5).max(egui::Vec2::ZERO) / scale;
                 self.view.pan = self.view.pan.clamp(-slack, slack);
 
-                let dest = egui::Rect::from_center_size(
-                    rect.center() - self.view.pan * scale,
-                    img * scale,
-                );
+                let raw_center = rect.center() - self.view.pan * scale;
+                let size = (img * scale).round();
+                let min = (raw_center - size * 0.5).round();
+                let dest = egui::Rect::from_min_size(min, size);
                 let frame = frame_of(dest);
                 self.stage_frame = Some(frame);
                 let painter = ui.painter().with_clip_rect(rect);

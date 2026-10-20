@@ -210,12 +210,21 @@ fn fs_green(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let e_grad = EPS + abs(cfa(x - 1, y) - cfa(x + 1, y)) + abs(c - cfa(x + 2, y))
         + abs(cfa(x + 1, y) - cfa(x + 3, y)) + abs(cfa(x + 2, y) - cfa(x + 4, y));
 
-    // Each neighbour's green, corrected by the low-pass ratio towards it.
+    // Each neighbour's green: blend RCD's ratio estimation with centered second-order
+    // chromatic Laplacian to achieve high edge sharpness without false colour on high frequencies.
     let lp = low_pass(x, y);
-    let n_est = cfa(x, y - 1) * 2.0 * lp / (EPS + lp + low_pass(x, y - 2));
-    let s_est = cfa(x, y + 1) * 2.0 * lp / (EPS + lp + low_pass(x, y + 2));
-    let w_est = cfa(x - 1, y) * 2.0 * lp / (EPS + lp + low_pass(x - 2, y));
-    let e_est = cfa(x + 1, y) * 2.0 * lp / (EPS + lp + low_pass(x + 2, y));
+    let n_rcd = cfa(x, y - 1) * 2.0 * lp / (EPS + lp + low_pass(x, y - 2));
+    let s_rcd = cfa(x, y + 1) * 2.0 * lp / (EPS + lp + low_pass(x, y + 2));
+    let w_rcd = cfa(x - 1, y) * 2.0 * lp / (EPS + lp + low_pass(x - 2, y));
+    let e_rcd = cfa(x + 1, y) * 2.0 * lp / (EPS + lp + low_pass(x + 2, y));
+
+    let v_lap = (2.0 * c - cfa(x, y - 2) - cfa(x, y + 2)) * 0.25;
+    let h_lap = (2.0 * c - cfa(x - 2, y) - cfa(x + 2, y)) * 0.25;
+
+    let n_est = mix(n_rcd, cfa(x, y - 1) + v_lap, 0.5);
+    let s_est = mix(s_rcd, cfa(x, y + 1) + v_lap, 0.5);
+    let w_est = mix(w_rcd, cfa(x - 1, y) + h_lap, 0.5);
+    let e_est = mix(e_rcd, cfa(x + 1, y) + h_lap, 0.5);
 
     let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
     let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
