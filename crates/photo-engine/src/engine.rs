@@ -605,6 +605,9 @@ pub struct Engine {
     progressive: bool,
     /// About how many pixels of demosaic work `advance_demosaic` records a call.
     slice_pixels: u64,
+    /// Renders logged (`gpu_checkpoint`) since the photo, its demosaic or its noise
+    /// reduction last changed: the first few, not every frame.
+    traced_renders: u32,
     /// The open photo's demosaic, while it is still running. Locked so that a reader of
     /// full-resolution pixels can finish it from `&self`.
     pending: std::sync::Mutex<Option<PendingDemosaic>>,
@@ -1524,6 +1527,7 @@ impl Engine {
             scratch: None,
             progressive: false,
             slice_pixels: slice_pixels_for(device),
+            traced_renders: 0,
             pending: std::sync::Mutex::new(None),
             prepared: None,
             retired_sensor: None,
@@ -1799,6 +1803,14 @@ impl Engine {
             );
         }
         queue.submit([encoder.finish()]);
+        gpu_checkpoint(
+            device,
+            &format!(
+                "noise reduction ({}x{} from level {base}, {levels} levels)",
+                (image.sensor_width >> base).max(1),
+                (image.sensor_height >> base).max(1)
+            ),
+        );
         Ok(Denoised {
             base,
             params: *params,
@@ -2096,6 +2108,7 @@ impl Engine {
                 if let Some(image) = &mut self.image {
                     image.denoised = Some((d, bind));
                 }
+                self.traced_renders = 0;
             }
             // The preview shows the photo without noise reduction rather than nothing.
             Err(e) => log::error!("{e:#}; previewing without noise reduction"),
@@ -2208,6 +2221,8 @@ impl Engine {
             image.denoised = None;
             image.fills.clear();
         }
+        log::info!("demosaic landed");
+        self.traced_renders = 0;
         true
     }
 
@@ -2235,6 +2250,12 @@ impl Engine {
             }
         }
         queue.submit([encoder.finish()]);
+        // A slice a frame, hundreds a photo: every one only while tracing, since each
+        // logged line is a sync to disk on this thread.
+        let left = pending.steps.len();
+        if gpu_tracing() || left.is_multiple_of(32) {
+            gpu_checkpoint(device, &format!("demosaic slice ({left} steps left)"));
+        }
     }
 
     /// A demosaic's memory back for the next one: its scratch, and its mosaic to the pool.
@@ -2257,6 +2278,7 @@ impl Engine {
             self.record(&mut encoder, &draw);
         }
         queue.submit([encoder.finish()]);
+        gpu_checkpoint(device, "demosaic finish");
     }
 
     /// Drop a demosaic that will never be shown, keeping its memory for the next photo.
@@ -2402,6 +2424,7 @@ impl Engine {
         // Any histogram in flight describes the previous image.
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
         self.histogram = Histogram::default();
+        self.traced_renders = 0;
         self.image = Some(image);
         self.sync_overlay(device);
     }
@@ -2640,6 +2663,10 @@ impl Engine {
             }
         });
         queue.submit([encoder.finish()]);
+        gpu_checkpoint(
+            device,
+            &format!("demosaic and mips ({width}x{height}, is_raw {is_raw})"),
+        );
         // Only after the submit: an upload into it now is ordered after this demosaic.
         if let Some(mosaic) = spent_mosaic {
             self.upload_pool.put(mosaic);
@@ -3397,6 +3424,16 @@ impl Engine {
         }
 
         queue.submit([encoder.finish()]);
+        if self.traced_renders < 3 {
+            self.traced_renders += 1;
+            gpu_checkpoint(
+                device,
+                &format!(
+                    "render {} ({}x{} at level {level})",
+                    self.traced_renders, target.0, target.1
+                ),
+            );
+        }
         if measuring {
             self.start_histogram_readback();
         }
@@ -3918,6 +3955,33 @@ fn wait_for(device: &wgpu::Device, index: wgpu::SubmissionIndex) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("the GPU did not finish: {e}"))?;
     Ok(())
+}
+
+/// Whether `DUCKFOOT_GPU_TRACE` is set (and not "0"): read once.
+fn gpu_tracing() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("DUCKFOOT_GPU_TRACE").is_some_and(|v| v != "0"))
+}
+
+/// A trail for GPU hangs: logs `what` as submitted. With `DUCKFOOT_GPU_TRACE=1` it then
+/// waits for everything queued so far and logs that it finished, so the last "done" in the
+/// log is the last GPU work that completed — a plain submit only says the CPU got that far.
+pub fn gpu_checkpoint(device: &wgpu::Device, what: &str) {
+    log::info!("gpu: {what} submitted");
+    if !gpu_tracing() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    match device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(GPU_TIMEOUT),
+    }) {
+        Ok(_) => log::info!(
+            "gpu: {what} done in {:.0} ms",
+            started.elapsed().as_secs_f32() * 1000.0
+        ),
+        Err(e) => log::error!("gpu: {what} did not finish: {e}"),
+    }
 }
 
 /// Wait for a `map_async` callback. The submission it waited on having finished is not

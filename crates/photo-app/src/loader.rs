@@ -347,6 +347,7 @@ impl Loader {
                                 });
                             }
 
+                            log::info!("{}: decoding", path.display());
                             let decoded = guarded(&path, || {
                                 if is_raster_path(&path) {
                                     fs::read(&file)
@@ -359,6 +360,19 @@ impl Loader {
                                 .map_err(|e| format!("{e:#}"))
                             });
                             let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
+                            match &decoded {
+                                Ok(Decoded::Raw(cfa)) => log::info!(
+                                    "{}: decoded {}x{} in {decode_ms:.0} ms, uploading",
+                                    path.display(),
+                                    cfa.width,
+                                    cfa.height
+                                ),
+                                Ok(Decoded::Raster(_)) => log::info!(
+                                    "{}: decoded in {decode_ms:.0} ms, uploading",
+                                    path.display()
+                                ),
+                                Err(e) => log::warn!("{}: decode failed: {e}", path.display()),
+                            }
 
                             let uploading = Instant::now();
                             // A decode error already names the file; an upload error (a
@@ -398,7 +412,7 @@ impl Loader {
                                     })
                                 })
                                 .map(Box::new);
-                            log::debug!(
+                            log::info!(
                                 "{}: decoded in {decode_ms:.0} ms, uploaded in {:.0} ms",
                                 path.display(),
                                 uploading.elapsed().as_secs_f32() * 1000.0
