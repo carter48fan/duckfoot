@@ -714,6 +714,7 @@ impl PhotoApp {
     /// straight away and appear when the pixels land; rotate, flip, crop and white balance
     /// wait for the decode, which is what knows the photo's true orientation and camera.
     pub fn open_path(&mut self, gpu: &Gpu, path: PathBuf) {
+        log::info!("open {}", path.display());
         if !photo_engine::copies::source_file(&path).exists() {
             if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
                 item.missing = true;
@@ -1085,6 +1086,7 @@ impl PhotoApp {
         let orientation = uploaded.orientation;
         // The pixels are already on the GPU (the loader uploaded them); what is left here
         // is recording the demosaic.
+        log::info!("{}: uploaded, recording its demosaic", path.display());
         self.open_with(gpu, path, orientation, |engine| {
             engine.load_uploaded(gpu.device, gpu.queue, *uploaded)
         });
