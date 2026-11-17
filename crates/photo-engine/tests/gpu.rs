@@ -2992,3 +2992,72 @@ fn a_fill_made_in_the_background_is_the_one_made_in_place() {
         "an export missed a fill in flight"
     );
 }
+
+/// The black-and-white mixer: at its defaults exactly the luminance that taking the
+/// saturation away gives; a band's weight moves its own colour's grey and leaves a grey
+/// alone; and the colour balance still tones what it makes.
+#[test]
+fn the_black_and_white_mixer_sets_each_colours_grey() {
+    let gpu = gpu_or_skip!();
+    // Left third red, middle third grey, right third blue.
+    let (w, h) = (96u32, 32u32);
+    let raster = || {
+        testkit::raster_from_fn(w, h, |x, _| match x / 32 {
+            0 => [0.45, 0.06, 0.05],
+            1 => [0.2, 0.2, 0.2],
+            _ => [0.05, 0.08, 0.45],
+        })
+    };
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load_raster(&gpu.device, &gpu.queue, raster())
+        .unwrap();
+
+    let mut desaturated = PhotoStack::default();
+    desaturated.vibrance.enabled = true;
+    desaturated.vibrance.params.saturation = -1.0;
+    let mut mixed = PhotoStack::default();
+    mixed.black_white.enabled = true;
+    let a = engine
+        .export(&gpu.device, &gpu.queue, &desaturated)
+        .unwrap();
+    let b = engine.export(&gpu.device, &gpu.queue, &mixed).unwrap();
+    let most = a
+        .rgba
+        .iter()
+        .zip(&b.rgba)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap();
+    assert!(
+        most <= 1,
+        "zero weights differ from no saturation by {most}"
+    );
+
+    mixed.black_white.params.red = 100.0;
+    let red_up = engine.export(&gpu.device, &gpu.queue, &mixed).unwrap();
+    let (red_before, red_after) = (grey_at(&b, 16, 16), grey_at(&red_up, 16, 16));
+    assert!(
+        red_after[1] > red_before[1] * 1.4,
+        "red's grey {red_before:?} → {red_after:?}"
+    );
+    assert!(
+        (red_after[0] - red_after[2]).abs() < 0.01,
+        "still a grey: {red_after:?}"
+    );
+    let grey = |o: &photo_engine::ExportedImage| grey_at(o, 48, 16)[1];
+    assert!((grey(&red_up) - grey(&b)).abs() < 0.01, "a grey moved");
+    let blue = |o: &photo_engine::ExportedImage| grey_at(o, 80, 16)[1];
+    assert!(
+        (blue(&red_up) - blue(&b)).abs() < 0.01,
+        "blue moved with red"
+    );
+
+    // Toned after: sepia from the colour balance survives the mixer.
+    mixed.color_balance.enabled = true;
+    mixed.color_balance.params.gain.r = 0.08;
+    mixed.color_balance.params.gain.b = -0.08;
+    let toned = engine.export(&gpu.device, &gpu.queue, &mixed).unwrap();
+    let t = grey_at(&toned, 48, 16);
+    assert!(t[0] > t[2] + 0.005, "not toned: {t:?}");
+}

@@ -114,6 +114,7 @@ module_table! {
     Filmic3D => filmic;
     ColorBalance => color_balance;
     Vibrance => vibrance;
+    BlackWhite => black_white;
     Sharpen => sharpen;
     Vignette => vignette;
     Local => local;
@@ -167,9 +168,12 @@ impl InspectorSectionId {
         use InspectorSectionId as I;
         match self {
             I::Exposure | I::Tonal | I::ToneCurve | I::Filmic3D => ModuleGroup::Light,
-            I::WhiteBalance | I::Vibrance | I::ColorEq | I::ColorBalance | I::Look => {
-                ModuleGroup::Colour
-            }
+            I::WhiteBalance
+            | I::Vibrance
+            | I::BlackWhite
+            | I::ColorEq
+            | I::ColorBalance
+            | I::Look => ModuleGroup::Colour,
             I::Clarity | I::Dehaze | I::Vignette => ModuleGroup::Effects,
             I::Sharpen | I::Denoise => ModuleGroup::Detail,
             I::Lens => ModuleGroup::Optics,
@@ -189,6 +193,7 @@ impl InspectorSectionId {
             I::ToneCurve
                 | I::Filmic3D
                 | I::ColorEq
+                | I::BlackWhite
                 | I::ColorBalance
                 | I::Look
                 | I::Geometry

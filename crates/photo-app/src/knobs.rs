@@ -226,7 +226,13 @@ pub fn knobs(id: InspectorSectionId) -> &'static [Knob] {
         I::Sharpen => SHARPEN,
         I::Vignette => VIGNETTE,
         I::Look => LOOK,
-        I::Scope | I::ToneCurve | I::ColorEq | I::ColorBalance | I::Local | I::Heal => &[],
+        I::Scope
+        | I::ToneCurve
+        | I::ColorEq
+        | I::BlackWhite
+        | I::ColorBalance
+        | I::Local
+        | I::Heal => &[],
     }
 }
 

@@ -67,7 +67,10 @@ impl AssetMetadata {
 
 /// The sidecar format this build writes. A file from a newer build is read for display
 /// but never written back: its fields beyond this version's would be lost in the save.
-pub const SIDECAR_VERSION: u32 = 2;
+///
+/// 3: the stack can hold the black-and-white mixer. A build that writes 2 would drop it
+/// on saving, so it is to treat such a sidecar as newer than it is.
+pub const SIDECAR_VERSION: u32 = 3;
 
 fn legacy_version() -> u32 {
     1

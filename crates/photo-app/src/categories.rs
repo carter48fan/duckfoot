@@ -90,6 +90,7 @@ const CROP_SECTIONS: &[(&str, usize)] = &[
 const TOOLS: &[Chip] = &[
     Tool(M::ToneCurve),
     Tool(M::ColorEq),
+    Tool(M::BlackWhite),
     Tool(M::ColorBalance),
     Tool(M::Local),
     Tool(M::Heal),
@@ -246,6 +247,7 @@ impl Chip {
         match self {
             Chip::Tool(M::ToneCurve) => ("curves", "tone, by channel"),
             Chip::Tool(M::ColorEq) => ("colour mixer", "each hue on its own"),
+            Chip::Tool(M::BlackWhite) => ("black & white", "a grey for each hue"),
             Chip::Tool(M::ColorBalance) => ("colour grade", "tint the tones"),
             Chip::Tool(M::Local) => ("brush & masks", "edit one part"),
             Chip::Tool(M::Heal) => ("healing", "take out spots"),

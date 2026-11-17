@@ -85,6 +85,10 @@ struct Adjust {
     // The gain map render (export only): the output space's luminance weights (xyz) and
     // the HDR rendition's white, linear (w; 0 for an ordinary render). See `finish`.
     hdr:        vec4<f32>,
+    // The black-and-white mixer: each band's weight, red..aqua then blue..magenta (and red
+    // again, wrapping), -100..100.
+    mono_a:     vec4<f32>,
+    mono_b:     vec4<f32>,
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -105,6 +109,7 @@ const FLAG_HEAL:     u32 = 32768u;
 const FLAG_LOOK:     u32 = 65536u;
 // The colour math of `params::Rendering::V2`: off for an edit saved before it.
 const FLAG_RENDER_V2: u32 = 131072u;
+const FLAG_BLACK_WHITE: u32 = 262144u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -1002,6 +1007,41 @@ fn eq_move(hue: f32) -> vec3<f32> {
     return mix(bands[i].xyz, bands[i + 1].xyz, t);
 }
 
+// The black-and-white mixer's weight for a hue, blended between its two bands as the
+// colour EQ's moves are (same centres), so the weights of every hue sum to one band's.
+fn mono_weight(hue: f32) -> f32 {
+    var centres = array<f32, 9>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 280.0, 320.0, 360.0);
+    var weights = array<f32, 9>(
+        u.mono_a.x, u.mono_a.y, u.mono_a.z, u.mono_a.w,
+        u.mono_b.x, u.mono_b.y, u.mono_b.z, u.mono_b.w, u.mono_a.x,
+    );
+    let h = clamp(hue, 0.0, 359.999);
+    var i = 0;
+    for (var k = 0; k < 8; k = k + 1) {
+        if (h >= centres[k]) {
+            i = k;
+        }
+    }
+    let t = (h - centres[i]) / (centres[i + 1] - centres[i]);
+    return mix(weights[i], weights[i + 1], t);
+}
+
+// To grey, each hue as bright as its band says: the luminance, scaled by the band's weight
+// in proportion to how coloured the pixel is (a grey has no hue, so the sliders leave it
+// alone). Hues are named in sRGB primaries, as the colour EQ names them.
+fn black_white(c: vec3<f32>) -> vec3<f32> {
+    let y = luma(c);
+    var named = c;
+    if (u.luma_w.w > 0.5) {
+        named = REC2020_TO_SRGB * c;
+    }
+    let hi = max(named.r, max(named.g, named.b));
+    let lo = min(named.r, min(named.g, named.b));
+    let s = clamp((hi - lo) / max(hi, 1e-4), 0.0, 1.0);
+    let k = max(1.0 + mono_weight(rgb_to_hsv(max(named, vec3<f32>(0.0))).x) * 0.01 * s, 0.0);
+    return vec3<f32>(y * k);
+}
+
 // Rec.2020 → sRGB, linear: only to name a wide colour's hue as the bands know it.
 const REC2020_TO_SRGB = mat3x3<f32>(
     vec3<f32>(1.660491, -0.124550, -0.018151),
@@ -1277,6 +1317,13 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     if (local.saturation != 0.0) {
         c = mix(vec3<f32>(luma(c)), c, max(1.0 + local.saturation * 0.01, 0.0));
+    }
+
+    // After saturation (which it makes moot) and before the colour balance, so a mixed
+    // black and white can still be toned.
+    if (enabled(FLAG_BLACK_WHITE)) {
+        c = black_white(c);
+        bad = bad || not_finite(c);
     }
 
     // Colour balance grades what saturation left: after it, so a photo taken to black and

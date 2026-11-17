@@ -149,6 +149,11 @@ Not sure where to begin? Choose **Looks** (the top tool at the right edge) and p
 style: *vivid*, *warm*, *film*, *mono*, *noir* and others. A look is just a starting
 point. Change any slider afterwards, or undo it with **Ctrl+Z**.
 
+For black and white with more control than *mono*, open the **black & white mixer**
+(under Colour). Each slider sets how light one colour turns out in grey: drag **Blue**
+down for a darker sky, or **Orange** up for brighter skin. Colour balance still works
+after it, for a sepia or cool tone.
+
 ## Undo, snapshots and history
 
 - **Undo** and **Redo** are the curved arrows in the top bar (**Ctrl+Z** and

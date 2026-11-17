@@ -808,6 +808,24 @@ impl PhotoApp {
                     }
                 }
             }
+            InspectorSectionId::BlackWhite => {
+                let p = &mut self.stack.black_white.params;
+                let home = d.black_white.params.weights();
+                ui.label(theme::dim(
+                    "How bright each colour's grey comes out. Tone it after with colour balance.",
+                ));
+                ui.add_space(4.0);
+                for ((name, weight), home) in p.weights_mut().into_iter().zip(home) {
+                    track!(widgets::param_slider(
+                        ui,
+                        name,
+                        weight,
+                        -100.0..=100.0,
+                        1,
+                        home
+                    ));
+                }
+            }
             InspectorSectionId::Filmic3D => {
                 let p = &mut self.stack.filmic.params;
                 let dp = d.filmic.params;

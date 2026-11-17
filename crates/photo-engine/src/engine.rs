@@ -192,6 +192,9 @@ struct AdjustUniforms {
     /// The gain map render (export only): the output's luminance weights (xyz) and the
     /// HDR rendition's white (w; 0 for an ordinary render).
     hdr: [f32; 4],
+    /// The black-and-white mixer's eight band weights, red to magenta (-100..100).
+    mono_a: [f32; 4],
+    mono_b: [f32; 4],
 }
 
 #[repr(C)]
@@ -3836,6 +3839,14 @@ impl Engine {
                     }
                     None => [0.0; 4],
                 },
+                mono_a: {
+                    let w = stack.black_white.params.weights();
+                    [w[0], w[1], w[2], w[3]]
+                },
+                mono_b: {
+                    let w = stack.black_white.params.weights();
+                    [w[4], w[5], w[6], w[7]]
+                },
             }),
         );
     }
@@ -5527,6 +5538,8 @@ mod uniform_layout_tests {
             ("out_m", std::mem::offset_of!(AdjustUniforms, out_m)),
             ("proof_m", std::mem::offset_of!(AdjustUniforms, proof_m)),
             ("hdr", std::mem::offset_of!(AdjustUniforms, hdr)),
+            ("mono_a", std::mem::offset_of!(AdjustUniforms, mono_a)),
+            ("mono_b", std::mem::offset_of!(AdjustUniforms, mono_b)),
         ];
         assert_eq!(members.len(), rust.len(), "a member on one side only");
         for (m, (name, offset)) in members.iter().zip(rust) {

@@ -654,6 +654,51 @@ impl ColorEq {
     }
 }
 
+/// Black and white from colour: how bright each hue's grey comes out, per band, as a
+/// percentage of its luminance for a fully saturated colour (-100 takes it to black, +100
+/// doubles it; a paler colour is moved in proportion).
+/// All zero is the plain luminance, exactly what taking saturation to nothing gives.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BlackWhite {
+    pub red: f32,
+    pub orange: f32,
+    pub yellow: f32,
+    pub green: f32,
+    pub aqua: f32,
+    pub blue: f32,
+    pub purple: f32,
+    pub magenta: f32,
+}
+
+impl BlackWhite {
+    pub fn weights_mut(&mut self) -> [(&'static str, &mut f32); 8] {
+        [
+            ("Red", &mut self.red),
+            ("Orange", &mut self.orange),
+            ("Yellow", &mut self.yellow),
+            ("Green", &mut self.green),
+            ("Aqua", &mut self.aqua),
+            ("Blue", &mut self.blue),
+            ("Purple", &mut self.purple),
+            ("Magenta", &mut self.magenta),
+        ]
+    }
+
+    pub fn weights(&self) -> [f32; 8] {
+        [
+            self.red,
+            self.orange,
+            self.yellow,
+            self.green,
+            self.aqua,
+            self.blue,
+            self.purple,
+            self.magenta,
+        ]
+    }
+}
+
 /// Which version of the pipeline's colour math an edit is drawn with. Fixes that change how
 /// a photo looks go in under a new version, so an edit saved before them is drawn as it
 /// was: a sidecar without the field is `V1`, and every new edit `V2`.
@@ -765,6 +810,9 @@ pub struct PhotoStack {
     pub color_balance: Module<ColorBalance>,
     #[serde(default)]
     pub vibrance: Module<Vibrance>,
+    /// Off in a sidecar without it, so an older edit is drawn as it was.
+    #[serde(default)]
+    pub black_white: Module<BlackWhite>,
     #[serde(default)]
     pub vignette: Module<Vignette>,
     #[serde(default)]
@@ -824,6 +872,7 @@ impl Default for PhotoStack {
                 },
             ),
             vibrance: Module::new(false, Vibrance::default()),
+            black_white: Module::new(false, BlackWhite::default()),
             vignette: Module::new(false, Vignette::default()),
             sharpen: Module::new(false, Sharpen::default()),
             clarity: Module::new(false, Clarity::default()),
@@ -912,6 +961,7 @@ pub(crate) mod flags {
     pub const HEAL: u32 = 32768;
     pub const LOOK: u32 = 65536;
     pub const RENDER_V2: u32 = 131072;
+    pub const BLACK_WHITE: u32 = 262144;
 }
 
 impl PhotoStack {
@@ -971,6 +1021,9 @@ impl PhotoStack {
         if self.rendering == Rendering::V2 {
             m |= flags::RENDER_V2;
         }
+        if self.black_white.enabled {
+            m |= flags::BLACK_WHITE;
+        }
         m
     }
 }
@@ -1006,6 +1059,9 @@ impl PhotoStack {
         let rgb = &mut s.rgb_curves.params;
         for nodes in [&mut rgb.red, &mut rgb.green, &mut rgb.blue] {
             clean_curve(nodes);
+        }
+        for (_, w) in s.black_white.params.weights_mut() {
+            *w = finite_or(*w, 0.0).clamp(-100.0, 100.0);
         }
         s.local.params = s.local.params.sanitised();
         s.heal.params = s.heal.params.sanitised();

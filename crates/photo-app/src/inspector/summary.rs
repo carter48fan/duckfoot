@@ -148,6 +148,16 @@ pub(crate) fn summarise(
             };
             (text, s.color_eq.params != d.color_eq.params)
         }
+        S::BlackWhite => {
+            let p = &s.black_white.params;
+            let moved = p.weights().iter().filter(|w| **w != 0.0).count();
+            let text = if moved > 0 {
+                format!("{moved} moved")
+            } else {
+                "luminance".to_string()
+            };
+            (text, *p != d.black_white.params)
+        }
         S::Filmic3D => {
             let p = &s.filmic.params;
             (
