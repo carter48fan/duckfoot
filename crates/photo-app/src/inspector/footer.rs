@@ -124,7 +124,10 @@ impl PhotoApp {
         job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
         let r = ui
             .add(egui::Label::new(job).sense(Sense::click()))
-            .on_hover_text(format!("{text}\nClick to change (Ctrl+E)"));
+            .on_hover_text(format!(
+                "{text}\n{}",
+                crate::keymap::keys("Click to change (Ctrl+E)")
+            ));
         if r.clicked() {
             self.export_dialog_open = true;
         }
@@ -153,10 +156,10 @@ impl PhotoApp {
                 });
                 ui.add_enabled_ui(loaded, |ui| {
                     if widgets::button(ui, Kind::Accent, "Save", 0.0)
-                        .on_hover_text(
+                        .on_hover_text(crate::keymap::keys(
                             "Write this stack beside the RAW (Ctrl+S). The RAW itself is never \
                              written",
-                        )
+                        ))
                         .clicked()
                     {
                         self.save_current_sidecar();

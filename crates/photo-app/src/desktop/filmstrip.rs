@@ -61,13 +61,17 @@ impl PhotoApp {
                 for one_to_one in order {
                     if one_to_one {
                         if widgets::button(ui, Kind::Secondary, "1:1", 0.0)
-                            .on_hover_text("Actual pixels (Ctrl+1, or Z to toggle)")
+                            .on_hover_text(crate::keymap::keys(
+                                "Actual pixels (Ctrl+1, or Z to toggle)",
+                            ))
                             .clicked()
                         {
                             app.zoom_actual();
                         }
                     } else if widgets::button(ui, Kind::Secondary, "FIT", 0.0)
-                        .on_hover_text("Fit to window (Ctrl+0, or Z to toggle)")
+                        .on_hover_text(crate::keymap::keys(
+                            "Fit to window (Ctrl+0, or Z to toggle)",
+                        ))
                         .clicked()
                     {
                         app.view = View::default();
@@ -937,7 +941,10 @@ impl PhotoApp {
                                 }
                             }
                         });
-                        if ui.button("Virtual copy (Ctrl+')").clicked() {
+                        if ui
+                            .button(crate::keymap::keys("Virtual copy (Ctrl+')"))
+                            .clicked()
+                        {
                             action_copy = Some(item.path.clone());
                             ui.close();
                         }
@@ -1025,13 +1032,17 @@ impl PhotoApp {
         use widgets::button_enabled as button;
         ui.horizontal(|ui| {
             if button(ui, loaded, Kind::Secondary, "Copy", w)
-                .on_hover_text("Copy this image's adjustments (Ctrl+C)")
+                .on_hover_text(crate::keymap::keys(
+                    "Copy this image's adjustments (Ctrl+C)",
+                ))
                 .clicked()
             {
                 self.copy_adjustments();
             }
             if button(ui, has_clip && loaded, Kind::Secondary, "Paste", w)
-                .on_hover_text("Paste the copied stack onto this image (Ctrl+V)")
+                .on_hover_text(crate::keymap::keys(
+                    "Paste the copied stack onto this image (Ctrl+V)",
+                ))
                 .clicked()
             {
                 self.paste_adjustments();
@@ -1049,9 +1060,9 @@ impl PhotoApp {
                 .show(|ui| {
                     ui.set_min_width(230.0);
                     let tip = format!(
-                        "Choose what Paste, Previous and Paste to all carry: now {} \
-                         (Ctrl+Shift+V)",
-                        self.paste_set.describe()
+                        "Choose what Paste, Previous and Paste to all carry: now {} ({})",
+                        self.paste_set.describe(),
+                        crate::keymap::keys("Ctrl+Shift+V")
                     );
                     if more_item(ui, true, "Choose what pastes…", "Ctrl+Shift+V")
                         .on_hover_text(tip)
@@ -1099,7 +1110,11 @@ fn more_item(ui: &mut egui::Ui, enabled: bool, name: &str, keys: &str) -> egui::
     ui.add_enabled(
         enabled,
         egui::Button::new(name)
-            .shortcut_text(theme::num(keys).size(11.0).color(theme::TEXT_FAINT))
+            .shortcut_text(
+                theme::num(crate::keymap::keys(keys))
+                    .size(11.0)
+                    .color(theme::TEXT_FAINT),
+            )
             .frame(false)
             .min_size(vec2(ui.available_width(), 26.0)),
     )

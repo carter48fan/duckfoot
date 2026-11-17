@@ -146,7 +146,10 @@ impl PhotoApp {
         let (undo, redo) = ctx.input(|i| {
             (
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                // Ctrl+Y is Windows' own redo, harmless elsewhere: nothing else is on Y.
+                i.modifiers.command
+                    && ((i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                        || (!i.modifiers.shift && i.key_pressed(egui::Key::Y))),
             )
         });
         if undo {

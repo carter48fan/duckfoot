@@ -56,7 +56,9 @@ impl PhotoApp {
                         let export = ui
                             .add_enabled_ui(ready, |ui| {
                                 widgets::button(ui, Kind::Primary, "Export", 0.0).on_hover_text(
-                                    "Choose size, format and metadata, then where (Ctrl+E)",
+                                    crate::keymap::keys(
+                                        "Choose size, format and metadata, then where (Ctrl+E)",
+                                    ),
                                 )
                             })
                             .inner;
@@ -67,13 +69,13 @@ impl PhotoApp {
 
                         // Right-to-left, so these read undo · redo on screen.
                         ui.add_enabled_ui(!self.history.future.is_empty(), |ui| {
-                            if widgets::icon(ui, "↷", false, "Redo (Ctrl+Shift+Z)").clicked() {
+                            if widgets::icon(ui, "↷", false, &crate::keymap::keys("Redo (Ctrl+Shift+Z)")).clicked() {
                                 self.redo();
                             }
                         });
                         let steps = self.history.past.len();
                         ui.add_enabled_ui(steps > 0, |ui| {
-                            let tip = format!("Undo (Ctrl+Z) · {steps} steps");
+                            let tip = format!("{} · {steps} steps", crate::keymap::keys("Undo (Ctrl+Z)"));
                             if widgets::icon(ui, "↶", false, &tip).clicked() {
                                 self.undo();
                             }
@@ -184,7 +186,11 @@ pub(crate) fn menu_item(ui: &mut egui::Ui, name: &str, keys: &str, enabled: bool
     ui.add_enabled_ui(enabled, |ui| {
         ui.add(
             egui::Button::new(name)
-                .shortcut_text(theme::num(keys).size(11.0).color(theme::TEXT_FAINT))
+                .shortcut_text(
+                    theme::num(crate::keymap::keys(keys))
+                        .size(11.0)
+                        .color(theme::TEXT_FAINT),
+                )
                 .frame(false)
                 .min_size(vec2(ui.available_width(), 26.0)),
         )

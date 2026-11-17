@@ -211,7 +211,7 @@ save it as a PNG with a see-through or a plain white background.
 
 Press **?** at any time to see every shortcut. The handful worth learning first:
 
-- **Ctrl+Z** / **Ctrl+Shift+Z**: undo / redo
+- **Ctrl+Z** / **Ctrl+Shift+Z** (or **Ctrl+Y**): undo / redo (on a Mac, ⌘ for Ctrl)
 - **Left** / **Right** arrows: previous / next photo
 - **1**–**5**: star rating. **P**: pick. **X**: reject.
 - **C**: crop

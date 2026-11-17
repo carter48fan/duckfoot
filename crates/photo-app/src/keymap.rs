@@ -74,7 +74,7 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     ),
     s(
         Editing,
-        "`Ctrl+Z` / `Ctrl+Shift+Z`",
+        "`Ctrl+Z` / `Ctrl+Shift+Z` or `Ctrl+Y`",
         "undo / redo, per photo",
     ),
     s(
@@ -225,14 +225,27 @@ pub(crate) fn markdown() -> String {
     out
 }
 
-/// The keys as this platform names them, without the docs' backticks.
-fn display_keys(keys: &str) -> String {
+/// The keys as this platform names them, without the docs' backticks. Every shortcut
+/// shown anywhere in the app goes through here, so a Mac shows ⌘ where the code says
+/// Ctrl (egui's `command` is ⌘ there).
+pub(crate) fn keys(keys: &str) -> String {
     let plain = keys.replace('`', "");
     if cfg!(target_os = "macos") {
-        plain.replace("Ctrl+", "⌘").replace("Ctrl", "⌘")
+        mac_keys(&plain)
     } else {
         plain
     }
+}
+
+/// `Ctrl+Shift+Z` as a Mac writes it: `⌘⇧Z`. Modifiers become their symbols with no
+/// `+` after them; a `+` key itself (as in `Ctrl++`) survives.
+fn mac_keys(keys: &str) -> String {
+    keys.replace("Ctrl+", "⌘")
+        .replace("Shift+", "⇧")
+        .replace("Alt+", "⌥")
+        .replace("Ctrl", "⌘")
+        .replace("Shift", "⇧")
+        .replace("Alt", "⌥")
 }
 
 impl PhotoApp {
@@ -306,7 +319,7 @@ impl PhotoApp {
                                         .show(ui, |ui| {
                                             for k in KEYMAP.iter().filter(|k| k.group == group) {
                                                 ui.label(
-                                                    RichText::new(display_keys(k.keys))
+                                                    RichText::new(keys(k.keys))
                                                         .monospace()
                                                         .color(theme::TEXT_HI),
                                                 );
@@ -341,6 +354,15 @@ impl PhotoApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mac_names_modifiers_by_their_symbols() {
+        assert_eq!(mac_keys("Ctrl+Shift+Z"), "⌘⇧Z");
+        assert_eq!(mac_keys("Ctrl+Alt+V"), "⌘⌥V");
+        assert_eq!(mac_keys("Ctrl+,"), "⌘,");
+        assert_eq!(mac_keys("Alt+↑ / Alt+↓"), "⌥↑ / ⌥↓");
+        assert_eq!(mac_keys("Ctrl+scroll"), "⌘scroll");
+    }
 
     const START: &str = "<!-- keymap:start (generated from crates/photo-app/src/keymap.rs) -->\n";
     const END: &str = "<!-- keymap:end -->";
