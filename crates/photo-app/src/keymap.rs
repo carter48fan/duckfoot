@@ -118,6 +118,7 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
         "`W`, then click",
         "white balance from something that should be grey",
     ),
+    s(View, "`J`", "clipping warnings on / off: red where white is lost, blue where black is"),
     s(View, "`\\`", "before / after split"),
     s(
         View,

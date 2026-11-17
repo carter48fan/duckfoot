@@ -2,7 +2,7 @@
 
 This guide is for anyone who wants to make their photos look better. You don't need to
 know anything about cameras or computers beyond opening a file. Every section here is
-also inside the app: click **Help** in the top bar.
+also inside the app: click the Duckfoot logo at the top left and choose **Help**.
 
 <!-- Each "## " heading below is one topic in the app's Help window. Keep them short,
      plain and in the order someone would need them. -->
@@ -128,7 +128,7 @@ bigger or smaller together; the shelf; your screen; and the tour.
 
 ## Cropping and straightening
 
-1. Click **Crop** in the top bar or the crop tool at the right edge, or press **C**.
+1. Click **crop** in the bar above the photo or the crop tool at the right edge, or press **C**.
 2. Drag the corners or edges to frame the picture. Drag inside the frame to move it.
 3. Pick a shape (*1:1* for a square, *4:5*, *3:2*, *16:9* and so on) from the buttons
    that appear, or press **X** to turn the shape on its side.
@@ -189,13 +189,13 @@ Pasting never changes a photo's crop or rotation. Each photo keeps its own frami
 ## Saving your work
 
 **You don't need to save.** Duckfoot saves your edits by itself a moment after you stop
-changing things. **Ctrl+S** (or **Save sidecar**) saves straight away if you'd like to be sure.
+changing things. **Ctrl+S** (or **Save**) saves straight away if you'd like to be sure.
 
 Your edits are kept in a small file next to your photo, with the same name. That small
 file is what Duckfoot calls a *sidecar*. Your original photo is never written to. Keep
 the two files together if you move them.
 
-**Save sidecar** and **Revert** are at the bottom of the editing panel.
+**Save** and **Revert** are at the bottom of the editing panel.
 
 ## Exporting a finished photo
 
@@ -206,7 +206,7 @@ Exporting makes a new picture file you can share, print or post.
    location. **JPEG** is right for almost everything: email, websites, phones and printing.
 3. Choose where to save it.
 
-The line above **Save sidecar** shows what an export will make. Click it to change the settings.
+The line above **Save** shows what an export will make. Click it to change the settings.
 
 **Many photos at once:** select them on the shelf (Ctrl+click), then click
 **Export Batch**. You can save several versions of each (a large one and a small one, for
@@ -214,7 +214,7 @@ example) and choose how the new files are named.
 
 ## Cutting out a background
 
-**Cutout** in the top bar opens Cutout Studio. It finds the main subject (a person or a
+**Cutout…** in the app menu (the Duckfoot logo at the top left) opens Cutout Studio. It finds the main subject (a person or a
 product, say) and removes the background around it. Touch up the edge if needed, then
 save it as a PNG with a see-through or a plain white background.
 
@@ -239,6 +239,6 @@ Shortcuts don't fire while you're typing in a box, such as Search.
   **Reset all** at the bottom of the editing panel.
 - **A tool is missing.** It may be hidden. Click the gear (⚙) in the editing panel and
   tick it, or click **Show all**.
-- **The text is too small.** Click the gear (⚙) and choose a larger **text size**.
+- **The text is too small.** Open **Preferences** (the logo menu, or **Ctrl+,**) and choose a larger **text size**. On a phone it is at the top of the module list's settings.
 - **The app feels slow.** Very large photos take a moment to open the first time. The next
   photo on the shelf is prepared while you look at this one, so stepping forward is quick.

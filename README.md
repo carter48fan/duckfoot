@@ -37,6 +37,11 @@ account, a subscription or an internet connection.
 to the photo, so you can always get back to exactly how it came out of the camera.
 
 **Private by design.** No logins, no cloud, no tracking. Your photos never leave your device.
+See [PRIVACY.md](./PRIVACY.md); security reports: [SECURITY.md](./SECURITY.md). What changed:
+[CHANGELOG.md](./CHANGELOG.md).
+
+Duckfoot is not affiliated with Adobe or any camera maker; product names are used only to
+say which files it opens and what it works like.
 
 ---
 
@@ -163,7 +168,7 @@ Every release's files are listed on its [release page](https://github.com/carter
 You don't need to save. Duckfoot saves your edits by itself as you work.
 
 The first time you open it, Duckfoot offers a one-minute tour. The full
-**[Help Guide](./docs/GUIDE.md)** is also inside the app: click **Help** in the top bar.
+**[Help Guide](./docs/GUIDE.md)** is also inside the app: click the Duckfoot logo at the top left and choose **Help**.
 Press **?** at any time to see every keyboard shortcut.
 
 ---

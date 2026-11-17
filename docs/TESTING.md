@@ -41,7 +41,7 @@ cargo run --release --example probe -- ~/Pictures/DSC08450.ARW
 ```
 
 ```
-── /home/carterw/Pictures/DSC08450.ARW
+── ~/Pictures/DSC08450.ARW
    camera     SONY ILCE-7M3
    cropped    6048×4024  (24.3 MP)
    cfa 2x2    [0 1 / 1 2]   (0=R 1=G 2=B)

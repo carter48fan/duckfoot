@@ -132,14 +132,14 @@ Checked items are done **and verified**, not merely written.
 - [x] Local contrast (clarity, texture), dehaze, colour equaliser, and lens correction (lensfun profiles, DNG warp, keystone/Auto Upright)
 - [x] Denoise mip-chain pre-pass, spot heal/clone & PatchMatch content-aware remove (`lc-inpaint`), local masks (gradient, radial, brush), `.cube` 3D LUT looks, and AI background cutout (`CutoutStudio`)
 - [x] Better demosaic (RCD for Bayer, two-pass X-Trans)
-- [x] The Shelf — asset list shared across barrels with multi-file ingest, ratings, flags, filter bar, and virtual copies
+- [x] The Shelf — the photo asset list (multi-file ingest, ratings, flags, filter bar, virtual copies); sharing it with the other barrels is part of building them
 - [x] Copy stack / paste across photos
 - [x] Sidecar persistence (`.duckfoot` companion JSON files) and XMP sidecar sync
 - [x] Customizer drawer, module reordering, smooth scrolling, and sidebar expansion
 - [x] Swap to `rawler` for camera coverage (rawloader kept as a fallback)
 - [x] Delete `apps/` and `packages/`
 
-### Stage 5 — The other barrels ◀ next
+### Stage 5 — The other barrels (design only, not scheduled; see DESIGN.md)
 
 - [ ] Barrel 2 — Audio stem stack
 - [ ] Barrel 3 — 3-track video timeline

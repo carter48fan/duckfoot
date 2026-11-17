@@ -354,8 +354,9 @@ the others:
 +------------------------------------------------------+
 ```
 
-In the PoC the Photo tab is the only one that mounts. The Shelf and the tab bar are built,
-because their absence would let Barrel 1 grow assumptions that the other two can't satisfy.
+Only the photo studio exists. The `[ Photo | Audio | Video ]` switch above is the design,
+not the build: the app's menu lists Audio and Video as "design only", disabled, and the
+Shelf holds photos alone. Both are meant to grow into the shared frame without a redesign.
 
 ## Interaction laws
 

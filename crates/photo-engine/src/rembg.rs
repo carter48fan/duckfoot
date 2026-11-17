@@ -751,9 +751,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual validation on user's real desktop photo"]
+    #[ignore = "manual check on a real photo: DUCKFOOT_CUTOUT_PHOTO=path/to/photo.jpg"]
     fn test_dsc05273_cutout_real_photo() {
-        let test_path = std::path::Path::new("/home/carterw/Desktop/DSC05273.jpg");
+        let Some(test_path) = std::env::var_os("DUCKFOOT_CUTOUT_PHOTO") else {
+            return;
+        };
+        let test_path = std::path::Path::new(&test_path);
         if !test_path.exists() {
             return;
         }
@@ -778,7 +781,7 @@ mod tests {
         assert_eq!(cutout.width(), img.width());
         assert_eq!(cutout.height(), img.height());
         // Save result so user can visually verify
-        let out_path = std::path::Path::new("/home/carterw/Desktop/DSC05273_duckfoot_cutout.png");
+        let out_path = test_path.with_extension("duckfoot-cutout.png");
         cutout.save(out_path).expect("Saving cutout should succeed");
     }
 }

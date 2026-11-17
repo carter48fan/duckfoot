@@ -44,6 +44,13 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Release: thin LTO across crates (smaller and faster for a few minutes' more build), and
+# debug info stripped. Symbol names stay, so a crash's backtrace and an Android tombstone
+# still name functions.
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
 # Debug builds of pixel code are unusably slow; optimise dependencies even in dev.
 # Omit debug symbols from dependencies (wgpu, tract, etc.) to prevent 60GB binary bloat.
 [profile.dev.package."*"]
