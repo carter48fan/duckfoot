@@ -3545,6 +3545,7 @@ fn batch_jobs(dir: &std::path::Path, n: usize) -> Vec<photo_app::batch::ExportJo
                 crop: photo_engine::Crop::default(),
                 output_path: out.join(format!("out{i}.png")),
                 recipe,
+                touchups: Vec::new(),
             }
         })
         .collect()
@@ -3819,5 +3820,42 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
     h.frame_sized(&mut app, PORTRAIT, key(egui::Key::BrowserBack));
     assert!(!app.cutout_studio.open, "back closes the cutout first");
     assert_eq!(app.compact_tab, Some(Tab::Edit));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An export runs off the UI thread and can be stopped: a cancelled export leaves no
+/// file and no error, and the next one is written.
+#[test]
+fn an_export_can_be_cancelled_and_writes_nothing() {
+    let dir = scratch_dir("export-cancel");
+    let settings = dir.join("settings");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let a = dir.join("a.dng");
+    // Large enough that its decode on the export's thread outlasts one frame.
+    write_dng(&a, 3000, 2000);
+    let h = Headless::new();
+    let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let platform = PhonePlatform(settings, answers.clone(), None);
+    let say = |r: Response| answers.lock().unwrap().push(r);
+    let mut app = PhotoApp::with_platform(&h.gpu(), Box::new(platform));
+    h.frame(&mut app, Default::default());
+    say(Response::OpenImage(a.clone()));
+    h.settle(&mut app, Duration::from_secs(30));
+
+    say(Response::ExportImage(out.join("a.jpg")));
+    h.frame(&mut app, Default::default());
+    assert!(!app.export_finished(), "the export started");
+    app.cancel_export();
+    settle_export(&h, &mut app);
+    assert!(
+        !out.join("a.jpg").exists(),
+        "a cancelled export wrote its file"
+    );
+    assert_eq!(app.error(), None);
+
+    say(Response::ExportImage(out.join("a.jpg")));
+    settle_export(&h, &mut app);
+    assert!(out.join("a.jpg").exists(), "the next export was written");
     let _ = std::fs::remove_dir_all(&dir);
 }

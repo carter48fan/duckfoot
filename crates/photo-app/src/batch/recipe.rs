@@ -25,6 +25,17 @@ pub struct ExportRecipe {
 }
 
 impl ExportRecipe {
+    /// The one-off recipe of a single export: these settings, no subfolder.
+    pub fn single(settings: photo_engine::ExportSettings) -> Self {
+        Self {
+            id: "single".into(),
+            name: "Export".into(),
+            enabled: true,
+            settings,
+            subfolder: None,
+        }
+    }
+
     fn new(
         id: &str,
         name: &str,

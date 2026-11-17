@@ -21,6 +21,8 @@ pub struct ExportJob {
     pub crop: Crop,
     pub output_path: PathBuf,
     pub recipe: ExportRecipe,
+    /// The Remove background tool's hand touch-ups, for a cutout export; empty otherwise.
+    pub touchups: Vec<photo_engine::rembg::TouchupDab>,
 }
 
 #[derive(Debug, Clone)]
@@ -454,7 +456,7 @@ fn write((exported, gain): Rendered, job: &ExportJob) -> anyhow::Result<()> {
         &job.output_path,
         &job.recipe.settings,
         info.as_ref(),
-        &[],
+        &job.touchups,
         gain.as_ref(),
     )
 }
@@ -515,6 +517,7 @@ mod tests {
             crop: Crop::default(),
             output_path: PathBuf::from("/nowhere/a.png"),
             recipe,
+            touchups: Vec::new(),
         };
         let mut engine = Engine::new(&device);
         let source = Source::Raw(Box::new(cfa), Some((name.clone(), warp)));

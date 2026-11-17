@@ -54,7 +54,6 @@ use parts::*;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use std::sync::RwLock;
@@ -351,12 +350,13 @@ const MAX_ZOOM_SCALE: f32 = 16.0;
 /// user why. DESIGN.md: long operations show real progress.
 enum Export {
     Idle,
+    /// On [`PhotoApp::single_export`]'s thread: decoded, rendered and written there, so
+    /// the editor stays live and the export can be cancelled.
     Writing {
         path: PathBuf,
         /// The photo exported, as it was when the export began.
         source: Option<PathBuf>,
         started: Instant,
-        result: Receiver<Result<(), String>>,
     },
     Done {
         path: PathBuf,
@@ -768,6 +768,9 @@ pub struct PhotoApp {
     pub batch_renamer: batch::Renamer,
     pub export_recipes: Vec<batch::ExportRecipe>,
     pub export_queue: Option<batch::ExportQueue>,
+    /// The single export's own queue: a one-photo batch, so it neither waits behind a
+    /// running batch nor blocks the editor. Made on the first export.
+    single_export: Option<batch::ExportQueue>,
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
@@ -1040,6 +1043,7 @@ impl PhotoApp {
                 gpu.device.clone(),
                 gpu.queue.clone(),
             )),
+            single_export: None,
             batch_dialog_open: false,
             shortcuts_open: false,
             help_open: false,

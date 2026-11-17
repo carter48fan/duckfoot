@@ -33,59 +33,50 @@ impl PhotoApp {
             },
             ..base
         };
-        let depth = settings.effective_depth();
-        let exported = match self.engine.export_in(
-            gpu.device,
-            gpu.queue,
-            &self.stack,
-            depth,
-            settings.effective_space(),
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                self.export = Export::Failed(format!("{e:#}"));
-                return;
-            }
+        let Some(source) = self.loaded_path.clone() else {
+            self.export = Export::Failed("no photo is open".into());
+            return;
         };
-        let gain = if settings.wants_gain_map() {
-            match self.engine.gain_map(
-                gpu.device,
-                gpu.queue,
-                &self.stack,
-                settings.effective_space(),
-            ) {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    self.export = Export::Failed(format!("the HDR gain map: {e:#}"));
-                    self.needs_render = true;
-                    return;
-                }
-            }
-        } else {
-            None
+        // Exported on its own engine, from the file, through the same shader and stack
+        // as the preview (Invariant 2). It costs a second decode, and a second copy of
+        // the photo on the GPU while it runs; in return, editing, stepping to the next
+        // photo or closing this one cannot change what is being written, and a phone
+        // gives back what it was keeping for the next photo first.
+        if cfg!(target_os = "android") {
+            self.engine.release_spares();
+        }
+        let job = batch::ExportJob {
+            source_path: source.clone(),
+            stack: self.stack.clone(),
+            crop: self.stack.geometry.crop,
+            output_path: path.clone(),
+            recipe: batch::ExportRecipe::single(settings),
+            touchups: self.cutout_studio.touchups.clone(),
         };
-
-        let (tx, rx) = mpsc::channel();
-        let target = path.clone();
-        let source = self.loaded_path.clone();
-        let touchups = self.cutout_studio.touchups.clone();
-        std::thread::spawn(move || {
-            let info = source.as_deref().and_then(photo_engine::read_export_info);
-            let outcome = exported
-                .save_with(&target, &settings, info.as_ref(), &touchups, gain.as_ref())
-                .map_err(|e| format!("{e:#}"));
-            // The receiver is gone only if the app is shutting down; nothing to report to.
-            let _ = tx.send(outcome);
-        });
-
+        let queue = self
+            .single_export
+            .get_or_insert_with(|| batch::ExportQueue::new(gpu.device.clone(), gpu.queue.clone()));
+        queue.start_batch(vec![job]);
         self.export = Export::Writing {
             path,
-            source: self.loaded_path.clone(),
+            source: Some(source),
             started: Instant::now(),
-            result: rx,
         };
-        // The export overwrote the preview's uniforms; put the preview back.
-        self.needs_render = true;
+    }
+
+    /// Stop the single export being written. Nothing half-written is left: the file is
+    /// written through a temporary one.
+    pub fn cancel_export(&mut self) {
+        if let Some(queue) = &mut self.single_export {
+            queue.cancel();
+        }
+    }
+
+    /// The single export is being cancelled.
+    pub(crate) fn export_cancelling(&self) -> bool {
+        self.single_export
+            .as_ref()
+            .is_some_and(|q| q.is_cancelling())
     }
 
     /// Default filename beside the source: DSC08450.ARW -> DSC08450.jpg. JPEG at the export
@@ -113,40 +104,41 @@ impl PhotoApp {
     }
 
     pub(crate) fn poll_export(&mut self, ctx: &egui::Context) {
-        let (outcome, path, seconds, source) = {
-            let Export::Writing {
-                path,
-                source,
-                started,
-                result,
-            } = &mut self.export
-            else {
-                return;
-            };
-            match result.try_recv() {
-                Ok(Ok(())) => (
-                    Some(Ok(())),
-                    path.clone(),
-                    started.elapsed().as_secs_f32(),
-                    source.take(),
-                ),
-                Ok(Err(e)) => (
-                    Some(Err(e)),
-                    path.clone(),
-                    started.elapsed().as_secs_f32(),
-                    None,
-                ),
-                Err(mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint();
-                    return;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => (
-                    Some(Err("export thread stopped unexpectedly".to_string())),
-                    path.clone(),
-                    started.elapsed().as_secs_f32(),
-                    None,
-                ),
-            }
+        let Export::Writing {
+            path,
+            source,
+            started,
+        } = &mut self.export
+        else {
+            return;
+        };
+        let finished = self.single_export.as_mut().and_then(|q| q.take_finished());
+        let Some(batch::ExportStatus::Finished {
+            total,
+            success,
+            mut errors,
+        }) = finished
+        else {
+            // The worker does not wake the event loop; look again shortly, rather than
+            // drawing every frame until it is done.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let (path, seconds) = (path.clone(), started.elapsed().as_secs_f32());
+        let outcome = if success == total {
+            Some(Ok(()))
+        } else if let Some((_, e)) = errors.pop() {
+            Some(Err(e))
+        } else {
+            // Neither written nor failed: cancelled.
+            self.set_status("Export cancelled");
+            self.export = Export::Idle;
+            return;
+        };
+        let source = if success == total {
+            source.take()
+        } else {
+            None
         };
 
         match outcome {
@@ -617,6 +609,7 @@ impl PhotoApp {
                         crop,
                         output_path: target_path,
                         recipe: recipe.clone(),
+                        touchups: Vec::new(),
                     });
                 }
             }

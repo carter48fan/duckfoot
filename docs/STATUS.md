@@ -51,7 +51,7 @@ DESIGN.md invariant 8.
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack, virtual copies |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | 8-handle crop framing, rule-of-thirds, golden ratio, aspect ratios (`C` / `Esc`) |
-| **App** | export | Working | Banded export dialog (Ctrl+E) and phone Export sheet sharing unified recipes |
+| **App** | export | Working | Banded export dialog (Ctrl+E) and phone Export sheet sharing unified recipes; a single export renders on its own thread from the file, with Cancel |
 | **App** | zoom and pan | Working | Scroll to zoom about cursor, drag to pan, Cmd+0 fit, Cmd+1 100% |
 | **Engine** | `Histogram`, `poll_histogram` | Working | GPU compute + atomics, 4 KB async readback |
 | **Engine** | preview at screen resolution | Working | Sensor mip chain; preview renders at coarsest level as dense as screen. Export renders full res |

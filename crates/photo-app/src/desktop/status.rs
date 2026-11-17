@@ -7,6 +7,7 @@ impl PhotoApp {
 
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let mut notice_action = None;
+        let mut cancel_export = false;
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -31,9 +32,10 @@ impl PhotoApp {
                         match &self.export {
                             Export::Idle => {}
                             Export::Writing { path, started, .. } => {
+                                let cancelling = self.export_cancelling();
                                 readout(
                                     ui,
-                                    "writing",
+                                    if cancelling { "cancelling" } else { "writing" },
                                     &format!(
                                         "{}  {:.1}s",
                                         file_name(path),
@@ -41,6 +43,13 @@ impl PhotoApp {
                                     ),
                                     theme::ACCENT,
                                 );
+                                if !cancelling
+                                    && widgets::outlined_chip(ui, true, false, "cancel")
+                                        .on_hover_text("Stop this export; nothing is written")
+                                        .clicked()
+                                {
+                                    cancel_export = true;
+                                }
                             }
                             Export::Done { path, seconds } => {
                                 readout(
@@ -107,6 +116,9 @@ impl PhotoApp {
                     });
                 });
             });
+        if cancel_export {
+            self.cancel_export();
+        }
         if let Some(action) = notice_action {
             self.run_notice_action(action);
         }

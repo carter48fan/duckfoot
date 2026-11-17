@@ -60,6 +60,7 @@ fn main() {
                     },
                     ..recipe.clone()
                 },
+                touchups: Vec::new(),
             }
         })
         .collect();

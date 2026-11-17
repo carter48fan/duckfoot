@@ -2296,6 +2296,13 @@ impl PhotoApp {
             }
         }
         let share = self.export_feedback(ui);
+        if busy
+            && !self.export_cancelling()
+            && widgets::button_sized(ui, true, Kind::Secondary, "Cancel export", width, 40.0)
+                .clicked()
+        {
+            self.cancel_export();
+        }
 
         ui.add_space(4.0);
         let options = if self.export_options_open {
