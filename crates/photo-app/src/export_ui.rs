@@ -343,6 +343,49 @@ pub(crate) fn settings_editor_with(
         });
     }
 
+    row(ui, wide, "watermark", |ui| {
+        use photo_engine::watermark::{Corner, ShortText, Watermark};
+        let on = s.watermark.is_some();
+        if widgets::outlined_chip(ui, true, on, "text")
+            .on_hover_text("A line of text over the photo, such as your name or a copyright")
+            .clicked()
+        {
+            s.watermark = if on { None } else { Some(Watermark::default()) };
+        }
+        let Some(mark) = &mut s.watermark else {
+            return;
+        };
+        let mut text = mark.text.as_str().to_string();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text("© 2026 Your Name")
+                    .desired_width(ui.available_width().min(260.0)),
+            )
+            .changed()
+        {
+            mark.text = ShortText::new(&text);
+        }
+        if let Some(c) = chips(
+            ui,
+            mark.corner,
+            [
+                (Corner::TopLeft, "↖"),
+                (Corner::TopRight, "↗"),
+                (Corner::Centre, "·"),
+                (Corner::BottomLeft, "↙"),
+                (Corner::BottomRight, "↘"),
+            ],
+        ) {
+            mark.corner = c;
+        }
+        widgets::param_slider(ui, "size %", &mut mark.size, 1.0..=10.0, 1, 3.0);
+        widgets::param_slider(ui, "opacity", &mut mark.opacity, 0.05..=1.0, 2, 0.6);
+        if widgets::outlined_chip(ui, true, mark.dark, "dark text").clicked() {
+            mark.dark = !mark.dark;
+        }
+    });
+
     if summary_line {
         summary_label(ui, s, source);
     }

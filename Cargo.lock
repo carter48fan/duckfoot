@@ -3319,6 +3319,7 @@ dependencies = [
 name = "photo-engine"
 version = "0.3.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "bytemuck",
  "crc32fast",

@@ -282,6 +282,9 @@ pub struct ExportSettings {
     /// Fine-tuning parameters for background cutout (threshold, feather, edge shift, defringing).
     #[serde(default)]
     pub cutout_params: crate::rembg::CutoutParams,
+    /// A line of text over the export (see [`crate::watermark`]).
+    #[serde(default)]
+    pub watermark: Option<crate::watermark::Watermark>,
 }
 
 impl ExportSettings {
@@ -297,6 +300,7 @@ impl ExportSettings {
             strip_location: true,
             color_space: crate::gamut::OutputSpace::Srgb,
             remove_background: false,
+            watermark: None,
             matte_color: None,
             hdr_gain_map: false,
             cutout_params: crate::rembg::CutoutParams::default(),
@@ -771,6 +775,13 @@ impl Exported {
                 }
             }
         }
+        // Last: sized to the photo as written, never sharpened or cut away.
+        if let Some(mark) = settings.watermark.filter(|m| m.is_on()) {
+            match &mut out {
+                Exported::Eight(i) => mark.draw(i),
+                Exported::Sixteen(i) => mark.draw(i),
+            };
+        }
         Ok(out)
     }
 
@@ -802,7 +813,21 @@ impl Exported {
         gain: Option<&crate::gainmap::GainMap>,
     ) -> Result<()> {
         let gain = gain.filter(|_| settings.wants_gain_map());
-        match self.finished_with_touchups(settings, touchups)? {
+        let finished = self.finished_with_touchups(settings, touchups)?;
+        // Under the mark the HDR rendition is the SDR one: text at SDR white beside
+        // highlights pushed past it would look dim, and boosted text would glare.
+        let marked;
+        let gain = match (gain, settings.watermark.filter(|m| m.is_on())) {
+            (Some(g), Some(mark)) => match mark.rect(finished.width(), finished.height()) {
+                Some(rect) => {
+                    marked = g.clone().neutralised(rect);
+                    Some(&marked)
+                }
+                None => Some(g),
+            },
+            (gain, _) => gain,
+        };
+        match finished {
             Exported::Eight(i) => i.write_with(path, settings, info, gain),
             Exported::Sixteen(i) => i.write_with(path, settings, info, gain),
         }

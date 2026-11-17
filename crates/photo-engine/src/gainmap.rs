@@ -229,6 +229,25 @@ impl GainMapMeta {
 }
 
 impl GainMap {
+    /// This map with no gain in `rect` (x, y, width, height, normalised to the image),
+    /// widened by a block each way since the map is read interpolated.
+    pub fn neutralised(mut self, rect: [f32; 4]) -> Self {
+        let m = self.meta;
+        let none =
+            (((0.0 - m.min) / (m.max - m.min).max(1e-6)).clamp(0.0, 1.0) * 255.0).round() as u8;
+        let (w, h) = (self.width as f32, self.height as f32);
+        let x0 = ((rect[0] * w).floor() as i64 - 1).max(0) as u32;
+        let y0 = ((rect[1] * h).floor() as i64 - 1).max(0) as u32;
+        let x1 = (((rect[0] + rect[2]) * w).ceil() as u32 + 1).min(self.width);
+        let y1 = (((rect[1] + rect[3]) * h).ceil() as u32 + 1).min(self.height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.data[(y * self.width + x) as usize] = none;
+            }
+        }
+        self
+    }
+
     /// The map as its own JPEG, at `quality`, with its metadata in it.
     pub(crate) fn to_jpeg(&self, quality: u8) -> Result<Vec<u8>> {
         let mut jpeg = Vec::new();
@@ -380,6 +399,31 @@ fn num(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_neutralised_block_has_no_gain() {
+        let map = GainMap {
+            width: 8,
+            height: 8,
+            data: vec![255; 64],
+            meta: GainMapMeta {
+                min: -1.0,
+                max: 3.0,
+                gamma: 1.0,
+                base_offset: OFFSET,
+                alternate_offset: OFFSET,
+                base_headroom: 0.0,
+                alternate_headroom: 3.0,
+            },
+        }
+        .neutralised([0.5, 0.5, 0.25, 0.25]);
+        // log gain 0 on -1..3 is a quarter of the way: code 64.
+        assert_eq!(map.data[(5 * 8 + 5) as usize], 64);
+        assert_eq!(
+            map.data[0], 255,
+            "outside the mark, and its margin, untouched"
+        );
+    }
 
     /// A map of an 8 × 4 image whose right half is two stops brighter in HDR.
     fn measured() -> GainMap {

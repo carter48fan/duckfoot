@@ -13,6 +13,9 @@ rawler.workspace = true
 anyhow.workspace = true
 log.workspace = true
 image.workspace = true
+# The export watermark's glyphs. Already in the tree (winit's Linux decorations bring it),
+# so the lock file gains nothing; pure Rust.
+ab_glyph = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 half = { version = "2", features = ["bytemuck"] }

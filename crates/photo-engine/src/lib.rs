@@ -35,6 +35,7 @@ pub mod sidecar;
 pub mod temperature;
 #[doc(hidden)]
 pub mod testkit;
+pub mod watermark;
 pub mod xmp;
 
 pub use curve::{build_lut, build_lut_4channel, identity_nodes, CurveNode, RgbCurves};
