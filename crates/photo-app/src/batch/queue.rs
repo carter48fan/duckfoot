@@ -44,6 +44,8 @@ pub enum ExportProgressMsg {
         success: usize,
         errors: Vec<(PathBuf, String)>,
     },
+    /// The batch itself (not one photo of it) panicked; nothing more will come.
+    Crashed(String),
 }
 
 enum WorkerCommand {
@@ -91,7 +93,23 @@ impl ExportQueue {
                 while let Ok(cmd) = cmd_rx.recv() {
                     // A Cancel with no batch running has nothing to stop.
                     if let WorkerCommand::StartBatch(jobs) = cmd {
-                        run_batch(&device, &queue, &mut engine, jobs, &progress_tx, &stop);
+                        // Each photo is already caught on its own; this catches the batch
+                        // around them (a scoped thread's panic is re-raised here), so the
+                        // queue reports an end instead of running forever.
+                        let run = std::panic::AssertUnwindSafe(|| {
+                            run_batch(&device, &queue, &mut engine, jobs, &progress_tx, &stop)
+                        });
+                        if let Err(panic) = std::panic::catch_unwind(run) {
+                            let reason = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown reason".into());
+                            log::error!("batch export crashed: {reason}");
+                            let _ = progress_tx.send(ExportProgressMsg::Crashed(reason));
+                            // Whatever it was mid-way through is not to be trusted.
+                            engine = Engine::new(&device);
+                        }
                     }
                 }
             })
@@ -167,6 +185,9 @@ impl ExportQueue {
                             current_file: "Failed image".into(),
                         };
                     }
+                    ExportProgressMsg::Crashed(reason) => {
+                        self.stopped(format!("the export crashed ({reason})"))
+                    }
                     ExportProgressMsg::AllFinished {
                         total,
                         success,
@@ -181,10 +202,29 @@ impl ExportQueue {
                     }
                 },
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+                // The worker is gone: a batch it was running will never report its end.
+                Err(TryRecvError::Disconnected) => {
+                    self.stopped("the export worker stopped".into());
+                    break;
+                }
             }
         }
         &self.current_status
+    }
+
+    /// Ends a running batch that will not end itself, keeping what was written.
+    fn stopped(&mut self, reason: String) {
+        if let ExportStatus::Running {
+            total, completed, ..
+        } = self.current_status
+        {
+            self.cancelling = false;
+            self.current_status = ExportStatus::Finished {
+                total,
+                success: completed,
+                errors: vec![(PathBuf::new(), reason)],
+            };
+        }
     }
 
     /// The result of a finished batch, handed out once; the queue is idle again after.
@@ -406,4 +446,51 @@ fn write((exported, gain): Rendered, job: &ExportJob) -> anyhow::Result<()> {
         &[],
         gain.as_ref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A queue whose worker has gone, mid-batch.
+    fn orphaned() -> ExportQueue {
+        let (cmd_tx, _) = mpsc::channel();
+        let (_, progress_rx) = mpsc::channel();
+        ExportQueue {
+            cmd_tx,
+            cancel: Arc::default(),
+            progress_rx,
+            current_status: ExportStatus::Running {
+                total: 5,
+                completed: 2,
+                current_file: "a.dng".into(),
+            },
+            cancelling: true,
+        }
+    }
+
+    #[test]
+    fn a_batch_whose_worker_is_gone_finishes_with_an_error() {
+        let mut q = orphaned();
+        match q.poll() {
+            ExportStatus::Finished { total, errors, .. } => {
+                assert_eq!(*total, 5);
+                assert_eq!(errors.len(), 1);
+            }
+            _ => panic!("still running"),
+        }
+        assert!(!q.is_cancelling());
+    }
+
+    #[test]
+    fn a_crashed_batch_finishes_with_its_reason() {
+        let mut q = orphaned();
+        let (tx, rx) = mpsc::channel();
+        q.progress_rx = rx;
+        tx.send(ExportProgressMsg::Crashed("boom".into())).unwrap();
+        match q.poll() {
+            ExportStatus::Finished { errors, .. } => assert!(errors[0].1.contains("boom")),
+            _ => panic!("still running"),
+        }
+    }
 }

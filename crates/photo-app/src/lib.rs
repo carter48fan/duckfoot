@@ -236,6 +236,18 @@ impl ShelfFacts {
             missing: !file.exists(),
         }
     }
+
+    /// A photo whose facts could not be read (the read panicked): no marks, and treated
+    /// like one whose sidecar cannot be parsed, so nothing is seeded over it.
+    pub fn unread(path: std::path::PathBuf) -> Self {
+        Self {
+            has_sidecar: find_sidecar(&path).is_some(),
+            path,
+            metadata: photo_engine::AssetMetadata::default(),
+            bytes: 0,
+            missing: false,
+        }
+    }
 }
 
 impl ShelfItem {
@@ -1768,11 +1780,7 @@ impl PhotoApp {
         if self.texture_id.is_none() && self.ready_image().is_some() {
             if let Some(view) = self.engine.display_view() {
                 let filter = self.texture_filter.unwrap_or(wgpu::FilterMode::Linear);
-                let id = renderer_write(gpu).register_native_texture(
-                    gpu.device,
-                    view,
-                    filter,
-                );
+                let id = renderer_write(gpu).register_native_texture(gpu.device, view, filter);
                 self.texture_id = Some(id);
                 // The photo replaces its stand-in from this frame.
                 self.stage_preview = None;

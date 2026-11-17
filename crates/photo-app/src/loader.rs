@@ -202,16 +202,104 @@ impl Drop for OpeningGuard<'_> {
 /// thread gone for the rest of the session.
 fn guarded<T>(path: &Path, job: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|panic| {
-        let reason = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown reason".to_string());
+        let reason = panic_reason(&*panic);
         Err(format!(
             "{}: the decoder crashed on this file ({reason})",
             path.display()
         ))
     })
+}
+
+/// What the panic carried, as text.
+fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown reason".to_string())
+}
+
+/// Runs `job`, turning a panic into its reason.
+fn caught<T>(job: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+        .map_err(|panic| format!("crashed ({})", panic_reason(&*panic)))
+}
+
+impl FileJob {
+    /// The answer to give if this job panics, built before it runs (the job is moved
+    /// into the run). Each one releases whatever the UI is counting for it.
+    fn answer_if_panicked(&self) -> impl FnOnce(String) -> Done {
+        let job = match self {
+            FileJob::Shelf(path) => Ok(path.clone()),
+            FileJob::Scan {
+                folder, purpose, ..
+            } => Err(Ok((folder.clone(), *purpose))),
+            FileJob::Library { dir, .. } => Err(Err(dir.clone())),
+        };
+        move |reason| match job {
+            // The facts of a photo nothing could be read about: shown, unmarked.
+            Ok(path) => Done::Shelf(crate::ShelfFacts::unread(path)),
+            Err(Ok((folder, purpose))) => Done::Scanned {
+                folder,
+                purpose,
+                found: Vec::new(),
+                cancelled: true,
+            },
+            // What is there still is, as far as it can be read.
+            Err(Err(dir)) => Done::Library {
+                entries: caught(|| crate::dam::storage::list(&dir)).unwrap_or_default(),
+                deleted: 0,
+                failed: vec![format!("Reading the library {reason}")],
+            },
+        }
+    }
+}
+
+fn run_file_job(job: FileJob, scan: &ScanProgress) -> Done {
+    match job {
+        FileJob::Shelf(path) => Done::Shelf(crate::ShelfFacts::read(&path)),
+        FileJob::Scan {
+            folder,
+            purpose,
+            depth,
+            epoch,
+        } => {
+            scan.folders.store(0, Ordering::Relaxed);
+            scan.photos.store(0, Ordering::Relaxed);
+            let found =
+                crate::dam::FolderTree::scan_tree_with(&folder, depth, |folders, photos| {
+                    scan.folders.store(folders, Ordering::Relaxed);
+                    scan.photos.store(photos, Ordering::Relaxed);
+                    epoch.is_none_or(|e| e == scan.epoch.load(Ordering::Relaxed))
+                });
+            Done::Scanned {
+                cancelled: found.is_none(),
+                found: found.unwrap_or_default(),
+                folder,
+                purpose,
+            }
+        }
+        FileJob::Library { dir, delete } => {
+            let mut failed = Vec::new();
+            let mut deleted = 0;
+            let before = if delete.is_empty() {
+                Vec::new()
+            } else {
+                crate::dam::storage::list(&dir)
+            };
+            for entry in before.iter().filter(|e| delete.contains(&e.path)) {
+                match crate::dam::storage::delete(entry) {
+                    Ok(()) => deleted += 1,
+                    Err(e) => failed.push(format!("{}: {e}", entry.path.display())),
+                }
+            }
+            Done::Library {
+                entries: crate::dam::storage::list(&dir),
+                deleted,
+                failed,
+            }
+        }
+    }
 }
 
 impl Loader {
@@ -233,56 +321,14 @@ impl Loader {
                 .name("duckfoot-files".into())
                 .spawn(move || {
                     while let Ok(job) = file_rx.recv() {
-                        let done = match job {
-                            FileJob::Shelf(path) => Done::Shelf(crate::ShelfFacts::read(&path)),
-                            FileJob::Scan {
-                                folder,
-                                purpose,
-                                depth,
-                                epoch,
-                            } => {
-                                scan.folders.store(0, Ordering::Relaxed);
-                                scan.photos.store(0, Ordering::Relaxed);
-                                let found = crate::dam::FolderTree::scan_tree_with(
-                                    &folder,
-                                    depth,
-                                    |folders, photos| {
-                                        scan.folders.store(folders, Ordering::Relaxed);
-                                        scan.photos.store(photos, Ordering::Relaxed);
-                                        epoch
-                                            .is_none_or(|e| e == scan.epoch.load(Ordering::Relaxed))
-                                    },
-                                );
-                                Done::Scanned {
-                                    cancelled: found.is_none(),
-                                    found: found.unwrap_or_default(),
-                                    folder,
-                                    purpose,
-                                }
-                            }
-                            FileJob::Library { dir, delete } => {
-                                let mut failed = Vec::new();
-                                let mut deleted = 0;
-                                let before = if delete.is_empty() {
-                                    Vec::new()
-                                } else {
-                                    crate::dam::storage::list(&dir)
-                                };
-                                for entry in before.iter().filter(|e| delete.contains(&e.path)) {
-                                    match crate::dam::storage::delete(entry) {
-                                        Ok(()) => deleted += 1,
-                                        Err(e) => {
-                                            failed.push(format!("{}: {e}", entry.path.display()))
-                                        }
-                                    }
-                                }
-                                Done::Library {
-                                    entries: crate::dam::storage::list(&dir),
-                                    deleted,
-                                    failed,
-                                }
-                            }
-                        };
+                        // Every job is answered, even one that panics: the UI counts
+                        // what it is waiting for, and an unanswered job would leave
+                        // it "busy" for the rest of the session.
+                        let failed = job.answer_if_panicked();
+                        let done = caught(|| run_file_job(job, &scan)).unwrap_or_else(|reason| {
+                            log::error!("file worker: {reason}");
+                            failed(reason)
+                        });
                         let _ = done_tx.send(done);
                         wake(&repaint);
                     }
@@ -774,6 +820,29 @@ fn orient(mut img: egui::ColorImage, g: &Geometry) -> egui::ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A job that panics is still answered, in the shape that releases what the UI is
+    /// counting for it.
+    #[test]
+    fn a_panicked_file_job_is_still_answered() {
+        let shelf = FileJob::Shelf(PathBuf::from("/nowhere/a.dng"));
+        let answer = shelf.answer_if_panicked();
+        assert!(caught(|| -> Done { panic!("hostile sidecar") }).is_err());
+        match answer("crashed".into()) {
+            Done::Shelf(facts) => assert_eq!(facts.path, PathBuf::from("/nowhere/a.dng")),
+            _ => panic!("wrong answer"),
+        }
+        let scan = FileJob::Scan {
+            folder: PathBuf::from("/nowhere"),
+            purpose: ScanFor::Watch,
+            depth: 1,
+            epoch: None,
+        };
+        assert!(matches!(
+            scan.answer_if_panicked()("crashed".into()),
+            Done::Scanned { cancelled: true, .. }
+        ));
+    }
 
     fn tagged(w: usize, h: usize) -> egui::ColorImage {
         let pixels = (0..w * h)
