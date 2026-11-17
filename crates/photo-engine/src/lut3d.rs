@@ -270,9 +270,66 @@ pub fn parse_cube(input: &str) -> Result<Lut3D> {
     })
 }
 
+/// Whether a look's path is one to open: an absolute path to a regular `.cube` file on a
+/// local disk. A sidecar or a preset names the file, and either may have come from
+/// someone else, so this is checked before anything is read:
+///
+/// - a network path (`\\server\share`, `//server/share`) is refused outright, before any
+///   filesystem call: on Windows merely touching one sends the user's NTLM credentials to
+///   that server;
+/// - a device path (`\\.\`, `\\?\`, `/dev/`, `/proc/`) is refused;
+/// - anything not a regular file (a FIFO would block the read forever) is refused.
+pub fn check_cube_path(path: &std::path::Path) -> anyhow::Result<()> {
+    let text = path.to_string_lossy();
+    if text.starts_with("\\\\") || text.starts_with("//") {
+        anyhow::bail!("a look on a network path is not opened: {text}");
+    }
+    if ["/dev/", "/proc/", "/sys/"]
+        .iter()
+        .any(|p| text.starts_with(p))
+    {
+        anyhow::bail!("not a look file: {text}");
+    }
+    if !path.is_absolute() {
+        anyhow::bail!("a look's path must be absolute: {text}");
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cube"))
+    {
+        anyhow::bail!("a look is a .cube file: {text}");
+    }
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        anyhow::bail!("not a regular file: {text}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_local_cube_file_is_opened() {
+        use std::path::Path;
+        for bad in [
+            "\\\\attacker\\share\\x.cube",
+            "//attacker/share/x.cube",
+            "/dev/stdin",
+            "relative/x.cube",
+            "/etc/passwd",
+        ] {
+            assert!(check_cube_path(Path::new(bad)).is_err(), "{bad}");
+        }
+        let dir = std::env::temp_dir().join(format!("duckfoot-cube-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("look.CUBE");
+        std::fs::write(&ok, "LUT_3D_SIZE 2\n").unwrap();
+        assert!(check_cube_path(&ok).is_ok());
+        assert!(check_cube_path(&dir.join("missing.cube")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parse_identity_2x2x2_cube() {

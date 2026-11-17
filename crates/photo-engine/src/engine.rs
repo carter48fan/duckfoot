@@ -2042,6 +2042,9 @@ impl Engine {
             const MAX_CUBE_BYTES: u64 = 16 << 20;
             let read_cube = || -> Result<crate::lut3d::Lut3D> {
                 use std::io::Read;
+                // The path comes from a sidecar or a preset, which may have come from
+                // anyone: checked before the filesystem is asked anything about it.
+                crate::lut3d::check_cube_path(std::path::Path::new(path))?;
                 let file = std::fs::File::open(path)?;
                 let mut text = String::new();
                 file.take(MAX_CUBE_BYTES + 1).read_to_string(&mut text)?;
