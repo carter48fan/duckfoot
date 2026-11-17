@@ -19,6 +19,8 @@ winit.workspace = true
 wgpu.workspace = true
 anyhow.workspace = true
 log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 pollster = "1"
 
 # The desktop binary's logger; Android logs through logcat instead. Screen readers

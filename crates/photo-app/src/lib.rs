@@ -1502,6 +1502,14 @@ impl PhotoApp {
             .save_if_changed(self.settings_dir.as_deref(), &self.settings_written);
     }
 
+    /// What the window's title bar says: the open photo's name, then the app's.
+    pub fn window_title(&self) -> String {
+        match self.loaded_path.as_deref().and_then(|p| p.file_name()) {
+            Some(name) => format!("{} — Duckfoot", name.to_string_lossy()),
+            None => "Duckfoot".to_string(),
+        }
+    }
+
     /// The size the photo's stage got last frame.
     pub fn stage_size(&self) -> egui::Vec2 {
         self.last_panel

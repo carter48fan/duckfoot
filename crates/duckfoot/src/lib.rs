@@ -9,6 +9,8 @@
 //! exactly the moment they chose a file.
 
 #[cfg(not(target_os = "android"))]
+mod geometry;
+#[cfg(not(target_os = "android"))]
 mod monitor;
 
 use std::path::PathBuf;
@@ -189,6 +191,8 @@ struct WindowState {
     window: Arc<Window>,
     config: wgpu::SurfaceConfiguration,
     egui_winit: egui_winit::State,
+    /// The title the window was last given; set again only when it changes.
+    title: String,
 }
 
 impl WindowState {
@@ -207,6 +211,11 @@ impl WindowState {
         let mut output = egui_ctx.run_ui(input, |ui| {
             app.update(ui, &gpu.gpu());
         });
+        let title = app.window_title();
+        if title != self.title {
+            self.window.set_title(&title);
+            self.title = title;
+        }
 
         self.egui_winit
             .handle_platform_output(&self.window, output.platform_output);
@@ -356,6 +365,9 @@ struct Shell {
     /// The monitor the window is on, and the system's profile for it.
     #[cfg(not(target_os = "android"))]
     monitors: monitor::Watch,
+    /// Where the window was when last closed or left, and where it opens.
+    #[cfg(not(target_os = "android"))]
+    geometry: Option<geometry::Geometry>,
 }
 
 impl Shell {
@@ -371,6 +383,9 @@ impl Shell {
             repaint_at: None,
             #[cfg(not(target_os = "android"))]
             monitors: monitor::Watch::default(),
+            #[cfg(not(target_os = "android"))]
+            geometry: photo_app::platform::desktop_settings_dir()
+                .and_then(|dir| geometry::Geometry::load(&dir)),
         }
     }
 
@@ -398,16 +413,34 @@ impl Shell {
     /// Create the window and surface, and — on the first resume only — the device and
     /// the app.
     fn open_window(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
-        let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Duckfoot — Photo")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
-                    .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0))
-                    // Shown once AccessKit is attached, which must happen before.
-                    .with_visible(false),
-            )?,
-        );
+        #[allow(unused_mut)]
+        let mut attributes = Window::default_attributes()
+            .with_title("Duckfoot")
+            .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0))
+            // Shown once AccessKit is attached, which must happen before.
+            .with_visible(false);
+        #[cfg(not(target_os = "android"))]
+        if let Some(saved) = self.geometry {
+            let monitors: Vec<geometry::Monitor> = event_loop
+                .available_monitors()
+                .map(|m| {
+                    let (p, s) = (m.position(), m.size());
+                    ((p.x, p.y), (s.width, s.height))
+                })
+                .collect();
+            attributes = saved.apply(attributes, &monitors);
+        }
+        // The desktop file's name, so a Linux desktop pairs the window with its icon.
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+        {
+            use winit::platform::{
+                wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11,
+            };
+            attributes = WindowAttributesExtWayland::with_name(attributes, "duckfoot", "duckfoot");
+            attributes = WindowAttributesExtX11::with_name(attributes, "duckfoot", "duckfoot");
+        }
+        let window = Arc::new(event_loop.create_window(attributes)?);
         let surface = self.instance.create_surface(window.clone())?;
 
         if self
@@ -483,6 +516,7 @@ impl Shell {
             window,
             config,
             egui_winit,
+            title: String::new(),
         });
         Ok(())
     }
@@ -580,11 +614,15 @@ impl ApplicationHandler<UserEvent> for Shell {
 
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                #[cfg(not(target_os = "android"))]
+                save_geometry(&mut self.geometry, &window.window);
                 app.shutdown();
                 event_loop.exit();
             }
             // Switching away is when work is most often abandoned mid-thought.
             WindowEvent::Focused(false) => {
+                #[cfg(not(target_os = "android"))]
+                save_geometry(&mut self.geometry, &window.window);
                 app.flush();
             }
             WindowEvent::Resized(size) => {
@@ -608,5 +646,17 @@ impl ApplicationHandler<UserEvent> for Shell {
             }
             _ => {}
         }
+    }
+}
+
+/// Remembers where `window` is, and writes it down if that has changed.
+#[cfg(not(target_os = "android"))]
+fn save_geometry(saved: &mut Option<geometry::Geometry>, window: &Window) {
+    let now = geometry::Geometry::of(window, *saved);
+    if *saved != Some(now) {
+        if let Some(dir) = photo_app::platform::desktop_settings_dir() {
+            now.save(&dir);
+        }
+        *saved = Some(now);
     }
 }
