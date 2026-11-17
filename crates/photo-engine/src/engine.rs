@@ -2938,9 +2938,7 @@ impl Engine {
         let sensor = denoised
             .as_ref()
             .map(|d| &d.view)
-            .or_else(|| {
-                denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view))
-            })
+            .or_else(|| denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view)))
             .unwrap_or(&image.sensor_view);
         let texel = DEEP_OUTPUT_FORMAT.block_copy_size(None).unwrap_or(8);
         self.render_bands_into(
@@ -3043,9 +3041,7 @@ impl Engine {
         let sensor = denoised
             .as_ref()
             .map(|d| &d.view)
-            .or_else(|| {
-                denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view))
-            })
+            .or_else(|| denoise_base.and_then(|_| image.denoised.as_ref().map(|(d, _)| &d.view)))
             .unwrap_or(&image.sensor_view);
         let Some((tw, th)) = resize_to else {
             let pixels =

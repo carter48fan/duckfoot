@@ -217,8 +217,7 @@ impl CutoutStudioState {
         let Ok(session) = RembgSession::auto() else {
             return;
         };
-        let Ok(mask) =
-            session.compute_mask_from_upscaled(upscaled, &self.params, &self.touchups)
+        let Ok(mask) = session.compute_mask_from_upscaled(upscaled, &self.params, &self.touchups)
         else {
             return;
         };

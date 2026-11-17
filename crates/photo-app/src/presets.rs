@@ -234,7 +234,8 @@ pub fn apply(base: &PhotoStack, look: &Look, strength: f32) -> PhotoStack {
     {
         // Looks draw their S-curves and fades relative to a 0..1 diagonal; on a RAW
         // (or a photo that already carries a curve), layer the look's curve over it.
-        target.tone_curve.params = compose_curve(&base.tone_curve.params, &target.tone_curve.params);
+        target.tone_curve.params =
+            compose_curve(&base.tone_curve.params, &target.tone_curve.params);
     }
 
     let mut out = base.clone();
@@ -499,12 +500,12 @@ mod tests {
         let after_warm = apply(&raw, warm, 1.0);
         assert_eq!(after_warm.tone_curve, raw.tone_curve);
 
-        let matte = LOOKS.iter().find(|l| l.name == "matte").unwrap();
-        let after_matte = apply(&raw, matte, 1.0);
-        assert!(after_matte.tone_curve.enabled);
-        let lut = photo_engine::curve::build_lut(&after_matte.tone_curve.params);
-        // Faded blacks from matte (0.07) and lifted midtones from the RAW base curve (~0.57 at 0.36).
-        assert!((lut[0] - 0.07).abs() < 0.01);
+        let fade = LOOKS.iter().find(|l| l.name == "fade").unwrap();
+        let after_fade = apply(&raw, fade, 1.0);
+        assert!(after_fade.tone_curve.enabled);
+        let lut = photo_engine::curve::build_lut(&after_fade.tone_curve.params);
+        // Faded blacks from the look (0.09) and lifted midtones from the RAW base curve (~0.57 at 0.36).
+        assert!((lut[0] - 0.09).abs() < 0.01);
         assert!(lut[368] > 0.50);
     }
 }

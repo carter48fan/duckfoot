@@ -54,7 +54,9 @@ fn main() -> anyhow::Result<()> {
         let nodes = curve
             .split(';')
             .map(|xy| {
-                let (x, y) = xy.split_once(',').ok_or_else(|| anyhow::anyhow!("node {xy}"))?;
+                let (x, y) = xy
+                    .split_once(',')
+                    .ok_or_else(|| anyhow::anyhow!("node {xy}"))?;
                 Ok(CurveNode::new(x.trim().parse()?, y.trim().parse()?))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
