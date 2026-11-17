@@ -1624,6 +1624,34 @@ impl PhotoApp {
                     ui.label(theme::dim("Choose a mask to place and adjust it.").size(11.5));
                 }
             }
+            InspectorSectionId::Grain => {
+                let p = &mut self.stack.grain.params;
+                let dp = d.grain.params;
+                track!(widgets::param_slider(
+                    ui,
+                    "amount",
+                    &mut p.amount,
+                    0.0..=100.0,
+                    0,
+                    dp.amount
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "size",
+                    &mut p.size,
+                    0.0..=100.0,
+                    0,
+                    dp.size
+                ));
+                track!(widgets::param_slider(
+                    ui,
+                    "roughness",
+                    &mut p.roughness,
+                    0.0..=100.0,
+                    0,
+                    dp.roughness
+                ));
+            }
             InspectorSectionId::Vignette => {
                 let p = &mut self.stack.vignette.params;
                 let dp = d.vignette.params;

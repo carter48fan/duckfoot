@@ -3061,3 +3061,88 @@ fn the_black_and_white_mixer_sets_each_colours_grey() {
     let t = grey_at(&toned, 48, 16);
     assert!(t[0] > t[2] + 0.005, "not toned: {t:?}");
 }
+
+/// Film grain: on a flat grey it averages out to the grey, grows with its amount, is
+/// stronger in the mid-tones than near black, is the same in every export, and a preview
+/// shows about as much of it as the export would at the preview's size.
+#[test]
+fn grain_is_mid_toned_repeatable_and_the_preview_shows_the_exports() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (512u32, 256u32);
+    // Left half mid grey, right half near black.
+    let raster = testkit::raster_from_fn(w, h, |x, _| [if x < w / 2 { 0.18 } else { 0.004 }; 3]);
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+
+    let stats = |out: &photo_engine::ExportedImage, x0: u32, x1: u32| {
+        let mut v = Vec::new();
+        for y in 8..out.height - 8 {
+            for x in x0..x1 {
+                v.push(out.rgba[((y * out.width + x) * 4 + 1) as usize] as f32);
+            }
+        }
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let sd = (v.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / v.len() as f32).sqrt();
+        (mean, sd)
+    };
+    let plain = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    stack.grain.enabled = true;
+    stack.grain.params.amount = 50.0;
+    stack.grain.params.size = 0.0;
+    let half = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    stack.grain.params.amount = 100.0;
+    let full = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+
+    let (grey, _) = stats(&plain, 8, w / 2 - 8);
+    let (mean, sd_full) = stats(&full, 8, w / 2 - 8);
+    let (_, sd_half) = stats(&half, 8, w / 2 - 8);
+    assert!(
+        (mean - grey).abs() < 1.5,
+        "grain moved the grey {grey} → {mean}"
+    );
+    assert!(sd_full > 3.0, "too little grain: sd {sd_full}");
+    assert!(sd_full > sd_half * 1.5, "amount: {sd_half} → {sd_full}");
+    let (_, sd_dark) = stats(&full, w / 2 + 8, w - 8);
+    assert!(
+        sd_dark < sd_full * 0.5,
+        "near black {sd_dark} vs mid grey {sd_full}"
+    );
+
+    let again = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(again.rgba == full.rgba, "grain changed between exports");
+
+    // A preview two levels down (a quarter the size) against the export shrunk to it.
+    stack.grain.params.size = 100.0;
+    let (pw, ph, preview_px) = preview(gpu, &mut engine, &stack, 2);
+    let export = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let k = export.width / pw;
+    let shrunk: Vec<f32> = (0..ph)
+        .flat_map(|y| (0..pw / 2).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let mut sum = 0.0;
+            for dy in 0..k {
+                for dx in 0..k {
+                    let i = (((y * k + dy) * export.width + x * k + dx) * 4 + 1) as usize;
+                    sum += export.rgba[i] as f32;
+                }
+            }
+            sum / (k * k) as f32
+        })
+        .collect();
+    let sd = |v: &[f32]| {
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|a| (a - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+    };
+    let shown: Vec<f32> = (2..ph - 2)
+        .flat_map(|y| (2..pw / 2 - 2).map(move |x| (x, y)))
+        .map(|(x, y)| preview_px[((y * pw + x) * 4 + 1) as usize] as f32)
+        .collect();
+    let (a, b) = (sd(&shown), sd(&shrunk));
+    assert!(
+        a > b * 0.6 && a < b * 1.6,
+        "the preview's grain (sd {a}) is not the export's at its size (sd {b})"
+    );
+}

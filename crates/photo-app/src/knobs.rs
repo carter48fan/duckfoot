@@ -207,6 +207,12 @@ const VIGNETTE: &[Knob] = &[
     knob!("radius", 0.1, 1.5, 2, vignette.params.radius),
 ];
 
+const GRAIN: &[Knob] = &[
+    knob!("amount", 0.0, 100.0, 0, grain.params.amount),
+    knob!("size", 0.0, 100.0, 0, grain.params.size),
+    knob!("roughness", 0.0, 100.0, 0, grain.params.roughness),
+];
+
 /// The module's knobs, in the order its card lists them. Empty for the modules whose
 /// controls are not values along a line (the curve, the colour wheels and bands, masks,
 /// spots, the scopes).
@@ -225,6 +231,7 @@ pub fn knobs(id: InspectorSectionId) -> &'static [Knob] {
         I::Vibrance => VIBRANCE,
         I::Sharpen => SHARPEN,
         I::Vignette => VIGNETTE,
+        I::Grain => GRAIN,
         I::Look => LOOK,
         I::Scope
         | I::ToneCurve

@@ -97,7 +97,8 @@ makes the Android bootstrap a small file instead of a fork.
               │   white balance · camera→Rec.2020 matrix · exposure · local masks (×8)
               │   highlights/shadows/whites/blacks · clarity/texture/dehaze · capture sharpen
               │   tone curve & RGB curves (1D LUT) · filmic · colour eq · vibrance/saturation
-              │   · colour balance · vignette · 3D .cube look · soft proofing
+              │   · b&w mixer · colour balance · 3D .cube look · vignette · grain
+              │   · soft proofing
               │   all driven by ONE uniform buffer
               ▼
         PASS 3  output transform → display/export space ──► egui texture, presented

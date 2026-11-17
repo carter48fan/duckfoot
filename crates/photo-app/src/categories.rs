@@ -55,6 +55,7 @@ const TUNE: &[Chip] = &[
     Knob(M::Tonal, 3),
     Knob(M::Dehaze, 0),
     Knob(M::Vignette, 0),
+    Knob(M::Grain, 0),
     // Colour
     Knob(M::WhiteBalance, 0),
     Knob(M::WhiteBalance, 1),
@@ -69,7 +70,7 @@ const TUNE: &[Chip] = &[
 ];
 
 /// Tune's stretches: a name, and where in [`TUNE`] it starts.
-const TUNE_SECTIONS: &[(&str, usize)] = &[("light", 0), ("colour", 7), ("detail", 11)];
+const TUNE_SECTIONS: &[(&str, usize)] = &[("light", 0), ("colour", 8), ("detail", 12)];
 
 const CROP: &[Chip] = &[
     Tool(M::Geometry),
@@ -229,6 +230,7 @@ impl Chip {
                 (M::Dehaze, 0) => "dehaze",
                 (M::Vignette, 0) => "vignette",
                 (M::Vignette, 1) => "vignette size",
+                (M::Grain, 0) => "grain",
                 (M::Sharpen, 0) => "sharpen",
                 (M::Denoise, 0) => "noise",
                 (M::Denoise, 2) => "colour noise",

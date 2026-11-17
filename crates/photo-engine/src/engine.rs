@@ -195,6 +195,8 @@ struct AdjustUniforms {
     /// The black-and-white mixer's eight band weights, red to magenta (-100..100).
     mono_a: [f32; 4],
     mono_b: [f32; 4],
+    /// Film grain: amount, size and roughness, each 0..1.
+    grain: [f32; 4],
 }
 
 #[repr(C)]
@@ -3847,6 +3849,10 @@ impl Engine {
                     let w = stack.black_white.params.weights();
                     [w[4], w[5], w[6], w[7]]
                 },
+                grain: {
+                    let g = stack.grain.params;
+                    [g.amount * 0.01, g.size * 0.01, g.roughness * 0.01, 0.0]
+                },
             }),
         );
     }
@@ -5540,6 +5546,7 @@ mod uniform_layout_tests {
             ("hdr", std::mem::offset_of!(AdjustUniforms, hdr)),
             ("mono_a", std::mem::offset_of!(AdjustUniforms, mono_a)),
             ("mono_b", std::mem::offset_of!(AdjustUniforms, mono_b)),
+            ("grain", std::mem::offset_of!(AdjustUniforms, grain)),
         ];
         assert_eq!(members.len(), rust.len(), "a member on one side only");
         for (m, (name, offset)) in members.iter().zip(rust) {

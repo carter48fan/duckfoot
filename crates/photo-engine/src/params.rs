@@ -430,6 +430,30 @@ impl Default for Vibrance {
     }
 }
 
+/// Film grain, laid over the finished photo: a monochrome texture strongest in the
+/// mid-tones, as film's is, and none in pure black or white.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grain {
+    /// How strong, 0..100.
+    pub amount: f32,
+    /// The grain's size, 0..100: from fine (a slow film) to coarse. Tied to the whole
+    /// frame, as film's is to the negative, so a tight crop shows it larger.
+    pub size: f32,
+    /// How much finer grain is mixed in with it, 0..100: smooth to gritty.
+    pub roughness: f32,
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self {
+            amount: 25.0,
+            size: 25.0,
+            roughness: 50.0,
+        }
+    }
+}
+
 /// Lens falloff and optical vignetting control.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Vignette {
@@ -815,6 +839,9 @@ pub struct PhotoStack {
     pub black_white: Module<BlackWhite>,
     #[serde(default)]
     pub vignette: Module<Vignette>,
+    /// Off in a sidecar without it.
+    #[serde(default)]
+    pub grain: Module<Grain>,
     #[serde(default)]
     pub sharpen: Module<Sharpen>,
     #[serde(default)]
@@ -874,6 +901,7 @@ impl Default for PhotoStack {
             vibrance: Module::new(false, Vibrance::default()),
             black_white: Module::new(false, BlackWhite::default()),
             vignette: Module::new(false, Vignette::default()),
+            grain: Module::new(false, Grain::default()),
             sharpen: Module::new(false, Sharpen::default()),
             clarity: Module::new(false, Clarity::default()),
             dehaze: Module::new(false, Dehaze::default()),
@@ -962,6 +990,7 @@ pub(crate) mod flags {
     pub const LOOK: u32 = 65536;
     pub const RENDER_V2: u32 = 131072;
     pub const BLACK_WHITE: u32 = 262144;
+    pub const GRAIN: u32 = 524288;
 }
 
 impl PhotoStack {
@@ -1024,6 +1053,9 @@ impl PhotoStack {
         if self.black_white.enabled {
             m |= flags::BLACK_WHITE;
         }
+        if self.grain.enabled && self.grain.params.amount > 0.0 {
+            m |= flags::GRAIN;
+        }
         m
     }
 }
@@ -1060,6 +1092,10 @@ impl PhotoStack {
         for nodes in [&mut rgb.red, &mut rgb.green, &mut rgb.blue] {
             clean_curve(nodes);
         }
+        let g = &mut s.grain.params;
+        g.amount = finite_or(g.amount, 0.0).clamp(0.0, 100.0);
+        g.size = finite_or(g.size, 25.0).clamp(0.0, 100.0);
+        g.roughness = finite_or(g.roughness, 50.0).clamp(0.0, 100.0);
         for (_, w) in s.black_white.params.weights_mut() {
             *w = finite_or(*w, 0.0).clamp(-100.0, 100.0);
         }

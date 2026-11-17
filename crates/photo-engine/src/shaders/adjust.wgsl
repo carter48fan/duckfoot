@@ -89,6 +89,7 @@ struct Adjust {
     // again, wrapping), -100..100.
     mono_a:     vec4<f32>,
     mono_b:     vec4<f32>,
+    grain:      vec4<f32>,   // x = amount, y = size, z = roughness, each 0..1
 }
 
 const FLAG_WB:       u32 = 1u;
@@ -110,6 +111,7 @@ const FLAG_LOOK:     u32 = 65536u;
 // The colour math of `params::Rendering::V2`: off for an edit saved before it.
 const FLAG_RENDER_V2: u32 = 131072u;
 const FLAG_BLACK_WHITE: u32 = 262144u;
+const FLAG_GRAIN:     u32 = 524288u;
 // Tests only: paint any pixel that went NaN or infinite anywhere in the chain transparent
 // magenta, so a pixel test can see a numerics bug instead of a black speck
 // (`Engine::set_nan_paint`).
@@ -1042,6 +1044,57 @@ fn black_white(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y * k);
 }
 
+// Film grain's noise: one value per lattice point, from an integer hash of the point and
+// the octave (lowbias32), -1..1. The same point always gives the same value, so a photo's
+// grain is the same in every render and in every band of an export.
+fn grain_hash(p: vec2<i32>, octave: u32) -> f32 {
+    var h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u)
+        ^ (octave * 0xcb1ab31fu);
+    h = h ^ (h >> 16u);
+    h = h * 0x7feb352du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return f32(h) / 2147483647.5 - 1.0;
+}
+
+// Smooth value noise over a lattice of unit cells.
+fn grain_noise(p: vec2<f32>, octave: u32) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let s = f * f * (3.0 - 2.0 * f);
+    let k = vec2<i32>(i);
+    let a = grain_hash(k, octave);
+    let b = grain_hash(k + vec2<i32>(1, 0), octave);
+    let c = grain_hash(k + vec2<i32>(0, 1), octave);
+    let d = grain_hash(k + vec2<i32>(1, 1), octave);
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+// Grain at `out_px`, a full-resolution output pixel, so the preview samples the export's
+// grain rather than a grain of its own. A preview pixel stands for several of the
+// export's, which average grain finer than themselves away; each octave is scaled down by
+// as much, so the preview shows about as much grain as the export would at that size.
+// Monochrome, and weighted by 4y(1-y) of the displayed luminance: strongest in the
+// mid-tones, none in pure black or white.
+fn grain(c: vec3<f32>, out_px: vec2<f32>) -> vec3<f32> {
+    let y = luma(c);
+    if (y <= 0.0) {
+        return c;
+    }
+    // Sized to the frame (a 6000 px photo's finest grain is a little over a pixel), but
+    // never finer than a pixel of the output it is drawn into.
+    let cell = max(max(u.sizes.x, u.sizes.y) / 3000.0 * (0.6 + 3.0 * u.grain.y), 1.0);
+    let footprint = max(u.sizes.x / u.dest.x, 1.0);
+    var n = grain_noise(out_px / cell, 0u) * min(1.0, cell / footprint);
+    let fine = cell * 0.5;
+    n += grain_noise(out_px / fine, 1u) * u.grain.z * min(1.0, fine / footprint);
+    let shown = linear_to_srgb(vec3<f32>(y)).x;
+    let mid = clamp(shown, 0.0, 1.0);
+    let moved = max(shown + u.grain.x * 0.12 * n * 4.0 * mid * (1.0 - mid), 0.0);
+    return c * (srgb_to_linear1(moved) / y);
+}
+
 // Rec.2020 → sRGB, linear: only to name a wide colour's hue as the bands know it.
 const REC2020_TO_SRGB = mat3x3<f32>(
     vec3<f32>(1.660491, -0.124550, -0.018151),
@@ -1351,6 +1404,12 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let rad = max(u.vignette.y, 0.05);
         let v_falloff = smoothstep(rad * 0.4, rad, dist);
         c = c * max(1.0 + u.vignette.x * v_falloff, 0.0);
+    }
+
+    // Last of the look, over everything, as film's grain is.
+    if (enabled(FLAG_GRAIN)) {
+        c = grain(c, out_px);
+        bad = bad || not_finite(c);
     }
 
     // The dust view (preview only): the finest detail alone, as grey, so specks from a dirty

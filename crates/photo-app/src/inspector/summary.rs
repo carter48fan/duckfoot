@@ -263,6 +263,13 @@ pub(crate) fn summarise(
             };
             (text, n > 0)
         }
+        S::Grain => {
+            let p = &s.grain.params;
+            (
+                format!("{:.0} · size {:.0}", p.amount, p.size),
+                *p != d.grain.params,
+            )
+        }
         S::Vignette => {
             let p = &s.vignette.params;
             (

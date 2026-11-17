@@ -25,6 +25,7 @@ DESIGN.md invariant 8.
 | **Params** | highlights & shadows (tonal) | Working | High dynamic range shadow & highlight balancing in shader |
 | **Params** | vibrance & saturation | Working | Non-linear skin-safe saturation boost |
 | **Params** | black & white mixer | Working | Eight hue bands set each colour's grey, after saturation and before colour balance (so it can be toned); off in older sidecars, which are now version 3 |
+| **Params** | film grain | Working | Monochrome, strongest in the mid-tones, sized to the whole frame; the same in every export and band, and a preview shows as much as the export would at its size |
 | **Params** | capture sharpen, vignette | Working | Resolution-independent convolution (`0.25` default on RAW) & crop-centered radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box with 8 handles & aspect lock |
 | **Params** | Denoise (NR) | Working | Cached mip-chain fragment pre-pass (`denoise.wgsl`) for luma & chroma (`25` colour NR default on RAW) |

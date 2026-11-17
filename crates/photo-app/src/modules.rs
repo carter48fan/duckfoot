@@ -117,6 +117,7 @@ module_table! {
     BlackWhite => black_white;
     Sharpen => sharpen;
     Vignette => vignette;
+    Grain => grain;
     Local => local;
     Heal => heal;
     Look => look;
@@ -174,7 +175,7 @@ impl InspectorSectionId {
             | I::ColorEq
             | I::ColorBalance
             | I::Look => ModuleGroup::Colour,
-            I::Clarity | I::Dehaze | I::Vignette => ModuleGroup::Effects,
+            I::Clarity | I::Dehaze | I::Vignette | I::Grain => ModuleGroup::Effects,
             I::Sharpen | I::Denoise => ModuleGroup::Detail,
             I::Lens => ModuleGroup::Optics,
             I::Geometry | I::Heal | I::Local => ModuleGroup::Retouch,

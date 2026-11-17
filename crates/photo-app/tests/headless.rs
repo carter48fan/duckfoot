@@ -3768,8 +3768,8 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
         Some(Chip::Knob(M::Tonal, 2)),
         "two steps up from highlights is whites"
     );
-    // Light's list ends at vignette: more steps up stay there, not on into Colour.
-    app.choose_chip(Chip::Knob(M::Vignette, 0));
+    // Light's list ends at grain: more steps up stay there, not on into Colour.
+    app.choose_chip(Chip::Knob(M::Grain, 0));
     for _ in 0..3 {
         h.frame_sized(&mut app, PORTRAIT, Default::default());
     }
@@ -3783,7 +3783,7 @@ fn a_chip_opens_its_tool_and_back_returns_to_the_ruler() {
         ),
         0,
     );
-    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Vignette, 0)));
+    assert_eq!(app.current_chip(), Some(Chip::Knob(M::Grain, 0)));
     // Drifting left on the ruler while choosing: Colour's tab, nothing turned.
     let vignette = app.stack().vignette.params.amount;
     let mut path = line(
