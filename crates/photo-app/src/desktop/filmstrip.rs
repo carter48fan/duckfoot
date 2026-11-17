@@ -153,13 +153,17 @@ impl PhotoApp {
                 } else {
                     it.is_edited
                 };
-                self.filter.matches_lowered(
-                    &query,
-                    &it.search_name,
-                    &it.metadata,
-                    is_edited,
-                    it.has_sidecar,
-                )
+                self.filter
+                    .folder
+                    .as_ref()
+                    .is_none_or(|f| it.path.starts_with(f))
+                    && self.filter.matches_lowered(
+                        &query,
+                        &it.search_name,
+                        &it.metadata,
+                        is_edited,
+                        it.has_sidecar,
+                    )
             })
             .map(|(i, _)| i)
             .collect();

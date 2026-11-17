@@ -68,6 +68,7 @@ impl PhotoApp {
                             })
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 10.0;
+                                self.folders_group(ui);
                                 self.photos_group(ui);
                                 self.snapshots_group(ui);
                                 self.history_group(ui);
@@ -75,6 +76,60 @@ impl PhotoApp {
                     });
             });
         self.desk_spots.history = Some(panel.response.rect);
+    }
+
+    /// The folders the shelf's photos are in, as a tree; a click shows only the photos in
+    /// one (and the folders inside it), a second click all of them again. Shown once the
+    /// shelf spans more than one folder.
+    pub(crate) fn folders_group(&mut self, ui: &mut egui::Ui) {
+        let folders = {
+            let mut cache = self.shelf_folders.borrow_mut();
+            if cache
+                .as_ref()
+                .is_none_or(|(epoch, _)| *epoch != self.shelf_epoch)
+            {
+                let tree =
+                    dam::FolderTree::from_paths(self.shelf.iter().map(|it| it.path.as_path()));
+                *cache = Some((self.shelf_epoch, tree));
+            }
+            cache.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
+        };
+        if folders.len() < 2 {
+            return;
+        }
+        let mut chosen = None;
+        group(
+            ui,
+            "Folders",
+            |ui| {
+                ui.label(theme::tag(folders.len().to_string()).color(theme::TEXT_DIM));
+            },
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("folders-list")
+                    .max_height(PHOTO_ROWS * 25.0)
+                    .show(ui, |ui| {
+                        for f in &folders {
+                            let on = self.filter.folder.as_ref() == Some(&f.path);
+                            let style = if on { RowStyle::Now } else { RowStyle::Normal };
+                            let label = format!("{}{}", "  ".repeat(f.depth), f.name);
+                            let row = list_row(
+                                ui,
+                                &label,
+                                style,
+                                Some((&f.photos.to_string(), theme::TEXT_DIM)),
+                            )
+                            .on_hover_text(f.path.display().to_string());
+                            if row.clicked() {
+                                chosen = Some(if on { None } else { Some(f.path.clone()) });
+                            }
+                        }
+                    });
+            },
+        );
+        if let Some(folder) = chosen {
+            self.filter.folder = folder;
+        }
     }
 
     /// Add photos or a folder, and the shelf as a list in the order the shelf shows it

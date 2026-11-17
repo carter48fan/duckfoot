@@ -618,6 +618,8 @@ pub struct PhotoApp {
     pub shelf_epoch: usize,
     /// Cached (epoch, filter, loaded_path, is_edited, indices) to eliminate per-frame O(N log N) sorting.
     shelf_display_cache: std::cell::RefCell<ShelfDisplayCache>,
+    /// The shelf's folders, as of `shelf_epoch`.
+    shelf_folders: std::cell::RefCell<Option<(usize, Vec<dam::folder_tree::ShelfFolder>)>>,
     /// Before/after split view toggle and position (0.0..=1.0).
     pub split_active: bool,
     pub split_pos: f32,
@@ -1050,6 +1052,7 @@ impl PhotoApp {
             filter: dam::FilterState::default(),
             shelf_epoch: 0,
             shelf_display_cache: std::cell::RefCell::new(None),
+            shelf_folders: std::cell::RefCell::new(None),
             folder_tree,
             storage: None,
             batch_renamer: batch::Renamer::default(),

@@ -44,6 +44,8 @@ pub struct FilterState {
     pub color_label: Option<String>,
     #[serde(skip)]
     pub search_query: String,
+    /// Only photos in this folder, or in a folder inside it.
+    pub folder: Option<std::path::PathBuf>,
     pub sort_by: SortBy,
     pub sort_descending: bool,
 }

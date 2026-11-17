@@ -45,7 +45,67 @@ impl Default for FolderTree {
     }
 }
 
+/// A folder the shelf's photos are in: its depth below the shelf's common folder, the
+/// name to show for it, and how many photos are in it and the folders inside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShelfFolder {
+    pub path: PathBuf,
+    pub depth: usize,
+    pub name: String,
+    pub photos: usize,
+}
+
 impl FolderTree {
+    /// The folders `photos` are in, and every folder between them and the one they all
+    /// share, as a tree in path order. Read from the paths alone: nothing touches the disk.
+    pub fn from_paths<'a>(photos: impl IntoIterator<Item = &'a Path>) -> Vec<ShelfFolder> {
+        use std::collections::BTreeMap;
+        let mut direct: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        for p in photos {
+            if let Some(parent) = p.parent() {
+                *direct.entry(parent.to_path_buf()).or_default() += 1;
+            }
+        }
+        let Some(first) = direct.keys().next().cloned() else {
+            return Vec::new();
+        };
+        // The deepest folder every one is inside.
+        let mut root = first;
+        for dir in direct.keys() {
+            while !dir.starts_with(&root) {
+                match root.parent() {
+                    Some(up) => root = up.to_path_buf(),
+                    None => break,
+                }
+            }
+        }
+        // Each folder from the root down to every one that holds photos, counted with
+        // what is inside it.
+        let mut all: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        for (dir, n) in &direct {
+            let mut at = Some(dir.as_path());
+            while let Some(d) = at {
+                if !d.starts_with(&root) {
+                    break;
+                }
+                *all.entry(d.to_path_buf()).or_default() += n;
+                at = d.parent();
+            }
+        }
+        let root_depth = root.components().count();
+        all.into_iter()
+            .map(|(path, photos)| ShelfFolder {
+                depth: path.components().count() - root_depth,
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+                path,
+                photos,
+            })
+            .collect()
+    }
+
     /// List subfolders inside the given directory for tree exploration.
     pub fn list_subfolders(dir: &Path) -> Vec<PathBuf> {
         let mut subfolders = Vec::new();
@@ -143,6 +203,32 @@ impl FolderTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shelfs_folders_are_a_tree_counted_from_the_paths() {
+        let paths = [
+            "/cards/2026/june/a.ARW",
+            "/cards/2026/june/b.ARW",
+            "/cards/2026/july/c.ARW",
+            "/cards/2026/july/raw/d.ARW",
+        ]
+        .map(PathBuf::from);
+        let tree = FolderTree::from_paths(paths.iter().map(PathBuf::as_path));
+        let rows: Vec<(String, usize, usize)> = tree
+            .iter()
+            .map(|f| (f.name.clone(), f.depth, f.photos))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("2026".to_string(), 0, 4),
+                ("july".to_string(), 1, 2),
+                ("raw".to_string(), 2, 1),
+                ("june".to_string(), 1, 2),
+            ]
+        );
+        assert!(FolderTree::from_paths(std::iter::empty()).is_empty());
+    }
 
     #[test]
     fn folder_tree_default_has_bookmarks() {

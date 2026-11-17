@@ -3904,3 +3904,40 @@ fn marks_written_in_the_background_are_there_when_a_photo_opens() {
     assert_eq!(app.error(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Choosing a folder shows only its photos: stepping through the shelf skips the rest.
+#[test]
+fn a_folder_chosen_narrows_the_shelf_to_it() {
+    let dir = scratch_dir("folder-filter");
+    let (one, two) = (dir.join("one"), dir.join("two"));
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    let paths = [one.join("a.png"), one.join("b.png"), two.join("c.png")];
+    for p in &paths {
+        image::RgbImage::new(16, 12).save(p).unwrap();
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), paths.to_vec());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(paths[0].as_path()));
+
+    // Only "two" shown: c is alone in it, so there is nothing to step back to.
+    app.filter.folder = Some(two.clone());
+    app.open_path(&h.gpu(), paths[2].clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    h.frame(&mut app, key(egui::Key::ArrowLeft));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(
+        app.loaded_path(),
+        Some(paths[2].as_path()),
+        "stepped out of the folder"
+    );
+
+    app.filter.folder = None;
+    h.frame(&mut app, key(egui::Key::ArrowLeft));
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.loaded_path(), Some(paths[1].as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
