@@ -81,13 +81,6 @@ model, for background cutout:
   below. The ONNX export is the one distributed by rembg (https://github.com/danielgatis/rembg).
 """
 
-OPENCUT_NOTICE = """## OpenCut Code Attribution (MIT)
-
-Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/OpenCut):
-- Copyright (c) 2026 OpenCut
-- Used under the terms of the MIT License.
-"""
-
 LICENSE_TEXTS = {
     "MIT": """The MIT License (MIT)
 
@@ -619,7 +612,6 @@ def main():
     lines.append(FONTS_NOTICE)
     lines.append(LENSFUN_NOTICE)
     lines.append(U2NET_NOTICE)
-    lines.append(OPENCUT_NOTICE)
     lines.append(LIGHTCRAFT_NOTICE)
 
     lines.append("## Rust Crate Dependencies Registry\n")

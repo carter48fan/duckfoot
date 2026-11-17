@@ -35,5 +35,3 @@ pools.
 The other formats Duckfoot reads and writes (JPEG, PNG, TIFF, WebP, AVIF, JPEG XL, the RAW
 formats) are not known to need a patent licence for this use: AV1, which AVIF is built on,
 is licensed royalty-free by the Alliance for Open Media.
-
-Duckfoot previously contained code derived from [OpenCut](https://github.com/OpenCut-app/OpenCut) (MIT); that code is superseded, and their copyright notice is retained in git history.

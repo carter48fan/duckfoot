@@ -52,12 +52,6 @@ model, for background cutout:
 - Licensed under the Apache License, Version 2.0; the full text is in the license text section
   below. The ONNX export is the one distributed by rembg (https://github.com/danielgatis/rembg).
 
-## OpenCut Code Attribution (MIT)
-
-Duckfoot contains code derived from OpenCut (https://github.com/OpenCut-app/OpenCut):
-- Copyright (c) 2026 OpenCut
-- Used under the terms of the MIT License.
-
 ## LightCraft Code Attribution (MIT)
 
 Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft): the XMP
