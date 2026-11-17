@@ -1092,7 +1092,7 @@ impl PhotoApp {
         painter.text(
             c + vec2(0.0, 40.0),
             Align2::CENTER_CENTER,
-            "ARW · CR2 · CR3 · NEF · RAF · ORF · RW2 · DNG",
+            "ARW · CR2 · CR3 · NEF · RAF · ORF · RW2 · DNG · and more",
             FontId::monospace(10.5),
             theme::TEXT_FAINT,
         );

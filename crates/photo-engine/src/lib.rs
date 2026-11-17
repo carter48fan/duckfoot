@@ -74,8 +74,17 @@ pub use sidecar::{
 pub use temperature::WhiteScale;
 
 /// File extensions the RAW decoder will attempt.
+///
+/// The first line is what most cameras write. The rest are formats rawler (or, failing
+/// it, rawloader) has a decoder for that hand over a plain Bayer mosaic; they are accepted
+/// but have not been tried against real files from each camera. Left out on purpose:
+/// Sigma's `x3f` (three colours per pixel, which the engine refuses), ARRI's `ari` and
+/// Canon's `crm` (cinema), Apple's `qtk` (refused by the decode gate) and GoPro's `gpr`
+/// (no decoder for its compression).
 pub const RAW_EXTENSIONS: &[&str] = &[
     "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "dng", "orf", "rw2", "raf", "pef", "raw",
+    "srw", "mrw", "crw", "3fr", "fff", "erf", "dcr", "dcs", "kdc", "mef", "mos", "iiq", "rwl",
+    "ori",
 ];
 
 /// File extensions for standard raster formats supported directly.
@@ -161,6 +170,9 @@ mod tests {
     #[test]
     fn recognises_raw_and_raster_extensions_regardless_of_case() {
         assert!(is_raw_path(Path::new("/tmp/IMG_0001.CR3")));
+        assert!(is_raw_path(Path::new("/tmp/SAM_0001.SRW")));
+        assert!(is_raw_path(Path::new("/tmp/CRW_0001.CRW")));
+        assert!(!is_raw_path(Path::new("/tmp/SDIM0001.X3F")));
         assert!(is_raw_path(Path::new("/tmp/shot.nef")));
         assert!(!is_raw_path(Path::new("/tmp/shot.jpg")));
         assert!(is_raster_path(Path::new("/tmp/shot.jpg")));

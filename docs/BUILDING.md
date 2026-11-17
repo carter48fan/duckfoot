@@ -114,7 +114,8 @@ You can also **drag a RAW file onto the window**.
 
 ### Supported files
 
-`.cr2 .cr3 .nef .nrw .arw .srf .sr2 .dng .orf .rw2 .raf .pef .raw`
+`.cr2 .cr3 .nef .nrw .arw .srf .sr2 .dng .orf .rw2 .raf .pef .raw`, and (accepted, not yet
+tried on real files) `.srw .mrw .crw .3fr .fff .erf .dcr .dcs .kdc .mef .mos .iiq .rwl .ori`
 
 Decoding is `rawler`'s (~2,500 camera models), with `rawloader` as a fallback for anything
 rawler refuses. Files neither can handle fail with

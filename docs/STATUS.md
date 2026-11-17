@@ -10,6 +10,7 @@ DESIGN.md invariant 8.
 | **Decode** | `DefaultRawDecoder` | Working | rawler, then rawloader, each tried once. Applies `crops`, real `cfa`, `wb_coeffs`, `xyz_to_cam`, per-channel levels |
 | **Decode** | measured white level | Working | Finds the real clip plateau in the data; Canon's per-ISO saturation no longer turns highlights magenta |
 | **Decode** | DNG `AsShotWhiteXY` | Working | Pixel-style DNGs; matrices interpolated by colour temperature per the DNG spec |
+| **Decode** | more RAW extensions | Accepted, untested | SRW, MRW, CRW, 3FR, FFF, ERF, DCR, DCS, KDC, MEF, MOS, IIQ, RWL, ORI open through rawler or rawloader; none tried yet against a real file from each camera |
 | **Decode** | EXIF orientation | Working | Opens upright; the camera's turn is the starting geometry, not an edit |
 | **Decode** | `RawDecoder` trait | Working | `rawler` is a drop-in behind it |
 | **Decode** | non-mosaic (`cpp != 1`) | `@stub` | Refuses loudly rather than mis-indexing |
