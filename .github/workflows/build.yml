@@ -328,9 +328,34 @@ jobs:
           set -e
           cp "dist/duckfoot-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.AppImage"
           cp "dist/duckfoot-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-linux-x86_64.tar.gz"
-          # Package complete corresponding source code archive (LGPL-2.1 / DEC-1 compliance)
+          # The complete corresponding source (LGPL-2.1 §6): this commit, plus the exact
+          # source of the two LGPL libraries linked in (rawler, rawloader), as built here,
+          # so the archive alone is enough to change them and build Duckfoot again.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git archive --format=tar.gz --prefix="duckfoot-$TAG/" -o "dist/duckfoot-$TAG-source.tar.gz" HEAD
+          src="dist/src/duckfoot-$TAG"
+          mkdir -p "$src"
+          git archive --format=tar HEAD | tar -x -C "$src"
+          mkdir -p "$src/third_party/lgpl"
+          for crate in rawler rawloader; do
+            v=$(grep -A1 "^name = \"$crate\"$" Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+            dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name "$crate-$v" | head -n 1)
+            if [ -z "$dir" ]; then echo "::error::no source for $crate $v"; exit 1; fi
+            cp -r "$dir" "$src/third_party/lgpl/"
+          done
+          cat > "$src/third_party/lgpl/README.md" <<'TXT'
+          # LGPL-2.1 libraries
+
+          Duckfoot links rawler and rawloader, both under the GNU LGPL 2.1. Their source, as
+          this release was built with them, is here. To build Duckfoot with a changed copy,
+          edit it here and add to the top-level Cargo.toml:
+
+              [patch.crates-io]
+              rawler = { path = "third_party/lgpl/rawler-<version>" }
+              rawloader = { path = "third_party/lgpl/rawloader-<version>" }
+
+          then build as docs/BUILDING.md says (without --locked, as the patch changes the lock).
+          TXT
+          tar -czf "dist/duckfoot-$TAG-source.tar.gz" -C dist/src "duckfoot-$TAG"
           gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-source.tar.gz" --clobber
 
 

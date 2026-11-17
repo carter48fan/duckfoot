@@ -11,6 +11,7 @@ Usage:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ In accordance with Section 6 of the GNU LGPL-2.1:
    https://github.com/carter48fan/duckfoot
 2. Relinking / Modification: Users have the right and ability to modify or substitute these
    libraries and relink or recompile the application using the provided source distribution.
+   The archive carries the exact source of both, as linked, in `third_party/lgpl/`, with the
+   two lines of Cargo.toml that build Duckfoot against a changed copy.
 3. No restriction is placed on reverse engineering for debugging modifications to the LGPL components.
 """
 
@@ -40,13 +43,20 @@ Duckfoot bundles the following open-source typefaces under the SIL Open Font Lic
 
 The complete license text for OFL-1.1 is included in the full license text section below and beside
 the font files in `crates/photo-app/assets/fonts/`.
+
+The interface also falls back to egui's bundled fonts (crate `epaint_default_fonts`): Hack
+(MIT), Ubuntu Light (Ubuntu Font Licence 1.0, text below), Noto Emoji (OFL-1.1) and
+emoji-icon-font (OFL-1.1).
 """
 
 LENSFUN_NOTICE = """## Bundled Lens Calibration Data (CC BY-SA 3.0)
 
 Duckfoot includes distilled lens and camera calibration tables derived from the Lensfun database:
 - **Lensfun Database**: Copyright (c) The Lensfun Project Authors
-- Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported License (CC BY-SA 3.0).
+- Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported License (CC BY-SA 3.0),
+  https://creativecommons.org/licenses/by-sa/3.0/legalcode
+- Adapted: the profiles are distilled into a table (`tools/lensfun_extract.py`), which is offered
+  under the same licence.
 - Detailed notice: `crates/photo-engine/data/LENSFUN-NOTICE.md`.
 """
 
@@ -522,8 +532,66 @@ OTHER DEALINGS IN THE FONT SOFTWARE.""",
 
 
 def get_metadata():
-    res = subprocess.check_output(["cargo", "metadata", "--format-version", "1"])
+    res = subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--locked"])
     return json.loads(res)
+
+
+LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE|UFL)", re.IGNORECASE)
+# A licence template's placeholder, not anyone's notice.
+PLACEHOLDER = re.compile(r"\[|<|\{|yyyy|name of copyright owner|copyright holders?\s*$", re.IGNORECASE)
+
+
+def license_files(pkg):
+    """The licence and notice files at the top of a crate's source, from the registry."""
+    root = Path(pkg["manifest_path"]).parent
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    found = [f for f in entries if f.is_file() and LICENSE_FILE.match(f.name)]
+    # Bundled assets keep theirs beside them (egui's fonts: fonts/UFL.txt, fonts/OFL.txt).
+    for sub in ("fonts", "licenses", "LICENSES"):
+        d = root / sub
+        if d.is_dir():
+            found += sorted(f for f in d.iterdir() if f.suffix == ".txt" and f.is_file())
+    return found
+
+
+def copyright_lines(files):
+    """The copyright notices in a crate's licence files: MIT, BSD and ISC require the
+    notice itself to travel with the binary, not only the licence's name."""
+    seen = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip().strip("*#/ ").strip()
+            # A notice names a year: "Copyright (c) 2016 …", "(C) 1995-2017 …", "© 2020 …".
+            # The Apache licence's own clauses ("copyright notice that is included…") do not.
+            notice = re.match(
+                r"^(copyright\s*(\(c\)|©)?\s*\d{4}|copyright\s*(\(c\)|©)\s*\S|\(c\)\s*\d{4}|©\s*\d{4})",
+                line,
+                re.IGNORECASE,
+            )
+            if notice and not PLACEHOLDER.search(line):
+                if line not in seen:
+                    seen.append(line)
+    return seen[:6]
+
+
+def text_from_crates(deps, licence, marker):
+    """A licence's full text, taken from a dependency that ships it (one whose licence
+    expression names `licence`, in a file containing `marker`)."""
+    for p in deps:
+        if licence not in (p.get("license") or ""):
+            continue
+        for f in license_files(p):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if marker.lower() in text.lower():
+                return text
+    return None
 
 
 def main():
@@ -569,9 +637,49 @@ def main():
         lines.append(f"| `{name}` | `{ver}` | {lic} | {repo_link} |")
 
     lines.append("\n---\n")
+    lines.append("## Copyright Notices\n")
+    lines.append(
+        "Each crate's copyright notices, as its own licence files state them. A crate "
+        "listed without one states none there; its repository, above, is its record.\n"
+    )
+    notices = []
+    for p in deps:
+        files = license_files(p)
+        found = copyright_lines(files)
+        if found:
+            lines.append(f"- `{p['name']}` {p['version']}: " + "; ".join(found))
+        for f in files:
+            if f.name.upper().startswith("NOTICE"):
+                notices.append((p, f))
+
+    if notices:
+        lines.append("\n---\n")
+        lines.append("## NOTICE Files\n")
+        lines.append("Apache-2.0 §4(d): the NOTICE files of the crates that have one, as they are.\n")
+        for p, f in notices:
+            lines.append(f"### `{p['name']}` {p['version']}\n")
+            lines.append("```")
+            lines.append(f.read_text(encoding="utf-8", errors="replace").strip())
+            lines.append("```\n")
+
+    # Licences in use whose texts the table above does not carry: taken from the crates
+    # that ship them, so they are word for word what those crates are under.
+    texts = dict(LICENSE_TEXTS)
+    for lic, marker in [
+        ("Unicode-3.0", "UNICODE LICENSE"),
+        ("Ubuntu-font-1.0", "Ubuntu Font Licence"),
+    ]:
+        if lic not in texts:
+            found = text_from_crates(deps, lic, marker)
+            if found:
+                texts[lic] = found
+            else:
+                print(f"warning: no text found for {lic}", file=sys.stderr)
+
+    lines.append("\n---\n")
     lines.append("## Complete License Texts\n")
 
-    for lic_name, text in LICENSE_TEXTS.items():
+    for lic_name, text in texts.items():
         lines.append(f"### {lic_name}\n")
         lines.append("```")
         lines.append(text.strip())

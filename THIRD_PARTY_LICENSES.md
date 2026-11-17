@@ -15,6 +15,8 @@ In accordance with Section 6 of the GNU LGPL-2.1:
    https://github.com/carter48fan/duckfoot
 2. Relinking / Modification: Users have the right and ability to modify or substitute these
    libraries and relink or recompile the application using the provided source distribution.
+   The archive carries the exact source of both, as linked, in `third_party/lgpl/`, with the
+   two lines of Cargo.toml that build Duckfoot against a changed copy.
 3. No restriction is placed on reverse engineering for debugging modifications to the LGPL components.
 
 ## Bundled Typefaces (SIL Open Font License 1.1)
@@ -27,11 +29,18 @@ Duckfoot bundles the following open-source typefaces under the SIL Open Font Lic
 The complete license text for OFL-1.1 is included in the full license text section below and beside
 the font files in `crates/photo-app/assets/fonts/`.
 
+The interface also falls back to egui's bundled fonts (crate `epaint_default_fonts`): Hack
+(MIT), Ubuntu Light (Ubuntu Font Licence 1.0, text below), Noto Emoji (OFL-1.1) and
+emoji-icon-font (OFL-1.1).
+
 ## Bundled Lens Calibration Data (CC BY-SA 3.0)
 
 Duckfoot includes distilled lens and camera calibration tables derived from the Lensfun database:
 - **Lensfun Database**: Copyright (c) The Lensfun Project Authors
-- Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported License (CC BY-SA 3.0).
+- Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported License (CC BY-SA 3.0),
+  https://creativecommons.org/licenses/by-sa/3.0/legalcode
+- Adapted: the profiles are distilled into a table (`tools/lensfun_extract.py`), which is offered
+  under the same licence.
 - Detailed notice: `crates/photo-engine/data/LENSFUN-NOTICE.md`.
 
 ## Bundled Segmentation Model (Apache-2.0)
@@ -461,6 +470,7 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `serde_json` | `1.0.151` | MIT OR Apache-2.0 | [https://github.com/serde-rs/json](https://github.com/serde-rs/json) |
 | `serde_repr` | `0.1.21` | MIT OR Apache-2.0 | [https://github.com/dtolnay/serde-repr](https://github.com/dtolnay/serde-repr) |
 | `serde_spanned` | `0.6.9` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `serde_spanned` | `1.1.3` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `shlex` | `2.0.1` | MIT OR Apache-2.0 | [https://github.com/comex/rust-shlex](https://github.com/comex/rust-shlex) |
 | `signal-hook-registry` | `1.4.8` | MIT OR Apache-2.0 | [https://github.com/vorner/signal-hook](https://github.com/vorner/signal-hook) |
 | `simd-adler32` | `0.3.10` | MIT | [https://github.com/mcountryman/simd-adler32](https://github.com/mcountryman/simd-adler32) |
@@ -496,12 +506,14 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `tinystr` | `0.8.4` | Unicode-3.0 | [https://github.com/unicode-org/icu4x](https://github.com/unicode-org/icu4x) |
 | `toml` | `0.5.11` | MIT/Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml` | `0.8.23` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml` | `1.2.1+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_datetime` | `0.6.11` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
-| `toml_datetime` | `1.1.1+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml_datetime` | `1.1.3+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_edit` | `0.22.27` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_edit` | `0.25.15+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
-| `toml_parser` | `1.1.3+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml_parser` | `1.1.5+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `toml_write` | `0.1.2` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
+| `toml_writer` | `1.2.0+spec-1.1.0` | MIT OR Apache-2.0 | [https://github.com/toml-rs/toml](https://github.com/toml-rs/toml) |
 | `tracing` | `0.1.44` | MIT | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
 | `tracing-attributes` | `0.1.31` | MIT | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
 | `tracing-core` | `0.1.36` | MIT | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
@@ -596,6 +608,7 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `winit` | `0.30.13` | Apache-2.0 | [https://github.com/rust-windowing/winit](https://github.com/rust-windowing/winit) |
 | `winnow` | `0.7.15` | MIT | [https://github.com/winnow-rs/winnow](https://github.com/winnow-rs/winnow) |
 | `winnow` | `1.0.4` | MIT | [https://github.com/winnow-rs/winnow](https://github.com/winnow-rs/winnow) |
+| `winresource` | `0.1.31` | MIT | [https://github.com/BenjaminRi/winresource](https://github.com/BenjaminRi/winresource) |
 | `wit-bindgen` | `0.57.1` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [https://github.com/bytecodealliance/wit-bindgen](https://github.com/bytecodealliance/wit-bindgen) |
 | `x11-dl` | `2.21.0` | MIT | [https://github.com/AltF02/x11-rs.git](https://github.com/AltF02/x11-rs.git) |
 | `x11rb` | `0.13.2` | MIT OR Apache-2.0 | [https://github.com/psychon/x11rb](https://github.com/psychon/x11rb) |
@@ -624,6 +637,444 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `zvariant` | `5.15.0` | MIT | [https://github.com/z-galaxy/zbus/](https://github.com/z-galaxy/zbus/) |
 | `zvariant_derive` | `5.15.0` | MIT | [https://github.com/z-galaxy/zbus/](https://github.com/z-galaxy/zbus/) |
 | `zvariant_utils` | `4.2.0` | MIT | [https://github.com/z-galaxy/zbus/](https://github.com/z-galaxy/zbus/) |
+
+---
+
+## Copyright Notices
+
+Each crate's copyright notices, as its own licence files state them. A crate listed without one states none there; its repository, above, is its record.
+
+- `addr2line` 0.25.1: Copyright (c) 2016-2018 The gimli Developers
+- `adler32` 1.2.0: (C) 2016 Remi Rampin and adler32-rs contributors; (C) 1995-2017 Jean-loup Gailly and Mark Adler
+- `ahash` 0.8.12: Copyright (c) 2018 Tom Kaitchuck
+- `aho-corasick` 1.1.5: Copyright (c) 2015 Andrew Gallant
+- `aligned` 0.4.3: Copyright (c) 2017 Jorge Aparicio
+- `aligned-vec` 0.6.4: Copyright (c) 2022 sarah
+- `alloc-no-stdlib` 2.0.4: Copyright (c) 2016 Dropbox, Inc.
+- `android-properties` 0.2.2: Copyright (c) 2020 Mikhail Lappo
+- `android_log-sys` 0.3.2: Copyright 2016 The android_log_sys Developers; Copyright (c) 2016 The android_log_sys Developers
+- `android_logger` 0.15.1: Copyright 2016 The android_logger Developers; Copyright (c) 2016 The android_logger Developers
+- `android_system_properties` 0.1.6: Copyright 2016 Nicolas Silva; Copyright (c) 2013 Nicolas Silva
+- `anstream` 1.0.0: Copyright (c) Individual contributors
+- `anstyle` 1.0.14: Copyright (c) Individual contributors
+- `anstyle-parse` 1.0.0: Copyright (c) Individual contributors
+- `anstyle-query` 1.1.5: Copyright (c) Individual contributors
+- `anstyle-wincon` 3.0.11: Copyright (c) Individual contributors
+- `anymap3` 1.1.0: Copyright © 2014–2022 Chris Morgan
+- `arbitrary` 1.5.0: Copyright (c) 2019 Manish Goregaokar
+- `arg_enum_proc_macro` 0.3.4: Copyright (c) 2018 Luca Barbato
+- `arrayvec` 0.7.8: Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
+- `as-raw-xcb-connection` 1.0.1: Copyright 2019 as-raw-xcb-connection Contributers
+- `as-slice` 0.2.1: Copyright (c) 2018 Jorge Aparicio
+- `ash` 0.38.0+1.3.281: Copyright 2016 Maik Klein; Copyright (c) 2016 ASH
+- `async-broadcast` 0.7.2: Copyright 2020 Yoshua Wuyts; Copyright (c) 2020 Yoshua Wuyts
+- `atomic-waker` 1.1.2: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `autocfg` 1.5.1: Copyright (c) 2018 Josh Stone
+- `av-scenechange` 0.14.1: Copyright (c) 2019 Multimedia and Rust
+- `av1-grain` 0.2.5: Copyright (c) 2022-2022, the rav1e contributors
+- `avif-serialize` 0.8.9: Copyright (c) 2020, Cloudflare, Inc.
+- `backtrace` 0.3.76: Copyright (c) 2014 Alex Crichton
+- `bit-set` 0.10.0: Copyright (c) 2026 The Rust Project Developers
+- `bit-set` 0.11.1: Copyright (c) 2023 The Rust Project Developers
+- `bit-vec` 0.9.1: Copyright (c) 2023 The Rust Project Developers
+- `bit-vec` 0.10.1: Copyright (c) 2023 The Rust Project Developers
+- `bitflags` 1.3.2: Copyright (c) 2014 The Rust Project Developers
+- `bitflags` 2.13.2: Copyright (c) 2014 The Rust Project Developers
+- `bitstream-io` 4.10.0: Copyright (c) 2017 Brian Langenberger
+- `borsh` 1.8.1: Copyright 2019 Near
+- `borsh-derive` 1.8.1: Copyright 2019 Near
+- `brotli-decompressor` 5.0.3: Copyright (c) 2016 Dropbox, Inc.
+- `built` 0.8.1: Copyright (c) 2017-2023 Lukas Lueg
+- `bumpalo` 3.20.3: Copyright (c) 2019 Nick Fitzgerald
+- `bytemuck` 1.25.2: Copyright (c) 2019 Daniel "Lokathor" Gee.
+- `bytemuck_derive` 1.12.1: Copyright (c) 2019 Daniel "Lokathor" Gee.
+- `byteorder` 1.5.0: Copyright (c) 2015 Andrew Gallant
+- `byteorder-lite` 0.1.0: Copyright (c) 2015 Andrew Gallant
+- `bytes` 1.12.1: Copyright (c) 2018 Carl Lerche
+- `calloop` 0.13.0: Copyright (c) 2018 Victor Berger
+- `calloop-wayland-source` 0.3.0: Copyright (c) 2023 Kirill Chibisov
+- `cc` 1.4.6: Copyright (c) 2014 Alex Crichton
+- `cesu8` 1.1.0: Copyright (C) 2000-2010 Julian Seward.  All rights; Copyright (c) 2003-2013 University of Illinois at; Copyright (c) 2009-2014 by the contributors listed in; Copyright (C) 2008-2010 Tachyon Technologies.; Copyright (c) 2008, Natacha Porté; Copyright (c) 2011, Vicent Martí
+- `cfg-if` 1.0.5: Copyright (c) 2014 Alex Crichton
+- `cfg_aliases` 0.2.2: Copyright (c) 2020 Katharos Technology
+- `chacha20` 0.10.2: Copyright (c) 2019-2026 The RustCrypto Project Developers
+- `chrono` 0.4.45: Copyright (c) 2014, Kang Seonghoon.
+- `colorchoice` 1.0.5: Copyright (c) Individual contributors
+- `combine` 4.6.8: Copyright (c) 2015 Markus Westerlind
+- `core-foundation` 0.9.4: Copyright (c) 2012-2013 Mozilla Foundation
+- `core-foundation-sys` 0.8.7: Copyright (c) 2012-2013 Mozilla Foundation
+- `core-graphics` 0.23.2: Copyright (c) 2012-2013 Mozilla Foundation
+- `core-graphics-types` 0.1.3: Copyright (c) 2012-2013 Mozilla Foundation
+- `cpufeatures` 0.3.1: Copyright (c) 2020-2026 The RustCrypto Project Developers
+- `crc32fast` 1.5.2: Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+- `crossbeam-deque` 0.8.8: Copyright (c) 2019 The Crossbeam Project Developers
+- `crossbeam-epoch` 0.9.21: Copyright (c) 2019 The Crossbeam Project Developers
+- `crossbeam-utils` 0.8.23: Copyright (c) 2019 The Crossbeam Project Developers
+- `crunchy` 0.2.4: Copyright 2017-2023 Eira Fransham.
+- `cursor-icon` 1.2.0: Copyright 2023 Kirill Chibisov; Copyright (c) 2023 Kirill Chibisov
+- `defmt` 1.1.1: Copyright (c) Ferrous Systems
+- `defmt-macros` 1.1.1: Copyright (c) Ferrous Systems
+- `derive-new` 0.7.0: Copyright (c) 2017-2021 nrc (Nick Cameron) and the derive-new contributors
+- `dlib` 0.5.3: Copyright (c) 2015 Victor Berger
+- `downcast-rs` 1.2.1: Copyright (c) 2020 Ashish Myles and contributors
+- `downcast-rs` 2.0.2: Copyright (c) 2020 Ashish Myles and contributors
+- `dpi` 0.1.2: Copyright (c) 2018 Jorge Aparicio; Copyright © 2005-2020 Rich Felker, et al.; Copyright © 1993,2004 Sun Microsystems or; Copyright © 2003-2011 David Schultz or; Copyright © 2003-2009 Steven G. Kargl or; Copyright © 2003-2009 Bruce D. Evans or
+- `either` 1.18.0: Copyright (c) 2015
+- `enumflags2` 0.7.12: Copyright 2017-2023 Maik Klein, Maja Kądziołka; Copyright (c) 2017-2023 Maik Klein, Maja Kądziołka
+- `enumflags2_derive` 0.7.12: Copyright (c) 2017 Maik Klein
+- `env_filter` 0.1.4: Copyright (c) Individual contributors
+- `env_filter` 2.0.0: Copyright (c) Individual contributors
+- `env_logger` 0.11.11: Copyright (c) Individual contributors
+- `epaint_default_fonts` 0.36.2: Copyright (c) 2018 Source Foundry Authors; Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is a trademark of Bitstream, Inc.; Copyright (c) 2014 John Slegers
+- `equator` 0.4.2: Copyright (c) 2023 sarah
+- `equator-macro` 0.4.2: Copyright (c) 2023 sarah
+- `equivalent` 1.0.2: Copyright (c) 2016--2023
+- `errno` 0.3.14: Copyright (c) 2014 Chris Wong
+- `euclid` 0.22.14: Copyright (c) 2012-2013 Mozilla Foundation
+- `fax` 0.2.7: Copyright © 2021 The pdf-rs contributers.
+- `fearless_simd` 0.4.1: Copyright (c) 2018 Raph Levien
+- `filetime` 0.2.29: Copyright (c) 2014 Alex Crichton
+- `find-msvc-tools` 0.1.12: Copyright (c) 2014 Alex Crichton
+- `flate2` 1.1.10: Copyright (c) 2014-2026 Alex Crichton
+- `float-ord` 0.3.2: Copyright (c) 2015 The rust-float-ord Developers
+- `fluent-bundle` 0.16.0: Copyright 2017 Mozilla
+- `fluent-syntax` 0.12.0: Copyright 2017 Mozilla
+- `foldhash` 0.2.0: Copyright (c) 2024 Orson Peters
+- `font-types` 0.12.5: Copyright 2019 Fontations Developers; Copyright (c) 2019 Fontations Developers
+- `foreign-types` 0.5.0: Copyright (c) 2017 The foreign-types Developers
+- `foreign-types-macros` 0.2.4: Copyright (c) 2017 The foreign-types Developers
+- `foreign-types-shared` 0.3.1: Copyright (c) 2017 The foreign-types Developers
+- `futures-core` 0.3.34: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `futures-io` 0.3.34: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `futures-lite` 2.6.1: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `futures-macro` 0.3.34: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `futures-task` 0.3.34: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `futures-util` 0.3.34: Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors
+- `getrandom` 0.3.4: Copyright (c) 2018-2025 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers
+- `getrandom` 0.4.3: Copyright (c) 2018-2026 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers
+- `gimli` 0.32.3: Copyright (c) 2015 The Rust Project Developers
+- `glifo` 0.2.0: Copyright 2025 the Vello Authors
+- `glob` 0.3.4: Copyright (c) 2014 The Rust Project Developers
+- `glutin_wgl_sys` 0.6.1: Copyright 2022 Kirill Chibisov
+- `gpu-allocator` 0.28.0: Copyright 2021 Traverse Research B.V.; Copyright (c) 2021 Traverse Research B.V.
+- `guillotiere` 0.7.0: Copyright 2019 Nicolas Silva; Copyright (c) 2019 Nicolas Silva
+- `harfrust` 0.12.0: Copyright (c) HarfBuzz developers; Copyright (c) 2020 Yevhenii Reizner
+- `hashbrown` 0.16.1: Copyright (c) 2016 Amanieu d'Antras
+- `hashbrown` 0.17.1: Copyright (c) 2016 Amanieu d'Antras
+- `heic-rs` 0.1.4: Copyright (c) 2026 Thomas Braun
+- `hex` 0.4.3: Copyright (c) 2013-2014 The Rust Project Developers.; Copyright (c) 2015-2020 The rust-hex Developers
+- `iana-time-zone` 0.1.65: Copyright 2020 Andrew Straw; Copyright (c) 2020 Andrew D. Straw
+- `iana-time-zone-haiku` 0.1.2: Copyright 2020 Andrew Straw; Copyright (c) 2020 Andrew D. Straw
+- `indexmap` 2.14.2: Copyright (c) 2016--2017
+- `interpolate_name` 0.2.4: Copyright (c) 2018 Luca Barbato
+- `intl-memoizer` 0.5.3: Copyright 2017 Mozilla
+- `is_terminal_polyfill` 1.70.2: Copyright (c) Individual contributors
+- `itertools` 0.14.0: Copyright (c) 2015
+- `itertools` 0.15.0: Copyright (c) 2015
+- `jiff` 0.2.37: Copyright (c) 2015 Andrew Gallant
+- `jiff-core` 0.1.1: Copyright (c) 2015 Andrew Gallant
+- `jiff-static` 0.2.37: Copyright (c) 2015 Andrew Gallant
+- `jixel` 0.3.4: Copyright 2024 Radzivon Bartoshyk; Copyright (c) Radzivon Bartoshyk. All rights reserved.
+- `jni` 0.21.1: Copyright (c) 2016 Prevoty, Inc. and jni-rs contributors
+- `jni-sys` 0.3.1: Copyright (c) 2015 The rust-jni-sys Developers
+- `jni-sys` 0.4.1: Copyright (c) 2015 The rust-jni-sys Developers
+- `jobserver` 0.1.35: Copyright (c) 2014 Alex Crichton
+- `jpeg-decoder` 0.3.2: Copyright (c) 2016 The jpeg-decoder Developers
+- `js-sys` 0.3.105: Copyright (c) 2014 Alex Crichton
+- `kamadak-exif` 0.6.1: Copyright (c) 2016-2023 KAMADA Ken'ichi.
+- `kurbo` 0.13.1: Copyright (c) 2018 Raph Levien
+- `lazy_static` 1.5.0: Copyright (c) 2010 The Rust Project Developers
+- `libc` 0.2.189: Copyright (c) The Rust Project Developers
+- `libfuzzer-sys` 0.4.13: Copyright (c) 2010 The Rust Project Developers
+- `libloading` 0.8.9: Copyright © 2015, Simonas Kazlauskas
+- `libm` 0.2.16: Copyright (c) 2018 Jorge Aparicio; Copyright © 2005-2020 Rich Felker, et al.; Copyright © 1993,2004 Sun Microsystems or; Copyright © 2003-2011 David Schultz or; Copyright © 2003-2009 Steven G. Kargl or; Copyright © 2003-2009 Bruce D. Evans or
+- `libredox` 0.1.24: Copyright (c) 2023 4lDO2
+- `litrs` 1.0.0: Copyright (c) 2020 Project Developers
+- `lock_api` 0.4.14: Copyright (c) 2016 The Rust Project Developers
+- `log` 0.4.34: Copyright (c) 2014 The Rust Project Developers
+- `maplit` 1.0.2: Copyright (c) 2015
+- `matrixmultiply` 0.3.11: Copyright (c) 2016 - 2023 Ulrik Sverdrup "bluss"
+- `maybe-rayon` 0.1.1: Copyright (c) 2021 Joshua Holmer
+- `md5` 0.8.1: Copyright 2015–2026 The md5 Developers
+- `memchr` 2.8.3: Copyright (c) 2015 Andrew Gallant
+- `memmap2` 0.9.11: Copyright (c) 2020 Yevhenii Reizner; Copyright (c) 2015 Dan Burkert
+- `memoffset` 0.9.1: Copyright (c) 2017 Gilad Naaman
+- `miniz_oxide` 0.8.9: Copyright 2013-2014 RAD Game Tools and Valve Software; Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC; Copyright (c) 2017 Frommi; Copyright (c) 2017-2024 oyvindln; Copyright (c) 2020 Frommi
+- `miniz_oxide` 0.9.1: Copyright 2013-2014 RAD Game Tools and Valve Software; Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC; Copyright (c) 2017 Frommi; Copyright (c) 2017-2024 oyvindln; Copyright (c) 2020 Frommi
+- `moxcms` 0.8.1: Copyright 2024 Radzivon Bartoshyk; Copyright (c) Radzivon Bartoshyk. All rights reserved.
+- `multiversion` 0.8.0: Copyright 2019 Caleb Zulawski
+- `multiversion-macros` 0.8.0: Copyright 2019 Caleb Zulawski
+- `mutate_once` 0.1.2: Copyright (c) 2019 KAMADA Ken'ichi.
+- `naga` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `naga-types` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `ndarray` 0.17.2: Copyright (c) 2015 - 2021 Ulrik Sverdrup "bluss",
+- `new_debug_unreachable` 1.0.6: Copyright (c) 2015 Jonathan Reem
+- `nohash-hasher` 0.2.0: Copyright 2018 Parity Technologies (UK) Ltd.
+- `nom` 8.0.0: Copyright (c) 2014-2019 Geoffroy Couprie
+- `noop_proc_macro` 0.3.0: Copyright (c) 2019 Luca Barbato
+- `num` 0.4.3: Copyright (c) 2014 The Rust Project Developers
+- `num-bigint` 0.4.8: Copyright (c) 2014 The Rust Project Developers
+- `num-complex` 0.4.6: Copyright (c) 2014 The Rust Project Developers
+- `num-derive` 0.4.2: Copyright (c) 2014 The Rust Project Developers
+- `num-integer` 0.1.47: Copyright (c) 2014 The Rust Project Developers
+- `num-iter` 0.1.46: Copyright (c) 2014 The Rust Project Developers
+- `num-rational` 0.4.2: Copyright (c) 2014 The Rust Project Developers
+- `num-traits` 0.2.19: Copyright (c) 2014 The Rust Project Developers
+- `num_enum` 0.7.6: Copyright (c) 2018, Daniel Wagner-Hall
+- `num_enum_derive` 0.7.6: Copyright (c) 2018, Daniel Wagner-Hall
+- `object` 0.37.3: Copyright (c) 2015 The Gimli Developers
+- `once_cell_polyfill` 1.70.2: Copyright (c) Individual contributors
+- `orbclient` 0.3.55: Copyright (c) 2015-2019 Jeremy Soller
+- `ordered-float` 5.5.0: Copyright (c) 2015 Jonathan Reem
+- `parking` 2.2.1: Copyright 2014-2020 The Rust Project Developers
+- `parking_lot` 0.12.5: Copyright (c) 2016 The Rust Project Developers
+- `parking_lot_core` 0.9.12: Copyright (c) 2016 The Rust Project Developers
+- `peniko` 0.6.1: Copyright (c) 2018 Raph Levien
+- `percent-encoding` 2.3.2: Copyright (c) 2013-2025 The rust-url developers
+- `phf` 0.13.1: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- `phf_generator` 0.13.1: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- `phf_macros` 0.13.1: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- `phf_shared` 0.13.1: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- `pkg-config` 0.3.34: Copyright (c) 2014 Alex Crichton
+- `plain` 0.2.3: Copyright (c) 2017 Plain contributors
+- `png` 0.18.1: Copyright (c) 2015 nwin
+- `pollster` 0.4.0: Copyright (c) 2020-2021 Joshua Barretto
+- `pollster` 1.0.1: Copyright (c) 2020-2021 Joshua Barretto
+- `polycool` 0.4.0: Copyright (c) 2018 Raph Levien
+- `ppv-lite86` 0.2.21: Copyright 2019 The CryptoCorrosion Contributors; Copyright (c) 2019 The CryptoCorrosion Contributors
+- `presser` 0.3.1: Copyright (c) 2019 Embark Studios
+- `primal-check` 0.3.4: Copyright (c) 2014 Huon Wilson
+- `pxfm` 0.1.30: Copyright 2024 Radzivon Bartoshyk; Copyright (c) Radzivon Bartoshyk. All rights reserved.
+- `quick-error` 2.0.1: Copyright (c) 2015 The quick-error Developers
+- `quick-xml` 0.41.0: Copyright (c) 2016 Johann Tuffe
+- `rand` 0.9.5: Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers
+- `rand` 0.10.3: Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers
+- `rand_chacha` 0.9.0: Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers
+- `rand_core` 0.9.5: Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers
+- `rand_core` 0.10.1: Copyright (c) 2018-2026 The Rand Project Developers
+- `rand_distr` 0.6.0: Copyright 2018 Developers of the Rand project
+- `range-alloc` 0.1.5: Copyright (c) 2023 The gfx-rs developers
+- `rav1e` 0.8.1: Copyright (c) 2017-2023, the rav1e contributors
+- `ravif` 0.13.0: Copyright (c) 2020, Kornel
+- `raw-window-handle` 0.6.2: Copyright (c) 2019 Osspial; Copyright (c) 2020 Osspial
+- `rawler` 0.8.0: Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+- `rawloader` 0.37.2: Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+- `rawpointer` 0.2.1: Copyright (c) 2015
+- `rayon` 1.12.0: Copyright (c) 2010 The Rust Project Developers
+- `rayon-core` 1.13.0: Copyright (c) 2010 The Rust Project Developers
+- `read-fonts` 0.41.0: Copyright 2019 Fontations Developers; Copyright (c) 2019 Fontations Developers
+- `redox_syscall` 0.4.1: Copyright (c) 2017 Redox OS Developers
+- `redox_syscall` 0.5.18: Copyright (c) 2017 Redox OS Developers
+- `redox_syscall` 0.9.4: Copyright (c) 2017 Redox OS Developers
+- `regex` 1.13.1: Copyright (c) 2014 The Rust Project Developers
+- `regex-automata` 0.4.18: Copyright (c) 2014 The Rust Project Developers
+- `regex-syntax` 0.8.11: Copyright (c) 2014 The Rust Project Developers
+- `renderdoc-sys` 1.1.0: Copyright (c) 2022 Eyal Kalderon
+- `rfd` 0.17.2: Copyright (c) 2022 Bartłomiej Maryńczak
+- `rgb` 0.8.53: Copyright (c) 2019 Kornel
+- `rle-decode-fast` 1.0.3: Copyright 2019 Moritz "WanzenBug" Wanzenböck
+- `rustc-demangle` 0.1.28: Copyright (c) 2014 Alex Crichton
+- `rustc_version` 0.4.1: Copyright (c) 2016 The Rust Project Developers
+- `rustfft` 6.4.1: Copyright (c) 2015 The RustFFT Developers
+- `same-file` 1.0.6: Copyright (c) 2017 Andrew Gallant
+- `scoped-tls` 1.0.1: Copyright (c) 2014 Alex Crichton
+- `scopeguard` 1.2.0: Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+- `sctk-adwaita` 0.10.1: Copyright (c) 2022 Bartłomiej Maryńczak
+- `self_cell` 1.3.0: Copyright (C) 1989, 1991 Free Software Foundation, Inc.,
+- `serde_spanned` 0.6.9: Copyright (c) Individual contributors
+- `serde_spanned` 1.1.3: Copyright (c) Individual contributors
+- `shlex` 2.0.1: Copyright 2015 Nicholas Allegra (comex).; Copyright (c) 2015 Nicholas Allegra (comex).
+- `signal-hook-registry` 1.4.8: Copyright (c) 2017 tokio-jsonrpc developers
+- `siphasher` 1.0.4: Copyright 2012-2016 The Rust Project Developers.; Copyright 2016-2026 Frank Denis.
+- `skrifa` 0.44.0: Copyright 2019 Fontations Developers; Copyright (c) 2019 Fontations Developers
+- `slab` 0.4.12: Copyright (c) 2019 Carl Lerche
+- `smallvec` 1.16.1: Copyright (c) 2018 The Servo Project Developers
+- `smithay-client-toolkit` 0.19.2: Copyright (c) 2018 Victor Berger
+- `stable_deref_trait` 1.2.1: Copyright (c) 2017 Robert Grosse
+- `static_assertions` 1.1.0: Copyright (c) 2017 Nikolai Vazquez
+- `strength_reduce` 0.2.4: Copyright (c) 2015 The RustFFT Developers
+- `strict-num` 0.1.1: Copyright (c) 2022 Yevhenii Reizner
+- `string-interner` 0.20.0: Copyright 2020 Robin Freyler; Copyright (c) 2020 by Robin Freyler
+- `tar` 0.4.46: Copyright (c) The tar-rs Project Contributors
+- `target-features` 0.1.6: Copyright 2022 Caleb Zulawski
+- `tempfile` 3.27.0: Copyright (c) 2015 Steven Allen
+- `termcolor` 1.4.1: Copyright (c) 2015 Andrew Gallant
+- `tiff` 0.11.3: Copyright (c) 2018 PistonDevelopers
+- `tiny-skia` 0.11.4: Copyright (c) 2011 Google Inc. All rights reserved.; Copyright (c) 2020 Yevhenii Reizner All rights reserved.
+- `tiny-skia-path` 0.11.4: Copyright (c) 2011 Google Inc. All rights reserved.; Copyright (c) 2020 Yevhenii Reizner All rights reserved.
+- `tinystr` 0.8.4: Copyright © 2020-2024 Unicode, Inc.
+- `toml` 0.5.11: Copyright (c) 2014 Alex Crichton
+- `toml` 0.8.23: Copyright (c) Individual contributors
+- `toml` 1.2.1+spec-1.1.0: Copyright (c) Individual contributors
+- `toml_datetime` 0.6.11: Copyright (c) Individual contributors
+- `toml_datetime` 1.1.3+spec-1.1.0: Copyright (c) Individual contributors
+- `toml_edit` 0.22.27: Copyright (c) Individual contributors
+- `toml_edit` 0.25.15+spec-1.1.0: Copyright (c) Individual contributors
+- `toml_parser` 1.1.5+spec-1.1.0: Copyright (c) Individual contributors
+- `toml_write` 0.1.2: Copyright (c) Individual contributors
+- `toml_writer` 1.2.0+spec-1.1.0: Copyright (c) Individual contributors
+- `tracing` 0.1.44: Copyright (c) 2019 Tokio Contributors
+- `tracing-attributes` 0.1.31: Copyright (c) 2019 Tokio Contributors
+- `tracing-core` 0.1.36: Copyright (c) 2019 Tokio Contributors
+- `transpose` 0.2.3: Copyright 2022 The transpose developers; Copyright (c) 2022 The transpose Developers
+- `ttf-parser` 0.25.1: Copyright (c) 2018 Yevhenii Reizner
+- `type-map` 0.5.1: Copyright 2017-NOW Actix Team; Copyright (c) 2022 Jacob Brown; Copyright (c) 2017-NOW Actix Team
+- `uds_windows` 1.2.1: Copyright (c) Microsoft Corporation. All rights reserved.
+- `unicode-ident` 1.0.26: Copyright © 1991-2023 Unicode, Inc.
+- `unicode-segmentation` 1.13.3: Copyright (c) 2015 The Rust Project Developers
+- `unicode-width` 0.2.2: Copyright (c) 2015 The Rust Project Developers
+- `utf8parse` 0.2.2: Copyright (c) 2016 Joe Wilm
+- `uuid` 1.26.1: Copyright (c) 2014 The Rust Project Developers; Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
+- `v_frame` 0.3.9: Copyright (c) 2017-2022, the rav1e contributors
+- `vello_common` 0.1.0: Copyright 2020 the Vello Authors
+- `vello_cpu` 0.1.0: Copyright 2020 the Vello Authors
+- `version_check` 0.9.5: Copyright (c) 2017-2018 Sergio Benitez
+- `walkdir` 2.5.0: Copyright (c) 2015 Andrew Gallant
+- `wasm-bindgen` 0.2.128: Copyright (c) 2014 Alex Crichton
+- `wasm-bindgen-futures` 0.4.78: Copyright (c) 2014 Alex Crichton
+- `wasm-bindgen-macro` 0.2.128: Copyright (c) 2014 Alex Crichton
+- `wasm-bindgen-macro-support` 0.2.128: Copyright (c) 2014 Alex Crichton
+- `wasm-bindgen-shared` 0.2.128: Copyright (c) 2014 Alex Crichton
+- `wayland-backend` 0.3.17: Copyright (c) 2015 Elinor Berger
+- `wayland-client` 0.31.15: Copyright (c) 2015 Elinor Berger
+- `wayland-csd-frame` 0.3.0: Copyright (c) 2023 Kirill Chibisov
+- `wayland-cursor` 0.31.14: Copyright (c) 2015 Elinor Berger
+- `wayland-protocols` 0.32.13: Copyright (c) 2015 Elinor Berger
+- `wayland-protocols-plasma` 0.3.12: Copyright (c) 2015 Elinor Berger
+- `wayland-protocols-wlr` 0.3.12: Copyright (c) 2015 Elinor Berger
+- `wayland-scanner` 0.31.11: Copyright (c) 2015 Elinor Berger
+- `wayland-sys` 0.31.11: Copyright (c) 2015 Elinor Berger
+- `web-sys` 0.3.105: Copyright (c) 2014 Alex Crichton
+- `web-time` 1.1.0: Copyright 2023 dAxpeDDa; Copyright (c) 2023 dAxpeDDa
+- `webp` 0.3.1: Copyright 2020 Jared Forth.; Copyright (c) 2020 Jared Forth
+- `weezl` 0.1.12: Copyright (c) HeroicKatora 2020
+- `wgpu` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-core` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-core-deps-apple` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-core-deps-emscripten` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-core-deps-wasm` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-core-deps-windows-linux-android` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-hal` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-naga-bridge` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `wgpu-types` 30.0.1: Copyright (c) 2025 The gfx-rs developers
+- `winapi-util` 0.1.11: Copyright (c) 2017 Andrew Gallant
+- `windows` 0.62.2: Copyright (c) Microsoft Corporation.
+- `windows-collections` 0.3.2: Copyright (c) Microsoft Corporation.
+- `windows-core` 0.62.2: Copyright (c) Microsoft Corporation.
+- `windows-future` 0.3.2: Copyright (c) Microsoft Corporation.
+- `windows-implement` 0.60.2: Copyright (c) Microsoft Corporation.
+- `windows-interface` 0.59.3: Copyright (c) Microsoft Corporation.
+- `windows-link` 0.2.1: Copyright (c) Microsoft Corporation.
+- `windows-numerics` 0.3.1: Copyright (c) Microsoft Corporation.
+- `windows-result` 0.4.1: Copyright (c) Microsoft Corporation.
+- `windows-strings` 0.5.1: Copyright (c) Microsoft Corporation.
+- `windows-sys` 0.45.0: Copyright (c) Microsoft Corporation.
+- `windows-sys` 0.52.0: Copyright (c) Microsoft Corporation.
+- `windows-sys` 0.59.0: Copyright (c) Microsoft Corporation.
+- `windows-sys` 0.61.2: Copyright (c) Microsoft Corporation.
+- `windows-targets` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows-targets` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows-threading` 0.2.1: Copyright (c) Microsoft Corporation.
+- `windows_aarch64_gnullvm` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_aarch64_gnullvm` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_aarch64_msvc` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_aarch64_msvc` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_i686_gnu` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_i686_gnu` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_i686_gnullvm` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_i686_msvc` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_i686_msvc` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_gnu` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_gnu` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_gnullvm` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_gnullvm` 0.52.6: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_msvc` 0.42.2: Copyright (c) Microsoft Corporation.
+- `windows_x86_64_msvc` 0.52.6: Copyright (c) Microsoft Corporation.
+- `winresource` 0.1.31: Copyright 2016 Max Resch
+- `x11rb` 0.13.2: Copyright 2019 x11rb Contributers
+- `x11rb-protocol` 0.13.2: Copyright 2019 x11rb Contributers
+- `xattr` 1.6.1: Copyright (c) 2015 Steven Allen
+- `xcursor` 0.3.11: Copyright (c) 2020 Samuele Esposito
+- `xkbcommon-dl` 0.4.2: Copyright (c) 2023 Kirill Chibisov
+- `xkeysym` 0.2.1: Copyright 2022-2023 John Nunley; Copyright (c) 2022-2023 John Nunley
+- `xml-rs` 0.8.29: Copyright (c) 2014 Vladimir Matveev
+- `y4m` 0.8.0: Copyright (c) 2015-2019 PistonDevelopers; Copyright (c) 2019 image-rs contributors
+- `zbus` 5.19.0: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+- `zbus_macros` 5.19.0: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+- `zbus_names` 4.3.4: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+- `zbus_xml` 5.2.1: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+- `zcheapstr` 1.1.0: Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
+- `zerocopy` 0.8.57: Copyright 2023 The Fuchsia Authors; Copyright 2019 The Fuchsia Authors.
+- `zerocopy-derive` 0.8.57: Copyright 2023 The Fuchsia Authors; Copyright 2019 The Fuchsia Authors.
+- `zerofrom` 0.1.8: Copyright © 2020-2024 Unicode, Inc.
+- `zerovec` 0.11.8: Copyright © 2020-2024 Unicode, Inc.
+- `zlib-rs` 0.6.8: (C) 2024 Trifecta Tech Foundation
+- `zune-core` 0.5.3: Copyright (c) zune-image developers
+- `zune-jpeg` 0.5.15: Copyright (c) zune-image developers
+- `zvariant` 5.15.0: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+- `zvariant_derive` 5.15.0: Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+
+---
+
+## NOTICE Files
+
+Apache-2.0 §4(d): the NOTICE files of the crates that have one, as they are.
+
+### `cfg_aliases` 0.2.2
+
+```
+# 3rd Party Notices
+
+The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::target_cfg!`] macro which is under the following license:
+
+[`tectonic_cfg_support::target_cfg!`]: https://github.com/tectonic-typesetting/tectonic/blob/f2439b936470ad27bdf92882064bc4702ee01899/cfg_support/src/lib.rs#L166
+
+    tectonic_cfg_support is licensed under the MIT License.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the “Software”), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+---
+```
+
+### `heic-rs` 0.1.4
+
+```
+heic-rs is an independent implementation of ISO/IEC 23008-12 (HEIF) and of the
+decoding process described in Recommendation ITU-T H.265 | ISO/IEC 23008-2
+(High Efficiency Video Coding).
+
+No code was taken from any GPL, LGPL or AGPL licensed decoder. The algorithms
+are written from the published specification text. Permissively licensed Rust
+projects were consulted for cross-checking header syntax only, with no code
+copied:
+
+  * rust_h265    (MIT OR Apache-2.0)  https://github.com/roticv/rust_h265
+  * scuffle-h265 (MIT OR Apache-2.0)  NAL and parameter set header parsing
+
+This crate does not grant any patent licence to the HEVC standard itself.
+
+The brand assets under assets/ are CertifiedCopy's (https://certified.sh), used
+here by its own authors; the mark is not licensed for other people's use.
+assets/fonts/ holds three IBM Plex web fonts, used only to render the social
+preview image; IBM Plex is licensed under the SIL Open Font License 1.1, whose
+text is beside them in assets/fonts/LICENSE-IBM-Plex.txt.
+```
+
 
 ---
 
@@ -1099,5 +1550,157 @@ INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
 DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
+```
+
+### Unicode-3.0
+
+```
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 2020-2024 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+SPDX-License-Identifier: Unicode-3.0
+
+—
+
+Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
+ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
+```
+
+### Ubuntu-font-1.0
+
+```
+-------------------------------
+UBUNTU FONT LICENCE Version 1.0
+-------------------------------
+
+PREAMBLE
+This licence allows the licensed fonts to be used, studied, modified and
+redistributed freely. The fonts, including any derivative works, can be
+bundled, embedded, and redistributed provided the terms of this licence
+are met. The fonts and derivatives, however, cannot be released under
+any other licence. The requirement for fonts to remain under this
+licence does not require any document created using the fonts or their
+derivatives to be published under this licence, as long as the primary
+purpose of the document is not to be a vehicle for the distribution of
+the fonts.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this licence and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Original Version" refers to the collection of Font Software components
+as received under this licence.
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to
+a new environment.
+
+"Copyright Holder(s)" refers to all individuals and companies who have a
+copyright ownership of the Font Software.
+
+"Substantially Changed" refers to Modified Versions which can be easily
+identified as dissimilar to the Font Software by users of the Font
+Software comparing the Original Version with the Modified Version.
+
+To "Propagate" a work means to do anything with it that, without
+permission, would make you directly or secondarily liable for
+infringement under applicable copyright law, except executing it on a
+computer or modifying a private copy. Propagation includes copying,
+distribution (with or without modification and with or without charging
+a redistribution fee), making available to the public, and in some
+countries other activities as well.
+
+PERMISSION & CONDITIONS
+This licence does not grant any rights under trademark law and all such
+rights are reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of the Font Software, to propagate the Font Software, subject to
+the below conditions:
+
+1) Each copy of the Font Software must contain the above copyright
+notice and this licence. These can be included either as stand-alone
+text files, human-readable headers or in the appropriate machine-
+readable metadata fields within text or binary files as long as those
+fields can be easily viewed by the user.
+
+2) The font name complies with the following:
+(a) The Original Version must retain its name, unmodified.
+(b) Modified Versions which are Substantially Changed must be renamed to
+avoid use of the name of the Original Version or similar names entirely.
+(c) Modified Versions which are not Substantially Changed must be
+renamed to both (i) retain the name of the Original Version and (ii) add
+additional naming elements to distinguish the Modified Version from the
+Original Version. The name of such Modified Versions must be the name of
+the Original Version, with "derivative X" where X represents the name of
+the new work, appended to that name.
+
+3) The name(s) of the Copyright Holder(s) and any contributor to the
+Font Software shall not be used to promote, endorse or advertise any
+Modified Version, except (i) as required by this licence, (ii) to
+acknowledge the contribution(s) of the Copyright Holder(s) or (iii) with
+their explicit written permission.
+
+4) The Font Software, modified or unmodified, in part or in whole, must
+be distributed entirely under this licence, and must not be distributed
+under any other licence. The requirement for fonts to remain under this
+licence does not affect any document created using the Font Software,
+except any version of the Font Software extracted from a document
+created using the Font Software may only be distributed under this
+licence.
+
+TERMINATION
+This licence becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER
+DEALINGS IN THE FONT SOFTWARE.
 ```
 
