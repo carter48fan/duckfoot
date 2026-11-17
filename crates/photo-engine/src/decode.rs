@@ -500,18 +500,34 @@ pub struct DefaultRawDecoder;
 
 impl RawDecoder for DefaultRawDecoder {
     fn decode_bytes(&self, bytes: &[u8]) -> Result<CfaImage> {
-        RawlerBackend
-            .decode_bytes(bytes)
-            .or_else(|first| rawloader_only(bytes).map_err(|second| both_failed(first, second)))
+        caught("rawler", || RawlerBackend.decode_bytes(bytes)).or_else(|first| {
+            caught("rawloader", || rawloader_only(bytes))
+                .map_err(|second| both_failed(first, second))
+        })
     }
 
     fn decode_file(&self, path: &Path) -> Result<CfaImage> {
-        RawlerBackend.decode_file(path).or_else(|first| {
+        caught("rawler", || RawlerBackend.decode_file(path)).or_else(|first| {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("{}: could not be read", path.display()))?;
-            rawloader_only(&bytes).map_err(|second| both_failed(first, second))
+            caught("rawloader", || rawloader_only(&bytes))
+                .map_err(|second| both_failed(first, second))
         })
     }
+}
+
+/// Runs one decoder, a panic in it becoming its error. A decoder that panics on a file
+/// (rawler has `todo!()`s on some formats' decode paths) is then one that failed, and the
+/// other still gets its turn, rather than the panic ending the whole open.
+fn caught(decoder: &str, decode: impl FnOnce() -> Result<CfaImage>) -> Result<CfaImage> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)).unwrap_or_else(|panic| {
+        let reason = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown reason".into());
+        Err(anyhow!("{decoder} crashed on this file ({reason})"))
+    })
 }
 
 /// Each decoder is tried once. The error keeps both reasons: rawler's is usually the one
@@ -2017,6 +2033,20 @@ pub(crate) fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decoder_that_panics_fails_instead_of_unwinding() {
+        let first = caught("rawler", || panic!("not yet implemented"));
+        assert!(format!("{:#}", first.err().unwrap()).contains("rawler crashed"));
+        let second = caught("rawler", || Err(anyhow!("no"))).or_else(|first| {
+            caught("rawloader", || panic!("boom")).map_err(|s| both_failed(first, s))
+        });
+        let text = format!("{:#}", second.err().unwrap());
+        assert!(
+            text.contains("no") && text.contains("rawloader crashed"),
+            "{text}"
+        );
+    }
 
     /// A little-endian TIFF with one IFD: each tag's values as FLOATs, or a SHORT.
     fn dng_tags(tags: &[(u16, Vec<f32>)]) -> Vec<u8> {
