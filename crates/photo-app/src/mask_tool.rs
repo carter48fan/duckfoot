@@ -56,8 +56,8 @@ impl Mapping {
     /// A mask's handles, on screen.
     pub fn handles(&self, mask: &Mask) -> Vec<(Handle, Pos2)> {
         match mask.shape {
-            // A brush is painted, not dragged.
-            Shape::Brush { .. } => Vec::new(),
+            // A brush is painted, not dragged; a found mask is what was found.
+            Shape::Brush { .. } | Shape::Matte { .. } => Vec::new(),
             Shape::Linear { from, to } => {
                 let mid = [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5];
                 vec![
@@ -101,7 +101,7 @@ impl Mapping {
                     .fold((0.0, 0.0), |(x, y), d| (x + d.at[0], y + d.at[1]));
                 self.to_screen([x / n, y / n])
             }
-            Shape::Brush { .. } => self.frame.center(),
+            Shape::Brush { .. } | Shape::Matte { .. } => self.frame.center(),
         }
     }
 
@@ -110,7 +110,7 @@ impl Mapping {
     pub fn outline(&self, mask: &Mask) -> Vec<Vec<Pos2>> {
         let (sw, sh) = (self.sensor.0 as f32, self.sensor.1 as f32);
         match mask.shape {
-            Shape::Brush { .. } => Vec::new(),
+            Shape::Brush { .. } | Shape::Matte { .. } => Vec::new(),
             Shape::Radial {
                 centre,
                 radius,
@@ -174,7 +174,7 @@ impl Mapping {
         }
         let s = self.to_sensor(p);
         match mask.shape {
-            Shape::Brush { .. } => None,
+            Shape::Brush { .. } | Shape::Matte { .. } => None,
             Shape::Radial { .. } => {
                 let mut solid = mask.clone();
                 solid.invert = false;

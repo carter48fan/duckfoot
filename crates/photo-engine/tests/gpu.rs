@@ -3192,3 +3192,51 @@ fn a_photo_too_big_for_the_gpu_opens_at_a_fraction_of_its_size() {
     assert_eq!(image.proxy_factor(), 3);
     assert_eq!((image.sensor_width, image.sensor_height), (1000, 200));
 }
+
+/// A found mask (a stored matte) applies where its matte says, through the brush layers,
+/// inverted when asked, and the same after its stack is written and read back.
+#[test]
+fn a_found_mask_applies_where_its_matte_says() {
+    use photo_engine::local::{Mask, Matte, MatteSource};
+    let gpu = gpu_or_skip!();
+    let (w, h) = (256u32, 128u32);
+    let mut engine = Engine::new(&gpu.device);
+    engine
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            testkit::raster_from_fn(w, h, |_, _| [0.18; 3]),
+        )
+        .unwrap();
+    // The left half found.
+    let coverage =
+        image::GrayImage::from_fn(64, 32, |x, _| image::Luma([if x < 32 { 255 } else { 0 }]));
+    let mut mask = Mask::matte(Matte::new(MatteSource::Subject, &coverage).unwrap());
+    mask.adjust.exposure = 1.0;
+    let mut stack = PhotoStack::default();
+    stack.local.enabled = true;
+    stack.local.params.masks.push(mask);
+
+    let out = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let (left, right) = (grey_at(&out, 40, 64)[1], grey_at(&out, 216, 64)[1]);
+    assert!(
+        (left / right - 2.0).abs() < 0.15,
+        "a stop up on the left: {left} vs {right}"
+    );
+
+    stack.local.params.masks[0].invert = true;
+    let inverted = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let (l2, r2) = (
+        grey_at(&inverted, 40, 64)[1],
+        grey_at(&inverted, 216, 64)[1],
+    );
+    assert!(r2 > l2 * 1.8, "inverted: {l2} vs {r2}");
+
+    let json = serde_json::to_string(&stack).unwrap();
+    let back: PhotoStack = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, stack);
+    let again = engine
+        .export(&gpu.device, &gpu.queue, &back.sanitised())
+        .unwrap();
+    assert!(again.rgba == inverted.rgba);
+}

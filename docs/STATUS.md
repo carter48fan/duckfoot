@@ -32,6 +32,7 @@ DESIGN.md invariant 8.
 | **Params** | Lens Correction | Working | Distortion, TCA, vignetting via bundled Lensfun database and DNG opcodes |
 | **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
 | **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |
+| **Params** | found masks: subject, sky | Working | Subject by the bundled U²-Net model, sky by a heuristic (labelled a guess); found once on a thread from a small read-back of the photo, stored in the stack as a PNG matte so they look the same on every machine and export; drawn through the brush layers, so invert, ranges and local noise reduction apply. A matte is ~10-40 KB, so a sidecar keeps fewer undo steps while one is in the stack |
 | **Params** | Spot Heal, Clone & Remove | Working | Up to 32 circular sensor-space spots: heal/clone from a draggable source, or remove (content-aware PatchMatch fill from the vendored `lc-inpaint`, up to 16 at once; a spot of radius over ~42 px is filled at a coarser level of the sensor, so softer) |
 | **Params** | Look (`.cube`) | Working | A 3D or 1D `.cube` LUT (Resolve/Adobe) applied to the photo as an sRGB screen shows it, mixed in by amount; above-white and out-of-sRGB values pass through unclipped; read by the engine so batch export applies it too |
 | **AI Studio** | `CutoutStudio` (rembg) | Working | Pure-Rust `tract-onnx` neural inference (`u2netp.onnx`), alpha matting, defringing & touch-ups |

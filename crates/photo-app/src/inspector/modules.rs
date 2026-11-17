@@ -1331,6 +1331,27 @@ impl PhotoApp {
                     {
                         add = Some(Mask::brush());
                     }
+                    let free = room && !self.finding_mask();
+                    if widgets::outlined_chip(ui, free, false, "+ subject")
+                        .on_hover_text(
+                            "Find the photo's main subject (a person, an animal, a thing) and \
+                             mask it",
+                        )
+                        .clicked()
+                    {
+                        self.pending_sample =
+                            Some(Sample::FindMask(photo_engine::local::MatteSource::Subject));
+                    }
+                    if widgets::outlined_chip(ui, free, false, "+ sky")
+                        .on_hover_text(
+                            "Guess where the sky is, from the top of the frame down; tidy it \
+                             with a range or invert if need be",
+                        )
+                        .clicked()
+                    {
+                        self.pending_sample =
+                            Some(Sample::FindMask(photo_engine::local::MatteSource::Sky));
+                    }
                     if n > 0 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if widgets::outlined_chip(ui, true, self.mask_overlay, "show")

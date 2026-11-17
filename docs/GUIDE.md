@@ -91,6 +91,12 @@ Crop, spot healing and masks (changes brushed onto one area) are **tools** on th
 the window's right edge, with **Looks** and **Edit** (this list). Choose one and the panel
 shows it.
 
+In **masks**, besides a radial, a gradient or a brush, **+ subject** finds the photo's
+main subject (a person, an animal, a thing) and **+ sky** guesses where the sky is. Each
+takes a moment, then becomes a mask like any other: set what it does with the sliders,
+invert it to change everything but the subject, or narrow it with a colour or brightness
+range. The sky is a guess from the top of the photo down, so check it with **show**.
+
 Click a section's name to fold it away. The less-used tools are **drawers** inside a
 section: click one to open it. Moving any slider switches its tool on for you. Each section
 and each drawer has a **switch** at its right: switch it off to see the photo without it.

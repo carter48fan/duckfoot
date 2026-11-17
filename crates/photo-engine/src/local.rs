@@ -11,6 +11,7 @@
 //! texture (see [`BRUSH_SIDE`]) that preview and export both sample, so they agree; the CPU
 //! evaluates the same dabs the same way for hit tests.
 
+use image::ImageEncoder;
 use serde::{Deserialize, Serialize};
 
 /// The most masks a photo has: the shader's fixed array.
@@ -116,6 +117,75 @@ pub enum Shape {
     },
     /// Painted: where the dabs cover, in the order they were laid down.
     Brush { dabs: Dabs },
+    /// Found in the photo: the subject, or the sky. Drawn as a brush is, from the matte
+    /// stored with it.
+    Matte { matte: Matte },
+}
+
+/// What a found mask found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatteSource {
+    /// The main subject, by the U²-Net model (see `rembg`).
+    Subject,
+    /// The sky, by a heuristic (see `sky`): a guess, to tidy with a range or invert.
+    Sky,
+}
+
+/// A mask's coverage as an 8-bit image over the sensor (in its own orientation), kept as
+/// a PNG in base64. Stored, not found again on opening: the model's output differs a
+/// little between CPUs and versions, and a mask must look the same wherever the photo is
+/// opened and every time it is exported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Matte {
+    pub source: MatteSource,
+    pub width: u32,
+    pub height: u32,
+    pub png: String,
+}
+
+/// The longest a stored matte's side is: a mask's edge is soft at this scale anyway (the
+/// model sees 320 px), and the sidecar stays small.
+pub const MATTE_SIDE: u32 = 512;
+/// The largest a stored matte may be, encoded.
+const MATTE_MAX_BYTES: usize = 512 * 1024;
+
+impl Matte {
+    /// `coverage` (0 none, 255 full), stored.
+    pub fn new(source: MatteSource, coverage: &image::GrayImage) -> Option<Self> {
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                coverage.as_raw(),
+                coverage.width(),
+                coverage.height(),
+                image::ExtendedColorType::L8,
+            )
+            .ok()?;
+        Some(Self {
+            source,
+            width: coverage.width(),
+            height: coverage.height(),
+            png: crate::base64::encode(&png),
+        })
+    }
+
+    /// The coverage, if what is stored reads as the size it says.
+    pub fn coverage(&self) -> Option<image::GrayImage> {
+        let bytes = crate::base64::decode(&self.png)?;
+        let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .ok()?
+            .into_luma8();
+        (img.dimensions() == (self.width, self.height)).then_some(img)
+    }
+
+    /// The coverage resampled to `size` (a brush layer), bilinear.
+    pub fn coverage_at(&self, size: (u32, u32)) -> Option<Vec<u8>> {
+        let img = self.coverage()?;
+        Some(
+            image::imageops::resize(&img, size.0, size.1, image::imageops::FilterType::Triangle)
+                .into_raw(),
+        )
+    }
 }
 
 /// What a mask does where it applies. Sliders are -100..=100 except exposure, in stops.
@@ -202,6 +272,17 @@ impl Mask {
         }
     }
 
+    /// A found mask, from its matte.
+    pub fn matte(matte: Matte) -> Self {
+        Self {
+            shape: Shape::Matte { matte },
+            invert: false,
+            on: true,
+            adjust: Adjust::default(),
+            range: RangeMask::None,
+        }
+    }
+
     pub fn brush() -> Self {
         Self {
             shape: Shape::Brush {
@@ -220,6 +301,10 @@ impl Mask {
             Shape::Linear { .. } => "gradient",
             Shape::Radial { .. } => "radial",
             Shape::Brush { .. } => "brush",
+            Shape::Matte { ref matte } => match matte.source {
+                MatteSource::Subject => "subject",
+                MatteSource::Sky => "sky",
+            },
         }
     }
 
@@ -229,6 +314,8 @@ impl Mask {
         let (w, h) = (sensor.0 as f32, sensor.1 as f32);
         let px = [p[0] * w, p[1] * h];
         let inside = match &self.shape {
+            // Its handle is the mask list's row, not a place on the photo.
+            Shape::Matte { .. } => 0.0,
             Shape::Brush { dabs } => {
                 let long = w.max(h);
                 dabs.iter().fold(0.0, |v, dab| {
@@ -270,6 +357,25 @@ impl Mask {
     fn sanitised(mut self) -> Self {
         let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
         self.shape = match self.shape {
+            // A matte that is too big, or not the size it says, applies nowhere rather
+            // than everywhere.
+            Shape::Matte { matte } => {
+                let sane = (1..=4096).contains(&matte.width)
+                    && (1..=4096).contains(&matte.height)
+                    && matte.png.len() <= MATTE_MAX_BYTES;
+                Shape::Matte {
+                    matte: if sane {
+                        matte
+                    } else {
+                        Matte {
+                            width: 1,
+                            height: 1,
+                            png: String::new(),
+                            ..matte
+                        }
+                    },
+                }
+            }
             Shape::Brush { dabs } => Shape::Brush {
                 dabs: dabs
                     .iter()

@@ -27,6 +27,7 @@ mod desktop;
 mod display;
 mod export_flow;
 mod export_ui;
+mod found_masks;
 mod help;
 mod i18n;
 mod icons;
@@ -482,6 +483,8 @@ pub(crate) enum Sample {
     AutoTone,
     Upright(photo_engine::keystone::Upright),
     Tat(egui::Pos2, tat::TatMode, egui::Pos2),
+    /// Find the subject, or the sky, and add it as a mask.
+    FindMask(photo_engine::local::MatteSource),
 }
 
 /// What a notice's Undo button takes back.
@@ -634,6 +637,8 @@ pub struct PhotoApp {
     /// The caption fields as typed (title, caption, creator, copyright), for the photo
     /// they were opened on; written when a field is left.
     caption_drafts: Option<(PathBuf, [String; 4])>,
+    /// A subject or sky mask being found, off the UI thread.
+    finding: Option<found_masks::Finding>,
     /// Filters kept under a name, and the name being typed for a new one.
     pub saved_filters: Vec<dam::SavedFilter>,
     saved_filter_draft: Option<String>,
@@ -979,6 +984,7 @@ impl PhotoApp {
             paste_picker_open: false,
             keyword_draft: String::new(),
             caption_drafts: None,
+            finding: None,
             saved_filters: Vec::new(),
             saved_filter_draft: None,
             folder_watch: Default::default(),
@@ -1269,6 +1275,11 @@ impl PhotoApp {
         let (device, queue) = (gpu.device, gpu.queue);
         let before = self.stack.clone();
         let outcome = match sample {
+            // Not a value but a mask, found off this thread: its own path.
+            Sample::FindMask(source) => {
+                self.find_mask(gpu, source);
+                return;
+            }
             Sample::Pick(p) => self
                 .engine
                 .neutral_at(device, queue, &self.stack, (p.x, p.y))
@@ -1880,6 +1891,10 @@ impl PhotoApp {
         self.poll_folders(&ctx, gpu);
         self.handle_keys(&ctx, gpu);
         self.poll_export(&ctx);
+        self.poll_found_mask();
+        if self.finding_mask() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.poll_batch_export(&ctx);
         if let Some(e) = gpu_errors::take() {
             self.error = Some(format!("GPU error: {e}"));

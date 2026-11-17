@@ -7,6 +7,7 @@
 //! This crate owns no window and creates no `Device`. Both are handed to it by the shell,
 //! which is what keeps the eventual Android build a new bootstrap rather than a fork.
 
+pub(crate) mod base64;
 pub mod copies;
 pub mod curve;
 pub mod decode;
@@ -33,6 +34,7 @@ pub mod proof;
 pub mod proxy;
 pub mod rembg;
 pub mod sidecar;
+pub mod sky;
 pub mod temperature;
 #[doc(hidden)]
 pub mod testkit;

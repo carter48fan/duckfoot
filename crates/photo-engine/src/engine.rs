@@ -380,7 +380,34 @@ struct Brushes {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     size: (u32, u32),
-    layers: Vec<(Vec<crate::local::Dab>, Vec<u8>)>,
+    layers: Vec<(Kept, Vec<u8>)>,
+}
+
+/// What a brush layer holds: a brush mask's dabs, or a found mask's stored matte.
+#[derive(Clone, PartialEq)]
+enum Kept {
+    Dabs(Vec<crate::local::Dab>),
+    Matte(String),
+}
+
+/// What a layer is to hold: a brush's dabs, or a found mask's matte.
+#[derive(Clone, Copy)]
+enum Layer<'a> {
+    Dabs(&'a [crate::local::Dab]),
+    Matte(&'a crate::local::Matte),
+}
+
+impl Layer<'_> {
+    /// Changes with what the layer would hold; for the local denoise's cache.
+    fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match self {
+            Layer::Dabs(d) => (0u8, d.len()).hash(&mut h),
+            Layer::Matte(m) => (1u8, &m.png).hash(&mut h),
+        }
+        h.finish()
+    }
 }
 
 impl Brushes {
@@ -410,28 +437,41 @@ impl Brushes {
             view,
             size,
             layers: (0..crate::local::MAX_MASKS)
-                .map(|_| (Vec::new(), blank.clone()))
+                .map(|_| (Kept::Dabs(Vec::new()), blank.clone()))
                 .collect(),
         }
     }
 
     /// Make each layer hold its brush mask's dabs: new dabs laid on top when a stroke has
     /// only grown, the layer redrawn otherwise; only what changed is uploaded.
-    fn sync(&mut self, queue: &wgpu::Queue, wanted: &[&[crate::local::Dab]]) {
+    fn sync(&mut self, queue: &wgpu::Queue, wanted: &[Layer<'_>]) {
         let (w, h) = self.size;
         for (l, (have, buf)) in self.layers.iter_mut().enumerate() {
-            let want: &[crate::local::Dab] = wanted.get(l).copied().unwrap_or(&[]);
-            if want == have.as_slice() {
-                continue;
-            }
-            let dirty = if want.starts_with(have) {
-                crate::local::rasterise(buf, self.size, &want[have.len()..])
-            } else {
-                buf.fill(0);
-                crate::local::rasterise(buf, self.size, want);
-                Some((0, 0, w, h))
+            let want = wanted.get(l).copied().unwrap_or(Layer::Dabs(&[]));
+            let dirty = match (want, &*have) {
+                (Layer::Dabs(want), Kept::Dabs(had)) if want == had.as_slice() => continue,
+                (Layer::Matte(m), Kept::Matte(png)) if m.png == *png => continue,
+                // A stroke that has only grown: its new dabs, laid on top.
+                (Layer::Dabs(want), Kept::Dabs(had)) if want.starts_with(had) => {
+                    let dirty = crate::local::rasterise(buf, self.size, &want[had.len()..]);
+                    *have = Kept::Dabs(want.to_vec());
+                    dirty
+                }
+                (Layer::Dabs(want), _) => {
+                    buf.fill(0);
+                    crate::local::rasterise(buf, self.size, want);
+                    *have = Kept::Dabs(want.to_vec());
+                    Some((0, 0, w, h))
+                }
+                (Layer::Matte(m), _) => {
+                    match m.coverage_at(self.size) {
+                        Some(cover) => buf.copy_from_slice(&cover),
+                        None => buf.fill(0),
+                    }
+                    *have = Kept::Matte(m.png.clone());
+                    Some((0, 0, w, h))
+                }
             };
-            *have = want.to_vec();
             if let Some((x, y, rw, rh)) = dirty {
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -458,7 +498,7 @@ impl Brushes {
 }
 
 /// The dabs of each brush mask that is on, in the order the shader numbers them.
-fn brush_layers(stack: &PhotoStack) -> Vec<&[crate::local::Dab]> {
+fn brush_layers(stack: &PhotoStack) -> Vec<Layer<'_>> {
     if !stack.local.enabled {
         return Vec::new();
     }
@@ -470,7 +510,8 @@ fn brush_layers(stack: &PhotoStack) -> Vec<&[crate::local::Dab]> {
         .filter(|m| m.on)
         .take(crate::local::MAX_MASKS)
         .filter_map(|m| match &m.shape {
-            crate::local::Shape::Brush { dabs } => Some(dabs.as_slice()),
+            crate::local::Shape::Brush { dabs } => Some(Layer::Dabs(dabs.as_slice())),
+            crate::local::Shape::Matte { matte } => Some(Layer::Matte(matte)),
             _ => None,
         })
         .collect()
@@ -4465,7 +4506,8 @@ fn mask_uniforms(
         // Kind (0 gradient, 1 radial, 2 brush), plus 4 when inverted.
         let invert = if m.invert { 4.0 } else { 0.0 };
         match m.shape {
-            Shape::Brush { .. } => {
+            // A found mask is drawn from its layer, as a brush is.
+            Shape::Brush { .. } | Shape::Matte { .. } => {
                 out[slot] = [brush, 0.0, 0.0, 0.0];
                 out[slot + 1] = [0.0, 0.0, 0.0, 2.0 + invert];
                 brush += 1.0;
@@ -4523,7 +4565,7 @@ fn mask_uniforms(
 struct LocalDenoise {
     masks: [[f32; 4]; 32],
     count: u32,
-    dabs: Vec<usize>,
+    dabs: Vec<u64>,
 }
 
 impl LocalDenoise {
@@ -4538,7 +4580,7 @@ impl LocalDenoise {
             }
         }
         if out.count > 0 {
-            out.dabs = brush_layers(stack).iter().map(|d| d.len()).collect();
+            out.dabs = brush_layers(stack).iter().map(Layer::key).collect();
         }
         out
     }
@@ -5432,6 +5474,56 @@ impl Engine {
             &scale(horizontal),
             mode,
         ))
+    }
+
+    /// The photo roughly as the eye sees it, for finding a mask in (`local::Matte`):
+    /// the whole sensor at about `side` texels across, in its own orientation, with its
+    /// white balance and colour, exposed so its median is mid grey, sRGB-encoded. A
+    /// one-shot read, as auto tone's is (DESIGN invariant 4).
+    pub fn mask_source(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        side: u32,
+    ) -> Result<image::RgbImage> {
+        let Some(image) = &self.image else {
+            bail!("no image is loaded");
+        };
+        let (texels, (w, h)) = self.sensor_overview_sized(device, queue, side)?;
+        let t = stack.white_balance.params;
+        let wb = if stack.white_balance.enabled {
+            [image.wb[0] * t.tint_r, image.wb[1], image.wb[2] * t.tint_b]
+        } else {
+            image.wb
+        };
+        let m = image.cam_to_srgb;
+        let rgb: Vec<[f32; 3]> = texels
+            .iter()
+            .map(|t| {
+                let c = [0, 1, 2].map(|i| t[i] * wb[i] + t[3]);
+                [0, 1, 2].map(|r| (m[r][0] * c[0] + m[r][1] * c[1] + m[r][2] * c[2]).max(0.0))
+            })
+            .collect();
+        let mut luma: Vec<f32> = rgb
+            .iter()
+            .map(|c| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2])
+            .filter(|y| y.is_finite())
+            .collect();
+        luma.sort_by(f32::total_cmp);
+        let median = luma.get(luma.len() / 2).copied().unwrap_or(0.18).max(1e-5);
+        let gain = 0.18 / median;
+        let encode = |v: f32| {
+            let v = (v * gain).clamp(0.0, 1.0);
+            let s = if v <= 0.0031308 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0).round() as u8
+        };
+        let bytes = rgb.iter().flat_map(|c| c.map(encode)).collect();
+        image::RgbImage::from_raw(w, h, bytes).ok_or_else(|| anyhow::anyhow!("mask source size"))
     }
 
     pub fn auto_tone(
