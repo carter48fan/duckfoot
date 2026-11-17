@@ -2,6 +2,14 @@
 //!
 //! The desktop and Android bootstraps both drive this same type.
 
+/// The version this build reports: the release's, which CI passes in as
+/// `DUCKFOOT_VERSION` (`v0.3.24` → `0.3.24`), or the crate's for a local build. Cargo.toml's
+/// version is only the floor CI's auto-increment starts from.
+pub const VERSION: &str = match option_env!("DUCKFOOT_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
 pub mod batch;
 pub mod categories;
 pub mod compact;
@@ -20,6 +28,7 @@ pub mod theme;
 pub mod tonemap_3d;
 pub mod widgets;
 
+mod about;
 pub mod crop_tool;
 mod curve_editor;
 pub mod cutout_studio;
@@ -730,6 +739,8 @@ pub struct PhotoApp {
     pub customize_open: bool,
     /// The Preferences window is open (desktop).
     pub(crate) preferences_open: bool,
+    /// The About window: version, licence and notices.
+    pub(crate) about_open: bool,
     /// The inspector sections folded shut (desktop).
     pub(crate) shut_groups: HashSet<modules::ModuleGroup>,
     /// The tool chosen on the rail beside the inspector (desktop).
@@ -1034,6 +1045,7 @@ impl PhotoApp {
             inspector_sections: InspectorSectionConfig::default_sections(),
             customize_open: false,
             preferences_open: false,
+            about_open: false,
             shut_groups: HashSet::new(),
             tool: Tool::default(),
             bypassed: HashMap::new(),
@@ -1920,6 +1932,7 @@ impl PhotoApp {
 
         if self.layout.is_compact() {
             self.compact_layout(ui, gpu, screen);
+            self.about_window(&ctx);
         } else {
             // Room to breathe on the desktop (the phone keeps its own, finger-sized). Panels
             // inherit this; a few set their own rhythm inside.
@@ -1944,6 +1957,7 @@ impl PhotoApp {
             self.paste_picker(&ctx);
             self.shortcuts_overlay(&ctx);
             self.preferences_window(&ctx);
+            self.about_window(&ctx);
             self.help_window(&ctx);
             self.welcome(&ctx);
             self.desk_tour(&ctx);

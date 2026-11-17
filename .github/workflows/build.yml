@@ -151,6 +151,8 @@ jobs:
       DUCKFOOT_KEYSTORE_BASE64: ${{ secrets.DUCKFOOT_KEYSTORE_BASE64 }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
       DUCKFOOT_VERSION_NAME: ${{ needs.version.outputs.version }}
+      # The version the app reports (photo_app::VERSION), not Cargo.toml's floor.
+      DUCKFOOT_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # rust-toolchain.toml pins the version: install it, then add the Android target to
@@ -289,6 +291,8 @@ jobs:
 
       # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
       - run: cargo build --release --locked -p duckfoot --features heif
+        env:
+          DUCKFOOT_VERSION: ${{ needs.version.outputs.version }}
 
       - name: Package tarball and AppImage
         run: |
@@ -355,6 +359,8 @@ jobs:
 
       # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
       - run: cargo build --release --locked -p duckfoot --features heif
+        env:
+          DUCKFOOT_VERSION: ${{ needs.version.outputs.version }}
 
       - name: Package
         shell: bash
@@ -414,6 +420,7 @@ jobs:
       - run: cargo build --release --locked -p duckfoot --features heif
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
+          DUCKFOOT_VERSION: ${{ needs.version.outputs.version }}
 
       - name: Package macOS app and dmg
         run: |

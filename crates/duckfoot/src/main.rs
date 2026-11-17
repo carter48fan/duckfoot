@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     }));
     log::info!(
         "duckfoot {} ({}) on {} {}, logging to {}",
-        env!("CARGO_PKG_VERSION"),
+        photo_app::VERSION,
         option_env!("GITHUB_SHA").map_or("local build", |sha| &sha[..sha.len().min(7)]),
         std::env::consts::OS,
         std::env::consts::ARCH,

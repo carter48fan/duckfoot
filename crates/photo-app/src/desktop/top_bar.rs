@@ -158,16 +158,20 @@ impl PhotoApp {
                 ui.close();
             }
             ui.separator();
-            if menu_item(ui, "Help", "F1", true) {
+            if menu_item(ui, "Help", "", true) {
                 self.open_help();
                 ui.close();
             }
-            if menu_item(ui, "Shortcuts", "?", true) {
+            if menu_item(ui, "Shortcuts", "? / F1", true) {
                 self.shortcuts_open = !self.shortcuts_open;
                 ui.close();
             }
             if menu_item(ui, "Preferences…", "Ctrl+,", true) {
                 self.preferences_open = true;
+                ui.close();
+            }
+            if menu_item(ui, "About & licences…", "", true) {
+                self.about_open = true;
                 ui.close();
             }
             ui.separator();

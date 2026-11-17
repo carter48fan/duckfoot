@@ -2096,6 +2096,15 @@ impl PhotoApp {
     /// The scope and filmic start off here: flat on a phone, and a switch away.
     fn compact_modules_list(&mut self, ui: &mut egui::Ui) {
         self.ui_scale_row(ui);
+        if widgets::chip(
+            ui,
+            false,
+            &format!("about Duckfoot {} & licences", crate::VERSION),
+        )
+        .clicked()
+        {
+            self.about_open = true;
+        }
         ui.add_space(4.0);
         let mut changed = false;
         ui.horizontal(|ui| {
