@@ -14,7 +14,7 @@
     <!-- No storage permissions: files come in through the system picker, and exports are
          written to Pictures/Duckfoot, which Android 11+ allows without one. -->
     <application
-        android:label="Duckfoot"
+        android:label="${appLabel}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Duckfoot"

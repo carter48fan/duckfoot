@@ -49,15 +49,23 @@ Every push to a branch other than `main` publishes that branch's rolling pre-rel
 **Test build: `<branch>`** on the repository's Releases page, with the APK as a plain
 file: open the release on the phone, tap the `.apk`, install. Each push replaces it.
 
-Android installs an update only over an app signed with the same key. Until the
-repository has a key of its own (below), every build - CI's on any branch, and local
-ones - is signed with the **testing key** checked in as `android/testing.jks`, so each
-test build installs over the last without losing the app's library and edits. It is a
-key for testing only: anyone with the repository can sign with it. `build-apk.sh` fails
-a build whose APK is not signed with the key it should be.
+Android installs an update only over an app signed with the same key, and that app can
+read the data of the one it replaces. The **testing key** checked in as
+`android/testing.jks` is public (its password is in `app/build.gradle.kts`), so nothing
+signed with it may be the real app. There are therefore two apps:
 
-If a build from before the testing key (signed with a one-off key) is on the phone,
-uninstall it once.
+| | App id | Label | Signed with |
+|---|---|---|---|
+| A release | `com.walker.duckfoot` | Duckfoot | the repository's key (below) |
+| Every other build (debug, CI branch builds, a local release without the key) | `com.walker.duckfoot.testing` | Duckfoot testing | the testing key |
+
+They install side by side, each keeping its own library and edits. CI refuses to make a
+release without the repository's key, and `build-apk.sh` fails a build signed with the
+wrong key for what it is.
+
+Releases up to v0.3.23 were the real app id signed with the testing key. Moving to the
+repository's key means those installs must be uninstalled once (Android will not update
+across keys); export or note anything wanted from them first.
 
 ## Signing key (for publishing)
 
@@ -78,8 +86,8 @@ base64 -w0 duckfoot.jks        # the value of DUCKFOOT_KEYSTORE_BASE64
 | `DUCKFOOT_KEY_PASSWORD` | the key password (the same as the keystore's, unless you chose another) |
 
 Keep `duckfoot.jks` and its passwords somewhere safe and out of the repository: whoever
-has them can sign an update to the app. Builds signed with the testing key are a
-different app to Android, so uninstall the testing build once when switching.
+has them can sign an update to the app, and losing them means no update can ever be
+installed over the app again.
 
 To sign a local build with the same key, export `DUCKFOOT_KEYSTORE` (the `.jks` path) and
 the three other variables above before running `build-apk.sh`.

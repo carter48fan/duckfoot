@@ -184,13 +184,25 @@ jobs:
       # Clippy needs no linker, so it runs before the (slower) NDK build.
       - run: cargo clippy -p duckfoot-android --target aarch64-linux-android -- -D warnings
 
-      # With a signing key in the repository's secrets (android/README.md), every build is
-      # signed with it and installs over the last; without one, each uses a throwaway key.
+      # A release is com.walker.duckfoot and must be signed with the repository's own key
+      # (android/README.md): the testing key is public, so an APK signed with it could be
+      # "updated" by anyone. Every other build is com.walker.duckfoot.testing, signed with
+      # the testing key, and installs beside the real app, never over it.
       - name: Use the repository's signing key
         if: env.DUCKFOOT_KEYSTORE_BASE64 != ''
         run: |
           echo "$DUCKFOOT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/duckfoot.jks"
           echo "DUCKFOOT_KEYSTORE=$RUNNER_TEMP/duckfoot.jks" >> "$GITHUB_ENV"
+
+      - name: Refuse to release without the signing key
+        if: needs.version.outputs.is_release == 'true' && env.DUCKFOOT_KEYSTORE_BASE64 == ''
+        run: |
+          echo "::error::A release needs the DUCKFOOT_KEYSTORE_BASE64, DUCKFOOT_KEYSTORE_PASSWORD, DUCKFOOT_KEY_ALIAS and DUCKFOOT_KEY_PASSWORD secrets (android/README.md)."
+          exit 1
+
+      - name: Mark a testing build
+        if: needs.version.outputs.is_release != 'true'
+        run: echo "DUCKFOOT_TESTING_BUILD=1" >> "$GITHUB_ENV"
 
       - run: android/build-apk.sh release
         env:
@@ -203,10 +215,10 @@ jobs:
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk dist/duckfoot-android-arm64.apk
-          if [ -n "${DUCKFOOT_KEYSTORE:-}" ]; then
+          if [ -n "${DUCKFOOT_KEYSTORE:-}" ] && [ "${DUCKFOOT_TESTING_BUILD:-}" != "1" ]; then
             signing="repository key"
           else
-            signing="testing key"
+            signing="testing key (com.walker.duckfoot.testing)"
           fi
           echo "$signing" > dist/android-signing.txt
           echo "signing=$signing" >> "$GITHUB_OUTPUT"
@@ -522,7 +534,7 @@ jobs:
             "repository key")
               signing="The APK is signed with the repository's key, so it installs over earlier builds." ;;
             *)
-              signing="The APK is signed with the testing key, so it installs over any earlier testing build (uninstall once if an older build signed with a one-off key is on the phone)." ;;
+              signing="This is a testing build (Duckfoot testing, com.walker.duckfoot.testing), signed with the public testing key: it installs beside the real app, never over it." ;;
           esac
           {
             echo "Duckfoot $RELEASE_TAG, built from ${GITHUB_SHA::7}${HEAD_MESSAGE:+: ${HEAD_MESSAGE%%$'\n'*}}"
@@ -603,7 +615,7 @@ jobs:
             if [ "$(cat dist/android-signing.txt 2>/dev/null)" = "repository key" ]; then
               echo "Signed with the repository's key: installs over earlier builds."
             else
-              echo "Signed with the testing key: installs over any earlier testing build. (If a build signed with a one-off key is on the phone, uninstall it once.)"
+              echo "A testing build (Duckfoot testing, com.walker.duckfoot.testing), signed with the public testing key: it installs beside the real app, never over it."
             fi
             echo
             echo "Desktop builds for this commit are on its workflow run: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"

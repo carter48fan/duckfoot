@@ -39,7 +39,7 @@ cd "$root"
 # API 30 matches minSdk in app/build.gradle.kts.
 cargo ndk --target arm64-v8a --platform 30 \
     --output-dir android/app/src/main/jniLibs \
-    build --release -p duckfoot-android --features heif
+    build --release --locked -p duckfoot-android --features heif
 
 mkdir -p "$root/android/app/src/main/assets"
 cp "$root/THIRD_PARTY_LICENSES.txt" "$root/android/app/src/main/assets/THIRD_PARTY_LICENSES.txt"
@@ -67,14 +67,23 @@ if ! grep -q ' ANativeActivity_onCreate$' <<<"$exported"; then
     echo "$lib does not export ANativeActivity_onCreate" >&2
     exit 1
 fi
-# And that it is signed as expected, so it installs over the last build: with the
-# repository's key when one is given, otherwise the testing key beside this script.
+# And that it is signed as expected: the real app (com.walker.duckfoot) only ever with
+# the repository's key, and every testing build (com.walker.duckfoot.testing) with the
+# testing key beside this script. See app/build.gradle.kts.
+testing=0
+if [[ -z "${DUCKFOOT_KEYSTORE:-}" || "${DUCKFOOT_TESTING_BUILD:-}" == "1" || "$variant" == debug ]]; then
+    testing=1
+fi
 signer=("${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"/build-tools/*/apksigner)
 if [[ -x "${signer[-1]}" ]]; then
     certs="$("${signer[-1]}" verify --print-certs "$apk")"
-    if [[ -z "${DUCKFOOT_KEYSTORE:-}" ]] && ! grep -q "CN=Duckfoot testing" <<<"$certs"; then
-        echo "$apk is not signed with the testing key:" >&2
+    if [[ $testing == 1 ]] && ! grep -q "CN=Duckfoot testing" <<<"$certs"; then
+        echo "$apk is a testing build not signed with the testing key:" >&2
         echo "$certs" >&2
+        exit 1
+    fi
+    if [[ $testing == 0 ]] && grep -q "CN=Duckfoot testing" <<<"$certs"; then
+        echo "$apk is the real app but signed with the public testing key" >&2
         exit 1
     fi
     grep -m1 "certificate DN" <<<"$certs" || true
