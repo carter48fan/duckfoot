@@ -28,7 +28,7 @@ DESIGN.md invariant 8.
 | **Params** | film grain | Working | Monochrome, strongest in the mid-tones, sized to the whole frame; the same in every export and band, and a preview shows as much as the export would at its size |
 | **Params** | capture sharpen, vignette | Working | Resolution-independent convolution (`0.25` default on RAW) & crop-centered radial falloff |
 | **Params** | `Geometry` (crop / rotate / mirror) | Working | 90° CCW/CW, 180°, H/V mirror, normalized crop box with 8 handles & aspect lock |
-| **Params** | Denoise (NR) | Working | Cached mip-chain fragment pre-pass (`denoise.wgsl`) for luma & chroma (`25` colour NR default on RAW) |
+| **Params** | Denoise (NR) | Working | Cached mip-chain fragment pre-pass (`denoise.wgsl`) for luma & chroma (`25` colour NR default on RAW) | Coarse grain (opt-in, default 0): blotches a few photosites across taken out at an absolute scale, edge-preserving; tuned on synthetic noise only, not yet on real high-ISO files
 | **Params** | Lens Correction | Working | Distortion, TCA, vignetting via bundled Lensfun database and DNG opcodes |
 | **Params** | Perspective / Keystone | Working | Vertical/horizontal homography and Auto Upright line detection |
 | **Params** | Local Adjustments | Working | Up to 8 linear gradient, radial, or sensor-space brush masks |

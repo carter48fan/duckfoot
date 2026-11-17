@@ -3240,3 +3240,66 @@ fn a_found_mask_applies_where_its_matte_says() {
         .unwrap();
     assert!(again.rgba == inverted.rgba);
 }
+
+/// Coarse grain: blotches a few photosites across, which the fine smoothing cannot see,
+/// are taken out, an edge is kept, and at 0 nothing changes.
+#[test]
+fn coarse_grain_takes_out_blotches_and_keeps_an_edge() {
+    let gpu = gpu_or_skip!();
+    let (w, h) = (256u32, 128u32);
+    // Mid grey with ±noise constant over 4×4 blocks, and a hard step at x = 192.
+    let blotch = |x: u32, y: u32| {
+        let mut s = (x / 4).wrapping_mul(0x9E37_79B9) ^ (y / 4).wrapping_mul(0x85EB_CA6B);
+        s ^= s >> 15;
+        s = s.wrapping_mul(0x2C1B_3C6D);
+        s ^= s >> 12;
+        (s % 1000) as f32 / 1000.0 - 0.5
+    };
+    let raster = testkit::raster_from_fn(w, h, |x, y| {
+        let base = if x < 192 { 0.18 } else { 0.6 };
+        [base * (1.0 + 0.25 * blotch(x, y)); 3]
+    });
+    let mut engine = Engine::new(&gpu.device);
+    engine.load_raster(&gpu.device, &gpu.queue, raster).unwrap();
+
+    let sd = |out: &photo_engine::ExportedImage| {
+        let v: Vec<f32> = (16..112)
+            .flat_map(|y| (16..170).map(move |x| (x, y)))
+            .map(|(x, y)| grey_at(out, x, y)[1])
+            .collect();
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|a| (a - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+    };
+    let plain = engine
+        .export(&gpu.device, &gpu.queue, &PhotoStack::default())
+        .unwrap();
+    let mut stack = PhotoStack::default();
+    stack.denoise.enabled = true;
+    stack.denoise.params.luminance = 0.0;
+    stack.denoise.params.color = 0.0;
+    stack.denoise.params.coarse = 100.0;
+    let coarse = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let (before, after) = (sd(&plain), sd(&coarse));
+    assert!(after < before * 0.75, "blotches {before} → {after}");
+
+    // The step stays a step: either side of it as it was, within the noise.
+    let side = |o: &photo_engine::ExportedImage, x: u32| {
+        (40..90).map(|y| grey_at(o, x, y)[1]).sum::<f32>() / 50.0
+    };
+    assert!((side(&coarse, 188) - side(&plain, 188)).abs() < 0.03);
+    assert!((side(&coarse, 196) - side(&plain, 196)).abs() < 0.05);
+
+    // Off at 0: identical to before it existed.
+    stack.denoise.params.coarse = 0.0;
+    stack.denoise.params.color = 25.0;
+    let without = engine.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    let mut legacy: PhotoStack = serde_json::from_str(
+        &serde_json::to_string(&stack)
+            .unwrap()
+            .replace(",\"coarse\":0.0", ""),
+    )
+    .unwrap();
+    legacy.denoise.params.coarse = 0.0;
+    let old = engine.export(&gpu.device, &gpu.queue, &legacy).unwrap();
+    assert!(without.rgba == old.rgba);
+}

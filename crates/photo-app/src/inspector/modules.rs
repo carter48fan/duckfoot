@@ -1037,6 +1037,7 @@ impl PhotoApp {
                     ("detail", &mut p.detail, dp.detail),
                     ("colour", &mut p.color, dp.color),
                     ("smoothness", &mut p.smoothness, dp.smoothness),
+                    ("coarse grain", &mut p.coarse, dp.coarse),
                 ] {
                     track!(widgets::param_slider(
                         ui,

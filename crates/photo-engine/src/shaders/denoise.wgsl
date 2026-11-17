@@ -17,7 +17,8 @@ struct Params {
     // x = sensor level read and written, y = luminance noise scale (0 = off),
     // z = range width in noise sigmas (detail), w = colour amount 0..1
     a: vec4<f32>,
-    // x = extra levels for the colour average (smoothness), y = the sensor's last level
+    // x = extra levels for the colour average (smoothness), y = the sensor's last level,
+    // z = coarse grain amount 0..1
     b: vec4<f32>,
     // Local noise reduction (W-01): x = masks in use, yz = the sensor's size in pixels.
     c: vec4<f32>,
@@ -118,6 +119,39 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
         }
         y_out = sum / weight;
+    }
+
+    // Coarse grain: brightness blotches about four photosites across, which the 5×5 above
+    // is too small to see. At an absolute level (2: 4×4 photosites a texel), so a preview
+    // and the export take out the same blotches; a preview at level 2 or coarser shows
+    // them already averaged away. The level-2 brightness here, less an edge-preserving
+    // average of it and its neighbours there, is the blotch; it is subtracted, so an edge
+    // (whose neighbours fall outside the range) is left as it is.
+    let coarse_k = p.b.z;
+    if (coarse_k > 0.0 && level < 2.0 && p.b.y >= 2.0) {
+        let uv = (vec2<f32>(at) + 0.5) / vec2<f32>(size);
+        let step = exp2(2.0 - level) / vec2<f32>(size);
+        let mid = luma(textureSampleLevel(sensor, sensor_sampler, uv, 2.0).rgb);
+        // Blotches are what is left of the noise where it is correlated, so they do not
+        // shrink with the level as white noise does: the range is full resolution's.
+        let range = max(3.0 * sigma(mid, 0.0, max(lum_k, 0.04)), 1e-6);
+        var sum = 0.0;
+        var weight = 0.0;
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                let n = luma(textureSampleLevel(
+                    sensor,
+                    sensor_sampler,
+                    uv + vec2<f32>(f32(dx), f32(dy)) * step,
+                    2.0,
+                ).rgb);
+                let r = (n - mid) / range;
+                let w = exp(-0.5 * r * r) * select(1.0, 0.5, dx != 0 || dy != 0);
+                sum += w * n;
+                weight += w;
+            }
+        }
+        y_out -= coarse_k * (mid - sum / weight);
     }
 
     var chroma = c.rgb - vec3<f32>(y);

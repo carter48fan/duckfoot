@@ -4649,7 +4649,7 @@ fn denoise_params(params: &Denoise, mip_levels: u32) -> [f32; 8] {
         // One to three levels coarser: 2x2 to 8x8 photosites per colour tap.
         (1.0 + 2.0 * unit(params.smoothness)).round(),
         mip_levels.saturating_sub(1) as f32,
-        0.0,
+        unit(params.coarse),
         0.0,
     ]
 }

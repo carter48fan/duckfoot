@@ -131,6 +131,7 @@ const DENOISE: &[Knob] = &[
     knob!("detail", 0.0, 100.0, 0, denoise.params.detail),
     knob!("colour", 0.0, 100.0, 0, denoise.params.color),
     knob!("smoothness", 0.0, 100.0, 0, denoise.params.smoothness),
+    knob!("coarse grain", 0.0, 100.0, 0, denoise.params.coarse),
 ];
 
 const WHITE_BALANCE: &[Knob] = &[

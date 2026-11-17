@@ -550,6 +550,11 @@ pub struct Denoise {
     pub color: f32,
     /// How wide an area colour is averaged over; higher removes coarser blotches.
     pub smoothness: f32,
+    /// How much coarse grain (brightness blotches a few photosites across, which high ISO
+    /// leaves and the fine smoothing is too small to see) is taken out. 0 in an edit made
+    /// before it, so that edit draws as it did.
+    #[serde(default)]
+    pub coarse: f32,
 }
 
 impl Default for Denoise {
@@ -559,6 +564,7 @@ impl Default for Denoise {
             detail: 50.0,
             color: 25.0,
             smoothness: 50.0,
+            coarse: 0.0,
         }
     }
 }
@@ -577,7 +583,7 @@ impl Denoise {
 
     /// Whether it would change a pixel at all.
     pub fn is_neutral(&self) -> bool {
-        !(self.luminance > 0.0 || self.color > 0.0)
+        !(self.luminance > 0.0 || self.color > 0.0 || self.coarse > 0.0)
     }
 }
 
