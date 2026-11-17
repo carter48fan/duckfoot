@@ -4,6 +4,8 @@
 //! platform's settings directory; with no directory (tests, the screenshot tool) nothing
 //! is remembered and nothing is written.
 
+use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::{InspectorSectionConfig, InspectorSectionId};
@@ -129,17 +131,41 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, dir: Option<&Path>) {
-        let Some(dir) = dir else { return };
+    /// Writes the settings unless they are what `last` says was written already, and
+    /// returns whether it wrote. Saving runs on every settle and every focus change, and
+    /// each write is fsynced; a hash of the bytes that would be written cannot miss a
+    /// changed field the way per-field dirty flags could, and costs far less than the
+    /// write it saves.
+    pub fn save_if_changed(&self, dir: Option<&Path>, last: &Cell<Option<u64>>) -> bool {
+        let Some(dir) = dir else { return false };
+        let json = match serde_json::to_vec_pretty(self) {
+            Ok(json) => json,
+            Err(e) => {
+                log::warn!("could not serialise settings: {e}");
+                return false;
+            }
+        };
+        let hash = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            json.hash(&mut h);
+            h.finish()
+        };
+        if last.get() == Some(hash) {
+            return false;
+        }
         // Through a temporary file: a crash mid-write must not reset every setting.
         let result = std::fs::create_dir_all(dir)
             .map_err(anyhow::Error::from)
-            .and_then(|()| {
-                let json = serde_json::to_vec_pretty(self)?;
-                photo_engine::fsio::atomic_write_bytes(&file(dir), &json)
-            });
-        if let Err(e) = result {
-            log::warn!("could not save settings in {}: {e:#}", dir.display());
+            .and_then(|()| photo_engine::fsio::atomic_write_bytes(&file(dir), &json));
+        match result {
+            Ok(()) => {
+                last.set(Some(hash));
+                true
+            }
+            Err(e) => {
+                log::warn!("could not save settings in {}: {e:#}", dir.display());
+                false
+            }
         }
     }
 }
@@ -201,6 +227,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unchanged_save_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckfoot-settings-unchanged-{}",
+            std::process::id()
+        ));
+        let last = Cell::new(None);
+        let mut settings = Settings::default();
+        assert!(settings.save_if_changed(Some(&dir), &last));
+        std::fs::remove_file(file(&dir)).unwrap();
+        assert!(!settings.save_if_changed(Some(&dir), &last));
+        assert!(!file(&dir).exists(), "an unchanged save wrote the file");
+        settings.xmp_sidecars = !settings.xmp_sidecars;
+        assert!(settings.save_if_changed(Some(&dir), &last));
+        assert!(file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn settings_round_trip_and_fill_in_new_modules() {
         let dir = std::env::temp_dir().join(format!("duckfoot-settings-{}", std::process::id()));
         let mut saved = default_compact_sections();
@@ -213,7 +257,7 @@ mod tests {
             shelf: vec![PathBuf::from("/photos/a.ARW")],
             ..Default::default()
         }
-        .save(Some(&dir));
+        .save_if_changed(Some(&dir), &Cell::new(None));
         let loaded = Settings::load(Some(&dir));
         assert!(loaded.tour_done);
         assert_eq!(loaded.ui_scale, 1.3);

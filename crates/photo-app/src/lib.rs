@@ -860,6 +860,8 @@ pub struct PhotoApp {
     /// Where settings are kept, and what they say.
     settings_dir: Option<PathBuf>,
     settings: settings::Settings,
+    /// A hash of the settings as last written, so an unchanged save writes nothing.
+    settings_written: std::cell::Cell<Option<u64>>,
     /// The phone's modules: which show in the Edit strip, in what order. Separate from
     /// the desktop's, because a phone wants fewer.
     pub compact_sections: Vec<InspectorSectionConfig>,
@@ -1083,6 +1085,7 @@ impl PhotoApp {
             step_dir: 1,
             layout: compact::Layout::Desktop,
             settings_dir,
+            settings_written: Default::default(),
             settings,
             compact_sections,
             preset: None,
@@ -1495,7 +1498,8 @@ impl PhotoApp {
     }
 
     fn save_settings(&self) {
-        self.settings.save(self.settings_dir.as_deref());
+        self.settings
+            .save_if_changed(self.settings_dir.as_deref(), &self.settings_written);
     }
 
     /// The size the photo's stage got last frame.
