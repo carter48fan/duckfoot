@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: what software centres (GNOME Software, KDE Discover, Flathub)
+     show for Duckfoot. https://www.freedesktop.org/software/appstream/docs/ -->
+<component type="desktop-application">
+  <id>com.walker.duckfoot</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Duckfoot</name>
+  <summary>Edit photos and camera RAW files, on your own device</summary>
+  <description>
+    <p>
+      Duckfoot is a fast photo editor for ordinary photos and the RAW files of serious
+      cameras. It draws every edit on the GPU, so sliders move in real time even on a full
+      resolution photo, and never changes the original: edits are kept in a small file
+      beside it.
+    </p>
+    <ul>
+      <li>RAW files from Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax and more</li>
+      <li>Light, colour, curves, colour grading and a black-and-white mixer</li>
+      <li>Masks by brush, gradient, radial, or found: the subject or the sky</li>
+      <li>Spot healing, lens correction, noise reduction and film grain</li>
+      <li>Ratings, flags, labels, keywords and captions, and batch export</li>
+    </ul>
+    <p>No account, no cloud, no tracking: photos never leave the device.</p>
+  </description>
+  <launchable type="desktop-id">duckfoot.desktop</launchable>
+  <url type="homepage">https://github.com/carter48fan/duckfoot</url>
+  <url type="bugtracker">https://github.com/carter48fan/duckfoot/issues</url>
+  <categories>
+    <category>Graphics</category>
+    <category>Photography</category>
+  </categories>
+  <keywords>
+    <keyword>RAW</keyword>
+    <keyword>photo</keyword>
+    <keyword>develop</keyword>
+    <keyword>editor</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>duckfoot</binary>
+  </provides>
+</component>

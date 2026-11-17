@@ -392,7 +392,10 @@ jobs:
           key: macos
 
       # HEIF/HEIC on: see docs/LEGAL.md, HEVC patents.
+      # The oldest macOS it runs on, the same in the binary and its Info.plist.
       - run: cargo build --release --locked -p duckfoot --features heif
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
 
       - name: Package macOS app and dmg
         run: |
@@ -400,7 +403,15 @@ jobs:
           app=dist/Duckfoot.app
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/duckfoot "$app/Contents/MacOS/duckfoot"
-          cp brand/duckfoot-1024.png "$app/Contents/Resources/duckfoot.png"
+          # The icon as macOS wants it: an .icns of every size, made from the 1024 px mark.
+          set=dist/duckfoot.iconset
+          mkdir -p "$set"
+          for size in 16 32 128 256 512; do
+            sips -z $size $size brand/duckfoot-1024.png --out "$set/icon_${size}x${size}.png" >/dev/null
+            double=$((size * 2))
+            sips -z $double $double brand/duckfoot-1024.png --out "$set/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$set" -o "$app/Contents/Resources/duckfoot.icns"
           cp LICENSE "$app/Contents/Resources/LICENSE.txt"
           cp THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
 
@@ -416,7 +427,11 @@ jobs:
             <key>CFBundleExecutable</key><string>duckfoot</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>$version</string>
-            <key>CFBundleIconFile</key><string>duckfoot.png</string>
+            <key>CFBundleVersion</key><string>$version</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleIconFile</key><string>duckfoot</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>

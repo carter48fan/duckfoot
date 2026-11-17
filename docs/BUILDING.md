@@ -227,6 +227,16 @@ cargo build --release --target x86_64-pc-windows-gnu
 cargo build --release --target aarch64-apple-darwin
 ```
 
+The Windows executable's icon and version come from `crates/duckfoot/build.rs`, which
+needs a resource compiler: `rc.exe` from the Windows SDK on Windows (CI has it), or
+`x86_64-w64-mingw32-windres` (MinGW) when cross-compiling from Linux. Without one the build
+still succeeds, with a warning and no icon.
+
+The macOS bundle (`.github/workflows/build.yml`) carries an `.icns` icon made from
+`brand/duckfoot-1024.png` and says it needs macOS 11 or newer. It declares no document
+types yet: winit does not pass on a file double-clicked in the Finder, so "Open With"
+would start Duckfoot without the photo.
+
 ## Releases and CI
 
 The **Build** workflow (`.github/workflows/build.yml`) builds the Android APK, the Linux
