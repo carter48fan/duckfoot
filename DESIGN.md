@@ -280,7 +280,9 @@ images from a hardcoded RGGB assumption. All of the following are mandatory:
 
 3. **Every mutation is a command on an undo stack.** No exceptions, no "just this one
    little toggle." *Because undo is what makes people trust an editor, and it cannot be
-   retrofitted.*
+   retrofitted.* The one deliberate line: catalogue marks (rating, flag, label, keywords,
+   title, caption, creator, copyright) describe the photo rather than edit it, are written
+   straight to its sidecar, and are changed back by changing them back.
 
 4. **No GPU→CPU readback in the interactive path.** Export reads back. Scopes read back
    4 KB of histogram bins. Nothing else per frame, ever. The one-shot exceptions are

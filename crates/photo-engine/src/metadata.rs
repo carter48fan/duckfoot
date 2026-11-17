@@ -34,7 +34,29 @@ pub struct PhotoInfo {
     pub catalog: Option<crate::sidecar::AssetMetadata>,
 }
 
+/// `s`, if it says anything.
+fn set(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
 impl PhotoInfo {
+    /// Who made the photo, as an export credits them: the creator written in Duckfoot,
+    /// else the camera's Artist.
+    pub fn credited_creator(&self) -> Option<&str> {
+        self.catalog
+            .as_ref()
+            .and_then(|c| set(&c.creator))
+            .or_else(|| set(&self.artist))
+    }
+
+    /// Its copyright, likewise: Duckfoot's, else the camera's.
+    pub fn credited_rights(&self) -> Option<&str> {
+        self.catalog
+            .as_ref()
+            .and_then(|c| set(&c.copyright))
+            .or_else(|| set(&self.copyright))
+    }
+
     /// "1/250 s", "2 s", "0.8 s".
     pub fn shutter(&self) -> Option<String> {
         let (n, d) = self.exposure_time?;

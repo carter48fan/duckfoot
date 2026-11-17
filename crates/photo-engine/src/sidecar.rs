@@ -35,6 +35,35 @@ pub struct AssetMetadata {
     /// Words to find the photo by, in the order given, none twice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+    /// IPTC's core captions, as XMP's Dublin Core carries them: `dc:title`,
+    /// `dc:description`, `dc:creator` and `dc:rights`. The creator and copyright written
+    /// here take the place of the camera's own (EXIF Artist and Copyright) in exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copyright: Option<String>,
+}
+
+/// The longest a title, creator or copyright may be, in characters; a caption may be
+/// [`CAPTION_MAX`].
+pub const CREDIT_MAX: usize = 256;
+pub const CAPTION_MAX: usize = 2000;
+
+/// `text` as a caption field keeps it: trimmed, cut to `max` characters, control
+/// characters (which XML cannot carry) taken out but line breaks kept; empty is `None`.
+pub fn caption_field(text: &str, max: usize) -> Option<String> {
+    let kept: String = text
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .take(max)
+        .collect();
+    let kept = kept.trim().to_string();
+    (!kept.is_empty()).then_some(kept)
 }
 
 /// The longest a keyword may be, in characters.

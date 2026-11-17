@@ -168,7 +168,13 @@ impl FilterState {
                     .iter()
                     .any(|k| k.to_lowercase().contains(query))
             };
-            if !name.contains(query) && !keyword() {
+            let caption = || {
+                [&metadata.title, &metadata.caption]
+                    .into_iter()
+                    .flatten()
+                    .any(|t| t.to_lowercase().contains(query))
+            };
+            if !name.contains(query) && !keyword() && !caption() {
                 return false;
             }
         }
@@ -191,6 +197,8 @@ mod tests {
             flag: Flag::Pick,
             color_label: Some("green".into()),
             keywords: vec!["Iceland".into()],
+            title: Some("Glacier lagoon".into()),
+            ..Default::default()
         };
 
         let meta_rejected = AssetMetadata {
@@ -198,10 +206,18 @@ mod tests {
             flag: Flag::Reject,
             color_label: None,
             keywords: Vec::new(),
+            ..Default::default()
         };
 
         assert!(filter.matches(path, &meta_good, false, false));
         assert!(filter.matches(path, &meta_rejected, false, false));
+        // A title is searched as keywords are.
+        let by_title = FilterState {
+            search_query: "lagoon".into(),
+            ..Default::default()
+        };
+        assert!(by_title.matches(path, &meta_good, false, false));
+        assert!(!by_title.matches(path, &meta_rejected, false, false));
 
         // Filter: Hide rejects
         filter.flag = FlagFilter::HideRejects;

@@ -1180,6 +1180,7 @@ impl PhotoApp {
                             self.info_rows(ui, &path);
                             ui.add_space(6.0);
                             self.keywords_editor(ui);
+                            self.captions_editor(ui);
                         });
                 }
             }

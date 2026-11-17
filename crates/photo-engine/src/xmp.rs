@@ -115,6 +115,27 @@ impl Xmp {
             any |= !words.is_empty();
             m.add_keywords(&words.join(","));
         }
+        use crate::sidecar::{caption_field, CAPTION_MAX, CREDIT_MAX};
+        let field = |key: &str, max: usize| self.first(key).and_then(|s| caption_field(s, max));
+        m.title = field("dc:title", CREDIT_MAX);
+        m.caption = field("dc:description", CAPTION_MAX);
+        m.creator = self
+            .properties
+            .get("dc:creator")
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|n| n.trim())
+                    .filter(|n| !n.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .and_then(|s| caption_field(&s, CREDIT_MAX));
+        m.copyright = field("dc:rights", CREDIT_MAX);
+        any |= m.title.is_some()
+            || m.caption.is_some()
+            || m.creator.is_some()
+            || m.copyright.is_some();
         any.then_some(m)
     }
 }
@@ -201,6 +222,10 @@ impl ExportXmp<'_> {
                     && m.flag != Flag::Reject
                     && m.color_label.is_none()
                     && m.keywords.is_empty()
+                    && m.title.is_none()
+                    && m.caption.is_none()
+                    && m.creator.is_none()
+                    && m.copyright.is_none()
             })
     }
 }
@@ -241,17 +266,33 @@ fn render(what: &ExportXmp) -> String {
             body.push_str("\n    </rdf:Bag>\n   </dc:subject>");
         }
     }
-    if let Some(c) = what.creator {
+    let alt = |body: &mut String, tag: &str, text: &str| {
+        body.push_str(&format!(
+            "\n   <{tag}>\n    <rdf:Alt>\n     <rdf:li xml:lang=\"x-default\">{}</rdf:li>\n    </rdf:Alt>\n   </{tag}>",
+            esc(text)
+        ));
+    };
+    if let Some(m) = what.marks {
+        if let Some(t) = m.title.as_deref() {
+            alt(&mut body, "dc:title", t);
+        }
+        if let Some(d) = m.caption.as_deref() {
+            alt(&mut body, "dc:description", d);
+        }
+    }
+    // The export's own credit (already the catalogue's over the camera's), or else the
+    // catalogue's, as a sidecar merge has no other.
+    let marks_credit = |f: fn(&AssetMetadata) -> Option<&str>| what.marks.and_then(f);
+    let creator = what.creator.or(marks_credit(|m| m.creator.as_deref()));
+    let rights = what.rights.or(marks_credit(|m| m.copyright.as_deref()));
+    if let Some(c) = creator {
         body.push_str(&format!(
             "\n   <dc:creator>\n    <rdf:Seq>\n     <rdf:li>{}</rdf:li>\n    </rdf:Seq>\n   </dc:creator>",
             esc(c)
         ));
     }
-    if let Some(r) = what.rights {
-        body.push_str(&format!(
-            "\n   <dc:rights>\n    <rdf:Alt>\n     <rdf:li xml:lang=\"x-default\">{}</rdf:li>\n    </rdf:Alt>\n   </dc:rights>",
-            esc(r)
-        ));
+    if let Some(r) = rights {
+        alt(&mut body, "dc:rights", r);
     }
     format!(
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
@@ -291,7 +332,8 @@ pub fn merge(existing: &str, marks: &AssetMetadata) -> Result<String, XmpError> 
         &fresh,
         MergeRules {
             owned: OWNED,
-            owned_if_present: &[],
+            // Never cleared from another app's file by a field left empty here.
+            owned_if_present: &["dc:title", "dc:description", "dc:creator", "dc:rights"],
         },
     )
 }
@@ -1022,6 +1064,35 @@ mod tests {
         assert_eq!(m.keywords, ["darktable|format|ARW"]);
     }
 
+    /// Title and caption are written as XMP's alternatives and read back; a merge into
+    /// another app's sidecar sets them when Duckfoot has them and never clears its own.
+    #[test]
+    fn title_and_caption_round_trip_and_never_clear_anothers() {
+        let m = AssetMetadata {
+            title: Some("Harbour <dawn>".into()),
+            caption: Some("Boats & gulls\nat first light".into()),
+            creator: Some("A. Photographer".into()),
+            ..Default::default()
+        };
+        let p = packet(&ExportXmp {
+            marks: Some(&m),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(parse(&p).unwrap().marks().unwrap(), m);
+
+        let theirs = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+           <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Their title</rdf:li></rdf:Alt></dc:title>
+          </rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let kept = merge(theirs, &AssetMetadata::default()).unwrap();
+        assert_eq!(parse(&kept).unwrap().first("dc:title"), Some("Their title"));
+        let ours = merge(theirs, &m).unwrap();
+        let x = parse(&ours).unwrap();
+        assert_eq!(x.first("dc:title"), Some("Harbour <dawn>"));
+        assert_eq!(x.first("dc:creator"), Some("A. Photographer"));
+    }
+
     #[test]
     fn a_packet_that_says_nothing_seeds_nothing() {
         let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -1041,7 +1112,13 @@ mod tests {
         })
         .unwrap();
         let x = parse(&p).unwrap();
-        assert_eq!(x.marks().unwrap(), m);
+        // The packet's credit is the photo's creator and copyright when read back.
+        let credited = AssetMetadata {
+            creator: Some("Carter & co".into()),
+            copyright: Some("© 2026".into()),
+            ..m.clone()
+        };
+        assert_eq!(x.marks().unwrap(), credited);
         assert_eq!(x.first("dc:creator"), Some("Carter & co"));
         assert_eq!(x.first("dc:rights"), Some("© 2026"));
         let reject = AssetMetadata {

@@ -111,6 +111,99 @@ impl PhotoApp {
         }
     }
 
+    /// The open photo's title, caption, creator and copyright, each written (to it, or to
+    /// every selected photo) when its field is left. The camera's own credit shows as the
+    /// hint for the last two, since an export uses it when they are empty.
+    pub(crate) fn captions_editor(&mut self, ui: &mut egui::Ui) {
+        use photo_engine::{caption_field, CAPTION_MAX, CREDIT_MAX};
+        let Some(path) = self.loaded_path.clone() else {
+            return;
+        };
+        let metadata = self
+            .shelf
+            .get(&path)
+            .map(|it| it.metadata.clone())
+            .unwrap_or_default();
+        if self.caption_drafts.as_ref().is_none_or(|(p, _)| *p != path) {
+            let text = |s: &Option<String>| s.clone().unwrap_or_default();
+            self.caption_drafts = Some((
+                path.clone(),
+                [
+                    text(&metadata.title),
+                    text(&metadata.caption),
+                    text(&metadata.creator),
+                    text(&metadata.copyright),
+                ],
+            ));
+        }
+        let info = self.open_info();
+        let camera = [
+            None,
+            None,
+            info.and_then(|i| i.artist.clone()),
+            info.and_then(|i| i.copyright.clone()),
+        ];
+        let names = [
+            crate::i18n::tr("info-title"),
+            crate::i18n::tr("info-caption"),
+            crate::i18n::tr("info-creator"),
+            crate::i18n::tr("info-rights"),
+        ];
+        let mut left = None;
+        if let Some((_, drafts)) = &mut self.caption_drafts {
+            egui::Grid::new("captions")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    for (i, draft) in drafts.iter_mut().enumerate() {
+                        ui.label(theme::dim(names[i]).size(11.5));
+                        let hint = camera[i].clone().unwrap_or_default();
+                        let edit = if i == 1 {
+                            egui::TextEdit::multiline(draft).desired_rows(2)
+                        } else {
+                            egui::TextEdit::singleline(draft)
+                        };
+                        let field =
+                            ui.add(edit.hint_text(hint).desired_width(ui.available_width()));
+                        if field.lost_focus() {
+                            left = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+        let Some(i) = left else { return };
+        let Some((_, drafts)) = &self.caption_drafts else {
+            return;
+        };
+        let value = caption_field(&drafts[i], if i == 1 { CAPTION_MAX } else { CREDIT_MAX });
+        let now = [
+            &metadata.title,
+            &metadata.caption,
+            &metadata.creator,
+            &metadata.copyright,
+        ][i];
+        if value == *now {
+            return;
+        }
+        let paths: Vec<PathBuf> = if self.selection.count() > 1 {
+            self.selection.selected.iter().cloned().collect()
+        } else {
+            vec![path]
+        };
+        for p in &paths {
+            let value = value.clone();
+            self.update_metadata(p, move |m| {
+                *[
+                    &mut m.title,
+                    &mut m.caption,
+                    &mut m.creator,
+                    &mut m.copyright,
+                ][i] = value.clone();
+            });
+        }
+    }
+
     /// The open photo's keywords, each with a × to take it off, and a field that adds
     /// what is typed (commas for several) to it, or to every selected photo.
     pub(crate) fn keywords_editor(&mut self, ui: &mut egui::Ui) {

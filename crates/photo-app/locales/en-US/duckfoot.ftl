@@ -98,6 +98,10 @@ info-nothing-more = the file says nothing more
 info-label = label
 info-keywords = keywords
 info-keyword-hint = add…
+info-title = title
+info-caption = caption
+info-creator = creator
+info-rights = copyright
 
 ## Notices
 

@@ -110,6 +110,8 @@ impl PhotoApp {
                     self.label_picker(ui);
                 });
                 self.keywords_editor(ui);
+                ui.add_space(6.0);
+                self.captions_editor(ui);
             });
     }
 

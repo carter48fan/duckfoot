@@ -1228,9 +1228,6 @@ fn webp_with_metadata(
 /// metadata only) and its credit (all, or copyright only), or nothing.
 fn xmp_for(info: Option<&PhotoInfo>, policy: MetadataPolicy) -> Option<String> {
     let info = info?;
-    fn credit(s: &Option<String>) -> Option<&str> {
-        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
-    }
     let marks = match policy {
         MetadataPolicy::None => return None,
         MetadataPolicy::CopyrightOnly => None,
@@ -1238,8 +1235,8 @@ fn xmp_for(info: Option<&PhotoInfo>, policy: MetadataPolicy) -> Option<String> {
     };
     crate::xmp::packet(&crate::xmp::ExportXmp {
         marks,
-        creator: credit(&info.artist),
-        rights: credit(&info.copyright),
+        creator: info.credited_creator(),
+        rights: info.credited_rights(),
     })
 }
 
@@ -1697,7 +1694,13 @@ mod tests {
                 .read_from_container(&mut std::io::Cursor::new(&all))
                 .unwrap_or_else(|e| panic!("{format:?}: no EXIF beside the XMP ({e})"));
             let x = crate::xmp::find_packet(&all).unwrap_or_else(|| panic!("{format:?}: no XMP"));
-            assert_eq!(x.marks().as_ref(), Some(&marks), "{format:?}");
+            // The credit it carries (the camera's, here) reads back as the creator.
+            let expected = crate::sidecar::AssetMetadata {
+                creator: info.credited_creator().map(str::to_string),
+                copyright: info.credited_rights().map(str::to_string),
+                ..marks.clone()
+            };
+            assert_eq!(x.marks().as_ref(), Some(&expected), "{format:?}");
             assert_eq!(
                 x.properties
                     .get("dc:rights")
@@ -1708,9 +1711,14 @@ mod tests {
             );
             // Copyright only: the credit, not the marks.
             let credit = crate::xmp::find_packet(&at(MetadataPolicy::CopyrightOnly)).unwrap();
+            let only = credit.marks().unwrap_or_default();
             assert!(
-                credit.marks().is_none(),
-                "{format:?}: marks under copyright only"
+                only.rating == 0
+                    && only.color_label.is_none()
+                    && only.keywords.is_empty()
+                    && only.title.is_none()
+                    && only.caption.is_none(),
+                "{format:?}: marks under copyright only: {only:?}"
             );
             assert!(credit.properties.contains_key("dc:rights"), "{format:?}");
             assert!(

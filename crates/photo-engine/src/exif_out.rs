@@ -107,10 +107,10 @@ pub(crate) fn fields(
     let text = |s: &str| Value::Ascii(s.trim().to_string());
     let credit = |f: &mut Fields| {
         if let Some(info) = info {
-            if let Some(a) = info.artist.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(a) = info.credited_creator() {
                 f.ifd0.push((315, text(a)));
             }
-            if let Some(c) = info.copyright.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(c) = info.credited_rights() {
                 f.ifd0.push((33432, text(c)));
             }
         }
@@ -335,6 +335,23 @@ mod tests {
         assert!(get(Tag::Copyright, In::PRIMARY).is_some());
         assert!(get(Tag::GPSLatitude, In::PRIMARY).is_some());
         assert_eq!(get(Tag::GPSLongitudeRef, In::PRIMARY).as_deref(), Some("W"));
+    }
+
+    #[test]
+    fn the_creator_written_in_duckfoot_takes_the_cameras_place() {
+        let mut info = sample();
+        info.artist = Some("CAMERA OWNER".into());
+        info.catalog = Some(crate::sidecar::AssetMetadata {
+            creator: Some("A. Photographer".into()),
+            ..Default::default()
+        });
+        let f = fields(Some(&info), MetadataPolicy::CopyrightOnly, true, "x");
+        let artist = f
+            .ifd0
+            .iter()
+            .find(|(t, _)| *t == 315)
+            .map(|(_, v)| v.clone());
+        assert_eq!(artist, Some(Value::Ascii("A. Photographer".into())));
     }
 
     #[test]

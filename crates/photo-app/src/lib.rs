@@ -629,6 +629,9 @@ pub struct PhotoApp {
     pub paste_picker_open: bool,
     /// What is typed in a keywords field, not yet added.
     keyword_draft: String,
+    /// The caption fields as typed (title, caption, creator, copyright), for the photo
+    /// they were opened on; written when a field is left.
+    caption_drafts: Option<(PathBuf, [String; 4])>,
     /// Filters kept under a name, and the name being typed for a new one.
     pub saved_filters: Vec<dam::SavedFilter>,
     saved_filter_draft: Option<String>,
@@ -973,6 +976,7 @@ impl PhotoApp {
             paste_set: paste::PasteSet::default(),
             paste_picker_open: false,
             keyword_draft: String::new(),
+            caption_drafts: None,
             saved_filters: Vec::new(),
             saved_filter_draft: None,
             folder_watch: Default::default(),

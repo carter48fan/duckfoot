@@ -41,6 +41,7 @@ DESIGN.md invariant 8.
 | **Sidecar** | `save_sidecar`, `load_sidecar` | Working | Non-destructive `.duckfoot` JSON v2 sidecars, atomic write, persistent undo history |
 | **HEIF** | `heif::open`, feature `heif` | Working (opt-in) | iPhone/Mac HEIC stills through the vendored pure-Rust `lc-heif` (from LightCraft): grids, 8–10 bit, ICC or `nclx` P3, container rotation/crop, embedded thumbnails. 4:2:2/4:4:4 camera HIF and HDR (PQ/HLG) are refused |
 | **XMP** | `xmp::seed_metadata`, `xmp::packet`, `xmp::merge` | Working | Ratings, labels and keywords read from Lightroom/darktable `.xmp` sidecars and embedded XMP, written into every export, and (opt-in, Customize) kept in step with an existing `.xmp` sidecar without touching the rest of it |
+| **XMP** | title, caption, creator, copyright | Working | IPTC's core fields as Dublin Core (`dc:title`, `dc:description`, `dc:creator`, `dc:rights`): read from other apps' sidecars, written into exports, merged into an `.xmp` without ever clearing another app's value; creator and copyright replace the camera's EXIF Artist and Copyright in exports; title and caption are searched |
 | **App** | inspector, undo/redo | Working | Snapshot undo, per-photo persistent history, one checkpoint per gesture |
 | **App** | inspector map 3D | Working | Rotatable 3D Ribbons, 3D Surface, 3D Scatter, 2D Plot |
 | **App** | filmic 3D tonemap | Working | 3D transfer surface, RGB cube deformation, handles, presets |
