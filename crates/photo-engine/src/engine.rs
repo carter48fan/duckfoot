@@ -300,6 +300,72 @@ impl Fill {
     }
 }
 
+/// A Remove spot's window, read back and ready for PatchMatch: the CPU half of a fill.
+struct FillInput {
+    key: [u32; 3],
+    /// The window's side, texels at `scale`.
+    tile: u32,
+    /// Its corner, texels at `scale`.
+    corner: (u32, u32),
+    scale: f32,
+    /// RGBA, square-rooted (matched perceptually), and which texels are the hole.
+    img: Vec<f32>,
+    hole: Vec<bool>,
+}
+
+impl FillInput {
+    /// PatchMatch, falling back to a smooth membrane where it finds nothing to copy.
+    fn complete(&self) -> Vec<f32> {
+        let n = self.tile as usize;
+        lc_inpaint::complete(n, n, 4, &self.img, &self.hole, &Default::default())
+            .unwrap_or_else(|| lc_inpaint::membrane_fill(n, n, 4, &self.img, &self.hole))
+    }
+}
+
+/// A fill computed on the fill thread, for the image it was asked for.
+struct FillDone {
+    epoch: u64,
+    slot: usize,
+    input: FillInput,
+    filled: Option<Vec<f32>>,
+}
+
+/// The thread that runs Remove spots' PatchMatch for the interactive engine, so placing
+/// or moving one never stalls a frame (see [`Engine::set_async_fills`]).
+struct FillWorker {
+    tx: std::sync::mpsc::Sender<(u64, usize, FillInput)>,
+    rx: std::sync::mpsc::Receiver<FillDone>,
+}
+
+impl FillWorker {
+    fn new() -> Option<Self> {
+        let (tx, jobs) = std::sync::mpsc::channel::<(u64, usize, FillInput)>();
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("duckfoot-fill".into())
+            .spawn(move || {
+                while let Ok((epoch, slot, input)) = jobs.recv() {
+                    let filled =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| input.complete()))
+                            .ok();
+                    if done
+                        .send(FillDone {
+                            epoch,
+                            slot,
+                            input,
+                            filled,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { tx, rx })
+    }
+}
+
 /// Brush masks' coverage, one texture layer each, rasterised from their dabs (see
 /// `local::rasterise`). Kept with the bytes and the dabs each layer holds, so a stroke in
 /// progress only lays its new dabs and uploads what they touched.
@@ -555,6 +621,15 @@ pub struct Engine {
     /// While set, a Remove spot that moved is healed from its source instead of filled:
     /// see [`Engine::hold_fills`].
     fills_held: bool,
+    /// Remove spots are filled on [`FillWorker`]'s thread rather than in `render`.
+    async_fills: bool,
+    fill_worker: Option<FillWorker>,
+    /// Slots with a fill on the worker, and the spot each was asked for.
+    fill_jobs: std::collections::HashMap<usize, [u32; 3]>,
+    /// Bumped whenever the open image changes, so a fill for the last one is dropped.
+    image_epoch: u64,
+    /// The spot each fill slot is for, as of the last render.
+    fill_wanted: Vec<[u32; 3]>,
     /// Remove spots' fills, a slot each (`heal::FILL_SLOTS` of `heal::FILL_TILE` texels).
     fill_atlas: wgpu::Texture,
     fill_atlas_view: wgpu::TextureView,
@@ -1514,6 +1589,11 @@ impl Engine {
             look_path: None,
             look_loaded: false,
             fills_held: false,
+            async_fills: false,
+            fill_worker: None,
+            fill_jobs: Default::default(),
+            image_epoch: 0,
+            fill_wanted: Vec::new(),
             sensor_sampler,
             cached_curve: None,
             cached_rgb_curves: None,
@@ -1915,6 +1995,61 @@ impl Engine {
         self.fills_held = held;
     }
 
+    /// Fill Remove spots on a thread of their own, so `render` never runs PatchMatch: a
+    /// spot not filled yet is drawn healed from its source, and [`Self::poll_fills`]
+    /// brings each fill in when it is done. For the interactive engine; one that only
+    /// exports leaves this off and fills as it renders. An export always waits for every
+    /// fill either way.
+    pub fn set_async_fills(&mut self, on: bool) {
+        self.async_fills = on;
+    }
+
+    /// Fills are still being computed.
+    pub fn fills_pending(&self) -> bool {
+        !self.fill_jobs.is_empty()
+    }
+
+    /// Writes in the fills the thread has finished, for the image still open and the
+    /// spots still where they were. True if any were, so the preview wants rendering.
+    pub fn poll_fills(&mut self, queue: &wgpu::Queue) -> bool {
+        let Some(worker) = &self.fill_worker else {
+            return false;
+        };
+        let done: Vec<FillDone> = worker.rx.try_iter().collect();
+        let mut any = false;
+        for d in done {
+            if self.fill_jobs.get(&d.slot) == Some(&d.input.key) {
+                self.fill_jobs.remove(&d.slot);
+            }
+            if d.epoch != self.image_epoch {
+                continue;
+            }
+            let Some(filled) = d.filled else {
+                log::warn!("a Remove spot's fill crashed; healed instead");
+                continue;
+            };
+            let wanted = self.fill_wanted.get(d.slot) == Some(&d.input.key);
+            let Some(image) = &mut self.image else {
+                continue;
+            };
+            let have = image
+                .fills
+                .get(d.slot)
+                .and_then(|f| f.as_ref())
+                .map(|f| f.key);
+            if !wanted || have == Some(d.input.key) {
+                continue;
+            }
+            let fill = write_fill(queue, &self.fill_atlas, d.slot, &d.input, &filled);
+            if image.fills.len() <= d.slot {
+                image.fills.resize(d.slot + 1, None);
+            }
+            image.fills[d.slot] = Some(fill);
+            any = true;
+        }
+        any
+    }
+
     /// Whether the Look module's file read, so the look is being applied.
     pub fn look_loaded(&self) -> bool {
         self.look_loaded
@@ -1922,7 +2057,13 @@ impl Engine {
 
     /// Fill the Remove spots that are new or have moved, each into its atlas slot. A fill
     /// is kept as long as its spot stays put, so only placing or moving one costs a fill.
-    fn sync_fills(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
+    fn sync_fills(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stack: &PhotoStack,
+        blocking: bool,
+    ) {
         let removes: Vec<crate::heal::Spot> = if stack.heal.enabled {
             stack
                 .heal
@@ -1937,6 +2078,16 @@ impl Engine {
         } else {
             Vec::new()
         };
+        self.fill_wanted = removes.iter().map(Fill::key).collect();
+        let background = self.async_fills && !blocking;
+        // Read back from the quick picture, a fill would be thrown away when the real
+        // demosaic lands; until then a spot heals from its source.
+        if background && self.demosaic_pending() {
+            return;
+        }
+        if background && self.fill_worker.is_none() {
+            self.fill_worker = FillWorker::new();
+        }
         let Some(image) = &self.image else { return };
         let stale: Vec<usize> = (0..removes.len())
             .filter(|&slot| {
@@ -1950,8 +2101,23 @@ impl Engine {
             .collect();
         let mut made = Vec::new();
         for slot in stale {
-            if self.fills_held {
+            if self.fills_held && !blocking {
                 // No fill: the shader heals a spot without one from its source.
+                made.push((slot, None));
+                continue;
+            }
+            if let (true, Some(worker)) = (background, &self.fill_worker) {
+                let key = Fill::key(&removes[slot]);
+                if self.fill_jobs.get(&slot) != Some(&key) {
+                    match fill_input(device, queue, image, &removes[slot]) {
+                        Ok(input) => {
+                            if worker.tx.send((self.image_epoch, slot, input)).is_ok() {
+                                self.fill_jobs.insert(slot, key);
+                            }
+                        }
+                        Err(e) => log::warn!("a Remove spot could not be read ({e:#})"),
+                    }
+                }
                 made.push((slot, None));
                 continue;
             }
@@ -1981,94 +2147,9 @@ impl Engine {
         slot: usize,
     ) -> Result<Fill> {
         self.finish_demosaic(device, queue);
-        use crate::heal::{FILL_CONTEXT, FILL_TILE};
-        let (sw, sh) = (image.sensor_width, image.sensor_height);
-        let r = (spot.radius * sw.max(sh) as f32).max(1.0);
-        let side = r * FILL_CONTEXT;
-        let mut level = 0u32;
-        while level + 1 < image.mip_levels && side / (1u32 << level) as f32 > FILL_TILE as f32 {
-            level += 1;
-        }
-        let scale = (1u32 << level) as f32;
-        let (lw, lh) = ((sw >> level).max(1), (sh >> level).max(1));
-        let tile = ((side / scale).ceil() as u32)
-            .clamp(1, FILL_TILE)
-            .min(lw)
-            .min(lh);
-        let centre = [
-            spot.dst[0] * sw as f32 / scale,
-            spot.dst[1] * sh as f32 / scale,
-        ];
-        let corner = |c: f32, extent: u32| {
-            (c - tile as f32 / 2.0)
-                .round()
-                .clamp(0.0, (extent - tile) as f32) as u32
-        };
-        let (ox, oy) = (corner(centre[0], lw), corner(centre[1], lh));
-        let texels = read_back_level(
-            device,
-            queue,
-            &image.sensor,
-            level,
-            (ox, oy, tile, tile),
-            8,
-            MAX_BAND_BYTES,
-        )?;
-        // Matched in a perceptual-ish domain: in linear light, patch distances are all
-        // about the highlights.
-        let img: Vec<f32> = texels
-            .chunks_exact(2)
-            .map(|h| {
-                half::f16::from_le_bytes([h[0], h[1]])
-                    .to_f32()
-                    .max(0.0)
-                    .sqrt()
-            })
-            .collect();
-        let hole_r = r / scale * 1.02 + 0.5;
-        let n = tile as usize;
-        let hole: Vec<bool> = (0..n * n)
-            .map(|i| {
-                let dx = (i % n) as f32 + ox as f32 + 0.5 - centre[0];
-                let dy = (i / n) as f32 + oy as f32 + 0.5 - centre[1];
-                dx * dx + dy * dy <= hole_r * hole_r
-            })
-            .collect();
-        let filled = lc_inpaint::complete(n, n, 4, &img, &hole, &Default::default())
-            .unwrap_or_else(|| lc_inpaint::membrane_fill(n, n, 4, &img, &hole));
-        let bytes: Vec<u8> = filled
-            .iter()
-            .flat_map(|v| half::f16::from_f32(v * v).to_le_bytes())
-            .collect();
-        let per_row = crate::heal::FILL_ATLAS / FILL_TILE;
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.fill_atlas,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: (slot as u32 % per_row) * FILL_TILE,
-                    y: (slot as u32 / per_row) * FILL_TILE,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(tile * 8),
-                rows_per_image: Some(tile),
-            },
-            wgpu::Extent3d {
-                width: tile,
-                height: tile,
-                depth_or_array_layers: 1,
-            },
-        );
-        Ok(Fill {
-            key: Fill::key(spot),
-            origin: [ox as f32 * scale, oy as f32 * scale],
-            scale,
-        })
+        let input = fill_input(device, queue, image, spot)?;
+        let filled = input.complete();
+        Ok(write_fill(queue, &self.fill_atlas, slot, &input, &filled))
     }
 
     fn sync_denoise(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stack: &PhotoStack) {
@@ -2308,6 +2389,8 @@ impl Engine {
 
     pub fn unload(&mut self) {
         self.cancel_demosaic();
+        self.image_epoch += 1;
+        self.fill_jobs.clear();
         if let Some(image) = self.image.take() {
             // Only its memory is kept, for the next image to overwrite. The image itself
             // is gone, so nothing it showed can change (invariant 5 is per image).
@@ -2425,6 +2508,8 @@ impl Engine {
         self.hist_epoch = self.hist_epoch.wrapping_add(1);
         self.histogram = Histogram::default();
         self.traced_renders = 0;
+        self.image_epoch += 1;
+        self.fill_jobs.clear();
         self.image = Some(image);
         self.sync_overlay(device);
     }
@@ -2912,7 +2997,7 @@ impl Engine {
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
-        self.sync_fills(device, queue, stack);
+        self.sync_fills(device, queue, stack, true);
         self.sync_look(queue, stack);
         let Some(image) = &self.image else {
             bail!("no image is loaded");
@@ -2989,7 +3074,7 @@ impl Engine {
         if let Some(image) = &mut self.image {
             image.brushes.sync(queue, &brush_layers(stack));
         }
-        self.sync_fills(device, queue, stack);
+        self.sync_fills(device, queue, stack, true);
         self.sync_look(queue, stack);
         let Some(image) = &self.image else {
             bail!("no image is loaded");
@@ -3322,7 +3407,7 @@ impl Engine {
             image.brushes.sync(queue, &brush_layers(stack));
         }
         self.sync_denoise(device, queue, stack);
-        self.sync_fills(device, queue, stack);
+        self.sync_fills(device, queue, stack, false);
         self.sync_look(queue, stack);
         let Some(image) = &self.image else { return };
         let target = image.preview_size();
@@ -4034,6 +4119,126 @@ pub(crate) fn read_back(
 }
 
 /// [`read_back`] from mip level `mip`, in that level's coordinates.
+/// Reads back the window around `spot`, at the level where it fits one atlas slot, and
+/// marks the hole in it. A small spot is filled at full resolution; a large one at a
+/// coarser level, so its fill is softer than the photo around it.
+fn fill_input(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &LoadedImage,
+    spot: &crate::heal::Spot,
+) -> Result<FillInput> {
+    use crate::heal::{FILL_CONTEXT, FILL_TILE};
+    let (sw, sh) = (image.sensor_width, image.sensor_height);
+    let r = (spot.radius * sw.max(sh) as f32).max(1.0);
+    let side = r * FILL_CONTEXT;
+    let mut level = 0u32;
+    while level + 1 < image.mip_levels && side / (1u32 << level) as f32 > FILL_TILE as f32 {
+        level += 1;
+    }
+    let scale = (1u32 << level) as f32;
+    let (lw, lh) = ((sw >> level).max(1), (sh >> level).max(1));
+    let tile = ((side / scale).ceil() as u32)
+        .clamp(1, FILL_TILE)
+        .min(lw)
+        .min(lh);
+    let centre = [
+        spot.dst[0] * sw as f32 / scale,
+        spot.dst[1] * sh as f32 / scale,
+    ];
+    let corner = |c: f32, extent: u32| {
+        (c - tile as f32 / 2.0)
+            .round()
+            .clamp(0.0, (extent - tile) as f32) as u32
+    };
+    let (ox, oy) = (corner(centre[0], lw), corner(centre[1], lh));
+    let texels = read_back_level(
+        device,
+        queue,
+        &image.sensor,
+        level,
+        (ox, oy, tile, tile),
+        8,
+        MAX_BAND_BYTES,
+    )?;
+    // Matched in a perceptual-ish domain: in linear light, patch distances are all
+    // about the highlights.
+    let img: Vec<f32> = texels
+        .chunks_exact(2)
+        .map(|h| {
+            half::f16::from_le_bytes([h[0], h[1]])
+                .to_f32()
+                .max(0.0)
+                .sqrt()
+        })
+        .collect();
+    let hole_r = r / scale * 1.02 + 0.5;
+    let n = tile as usize;
+    let hole: Vec<bool> = (0..n * n)
+        .map(|i| {
+            let dx = (i % n) as f32 + ox as f32 + 0.5 - centre[0];
+            let dy = (i / n) as f32 + oy as f32 + 0.5 - centre[1];
+            dx * dx + dy * dy <= hole_r * hole_r
+        })
+        .collect();
+    Ok(FillInput {
+        key: Fill::key(spot),
+        tile,
+        corner: (ox, oy),
+        scale,
+        img,
+        hole,
+    })
+}
+
+/// Writes a completed fill into atlas slot `slot`.
+fn write_fill(
+    queue: &wgpu::Queue,
+    atlas: &wgpu::Texture,
+    slot: usize,
+    input: &FillInput,
+    filled: &[f32],
+) -> Fill {
+    use crate::heal::FILL_TILE;
+    let tile = input.tile;
+    let bytes: Vec<u8> = filled
+        .iter()
+        .flat_map(|v| half::f16::from_f32(v * v).to_le_bytes())
+        .collect();
+    let per_row = crate::heal::FILL_ATLAS / FILL_TILE;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: atlas,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: (slot as u32 % per_row) * FILL_TILE,
+                y: (slot as u32 / per_row) * FILL_TILE,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(tile * 8),
+            rows_per_image: Some(tile),
+        },
+        wgpu::Extent3d {
+            width: tile,
+            height: tile,
+            depth_or_array_layers: 1,
+        },
+    );
+    Fill {
+        key: input.key,
+        origin: [
+            input.corner.0 as f32 * input.scale,
+            input.corner.1 as f32 * input.scale,
+        ],
+        scale: input.scale,
+    }
+}
+
 pub(crate) fn read_back_level(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

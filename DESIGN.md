@@ -282,7 +282,10 @@ images from a hardcoded RGGB assumption. All of the following are mandatory:
    retrofitted.*
 
 4. **No GPU→CPU readback in the interactive path.** Export reads back. Scopes read back
-   4 KB of histogram bins. Nothing else, ever. *Because a per-frame readback is the
+   4 KB of histogram bins. Nothing else per frame, ever. The one-shot exceptions are
+   named: a click that samples the photo (white balance picker, auto tone, Upright) and
+   placing a Remove spot, which reads back its window once (at most 256² texels) and
+   fills it on a thread of its own. *Because a per-frame readback is the
    webview mistake wearing a different hat.*
 
 5. **The decoded sensor texture is immutable.** Every adjustment is a shader reading it.

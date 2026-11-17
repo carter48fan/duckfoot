@@ -898,6 +898,8 @@ impl PhotoApp {
         // A photo opens on a quick half-size picture, and RCD lands a slice a frame later:
         // no frame waits on a whole demosaic.
         engine.set_progressive(true);
+        // Remove spots fill on their own thread; a frame never waits on PatchMatch.
+        engine.set_async_fills(true);
         let mut folder_tree = dam::FolderTree::default();
         let bookmarks = platform.bookmarks();
         if !bookmarks.is_empty() {
@@ -1868,7 +1870,10 @@ impl PhotoApp {
             self.error = Some(format!("GPU error: {e}"));
         }
         self.engine.poll_histogram(gpu.device, gpu.queue);
-        if self.engine.histogram_busy() {
+        if self.engine.poll_fills(gpu.queue) {
+            self.needs_render = true;
+        }
+        if self.engine.histogram_busy() || self.engine.fills_pending() {
             // The readback's callback does not wake the event loop, and on a touch screen
             // nothing else may; come back for it.
             ctx.request_repaint_after(Duration::from_millis(16));

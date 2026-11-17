@@ -2914,3 +2914,81 @@ fn a_prepared_photo_opens_with_nothing_left_to_do() {
         "and it is the photo a plain load gives"
     );
 }
+
+/// With fills on their own thread, a render never waits on PatchMatch: a Remove spot is
+/// healed until its fill lands, and then the photo is exactly what the synchronous fill
+/// gives. An export taken meanwhile waits for every fill.
+#[test]
+fn a_fill_made_in_the_background_is_the_one_made_in_place() {
+    use photo_engine::heal::{Mode, Spot};
+    let gpu = gpu_or_skip!();
+    let (w, h) = (192u32, 128u32);
+    let scene = |x: u32, y: u32| {
+        let blot = ((x as f32 - 96.0).powi(2) + (y as f32 - 64.0).powi(2)).sqrt() < 9.0;
+        [if blot {
+            0.01
+        } else if (x / 6).is_multiple_of(2) {
+            0.15
+        } else {
+            0.45
+        }; 3]
+    };
+    let mut stack = PhotoStack::default();
+    stack.heal.enabled = true;
+    stack.heal.params.spots.push(Spot {
+        mode: Mode::Remove,
+        feather: 0.05,
+        ..Spot::new(
+            [96.5 / w as f32, 64.5 / h as f32],
+            [0.0, 0.0],
+            11.0 / w as f32,
+        )
+    });
+
+    let mut in_place = Engine::new(&gpu.device);
+    in_place
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            testkit::raster_from_fn(w, h, scene),
+        )
+        .unwrap();
+    let expected = in_place.export(&gpu.device, &gpu.queue, &stack).unwrap();
+
+    let mut background = Engine::new(&gpu.device);
+    background.set_async_fills(true);
+    background
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            testkit::raster_from_fn(w, h, scene),
+        )
+        .unwrap();
+    background.render(&gpu.device, &gpu.queue, &stack, None);
+    assert!(background.fills_pending(), "the fill went to its thread");
+    let started = std::time::Instant::now();
+    while background.fills_pending() {
+        assert!(started.elapsed().as_secs() < 60, "the fill never came");
+        background.poll_fills(&gpu.queue);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let got = background.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(got.rgba == expected.rgba, "the background fill differs");
+
+    // An export straight after placing a spot does not wait for the thread, nor skip it.
+    let mut eager = Engine::new(&gpu.device);
+    eager.set_async_fills(true);
+    eager
+        .load_raster(
+            &gpu.device,
+            &gpu.queue,
+            testkit::raster_from_fn(w, h, scene),
+        )
+        .unwrap();
+    eager.render(&gpu.device, &gpu.queue, &stack, None);
+    let now = eager.export(&gpu.device, &gpu.queue, &stack).unwrap();
+    assert!(
+        now.rgba == expected.rgba,
+        "an export missed a fill in flight"
+    );
+}
