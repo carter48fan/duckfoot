@@ -581,6 +581,16 @@ impl PhotoApp {
         if self.folder_watch.folders().is_empty() {
             return;
         }
+        // Only while the window has focus: in the background the app sleeps, and the
+        // first frame back (focus is an event) reads at once.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.watch_focused {
+            self.folder_watch.read_soon();
+        }
+        self.watch_focused = focused;
+        if !focused {
+            return;
+        }
         if let Some(scan) = self.folder_watch.poll(std::time::Instant::now()) {
             self.take_scan(gpu, scan);
         }

@@ -774,6 +774,8 @@ pub struct PhotoApp {
     /// Marks being written on the loader's file thread, by photo: how many writes each
     /// has still to come back.
     metadata_writes: HashMap<PathBuf, u32>,
+    /// The window had focus at the last look at the watched folders.
+    watch_focused: bool,
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
@@ -1050,6 +1052,7 @@ impl PhotoApp {
             )),
             single_export: None,
             metadata_writes: HashMap::new(),
+            watch_focused: false,
             batch_dialog_open: false,
             shortcuts_open: false,
             help_open: false,
