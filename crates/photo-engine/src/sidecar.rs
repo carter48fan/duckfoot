@@ -68,16 +68,25 @@ pub fn caption_field(text: &str, max: usize) -> Option<String> {
 
 /// The longest a keyword may be, in characters.
 pub const KEYWORD_MAX: usize = 64;
+/// The most keywords a photo keeps; any more in a file are ignored.
+pub const KEYWORDS_MAX: usize = 500;
 
 impl AssetMetadata {
     /// Add the keywords in `text`, split at commas and semicolons: trimmed, cut to
     /// [`KEYWORD_MAX`], and skipped when already there in any case. True if any were new.
     pub fn add_keywords(&mut self, text: &str) -> bool {
         let before = self.keywords.len();
+        // Lower-cased once into a set: comparing each new word against every kept one was
+        // quadratic, and a hostile .xmp or sidecar can carry a hundred thousand keywords.
+        let mut have: std::collections::HashSet<String> =
+            self.keywords.iter().map(|k| k.to_lowercase()).collect();
         for word in text.split([',', ';']) {
+            if self.keywords.len() >= KEYWORDS_MAX {
+                break;
+            }
             let word: String = word.trim().chars().take(KEYWORD_MAX).collect();
             let word = word.trim().to_string();
-            if !word.is_empty() && !self.has_keyword(&word) {
+            if !word.is_empty() && have.insert(word.to_lowercase()) {
                 self.keywords.push(word);
             }
         }
@@ -420,6 +429,20 @@ pub fn load_sidecar(raw_path: &Path) -> Result<Option<PhotoStack>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flood_of_keywords_is_quick_and_capped() {
+        let words: Vec<String> = (0..100_000).map(|i| format!("k{i}")).collect();
+        let started = std::time::Instant::now();
+        let mut m = AssetMetadata::default();
+        m.add_keywords(&words.join(","));
+        assert_eq!(m.keywords.len(), KEYWORDS_MAX);
+        assert!(started.elapsed().as_secs() < 2);
+        // Case-insensitive, as before.
+        let mut m = AssetMetadata::default();
+        m.add_keywords("Dog, dog, DOG, cat");
+        assert_eq!(m.keywords, ["Dog", "cat"]);
+    }
 
     /// A photo whose folder cannot be written keeps its edits in the fallback folder, is
     /// read back from there, and moves home once its folder takes writes again.

@@ -152,7 +152,9 @@ fn gain_map(p: &mut Reader) -> Option<GainMap> {
     let (spacing_v, spacing_h) = (p.f64()?, p.f64()?);
     let (origin_v, origin_h) = (p.f64()?, p.f64()?);
     let map_planes = p.u32()?.max(1);
-    if points_v == 0 || points_h == 0 || points_v * points_h > 1 << 20 {
+    // In u64: two u32 counts from the file multiply past u32 (65536 × 65536 wraps to 0,
+    // which passed this check and then indexed an empty table).
+    if points_v == 0 || points_h == 0 || u64::from(points_v) * u64::from(points_h) > 1 << 20 {
         return None;
     }
     // Stored point by point with every map plane interleaved; keep plane 0.
@@ -333,6 +335,14 @@ pub(crate) mod tests {
             b.extend_from_slice(&g.to_be_bytes());
         }
         b
+    }
+
+    /// Point counts whose product overflows u32 are refused, not wrapped to zero.
+    #[test]
+    fn a_gain_map_too_big_to_count_is_refused() {
+        let params = gain_map_params((0, 0, 1), (65536, 65536), &[]);
+        let mut p = Reader { b: &params, at: 0 };
+        assert!(gain_map(&mut p).is_none());
     }
 
     #[test]

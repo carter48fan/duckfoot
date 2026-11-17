@@ -1098,6 +1098,100 @@ impl PhotoStack {
         for nodes in [&mut rgb.red, &mut rgb.green, &mut rgb.blue] {
             clean_curve(nodes);
         }
+        // Every slider: finite (else its default) and within a wide bound no control
+        // reaches, so a hand-edited or hostile file cannot send inf or NaN to the shader.
+        // Stops (exposure and filmic's ends) are bounded tighter: 2^±32 is still finite.
+        let d = PhotoStack::default();
+        let b = |v: &mut f32, home: f32, lim: f32| *v = finite_or(*v, home).clamp(-lim, lim);
+        const WIDE: f32 = 1000.0;
+        const STOPS: f32 = 32.0;
+        b(
+            &mut s.white_balance.params.tint_r,
+            d.white_balance.params.tint_r,
+            WIDE,
+        );
+        b(
+            &mut s.white_balance.params.tint_b,
+            d.white_balance.params.tint_b,
+            WIDE,
+        );
+        let (e, de) = (&mut s.exposure.params, d.exposure.params);
+        b(&mut e.ev, de.ev, STOPS);
+        b(&mut e.max_ev, de.max_ev, STOPS);
+        b(&mut e.black, de.black, WIDE);
+        b(&mut e.rolloff, de.rolloff, WIDE);
+        let (t, dt) = (&mut s.tonal.params, d.tonal.params);
+        for (v, h) in [
+            (&mut t.highlights, dt.highlights),
+            (&mut t.shadows, dt.shadows),
+            (&mut t.whites, dt.whites),
+            (&mut t.blacks, dt.blacks),
+        ] {
+            b(v, h, WIDE);
+        }
+        let (f, df) = (&mut s.filmic.params, d.filmic.params);
+        b(&mut f.white_ev, df.white_ev, STOPS);
+        b(&mut f.black_ev, df.black_ev, STOPS);
+        b(&mut f.latitude, df.latitude, WIDE);
+        b(&mut f.contrast, df.contrast, WIDE);
+        for rgb in [
+            &mut s.color_balance.params.lift,
+            &mut s.color_balance.params.gamma,
+            &mut s.color_balance.params.gain,
+            &mut s.color_balance.params.offset,
+        ] {
+            for v in [&mut rgb.r, &mut rgb.g, &mut rgb.b] {
+                b(v, 0.0, WIDE);
+            }
+        }
+        b(&mut s.vibrance.params.vibrance, 0.0, WIDE);
+        b(&mut s.vibrance.params.saturation, 0.0, WIDE);
+        b(
+            &mut s.vignette.params.amount,
+            d.vignette.params.amount,
+            WIDE,
+        );
+        b(
+            &mut s.vignette.params.radius,
+            d.vignette.params.radius,
+            WIDE,
+        );
+        let (sh, dsh) = (&mut s.sharpen.params, d.sharpen.params);
+        for (v, h) in [
+            (&mut sh.amount, dsh.amount),
+            (&mut sh.radius, dsh.radius),
+            (&mut sh.detail, dsh.detail),
+            (&mut sh.masking, dsh.masking),
+        ] {
+            b(v, h, WIDE);
+        }
+        b(&mut s.clarity.params.clarity, 0.0, WIDE);
+        b(&mut s.clarity.params.texture, 0.0, WIDE);
+        b(&mut s.dehaze.params.amount, 0.0, WIDE);
+        for (_, band) in s.color_eq.params.bands_mut() {
+            for v in [&mut band.hue, &mut band.saturation, &mut band.luminance] {
+                b(v, 0.0, WIDE);
+            }
+        }
+        let (l, dl) = (&mut s.lens.params, d.lens.params);
+        for (v, h) in [
+            (&mut l.distortion, dl.distortion),
+            (&mut l.ca_red, dl.ca_red),
+            (&mut l.ca_blue, dl.ca_blue),
+            (&mut l.vignetting, dl.vignetting),
+        ] {
+            b(v, h, WIDE);
+        }
+        let (n, dn) = (&mut s.denoise.params, d.denoise.params);
+        for (v, h) in [
+            (&mut n.luminance, dn.luminance),
+            (&mut n.detail, dn.detail),
+            (&mut n.color, dn.color),
+            (&mut n.smoothness, dn.smoothness),
+            (&mut n.coarse, dn.coarse),
+        ] {
+            *v = finite_or(*v, h).clamp(0.0, 100.0);
+        }
         let g = &mut s.grain.params;
         g.amount = finite_or(g.amount, 0.0).clamp(0.0, 100.0);
         g.size = finite_or(g.size, 25.0).clamp(0.0, 100.0);
@@ -1137,6 +1231,30 @@ fn finite_or(v: f32, fallback: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's infinities and NaNs never reach the shader: each slider comes back finite
+    /// and bounded, and an ordinary value is left as it was.
+    #[test]
+    fn a_hostile_stack_comes_back_finite() {
+        let mut s = PhotoStack::default();
+        s.exposure.params.ev = f32::INFINITY;
+        s.filmic.params.white_ev = 1e30;
+        s.vibrance.params.saturation = f32::NAN;
+        s.color_balance.params.gain.r = -f32::INFINITY;
+        s.denoise.params.luminance = 1e9;
+        s.sharpen.params.amount = 0.7;
+        let c = s.sanitised();
+        assert_eq!(
+            c.exposure.params.ev,
+            PhotoStack::default().exposure.params.ev
+        );
+        assert!(c.filmic.params.white_ev <= 32.0);
+        assert_eq!(c.vibrance.params.saturation, 0.0);
+        assert!(c.color_balance.params.gain.r.is_finite());
+        assert_eq!(c.denoise.params.luminance, 100.0);
+        assert_eq!(c.sharpen.params.amount, 0.7);
+        assert!(2f32.powf(c.exposure.params.ev).is_finite());
+    }
 
     #[test]
     fn denoise_for_iso_grows_with_the_iso() {
