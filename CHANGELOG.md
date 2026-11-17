@@ -2,7 +2,7 @@
 
 What changes for people using Duckfoot, newest first. Versions are the release tags.
 
-## 0.4.0
+## 1.0.0
 
 ### New
 - **Find a mask:** *+ subject* finds the photo's main subject, *+ sky* guesses where the sky

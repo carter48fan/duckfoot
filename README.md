@@ -1,47 +1,45 @@
-# 🦆 Duckfoot
+<div align="center">
 
-**A fast, free photo editor that keeps your pictures on your device.**
+<img src="./brand/duckfoot-256.png" alt="Duckfoot" width="112" />
 
-Open a photo, make it look the way you remember, and save a copy to share. Duckfoot works
-with ordinary photos and with the RAW files from serious cameras, and it never needs an
-account, a subscription or an internet connection.
+# Duckfoot
 
-**[⬇️ Download the latest version](https://github.com/carter48fan/duckfoot/releases/latest)** ·
-[All releases](https://github.com/carter48fan/duckfoot/releases) ·
-[Help Guide](./docs/GUIDE.md)
+**A fast, free, GPU-accelerated photo editor that keeps your pictures on your device.**
 
-> **Duckfoot is an early release.** It is already a full photo editor, but it is young:
-> the Windows, Mac and Android versions have had far less testing than Linux, so you may
-> hit rough edges. If you do, please [tell us](https://github.com/carter48fan/duckfoot/issues).
+Open a photo, make it look the way you remember, and save a copy to share. Duckfoot works with ordinary photos and RAW files from serious cameras — with no account, no subscription, and no internet connection.
+
+[![Latest Release](https://img.shields.io/github/v/release/carter48fan/duckfoot?style=flat-square&label=release&color=e07a2f)](https://github.com/carter48fan/duckfoot/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/carter48fan/duckfoot/ci.yml?style=flat-square&label=ci)](https://github.com/carter48fan/duckfoot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](./LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-2f6f4e?style=flat-square)
+
+**[⬇️ Download Latest Release](https://github.com/carter48fan/duckfoot/releases/latest)** ·
+[All Releases](https://github.com/carter48fan/duckfoot/releases) ·
+[Help Guide](./docs/GUIDE.md) ·
+[Changelog](./CHANGELOG.md)
+
+</div>
+
+> **Note for Windows, Mac & Android:** Duckfoot is built and tested primarily on Linux; the Windows, macOS and Android builds are newer and may have rough edges. If you hit a snag, please [open an issue](https://github.com/carter48fan/duckfoot/issues).
 
 ---
 
 ## What you can do
 
-- **Open almost any photo.** RAW files from Canon, Nikon, Sony, Fujifilm, Olympus,
-  Panasonic, Pentax and many more, plus JPEG, PNG, TIFF, WebP and iPhone photos (HEIC).
-- **Fix light and colour.** Brightness, shadows and highlights, warmth, vividness, and
-  one-tap **looks** such as vivid, warm, film, mono and noir.
-- **Sharpen and clean up.** Sharpening, noise reduction for grainy low-light shots, lens
-  corrections, and **spot healing** to remove dust and distractions.
-- **Edit just one part of a picture** with brushes and gradients.
-- **Cut out a background.** Duckfoot finds the person or product and removes what's behind
-  it, ready to save with a see-through or plain white background.
-- **Crop and straighten**, then compare **before and after** side by side.
-- **Work on many photos at once.** Edit one, paste the same look onto the rest, and
-  export a whole set in one go.
-- **Undo anything.** Every photo keeps its own history, and you can save named snapshots
-  of versions you like.
+| | |
+|---|---|
+| **📷 Open almost any photo** | RAW files from Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax and more — plus JPEG, PNG, TIFF, WebP and iPhone HEIC. |
+| **🎨 Fix light and colour** | Exposure, shadows & highlights, filmic tone mapping, curves, white balance, colour EQ, black & white mixer, film grain, and one-tap **looks** (vivid, warm, film, mono, noir). |
+| **✨ Sharpen & clean up** | Sharpening, luminance & colour noise reduction, Lensfun lens corrections, and **spot healing** to remove dust and distractions. |
+| **🖌️ Local adjustments & AI cutout** | Paint masks with brushes and gradients, or use **+ subject** / **+ sky** and background cutout to isolate people and products with transparent or white backgrounds. |
+| **✂️ Crop, straighten & compare** | Crop, rotate, straighten, and compare **before and after** side by side — or compare multiple shots in **Survey (N)**. |
+| **⚡ Batch & non-destructive** | Copy edits across a whole set, export in bulk with optional watermarks, and undo anything with per-photo history & snapshots. |
 
-**Your original photo is never changed.** Duckfoot saves your edits in a small file next
-to the photo, so you can always get back to exactly how it came out of the camera.
+**Your original photo is never changed.** Duckfoot saves your edits in a small sidecar file next to the photo, so you can always get back to exactly how it came out of the camera.
 
-**Private by design.** No logins, no cloud, no tracking. Your photos never leave your device.
-See [PRIVACY.md](./PRIVACY.md); security reports: [SECURITY.md](./SECURITY.md). What changed:
-[CHANGELOG.md](./CHANGELOG.md).
+**Private by design.** No logins, no cloud, no tracking. Your photos never leave your device. See [PRIVACY.md](./PRIVACY.md) and [SECURITY.md](./SECURITY.md).
 
-Duckfoot is not affiliated with Adobe or any camera maker; product names are used only to
-say which files it opens and what it works like.
+Duckfoot is not affiliated with Adobe or any camera maker; product names are used only to say which files it opens and what it works like.
 
 ---
 
@@ -57,7 +55,7 @@ and scroll down to **Assets**. Pick the file for your device:
 | **Android** phone or tablet (Android 11 or newer) | `android-arm64.apk` |
 | **Linux** | `linux-x86_64.AppImage` (see [Linux](#linux-advanced)) |
 
-The file names include the version number, for example `duckfoot-v0.4.0-windows-x86_64.zip`,
+The file names include the version number, for example `duckfoot-v1.0.0-windows-x86_64.zip`,
 so look for the ending, not the whole name.
 
 > **A note on warnings.** Duckfoot is a free project and its Windows and Mac downloads are
