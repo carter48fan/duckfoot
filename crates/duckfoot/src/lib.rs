@@ -647,7 +647,13 @@ impl ApplicationHandler<UserEvent> for Shell {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 #[cfg(not(target_os = "android"))]
                 save_geometry(&mut self.geometry, &window.window);
-                app.shutdown();
+                if !app.shutdown() && !quit_unsaved(app.error()) {
+                    // Stay open: the edits are still here, and the error says why they
+                    // could not be written.
+                    window.window.request_redraw();
+                    return;
+                }
+                app.end_session();
                 event_loop.exit();
             }
             // Switching away is when work is most often abandoned mid-thought.
@@ -690,4 +696,31 @@ fn save_geometry(saved: &mut Option<geometry::Geometry>, window: &Window) {
         }
         *saved = Some(now);
     }
+}
+
+/// The open photo's edits could not be saved: asks whether to quit anyway. True to quit.
+/// DESIGN.md has no "are you sure" for what undo can take back; edits about to be lost
+/// for good are not that.
+#[cfg(not(target_os = "android"))]
+fn quit_unsaved(why: Option<&str>) -> bool {
+    let text = format!(
+        "The open photo's edits could not be saved{}.\n\nQuit anyway and lose them, or stay \
+         and export the photo, or free some space and try again?",
+        why.map(|w| format!(":\n\n{w}")).unwrap_or_default()
+    );
+    rfd::MessageDialog::new()
+        .set_title("Edits not saved")
+        .set_description(&text)
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(
+            "Quit anyway".into(),
+            "Stay".into(),
+        ))
+        .show()
+        == rfd::MessageDialogResult::Custom("Quit anyway".into())
+}
+
+#[cfg(target_os = "android")]
+fn quit_unsaved(_why: Option<&str>) -> bool {
+    true
 }

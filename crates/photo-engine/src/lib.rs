@@ -71,10 +71,10 @@ pub use preview::{
     decode_jpeg_scaled, file_orientation, find_embedded_jpeg, load_embedded_preview, Preview,
 };
 pub use sidecar::{
-    caption_field, find_sidecar, load_sidecar, load_sidecar_full, recent_history, save_sidecar,
-    save_sidecar_full, save_sidecar_with_history, sidecar_path, update_sidecar, write_sidecar,
-    AssetMetadata, Flag, SidecarData, Snapshot, CAPTION_MAX, CREDIT_MAX, SIDECAR_EXT,
-    SIDECAR_VERSION,
+    caption_field, fallback_sidecar_path, find_sidecar, load_sidecar, load_sidecar_full,
+    recent_history, save_sidecar, save_sidecar_full, save_sidecar_with_history, set_fallback_dir,
+    sidecar_path, update_sidecar, write_sidecar, AssetMetadata, Flag, SidecarData, Snapshot,
+    CAPTION_MAX, CREDIT_MAX, SIDECAR_EXT, SIDECAR_VERSION,
 };
 pub use temperature::WhiteScale;
 

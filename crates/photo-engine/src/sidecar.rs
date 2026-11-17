@@ -170,6 +170,42 @@ pub fn sidecar_stem_path(raw_path: &Path) -> PathBuf {
     raw_path.with_extension(SIDECAR_EXT)
 }
 
+/// Where a photo's sidecar goes when its own folder cannot be written (a locked card, a
+/// read-only share, a system folder): the app's data folder, under a name made from the
+/// photo's path. Set once at start (`set_fallback_dir`); without it there is no fallback.
+static FALLBACK_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Gives sidecars a place in `dir` for photos whose folders cannot be written. Once per
+/// process; later calls are ignored.
+pub fn set_fallback_dir(dir: PathBuf) {
+    let _ = FALLBACK_DIR.set(dir);
+}
+
+/// The fallback sidecar for `raw_path`, if there is a fallback folder. The name is the
+/// FNV-1a hash of the path's bytes: stable across runs and builds, unlike `std`'s hasher.
+pub fn fallback_sidecar_path(raw_path: &Path) -> Option<PathBuf> {
+    let dir = FALLBACK_DIR.get()?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in raw_path.as_os_str().as_encoded_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    Some(dir.join(format!("{h:016x}.{SIDECAR_EXT}")))
+}
+
+/// Whether `e` is the folder refusing the write (rather than, say, a full disk, which the
+/// app's own folder would most likely refuse as well).
+fn not_writable_here(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        })
+    })
+}
+
 /// Locates an existing sidecar file beside the photo, checking the primary
 /// (`<raw_path>.duckfoot`) first, then the legacy `<stem>.duckfoot`.
 ///
@@ -180,11 +216,13 @@ pub fn find_sidecar(raw_path: &Path) -> Option<PathBuf> {
     if primary.is_file() {
         return Some(primary);
     }
-    if crate::is_raster_path(raw_path) {
-        return None;
+    if !crate::is_raster_path(raw_path) {
+        let stem = sidecar_stem_path(raw_path);
+        if stem.is_file() {
+            return Some(stem);
+        }
     }
-    let stem = sidecar_stem_path(raw_path);
-    stem.is_file().then_some(stem)
+    fallback_sidecar_path(raw_path).filter(|p| p.is_file())
 }
 
 /// Reads the sidecar beside `raw_path`: `Ok(None)` if there is none, `Err` if there is
@@ -263,9 +301,36 @@ pub fn write_sidecar(raw_path: &Path, data: &SidecarData) -> Result<PathBuf> {
     };
     let json =
         serde_json::to_string_pretty(&data).context("failed to serialize sidecar data to JSON")?;
-    crate::fsio::atomic_write_bytes(&target, json.as_bytes())
-        .with_context(|| format!("failed to write sidecar {}", target.display()))?;
-    Ok(target)
+    let fallback = fallback_sidecar_path(raw_path);
+    match crate::fsio::atomic_write_bytes(&target, json.as_bytes()) {
+        Ok(()) => {
+            // Its folder takes writes again: the fallback copy, now older, goes.
+            if let Some(f) = fallback.filter(|f| f.is_file()) {
+                let _ = fs::remove_file(f);
+            }
+            Ok(target)
+        }
+        Err(e) if not_writable_here(&e) && fallback.is_some() => {
+            let f = fallback.expect("checked");
+            if let Some(dir) = f.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            crate::fsio::atomic_write_bytes(&f, json.as_bytes()).with_context(|| {
+                format!(
+                    "{} cannot be written, nor its fallback {}",
+                    target.display(),
+                    f.display()
+                )
+            })?;
+            log::info!(
+                "{} is not writable; its edits are kept in {}",
+                target.display(),
+                f.display()
+            );
+            Ok(f)
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to write sidecar {}", target.display())),
+    }
 }
 
 /// Read, change and write back the sidecar, keeping whatever `change` does not touch —
@@ -355,6 +420,40 @@ pub fn load_sidecar(raw_path: &Path) -> Result<Option<PhotoStack>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A photo whose folder cannot be written keeps its edits in the fallback folder, is
+    /// read back from there, and moves home once its folder takes writes again.
+    #[cfg(unix)]
+    #[test]
+    fn edits_go_to_the_fallback_when_the_folder_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("duckfoot-fallback-{}", std::process::id()));
+        let (locked, store) = (root.join("card"), root.join("store"));
+        fs::create_dir_all(&locked).unwrap();
+        let raw = locked.join("a.png");
+        fs::write(&raw, b"x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(locked.join("probe"), b"").is_ok() {
+            // Running as root: nothing is read-only here.
+            let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        set_fallback_dir(store.clone());
+        let mut stack = PhotoStack::default();
+        stack.exposure.params.ev = 0.7;
+        let written = save_sidecar(&raw, &stack).expect("saved somewhere");
+        assert!(written.starts_with(&store), "{}", written.display());
+        assert_eq!(load_sidecar(&raw).unwrap().unwrap().exposure.params.ev, 0.7);
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        stack.exposure.params.ev = 1.1;
+        let home = save_sidecar(&raw, &stack).unwrap();
+        assert_eq!(home, sidecar_path(&raw));
+        assert!(!written.exists(), "the fallback copy is gone once home");
+        assert_eq!(load_sidecar(&raw).unwrap().unwrap().exposure.params.ev, 1.1);
+        let _ = fs::remove_dir_all(&root);
+    }
     use crate::curve::CurveNode;
     use crate::params::{Crop, Geometry, Module, WhiteBalance};
 

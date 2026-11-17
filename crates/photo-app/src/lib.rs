@@ -937,6 +937,10 @@ impl PhotoApp {
         let loader =
             loader::Loader::new(gpu.device.clone(), gpu.queue.clone(), engine.upload_pool());
         let settings_dir = platform.settings_dir();
+        // Edits to a photo whose own folder cannot be written are kept here instead.
+        if let Some(dir) = &settings_dir {
+            photo_engine::set_fallback_dir(dir.join("sidecars"));
+        }
         let settings = settings::Settings::load(settings_dir.as_deref());
         // A skipped tour asked to be shown again: once, now.
         let tour_step = settings.tour_again.then_some(0);

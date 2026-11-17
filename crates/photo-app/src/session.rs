@@ -95,9 +95,20 @@ impl PhotoApp {
     }
 
     /// Flush, and mark the session as closed cleanly. The shell calls this on the way out.
-    pub fn shutdown(&mut self) {
+    /// Saves what is open and closes the session. False when the open photo's edits could
+    /// not be written anywhere (the error says why): the shell then asks before quitting,
+    /// and the session is left open (it is marked unclean) unless the user goes anyway.
+    pub fn shutdown(&mut self) -> bool {
         self.await_metadata_writes(None);
-        self.flush();
+        if !self.flush() {
+            return false;
+        }
+        self.end_session();
+        true
+    }
+
+    /// Marks the session closed, saved or not (the user chose to quit anyway).
+    pub fn end_session(&mut self) {
         if let Some(lock) = session_lock_path(self.settings_dir.as_deref()) {
             let _ = std::fs::remove_file(lock);
         }
