@@ -1144,6 +1144,9 @@ fn rating_an_unopened_photo_writes_no_stack() {
     h.settle(&mut app, Duration::from_secs(30));
 
     app.set_rating_for_path(&b, 4);
+    // Shown at once; written off the UI thread.
+    assert_eq!(app.shelf.get(&b).unwrap().metadata.rating, 4);
+    h.settle(&mut app, Duration::from_secs(30));
     let data = photo_engine::load_sidecar_full(&b).unwrap().unwrap();
     assert_eq!(data.metadata.rating, 4);
     assert_eq!(
@@ -2712,9 +2715,13 @@ fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
     assert!(app.shelf.iter().find(|it| it.path == b).unwrap().pending);
     app.selection.select_single(b.clone());
     app.set_rating_for_selection(5);
+    h_.settle(&mut app, Duration::from_secs(30));
     let data = photo_engine::load_sidecar_full(&b).unwrap().unwrap();
     assert_eq!(data.metadata.rating, 5);
     assert_eq!(data.metadata.color_label.as_deref(), Some("green"));
+    let item = app.shelf.get(&b).unwrap();
+    assert_eq!(item.metadata.rating, 5, "the late read of its facts did not undo it");
+    assert_eq!(item.metadata.color_label.as_deref(), Some("green"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3857,5 +3864,40 @@ fn an_export_can_be_cancelled_and_writes_nothing() {
     say(Response::ExportImage(out.join("a.jpg")));
     settle_export(&h, &mut app);
     assert!(out.join("a.jpg").exists(), "the next export was written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Marking many photos writes their sidecars off the UI thread, in order; opening one
+/// still being written waits for it, so the editor never reads, then writes back, the
+/// marks from before.
+#[test]
+fn marks_written_in_the_background_are_there_when_a_photo_opens() {
+    let dir = scratch_dir("background-marks");
+    let paths: Vec<PathBuf> = (0..40).map(|i| dir.join(format!("p{i}.png"))).collect();
+    for p in &paths {
+        image::RgbImage::new(16, 12).save(p).unwrap();
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), paths.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+
+    for p in &paths {
+        app.selection.selected.insert(p.clone());
+    }
+    app.set_rating_for_selection(3);
+    app.set_rating_for_selection(5);
+    // Opened before anything settled.
+    let last = paths.last().unwrap().clone();
+    app.open_path(&h.gpu(), last.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    assert_eq!(app.shelf.get(&last).unwrap().metadata.rating, 5);
+    app.flush();
+    for p in &paths {
+        let data = photo_engine::load_sidecar_full(p).unwrap().unwrap();
+        assert_eq!(data.metadata.rating, 5, "{}", p.display());
+    }
+    assert_eq!(app.error(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }

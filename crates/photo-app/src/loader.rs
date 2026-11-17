@@ -80,6 +80,15 @@ pub enum Done {
         /// Stopped by a cancel: `found` is empty and nothing is to be shelved.
         cancelled: bool,
     },
+    /// A [`FileJob::Metadata`] done: the marks now on disk, or why they are not.
+    Metadata {
+        path: PathBuf,
+        result: Result<photo_engine::AssetMetadata, String>,
+        /// The .xmp sidecar could not be kept in step.
+        xmp_error: Option<String>,
+    },
+    /// A [`FileJob::Fence`] passed.
+    Fenced,
     /// The library's photos once `deleted` are gone, and what could not be deleted.
     Library {
         entries: Vec<crate::dam::storage::LibraryEntry>,
@@ -139,7 +148,20 @@ pub enum FileJob {
         dir: PathBuf,
         delete: Vec<PathBuf>,
     },
+    /// Change a shelved photo's marks on disk: its sidecar read, `change` applied, written
+    /// back (and its .xmp too, if `xmp`). Read and written here, in the order asked, so a
+    /// rating of a thousand photos never stalls a frame.
+    Metadata {
+        path: PathBuf,
+        change: MetadataChange,
+        xmp: bool,
+    },
+    /// Answers once every job sent before it is done.
+    Fence(mpsc::Sender<()>),
 }
+
+/// A change to a photo's marks, applied once in memory and once to what is on disk.
+pub type MetadataChange = Arc<dyn Fn(&mut photo_engine::AssetMetadata) + Send + Sync>;
 
 pub struct Loader {
     open_tx: Sender<OpenJob>,
@@ -228,15 +250,24 @@ fn caught<T>(job: impl FnOnce() -> T) -> Result<T, String> {
 impl FileJob {
     /// The answer to give if this job panics, built before it runs (the job is moved
     /// into the run). Each one releases whatever the UI is counting for it.
-    fn answer_if_panicked(&self) -> impl FnOnce(String) -> Done {
+    fn answer_if_panicked(&self) -> Box<dyn FnOnce(String) -> Done> {
         let job = match self {
             FileJob::Shelf(path) => Ok(path.clone()),
             FileJob::Scan {
                 folder, purpose, ..
             } => Err(Ok((folder.clone(), *purpose))),
             FileJob::Library { dir, .. } => Err(Err(dir.clone())),
+            FileJob::Metadata { path, .. } => {
+                let path = path.clone();
+                return Box::new(move |reason| Done::Metadata {
+                    path,
+                    result: Err(reason),
+                    xmp_error: None,
+                });
+            }
+            FileJob::Fence(_) => return Box::new(|_| Done::Fenced),
         };
-        move |reason| match job {
+        Box::new(move |reason| match job {
             // The facts of a photo nothing could be read about: shown, unmarked.
             Ok(path) => Done::Shelf(crate::ShelfFacts::unread(path)),
             Err(Ok((folder, purpose))) => Done::Scanned {
@@ -251,12 +282,36 @@ impl FileJob {
                 deleted: 0,
                 failed: vec![format!("Reading the library {reason}")],
             },
-        }
+        })
     }
 }
 
 fn run_file_job(job: FileJob, scan: &ScanProgress) -> Done {
     match job {
+        FileJob::Fence(tx) => {
+            let _ = tx.send(());
+            Done::Fenced
+        }
+        FileJob::Metadata { path, change, xmp } => {
+            // What is on disk now (or, with no sidecar yet, the marks another app left),
+            // so nothing written since the shelf was read is lost.
+            let mut metadata = crate::ShelfFacts::read(&path).metadata;
+            change(&mut metadata);
+            let result = photo_engine::update_sidecar(&path, |data| {
+                data.metadata = metadata.clone();
+            })
+            .map(|_| metadata.clone())
+            .map_err(|e| format!("Could not save to {}: {e:#}", path.display()));
+            let xmp_error = (xmp && result.is_ok())
+                .then(|| photo_engine::xmp::update_sidecar(&path, &metadata).err())
+                .flatten()
+                .map(|e| format!("Could not update the .xmp sidecar: {e:#}"));
+            Done::Metadata {
+                path,
+                result,
+                xmp_error,
+            }
+        }
         FileJob::Shelf(path) => Done::Shelf(crate::ShelfFacts::read(&path)),
         FileJob::Scan {
             folder,
@@ -529,6 +584,16 @@ impl Loader {
 
     pub fn file_job(&self, job: FileJob) {
         let _ = self.file_tx.send(job);
+    }
+
+    /// Waits, up to `timeout`, until every file job sent so far is done. True if it got
+    /// there. Their answers still arrive in `done` as usual.
+    pub fn fence(&self, timeout: std::time::Duration) -> bool {
+        let (tx, rx) = mpsc::channel();
+        if self.file_tx.send(FileJob::Fence(tx)).is_err() {
+            return false;
+        }
+        rx.recv_timeout(timeout).is_ok()
     }
 
     /// What a cancellable folder read asked now is stamped with.

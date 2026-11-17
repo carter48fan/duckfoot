@@ -69,7 +69,8 @@ impl PhotoApp {
             });
         let label = if all_have { None } else { label };
         for p in paths {
-            self.update_metadata(p, |m| m.color_label = label.map(str::to_string));
+            let label = label.map(str::to_string);
+            self.update_metadata(p, move |m| m.color_label = label.clone());
         }
         let n = paths.len();
         self.set_status(match label {
@@ -147,7 +148,8 @@ impl PhotoApp {
                     vec![path.clone()]
                 };
                 for p in &paths {
-                    self.update_metadata(p, |m| {
+                    let text = text.clone();
+                    self.update_metadata(p, move |m| {
                         m.add_keywords(&text);
                     });
                 }
@@ -155,7 +157,7 @@ impl PhotoApp {
             }
         });
         if let Some(word) = remove {
-            self.update_metadata(&path, |m| m.remove_keyword(&word));
+            self.update_metadata(&path, move |m| m.remove_keyword(&word));
         }
     }
 }

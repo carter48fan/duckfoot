@@ -96,6 +96,7 @@ impl PhotoApp {
 
     /// Flush, and mark the session as closed cleanly. The shell calls this on the way out.
     pub fn shutdown(&mut self) {
+        self.await_metadata_writes(None);
         self.flush();
         if let Some(lock) = session_lock_path(self.settings_dir.as_deref()) {
             let _ = std::fs::remove_file(lock);
@@ -105,14 +106,33 @@ impl PhotoApp {
     /// Write a rating or flag without touching the stack on disk. A photo that was never
     /// opened keeps a sidecar with no stack, so its camera orientation still decides how
     /// it opens.
+    ///
+    /// The open photo's sidecar is written here, since its autosave writes the same file
+    /// from this thread. Any other's is changed at once in memory and written on the
+    /// loader's file thread, in the order asked: marking a thousand photos never stalls
+    /// a frame, and one file never has two writers (opening a photo, or quitting, waits
+    /// for what is still being written; see [`Self::await_metadata_writes`]).
     pub(crate) fn update_metadata(
         &mut self,
         p: &Path,
-        change: impl Fn(&mut photo_engine::AssetMetadata),
+        change: impl Fn(&mut photo_engine::AssetMetadata) + Send + Sync + 'static,
     ) {
+        let open = self.loaded_path.as_deref() == Some(p);
+        let xmp = self.settings.xmp_sidecars && photo_engine::copies::parse(p).is_none();
         let Some(item) = self.shelf.get_mut(p) else {
             return;
         };
+        if !open {
+            change(&mut item.metadata);
+            *self.metadata_writes.entry(p.to_path_buf()).or_default() += 1;
+            self.loader.file_job(loader::FileJob::Metadata {
+                path: p.to_path_buf(),
+                change: std::sync::Arc::new(change),
+                xmp,
+            });
+            self.bump_shelf_epoch();
+            return;
+        }
         // Marked before its sidecar was read: read it now, so the marks it already has
         // are not written over with nothing.
         if item.pending {
@@ -128,7 +148,7 @@ impl PhotoApp {
             }
         }
         // A virtual copy's marks are its own; the file's .xmp follows the original.
-        if self.settings.xmp_sidecars && photo_engine::copies::parse(p).is_none() {
+        if xmp {
             if let Err(e) = photo_engine::xmp::update_sidecar(p, &metadata) {
                 self.error = Some(format!("Could not update the .xmp sidecar: {e:#}"));
             }
@@ -136,12 +156,58 @@ impl PhotoApp {
         self.bump_shelf_epoch();
     }
 
+    /// Waits (a few seconds at most) for marks still being written to `path`'s sidecar,
+    /// or to any photo's if `None`: before a photo is opened, whose sidecar this thread
+    /// then reads and writes, and before quitting.
+    pub(crate) fn await_metadata_writes(&mut self, path: Option<&Path>) {
+        let waiting = match path {
+            Some(p) => self.metadata_writes.contains_key(p),
+            None => !self.metadata_writes.is_empty(),
+        };
+        if waiting && !self.loader.fence(std::time::Duration::from_secs(5)) {
+            log::warn!("marks were still being written after 5 s");
+        }
+    }
+
+    /// A mark written off the UI thread: what is on disk now is what the shelf shows.
+    fn metadata_written(
+        &mut self,
+        path: PathBuf,
+        result: Result<photo_engine::AssetMetadata, String>,
+        xmp_error: Option<String>,
+    ) {
+        if let Some(n) = self.metadata_writes.get_mut(&path) {
+            *n -= 1;
+            if *n == 0 {
+                self.metadata_writes.remove(&path);
+            }
+        }
+        let last = !self.metadata_writes.contains_key(&path);
+        match result {
+            Ok(metadata) => {
+                if let Some(item) = self.shelf.get_mut(&path) {
+                    item.has_sidecar = true;
+                    // A later change already shows in memory; only the last write's
+                    // answer is the whole truth.
+                    if last {
+                        item.metadata = metadata;
+                    }
+                    self.bump_shelf_epoch();
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+        if let Some(e) = xmp_error {
+            self.error = Some(e);
+        }
+    }
+
     pub fn set_rating_for_path(&mut self, p: &Path, rating: u8) {
-        self.update_metadata(p, |m| m.rating = rating.min(5));
+        self.update_metadata(p, move |m| m.rating = rating.min(5));
     }
 
     pub fn set_flag_for_path(&mut self, p: &Path, flag: photo_engine::Flag) {
-        self.update_metadata(p, |m| m.flag = flag);
+        self.update_metadata(p, move |m| m.flag = flag);
     }
 
     pub fn set_rating_for_selection(&mut self, rating: u8) {
@@ -771,6 +837,7 @@ impl PhotoApp {
 
     /// Point every control at `path`: its sidecar's stack, or defaults.
     pub(crate) fn begin_editing(&mut self, path: &Path) {
+        self.await_metadata_writes(Some(path));
         self.error = None;
         // A mask belongs to the photo it was drawn on.
         self.selected_mask = None;
@@ -1045,6 +1112,12 @@ impl PhotoApp {
                     deleted,
                     failed,
                 } => self.take_library(entries, deleted, failed),
+                loader::Done::Metadata {
+                    path,
+                    result,
+                    xmp_error,
+                } => self.metadata_written(path, result, xmp_error),
+                loader::Done::Fenced => {}
                 loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_pending.remove(&path);
                     if let Some(item) = self.shelf.get_mut(&path) {

@@ -771,6 +771,9 @@ pub struct PhotoApp {
     /// The single export's own queue: a one-photo batch, so it neither waits behind a
     /// running batch nor blocks the editor. Made on the first export.
     single_export: Option<batch::ExportQueue>,
+    /// Marks being written on the loader's file thread, by photo: how many writes each
+    /// has still to come back.
+    metadata_writes: HashMap<PathBuf, u32>,
     pub batch_dialog_open: bool,
     /// The `?` sheet of every shortcut.
     pub shortcuts_open: bool,
@@ -1044,6 +1047,7 @@ impl PhotoApp {
                 gpu.queue.clone(),
             )),
             single_export: None,
+            metadata_writes: HashMap::new(),
             batch_dialog_open: false,
             shortcuts_open: false,
             help_open: false,
@@ -1534,6 +1538,7 @@ impl PhotoApp {
             || !self.thumbs_pending.is_empty()
             || !self.shelf_pending.is_empty()
             || self.scans_pending > 0
+            || !self.metadata_writes.is_empty()
     }
 
     fn sidecar_state(&self) -> SidecarState {
