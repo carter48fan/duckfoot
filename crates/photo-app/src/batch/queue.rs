@@ -258,7 +258,11 @@ fn encoders() -> usize {
 /// A photo as decoded, for the GPU stage to upload.
 enum Source {
     Raster(photo_engine::RasterImage),
-    Raw(Box<photo_engine::CfaImage>),
+    /// With the lens profile the editor would have found for it.
+    Raw(
+        Box<photo_engine::CfaImage>,
+        Option<(String, photo_engine::lens::FileWarp)>,
+    ),
 }
 
 /// One batch, in three stages that overlap: a thread decodes the next photo while the
@@ -397,7 +401,9 @@ fn decode(job: &ExportJob) -> anyhow::Result<Source> {
     if is_raster_path(&file) {
         Ok(Source::Raster(decode_raster(&fs::read(&file)?)?))
     } else {
-        Ok(Source::Raw(Box::new(decode_raw(&file)?)))
+        let cfa = decode_raw(&file)?;
+        let profile = photo_engine::lensfun::for_file(&file, &cfa);
+        Ok(Source::Raw(Box::new(cfa), profile))
     }
 }
 
@@ -415,7 +421,12 @@ fn render(
 ) -> anyhow::Result<Rendered> {
     match source {
         Source::Raster(raster) => engine.load_raster(device, queue, raster)?,
-        Source::Raw(cfa) => engine.load(device, queue, *cfa)?,
+        Source::Raw(cfa, profile) => {
+            let mut uploaded =
+                photo_engine::upload_cfa(device, queue, &engine.upload_pool(), *cfa)?;
+            uploaded.lens_profile = profile;
+            engine.load_uploaded(device, queue, uploaded)?
+        }
     }
     let settings = &job.recipe.settings;
     let exported = engine.export_in(
@@ -467,6 +478,51 @@ mod tests {
             },
             cancelling: true,
         }
+    }
+
+    /// A RAW's lens correction reaches the batch's engine, as it does the editor's: an
+    /// export that skipped it would not be what the user looked at (Invariant 2).
+    #[test]
+    fn a_batch_export_corrects_the_lens_as_the_editor_does() {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::NOOP;
+        desc.backend_options.noop.enable = true;
+        let instance = wgpu::Instance::new(desc);
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("the no-op adapter");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("a no-op device");
+
+        let db = photo_engine::lensfun::database();
+        let camera = db.camera("SONY", "ILCE-7M4");
+        let lens = db
+            .lens("FE 24-70mm F2.8 GM", camera)
+            .expect("in the database");
+        let cfa = photo_engine::testkit::flat(64, 48, 0.4);
+        let profile = lens.profile(24.0, Some(2.8));
+        let name = profile.name.clone();
+        let warp = profile
+            .warp((cfa.width, cfa.height), lens.crop)
+            .expect("a warp");
+
+        let mut recipe = ExportRecipe::default_recipes().remove(0);
+        recipe.settings = photo_engine::ExportSettings::new(photo_engine::ExportFormat::Png);
+        let job = ExportJob {
+            source_path: PathBuf::from("/nowhere/a.ARW"),
+            stack: PhotoStack::default(),
+            crop: Crop::default(),
+            output_path: PathBuf::from("/nowhere/a.png"),
+            recipe,
+        };
+        let mut engine = Engine::new(&device);
+        let source = Source::Raw(Box::new(cfa), Some((name.clone(), warp)));
+        render(&device, &queue, &mut engine, source, &job).expect("rendered");
+        assert_eq!(
+            engine.image().and_then(|i| i.lens_profile_name()),
+            Some(name.as_str())
+        );
     }
 
     #[test]

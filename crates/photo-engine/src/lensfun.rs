@@ -451,6 +451,17 @@ impl Profile {
     }
 }
 
+/// The profile for the decoded RAW `cfa` of `file`, unless the file corrects its own
+/// lens (a DNG's warp opcodes). Every path that opens a RAW for rendering (the editor's
+/// loader and the batch exporter) asks here, so an export corrects the lens exactly as
+/// the preview did (Invariant 2).
+pub fn for_file(file: &std::path::Path, cfa: &crate::CfaImage) -> Option<(String, FileWarp)> {
+    if cfa.warp.is_some() {
+        return None;
+    }
+    crate::read_info(file).and_then(|info| for_photo(&info, (cfa.width, cfa.height)))
+}
+
 /// The profile for a photo, from what its EXIF says: the camera for the sensor size, the
 /// lens by name, the focal length and aperture it was shot at. `sensor` is the decoded
 /// mosaic's size. The name is the lens as the database knows it.

@@ -431,18 +431,8 @@ impl Loader {
                                                 // A lens profile, unless the file corrects
                                                 // its own lens: looked up here, off the UI
                                                 // thread, from the EXIF it was shot with.
-                                                let profile = if cfa.warp.is_none() {
-                                                    photo_engine::read_info(&file).and_then(
-                                                        |info| {
-                                                            photo_engine::lensfun::for_photo(
-                                                                &info,
-                                                                (cfa.width, cfa.height),
-                                                            )
-                                                        },
-                                                    )
-                                                } else {
-                                                    None
-                                                };
+                                                let profile =
+                                                    photo_engine::lensfun::for_file(&file, &cfa);
                                                 upload_cfa(&device, &queue, &pool, *cfa).map(
                                                     |mut up| {
                                                         up.lens_profile = profile;
