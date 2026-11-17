@@ -378,7 +378,9 @@ mod tests {
     fn shortcuts_doc_is_the_keymap() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SHORTCUTS.md");
         // A checkout with CRLF line endings (git's autocrlf on Windows) is the same doc.
-        let doc = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\r\n", "\n");
         let start = doc
             .find(START)
             .expect("docs/SHORTCUTS.md has no keymap:start marker")
