@@ -279,11 +279,9 @@ impl PhotoApp {
                 // Recipes (Multi-Export Targets)
                 ui.label(theme::head("Process Recipes (Multi-Export)"));
                 ui.label(
-                    RichText::new(
-                        "Select multiple export formats to generate concurrently from a single decode pass:",
-                    )
-                    .size(11.0)
-                    .color(theme::TEXT_FAINT),
+                    RichText::new("Every recipe ticked is written for every photo:")
+                        .size(11.0)
+                        .color(theme::TEXT_FAINT),
                 );
 
                 let mut duplicate = None;
@@ -350,8 +348,7 @@ impl PhotoApp {
                                     {
                                         duplicate = Some(i);
                                     }
-                                    if widgets::button(ui, Kind::Secondary, "Delete", 0.0)
-                                        .clicked()
+                                    if widgets::button(ui, Kind::Secondary, "Delete", 0.0).clicked()
                                     {
                                         delete = Some(i);
                                     }
@@ -383,7 +380,7 @@ impl PhotoApp {
                         self.editing_recipe = Some(n);
                     }
                     if widgets::button(ui, Kind::Secondary, "Reset recipes", 0.0)
-                        .on_hover_text("Back to the four built-in recipes")
+                        .on_hover_text("Back to the built-in recipes")
                         .clicked()
                     {
                         self.export_recipes = batch::ExportRecipe::default_recipes();
@@ -416,11 +413,16 @@ impl PhotoApp {
                     .unwrap_or_else(|| PathBuf::from("DSC08450.ARW"));
 
                 // The preview uses the sample photo's own metadata, as the batch will.
-                let sample_info = photo_engine::read_info(&photo_engine::copies::source_file(&sample_path));
+                let sample_info =
+                    photo_engine::read_info(&photo_engine::copies::source_file(&sample_path));
                 let sample_date = sample_info
                     .as_ref()
                     .and_then(|i| i.capture_date_compact())
-                    .or_else(|| photo_engine::file_date_compact(&photo_engine::copies::source_file(&sample_path)));
+                    .or_else(|| {
+                        photo_engine::file_date_compact(&photo_engine::copies::source_file(
+                            &sample_path,
+                        ))
+                    });
                 let sample_ctx = batch::RenameContext {
                     source_path: &sample_path,
                     sequence_index: 0,
@@ -477,8 +479,7 @@ impl PhotoApp {
                             theme::tag("stopping after the photo being written…")
                                 .color(theme::TEXT_DIM),
                         );
-                    } else if widgets::button(ui, Kind::Secondary, "Cancel Export", 120.0)
-                        .clicked()
+                    } else if widgets::button(ui, Kind::Secondary, "Cancel Export", 120.0).clicked()
                     {
                         if let Some(queue) = &mut self.export_queue {
                             queue.cancel();
@@ -547,76 +548,20 @@ impl PhotoApp {
             return;
         }
 
-        let mut jobs = Vec::new();
-        let mut claimed = std::collections::HashSet::new();
-
-        for (seq_idx, src_path) in selected_paths.iter().enumerate() {
-            let info = photo_engine::read_info(&photo_engine::copies::source_file(src_path));
-            let date = info
-                .as_ref()
-                .and_then(|i| i.capture_date_compact())
-                .or_else(|| {
-                    photo_engine::file_date_compact(&photo_engine::copies::source_file(src_path))
-                });
-            let (stack, crop, rating) = if Some(src_path) == self.loaded_path.as_ref() {
-                let rating = self
-                    .shelf
-                    .iter()
-                    .find(|it| &it.path == src_path)
-                    .map(|it| it.metadata.rating)
-                    .unwrap_or(0);
-                (self.stack.clone(), self.stack.geometry.crop, rating)
-            } else {
-                let (stack, meta) = match photo_engine::load_sidecar_full(src_path) {
-                    Ok(Some(sc)) => (sc.stack, sc.metadata),
-                    _ => (None, photo_engine::AssetMetadata::default()),
-                };
-                // Never opened, or only rated: exported as shot, which includes the way the
-                // camera was held.
-                let stack = stack.unwrap_or_else(|| PhotoStack {
-                    geometry: photo_engine::file_orientation(&photo_engine::copies::source_file(
-                        src_path,
-                    )),
-                    ..PhotoStack::for_path(src_path)
-                });
-                let crop = stack.geometry.crop;
-                (stack, crop, meta.rating)
-            };
-
-            for recipe in &active_recipes {
-                let target_dir = match &recipe.subfolder {
-                    Some(sub) => out_dir.join(batch::renamer::sanitize_component(sub)),
-                    None => out_dir.clone(),
-                };
-
-                let ctx = batch::RenameContext {
-                    source_path: src_path,
-                    sequence_index: seq_idx,
-                    camera_model: info.as_ref().map(|i| i.model.as_str()),
-                    rating,
-                    custom_text: "",
-                    target_extension: recipe.settings.format.extension(),
-                    date: date.as_deref(),
-                };
-
-                if let Some(target_path) =
-                    self.batch_renamer
-                        .resolve_target_path(&target_dir, &ctx, &mut claimed)
-                {
-                    jobs.push(batch::ExportJob {
-                        source_path: src_path.clone(),
-                        stack: stack.clone(),
-                        crop,
-                        output_path: target_path,
-                        recipe: recipe.clone(),
-                        touchups: Vec::new(),
-                    });
-                }
-            }
-        }
+        let open = self.loaded_path.clone().map(|path| {
+            let rating = self.shelf.get(&path).map_or(0, |it| it.metadata.rating);
+            (path, self.stack.clone(), rating)
+        });
+        let request = batch::BuildRequest {
+            paths: selected_paths,
+            open,
+            recipes: active_recipes,
+            renamer: self.batch_renamer.clone(),
+            out_dir,
+        };
 
         if let Some(queue) = &mut self.export_queue {
-            queue.start_batch(jobs);
+            queue.start_build(request);
         }
     }
 }

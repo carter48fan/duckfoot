@@ -52,6 +52,8 @@ pub enum ExportProgressMsg {
 
 enum WorkerCommand {
     StartBatch(Vec<ExportJob>),
+    /// Build the jobs on the worker (it reads every photo's sidecar), then run them.
+    Build(Box<super::BuildRequest>),
     Cancel,
 }
 
@@ -94,7 +96,19 @@ impl ExportQueue {
                 let mut engine = Engine::new(&device);
                 while let Ok(cmd) = cmd_rx.recv() {
                     // A Cancel with no batch running has nothing to stop.
-                    if let WorkerCommand::StartBatch(jobs) = cmd {
+                    let jobs = match cmd {
+                        WorkerCommand::StartBatch(jobs) => Some(jobs),
+                        WorkerCommand::Build(request) => {
+                            let _ = progress_tx.send(ExportProgressMsg::JobProgress {
+                                completed: 0,
+                                total: request.paths.len(),
+                                current_file: "Reading the photos' edits…".into(),
+                            });
+                            Some(super::build_jobs(*request))
+                        }
+                        WorkerCommand::Cancel => None,
+                    };
+                    if let Some(jobs) = jobs {
                         // Each photo is already caught on its own; this catches the batch
                         // around them (a scoped thread's panic is re-raised here), so the
                         // queue reports an end instead of running forever.
@@ -139,6 +153,21 @@ impl ExportQueue {
         // between the two would be forgotten.
         self.cancel.store(false, Ordering::SeqCst);
         let _ = self.cmd_tx.send(WorkerCommand::StartBatch(jobs));
+    }
+
+    /// [`Self::start_batch`] for jobs still to be built from `request`: the sidecar
+    /// reads and name checks run on the worker, not the caller's thread.
+    pub fn start_build(&mut self, request: super::BuildRequest) {
+        if request.paths.is_empty() || request.recipes.is_empty() {
+            return;
+        }
+        self.current_status = ExportStatus::Running {
+            total: request.paths.len() * request.recipes.len(),
+            completed: 0,
+            current_file: "Starting...".into(),
+        };
+        self.cancel.store(false, Ordering::SeqCst);
+        let _ = self.cmd_tx.send(WorkerCommand::Build(Box::new(request)));
     }
 
     /// Stop: no photo is started or written after this. Every output is written through a temporary
