@@ -19,12 +19,12 @@ run-name: >-
 # full artifact quota can no longer stop a release. Other runs keep their builds on the
 # workflow run for a day. On top of that (see the `release` job):
 #
-# - every push to main or master auto-increments and publishes a full release
-#   with all 4 platform builds (Android APK, Linux AppImage, Windows, macOS);
-# - every push to any other branch updates that branch's rolling test build
-#   pre-release with the APK (the `test-build` job), downloadable straight onto a phone;
-# - a tag starting with v (v0.2.0, v0.2.0-alpha.1), or a manual run given a version,
-#   publishes a release with all artifacts attached.
+# - a tag starting with v (v0.2.0, v0.2.0-alpha.1), or a manual run given a version (or
+#   'auto' for the next patch), publishes a release with all artifacts attached, once the
+#   tests on Linux, Windows and macOS have passed. Nothing else releases: a push to main
+#   only builds;
+# - every push to any other branch updates that branch's rolling test build, a draft
+#   release (visible to collaborators) holding the testing APK (the `test-build` job).
 on:
   push:
   pull_request:
@@ -58,7 +58,7 @@ jobs:
       version: ${{ steps.calc_version.outputs.version }}
       is_release: ${{ steps.calc_version.outputs.is_release }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
@@ -77,7 +77,7 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             TAG="${{ github.ref_name }}"
             IS_RELEASE="true"
-          elif [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" || "$INPUT_RELEASE" == "auto" ]]; then
+          elif [[ "$INPUT_RELEASE" == "auto" ]]; then
             # Query existing releases for latest semver tag
             # Drafts are a failed run's leftovers, not versions: that number is used again.
             latest=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[] | select(.draft | not) | .tag_name' 2>/dev/null | tr -d ' ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
@@ -117,8 +117,9 @@ jobs:
           echo "Resolved release tag: $TAG (version: $VERSION, is_release: $IS_RELEASE)"
 
       # The build jobs attach their files to this draft as each finishes; `release`
-      # publishes it. Any release already holding the tag goes first: a failed run's draft,
-      # or the published one a manual run of the same version is replacing.
+      # publishes it. A failed run's draft of the same tag goes first; a published release
+      # is never replaced (what people downloaded must stay what it was), so a run for a
+      # version already released fails here.
       - name: Open a draft release
         if: steps.calc_version.outputs.is_release == 'true'
         env:
@@ -127,8 +128,13 @@ jobs:
           TAG: ${{ steps.calc_version.outputs.tag }}
         run: |
           set -e
+          if gh api "repos/$GH_REPO/releases" --paginate \
+               --jq ".[] | select(.tag_name == \"$TAG\" and (.draft | not)) | .id" | grep -q .; then
+            echo "::error::$TAG is already released; releases are never replaced. Use a new version."
+            exit 1
+          fi
           for id in $(gh api "repos/$GH_REPO/releases" --paginate \
-                        --jq ".[] | select(.tag_name == \"$TAG\") | .id"); do
+                        --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id"); do
             gh api -X DELETE "repos/$GH_REPO/releases/$id"
           done
           gh release create "$TAG" --draft --target "$GITHUB_SHA" \
@@ -146,25 +152,24 @@ jobs:
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
       DUCKFOOT_VERSION_NAME: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # rust-toolchain.toml pins the version: install it, then add the Android target to
       # *that* toolchain, which a target installed on `stable` would not be.
       - run: |
           rustup toolchain install
           rustup target add aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: android
 
       # The runner image ships the Android SDK and NDK; AGP 8 needs JDK 17.
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-ndk
 
@@ -235,7 +240,7 @@ jobs:
           cp "dist/duckfoot-android-arm64.apk" "dist/duckfoot-$TAG-android-arm64.apk"
           gh release upload "$TAG" "dist/duckfoot-$TAG-android-arm64.apk" --clobber
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-android
@@ -261,12 +266,15 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config \
             libxkbcommon-dev libwayland-dev file
-          # The container has no gh, which attaches the build to a draft release.
-          curl -sSfL https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_linux_amd64.tar.gz \
-            | tar xz -C /usr/local --strip-components=1
+          # The container has no gh, which attaches the build to a draft release. Checked
+          # against the sha256 gh publishes (gh_2.74.0_checksums.txt) before it is run.
+          curl -sSfL -o /tmp/gh.tar.gz \
+            https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_linux_amd64.tar.gz
+          echo "e55c9d49dc49c0b0fef0a9acd3510482fd9e27ff52ae80f8a6e838cd25b4cd89  /tmp/gh.tar.gz" \
+            | sha256sum -c -
+          tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1
 
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # The container has no Rust: rustup, then the version rust-toolchain.toml pins.
       - name: Rust
         run: |
@@ -275,7 +283,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: linux
 
@@ -322,7 +330,7 @@ jobs:
           gh release upload "$TAG" "dist/duckfoot-$TAG-linux-x86_64.AppImage" "dist/duckfoot-$TAG-linux-x86_64.tar.gz" "dist/duckfoot-$TAG-source.tar.gz" --clobber
 
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-linux-x86_64
@@ -338,11 +346,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: windows
 
@@ -379,7 +386,7 @@ jobs:
           cp "dist/duckfoot-windows-x86_64.zip" "dist/duckfoot-$TAG-windows-x86_64.zip"
           gh release upload "$TAG" "dist/duckfoot-$TAG-windows-x86_64.zip" --clobber
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-windows-x86_64
@@ -395,11 +402,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: macos
 
@@ -479,7 +485,7 @@ jobs:
           cp "dist/duckfoot-macos.zip" "dist/duckfoot-$TAG-macos.zip"
           gh release upload "$TAG" "dist/duckfoot-$TAG-macos.dmg" "dist/duckfoot-$TAG-macos.zip" --clobber
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: needs.version.outputs.is_release != 'true'
         with:
           name: duckfoot-macos
@@ -491,19 +497,21 @@ jobs:
           # is long enough to download a test build, and the test-build job's hand-off.
           retention-days: 1
 
+  # Before any release, and on a hand-run: the tests on each desktop platform (ci.yml runs
+  # Linux's, with a GPU, on every push).
   desktop-tests:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    needs: [version]
+    if: needs.version.outputs.is_release == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: tests-${{ matrix.os }}
 
@@ -512,14 +520,23 @@ jobs:
         timeout-minutes: 30
         run: |
           if [ "$RUNNER_OS" = Windows ]; then export WGPU_BACKEND=noop; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            # winit's build needs these; Mesa's lavapipe runs the GPU tests in software.
+            sudo apt-get update -q
+            sudo apt-get install -yq libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
+            export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json DUCKFOOT_REQUIRE_GPU=1
+          fi
           cargo test --workspace --locked
 
   release:
-    needs: [version, android, linux, windows, macos]
+    needs: [version, android, linux, windows, macos, desktop-tests]
     if: needs.version.outputs.is_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # A signed statement of which workflow run built each file (build provenance).
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -543,8 +560,9 @@ jobs:
             echo "- **Android APK** (\`duckfoot-$RELEASE_TAG-android-arm64.apk\`): Android 11+, Vulkan GPU, arm64. Open on phone or \`adb install -r\`. $signing"
             echo "- **Linux AppImage** (\`duckfoot-$RELEASE_TAG-linux-x86_64.AppImage\`): Standalone executable AppImage. Run \`chmod +x\` and execute."
             echo "- **Linux Tarball** (\`duckfoot-$RELEASE_TAG-linux-x86_64.tar.gz\`): Unpack and run \`./duckfoot\`. Needs Vulkan, Wayland or X11, and xdg-desktop-portal."
-            echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan. (Experimental / Developer Signed)"
-            echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS application (\`Duckfoot.app\`). Drag to Applications folder. (Experimental / Developer Signed)"
+            echo "- **Windows** (\`duckfoot-$RELEASE_TAG-windows-x86_64.zip\`): 64-bit Windows portable application (\`duckfoot.exe\`). Needs Vulkan. Not code-signed: SmartScreen warns on first run."
+            echo "- **macOS** (\`duckfoot-$RELEASE_TAG-macos.dmg\` / \`.zip\`): macOS 11+ on Apple Silicon (\`Duckfoot.app\`). Drag to Applications. Ad-hoc signed, not notarized: Gatekeeper asks on first open (see the README)."
+            echo "- **SHA256SUMS**: checksums of every file above; each also has a build-provenance attestation (\`gh attestation verify <file> -R $GH_REPO\`)."
             echo "- **Source Code** (\`duckfoot-$RELEASE_TAG-source.tar.gz\`): Complete corresponding source code archive (LGPL-2.1 compliance)."
 
             echo
@@ -553,6 +571,19 @@ jobs:
               -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" --jq .body || true
           } > notes.md
           cat notes.md
+
+      # Checksums of everything attached, and an attestation of where each was built.
+      - name: Checksums
+        run: |
+          set -e
+          mkdir -p assets
+          gh release download "$RELEASE_TAG" -D assets
+          (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          gh release upload "$RELEASE_TAG" assets/SHA256SUMS --clobber
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: assets/*
 
       # Every build attached its files to the draft; all four succeeded, or this job would
       # not run. Publishing creates the tag at this commit.
@@ -565,18 +596,24 @@ jobs:
             echo "::error::No draft release for $RELEASE_TAG to publish."
             exit 1
           fi
-          # A tag of that name left on another commit (not one pushed to make this release)
-          # would otherwise be what the release points at.
+          # A tag of that name already on another commit is never moved: that would change
+          # what an existing tag means. The release would point at it, so stop instead.
           if [[ "$GITHUB_REF" != refs/tags/* ]]; then
-            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" 2>/dev/null || true
+            at=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)
+            if [ -n "$at" ] && [ "$at" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG already exists on $at, not this commit."
+              exit 1
+            fi
           fi
           gh api -X PATCH "repos/$GH_REPO/releases/$id" \
             -F draft=false -f make_latest=true \
             -f target_commitish="$GITHUB_SHA" -F body=@notes.md \
             --jq .html_url
 
-  # Every push to a feature branch other than main/master: that branch's rolling pre-release,
-  # replaced on every push, with the APK as a plain file a phone can download and open.
+  # Every push to a feature branch other than main/master: that branch's rolling test build,
+  # replaced on every push, with the testing APK as a plain file a phone can download. A
+  # draft: only the repository's collaborators see it, so no unreviewed branch is offered
+  # to the public as a download.
   test-build:
     needs: [version, android]
     if: >-
@@ -597,7 +634,7 @@ jobs:
       BRANCH: ${{ github.ref_name }}
       HEAD_MESSAGE: ${{ github.event.head_commit.message }}
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: duckfoot-android
           path: dist
@@ -624,9 +661,8 @@ jobs:
                         --jq ".[] | select(.tag_name == \"$tag\") | .id"); do
             gh api -X DELETE "repos/$GH_REPO/releases/$id"
           done
-          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" 2>/dev/null || true
           gh release create "$tag" "$apk" \
-            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --target "$GITHUB_SHA" --draft --latest=false \
             --title "Test build: $BRANCH @ ${GITHUB_SHA::7}" \
             --notes-file notes.md
 

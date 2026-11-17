@@ -15,14 +15,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
-
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # winit needs these to build on Linux even though CI never opens a window.
       - name: Install Linux windowing dependencies
         run: |
@@ -46,12 +44,18 @@ jobs:
         run: cargo test --release --locked -p photo-engine --test gpu --test drag
 
       # Catches WGSL errors, which are otherwise only found at device creation.
-      - run: cargo build --workspace --all-targets
+      - run: cargo build --workspace --all-targets --locked
 
+  # Licences, advisories and sources of every dependency (deny.toml).
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2
   stubs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # DESIGN.md invariant 8: the docs document only what runs. The previous audit only
       # grepped the TypeScript packages, which is exactly where the unfinished code wasn't.
       - name: Audit stubs

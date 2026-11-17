@@ -242,11 +242,20 @@ would start Duckfoot without the photo.
 The **Build** workflow (`.github/workflows/build.yml`) builds the Android APK, the Linux
 AppImage and tarball, the Windows zip and the macOS `.dmg` / `.zip` on every push.
 
-- **Push to `main`** auto-increments the patch version, builds all four platforms, and
-  publishes a full release (marked *Latest*) with the files below attached.
-- **A `v…` tag**, or a manual run given a version, publishes a release with that version.
-- **Any other branch** keeps one rolling *test build* pre-release holding just the APK.
+- **A `v…` tag**, or a manual run given a version (or `auto` for the next patch),
+  publishes a release with that version, once the tests have passed on Linux (with
+  lavapipe), Windows and macOS. A published release is never replaced, and a tag never
+  moved: a run for a version already out fails.
+- **A push to `main`** builds and tests, and releases nothing.
+- **Any other branch** keeps one rolling *test build* draft (visible to collaborators)
+  holding the testing APK (`com.walker.duckfoot.testing`; see `android/README.md`).
 - **A manual run with no version** builds only; the files stay on the workflow run for a day.
+
+A release fails without the Android signing key in the repository's secrets. Each one
+carries `SHA256SUMS` and a build-provenance attestation per file
+(`gh attestation verify <file> -R carter48fan/duckfoot`). Every Action is pinned to a
+commit, and the tools CI downloads (gh, appimagetool) are checked against their sha256.
+`ci.yml` also runs `cargo deny` against `deny.toml` (licences, advisories, sources).
 
 Release files are named `duckfoot-<tag>-<platform>.<ext>`, so the file name changes with
 every release; link to the [latest release page](https://github.com/carter48fan/duckfoot/releases/latest)
@@ -261,6 +270,7 @@ rather than to a file.
 | `duckfoot-<tag>-android-arm64.apk` | Android 11+, arm64 |
 | `duckfoot-<tag>-source.tar.gz` | Complete corresponding source (LGPL-2.1 §6) |
 
-Desktop tests on `windows-latest` and `macos-latest` run on manual builds and tags (macOS
-runner minutes cost ten times Linux's, so not every push pays for them); GPU tests skip
-themselves where the runner has no GPU.
+Desktop tests on `ubuntu-latest`, `windows-latest` and `macos-latest` run before every
+release and on manual builds (macOS runner minutes cost ten times Linux's, so not every
+push pays for them); GPU tests run on lavapipe on Linux and skip themselves where a runner
+has no GPU.

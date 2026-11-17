@@ -8,8 +8,9 @@
 #
 # The AppImage runs only on systems with this machine's glibc or newer: CI builds in
 # ubuntu:22.04 so its AppImage reaches older distros; a local build is for local use.
-# appimagetool is downloaded once into target/appimagetool and run extracted, so FUSE
-# is not needed.
+# appimagetool (a pinned release, checked against its sha256) is downloaded once into
+# target/appimagetool and run extracted, so FUSE is not needed. Its runtime ends up inside
+# every AppImage, so it is never taken from the moving `continuous` build.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,11 +23,14 @@ else
     bin=target/release/duckfoot
 fi
 
-tool=target/appimagetool
+appimagetool_version=1.9.1
+appimagetool_sha256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+tool=target/appimagetool-$appimagetool_version
 if [[ ! -x "$tool/squashfs-root/AppRun" ]]; then
     mkdir -p "$tool"
     curl -sSfL -o "$tool/appimagetool" \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+        "https://github.com/AppImage/appimagetool/releases/download/$appimagetool_version/appimagetool-x86_64.AppImage"
+    echo "$appimagetool_sha256  $tool/appimagetool" | sha256sum -c -
     chmod +x "$tool/appimagetool"
     (cd "$tool" && ./appimagetool --appimage-extract >/dev/null)
 fi
