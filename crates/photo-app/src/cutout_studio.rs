@@ -44,6 +44,66 @@ pub struct CutoutStudioState {
     /// without this a failure would be retried, export and inference and all, every
     /// frame; it is retried only when asked (Retry) or for another photo.
     pub failed_for: Option<PathBuf>,
+    /// The preparation running on its thread, if any.
+    job: Option<CutoutJob>,
+    /// Bumped whenever what is prepared stops being wanted, so a late result is dropped.
+    generation: u64,
+}
+
+/// A preparation on its thread.
+struct CutoutJob {
+    path: PathBuf,
+    generation: u64,
+    rx: std::sync::mpsc::Receiver<Result<Prepared, String>>,
+}
+
+/// What a preparation hands back: the preview's base image and the model's matte, raw and
+/// at the preview's size.
+struct Prepared {
+    base: RgbaImage,
+    pred: Vec<f32>,
+    upscaled: image::GrayImage,
+}
+
+/// The photo to prepare from: already rendered, or to be read from its file.
+enum Source {
+    Image(DynamicImage),
+    File(PathBuf),
+}
+
+/// The slow part of preparing, off the UI thread: read (if need be), shrink to the
+/// preview's ~1400 px, and run the model.
+fn compute(source: Source) -> Result<Prepared, String> {
+    let img = match source {
+        Source::Image(img) => img,
+        Source::File(path) => CutoutStudioState::load_image_from_file(&path)
+            .map_err(|e| format!("Failed to open image for cutout: {e}"))?,
+    };
+    let (w, h) = img.dimensions();
+    let scale = 1400.0 / (w.max(h) as f32).max(1.0);
+    let (pw, ph) = if scale < 1.0 {
+        (
+            ((w as f32 * scale).round() as u32).max(1),
+            ((h as f32 * scale).round() as u32).max(1),
+        )
+    } else {
+        (w, h)
+    };
+    let preview_img = if (pw, ph) != (w, h) {
+        img.resize_exact(pw, ph, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let session = RembgSession::auto().map_err(|e| format!("Failed to load rembg model: {e}"))?;
+    let pred = session
+        .raw_prediction_320(&preview_img)
+        .map_err(|e| format!("Inference failed: {e}"))?;
+    let upscaled = RembgSession::upscale_prediction(&pred, pw, ph);
+    Ok(Prepared {
+        base: preview_img.to_rgba8(),
+        pred,
+        upscaled,
+    })
 }
 
 impl Default for CutoutStudioState {
@@ -69,6 +129,8 @@ impl Default for CutoutStudioState {
             preview_base_rgba: None,
             status: None,
             failed_for: None,
+            job: None,
+            generation: 0,
         }
     }
 }
@@ -84,6 +146,8 @@ impl CutoutStudioState {
         self.touchups.clear();
         self.status = None;
         self.failed_for = None;
+        self.job = None;
+        self.generation += 1;
     }
 
     /// Invalidate neural prediction and preview texture without wiping manual touch-up dabs.
@@ -95,15 +159,36 @@ impl CutoutStudioState {
         self.preview_base_rgba = None;
         self.status = None;
         self.failed_for = None;
+        self.job = None;
+        self.generation += 1;
     }
 
-    /// Prepare Cutout Studio using a pre-rendered image (e.g. from the GPU pipeline with full exposure/edits).
+    /// Prepare Cutout Studio using a pre-rendered image (e.g. from the GPU pipeline with
+    /// full exposure/edits). The resize, the model's load and its inference run on a
+    /// thread of their own; [`Self::poll`] takes the result.
     pub fn prepare_with_image(&mut self, ctx: &egui::Context, path: &Path, img: DynamicImage) {
+        self.start(ctx, path, Source::Image(img));
+    }
+
+    /// [`Self::prepare_with_image`] for the photo as read from its file. Supports both
+    /// raster files (JPEG, PNG, TIFF, WebP) and camera RAW files.
+    pub fn prepare(&mut self, ctx: &egui::Context, path: &Path) {
+        self.start(ctx, path, Source::File(path.to_path_buf()));
+    }
+
+    /// A preparation is running.
+    pub fn is_preparing(&self) -> bool {
+        self.job.is_some()
+    }
+
+    fn start(&mut self, ctx: &egui::Context, path: &Path, source: Source) {
         let is_same_path = self.cached_source_path.as_deref() == Some(path);
         if is_same_path && self.cached_pred_320.is_some() {
             return;
         }
-
+        if self.job.as_ref().is_some_and(|j| j.path == path) {
+            return;
+        }
         if !is_same_path {
             self.touchups.clear();
         }
@@ -112,66 +197,70 @@ impl CutoutStudioState {
         self.cached_source_path = Some(path.to_path_buf());
         self.preview_texture = None;
         self.preview_base_rgba = None;
-        self.status = None;
+        self.failed_for = None;
+        self.status = Some("Finding the subject…".into());
 
-        // Downscale source for fast 60fps interactive preview (~1400px long side) if needed
-        let (w, h) = img.dimensions();
-        let scale = 1400.0 / (w.max(h) as f32).max(1.0);
-        let (pw, ph) = if scale < 1.0 {
-            (
-                ((w as f32 * scale).round() as u32).max(1),
-                ((h as f32 * scale).round() as u32).max(1),
-            )
-        } else {
-            (w, h)
-        };
-        let preview_img = if (pw, ph) != (w, h) {
-            img.resize_exact(pw, ph, image::imageops::FilterType::Triangle)
-        } else {
-            img
-        };
-        self.preview_base_rgba = Some(preview_img.to_rgba8());
-
-        // Run neural inference for 320x320 prediction
-        match RembgSession::auto() {
-            Ok(session) => match session.raw_prediction_320(&preview_img) {
-                Ok(pred) => {
-                    self.cached_upscaled_pred =
-                        Some(RembgSession::upscale_prediction(&pred, pw, ph));
-                    self.cached_pred_320 = Some(pred);
-                    self.update_preview_texture(ctx);
-                    self.status = Some(
-                        "Cutout ready. Use Keep/Erase brushes or sliders to fine-tune.".into(),
-                    );
-                }
-                Err(e) => {
-                    self.status = Some(format!("Inference failed: {e}"));
-                    self.failed_for = Some(path.to_path_buf());
-                }
-            },
+        self.generation += 1;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("duckfoot-cutout".into())
+            .spawn(move || {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute(source)))
+                        .unwrap_or_else(
+                            |_| Err("Finding the subject crashed on this photo".into()),
+                        );
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+        match spawned {
+            Ok(_) => {
+                self.job = Some(CutoutJob {
+                    path: path.to_path_buf(),
+                    generation: self.generation,
+                    rx,
+                })
+            }
             Err(e) => {
-                self.status = Some(format!("Failed to load rembg model: {e}"));
+                self.status = Some(format!("Could not start the cutout: {e}"));
                 self.failed_for = Some(path.to_path_buf());
             }
         }
     }
 
-    /// Load source photo into memory, compute 320x320 prediction, and render initial preview.
-    /// Supports both raster files (JPEG, PNG, TIFF, WebP) and camera RAW files (Sony ARW, Canon CR2/CR3, Nikon NEF, Fuji RAF, etc.).
-    pub fn prepare(&mut self, ctx: &egui::Context, path: &Path) {
-        if self.cached_source_path.as_deref() == Some(path) && self.cached_pred_320.is_some() {
+    /// Takes a finished preparation, if there is one and it is still wanted. Call once a
+    /// frame while the tool is open.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the cutout worker stopped".into())
+            }
+        };
+        let job = self.job.take().expect("checked above");
+        // Asked for before the photo or its edits changed: nothing wants it now.
+        if job.generation != self.generation
+            || self.cached_source_path.as_deref() != Some(job.path.as_path())
+        {
             return;
         }
-
-        match Self::load_image_from_file(path) {
-            Ok(img) => {
-                self.prepare_with_image(ctx, path, img);
+        match result {
+            Ok(prepared) => {
+                self.preview_base_rgba = Some(prepared.base);
+                self.cached_upscaled_pred = Some(prepared.upscaled);
+                self.cached_pred_320 = Some(prepared.pred);
+                self.update_preview_texture(ctx);
+                self.status =
+                    Some("Cutout ready. Use Keep/Erase brushes or sliders to fine-tune.".into());
             }
             Err(e) => {
-                self.reset_cache();
-                self.cached_source_path = Some(path.to_path_buf());
-                self.status = Some(format!("Failed to open image for cutout: {e}"));
-                self.failed_for = Some(path.to_path_buf());
+                self.status = Some(e);
+                self.failed_for = Some(job.path);
             }
         }
     }
@@ -512,6 +601,16 @@ fn overlay_pixels(rgba: &RgbaImage, mode: CutoutPreviewMode) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Polls until the preparation on its thread has landed.
+    fn settle(state: &mut CutoutStudioState, ctx: &egui::Context) {
+        let started = std::time::Instant::now();
+        while state.is_preparing() {
+            assert!(started.elapsed().as_secs() < 60, "still preparing");
+            state.poll(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn overlay_shows_the_photo_through_what_the_cutout_keeps() {
         let mut rgba = RgbaImage::new(3, 1);
@@ -607,10 +706,25 @@ mod tests {
         let mut state = CutoutStudioState::default();
         let path = Path::new("/nowhere/at/all.png");
         state.prepare(&ctx, path);
+        assert!(state.is_preparing(), "prepared off this thread");
+        settle(&mut state, &ctx);
         assert_eq!(state.failed_for.as_deref(), Some(path));
         assert!(state.status.is_some());
         state.invalidate_prediction();
         assert!(state.failed_for.is_none());
+    }
+
+    /// A result asked for before the photo changed is dropped, not shown on the next.
+    #[test]
+    fn a_late_preparation_for_another_photo_is_dropped() {
+        let ctx = egui::Context::default();
+        let mut state = CutoutStudioState::default();
+        let img = DynamicImage::ImageRgba8(image::RgbaImage::new(40, 30));
+        state.prepare_with_image(&ctx, Path::new("/test/a.png"), img);
+        state.reset_cache();
+        settle(&mut state, &ctx);
+        assert!(state.cached_pred_320.is_none());
+        assert!(state.cached_source_path.is_none());
     }
 
     #[test]
@@ -633,6 +747,7 @@ mod tests {
         let dyn_img = DynamicImage::ImageRgba8(img);
 
         state.prepare_with_image(&ctx, path, dyn_img);
+        settle(&mut state, &ctx);
         assert_eq!(state.cached_source_path.as_deref(), Some(path));
         assert!(state.cached_pred_320.is_some());
         assert!(state.preview_base_rgba.is_some());

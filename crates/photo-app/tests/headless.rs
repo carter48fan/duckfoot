@@ -2720,7 +2720,10 @@ fn a_folder_opens_off_the_ui_thread_with_its_folders_and_marks() {
     assert_eq!(data.metadata.rating, 5);
     assert_eq!(data.metadata.color_label.as_deref(), Some("green"));
     let item = app.shelf.get(&b).unwrap();
-    assert_eq!(item.metadata.rating, 5, "the late read of its facts did not undo it");
+    assert_eq!(
+        item.metadata.rating, 5,
+        "the late read of its facts did not undo it"
+    );
     assert_eq!(item.metadata.color_label.as_deref(), Some("green"));
     let _ = std::fs::remove_dir_all(&dir);
 }
