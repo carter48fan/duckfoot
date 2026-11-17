@@ -254,6 +254,8 @@ pub struct LoadedImage {
     warp: Option<FileWarp>,
     /// The lens's profile, if one was found; applied while Lens is on and asks for it.
     lens_profile: Option<(String, FileWarp)>,
+    /// How many times smaller than the file it is held (1: full size). See `proxy`.
+    proxy: u32,
     /// Levels in the sensor texture's mip chain; level 0 is full resolution.
     mip_levels: u32,
     /// Kept so its memory can be recycled when this image is replaced by one the same size.
@@ -512,6 +514,12 @@ impl LoadedImage {
     }
 
     /// The name of the lens profile found for this photo.
+    /// How many times smaller than its file the photo is held, edited and exported: 1
+    /// unless the file is larger than this GPU's textures (see `proxy`).
+    pub fn proxy_factor(&self) -> u32 {
+        self.proxy
+    }
+
     pub fn lens_profile_name(&self) -> Option<&str> {
         self.lens_profile.as_ref().map(|(name, _)| name.as_str())
     }
@@ -775,10 +783,13 @@ pub struct UploadedImage {
     cam_profiled_v2: [[f32; 3]; 3],
     white_scale: WhiteScale,
     warp: Option<FileWarp>,
-    /// The lens's profile, by name, if the loader found one (see `lensfun::for_photo`).
+    /// The lens's profile, by name, if the loader found one (see `lensfun::for_photo`),
+    /// in the file's own pixels: scaled to a proxy's when the image is built.
     pub lens_profile: Option<(String, FileWarp)>,
     pub make: String,
     pub model: String,
+    /// How many times smaller than the file it was uploaded (1: full size). See `proxy`.
+    pub proxy: u32,
 }
 
 enum UploadedPixels {
@@ -843,6 +854,12 @@ pub fn upload_cfa(
     pool: &UploadPool,
     cfa: CfaImage,
 ) -> Result<UploadedImage> {
+    // Larger than this GPU can hold: opened as a proxy (see `proxy`).
+    let limit = device.limits().max_texture_dimension_2d;
+    let (cfa, proxy) = crate::proxy::fit_cfa(cfa, limit);
+    if proxy > 1 {
+        log::warn!("larger than this GPU's {limit} px textures: opened at 1/{proxy} size");
+    }
     check_size(device, cfa.width, cfa.height)?;
     let extent = wgpu::Extent3d {
         width: cfa.width,
@@ -850,7 +867,10 @@ pub fn upload_cfa(
         depth_or_array_layers: 1,
     };
     if let Some(rgb) = &cfa.linear {
-        return upload_linear(device, queue, &cfa, rgb, extent);
+        return upload_linear(device, queue, &cfa, rgb, extent).map(|mut up| {
+            up.proxy = proxy;
+            up
+        });
     }
     let texture = scoped(device, "uploading the mosaic", || {
         let texture = pool.take(extent).unwrap_or_else(|| {
@@ -902,6 +922,7 @@ pub fn upload_cfa(
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
         lens_profile: None,
+        proxy: 1,
         make: cfa.make,
         model: cfa.model,
     })
@@ -967,6 +988,7 @@ fn upload_linear(
         white_scale: WhiteScale::new(cfa.wb, cfa.daylight_wb, cfa.cam_to_srgb),
         warp: cfa.warp,
         lens_profile: None,
+        proxy: 1,
         make: cfa.make.clone(),
         model: cfa.model.clone(),
     })
@@ -979,6 +1001,11 @@ pub fn upload_raster(
     queue: &wgpu::Queue,
     raster: RasterImage,
 ) -> Result<UploadedImage> {
+    let limit = device.limits().max_texture_dimension_2d;
+    let (raster, proxy) = crate::proxy::fit_raster(raster, limit);
+    if proxy > 1 {
+        log::warn!("larger than this GPU's {limit} px textures: opened at 1/{proxy} size");
+    }
     check_size(device, raster.width, raster.height)?;
     let extent = wgpu::Extent3d {
         width: raster.width,
@@ -1025,6 +1052,7 @@ pub fn upload_raster(
         white_scale: WhiteScale::srgb(),
         warp: None,
         lens_profile: None,
+        proxy,
         make: raster.make,
         model: raster.model,
     })
@@ -2540,7 +2568,10 @@ impl Engine {
             lens_profile,
             make,
             model,
+            proxy,
         } = uploaded;
+        let lens_profile = lens_profile
+            .map(|(name, warp)| (name, crate::proxy::scaled(warp, 1.0 / proxy.max(1) as f32)));
         let (width, height) = (extent.width, extent.height);
 
         // Everything this allocates — sensor, mips, green plane, preview — is the most a
@@ -2798,6 +2829,7 @@ impl Engine {
             white_scale,
             warp,
             lens_profile,
+            proxy: proxy.max(1),
             mip_levels,
             preview_level,
             sensor_extent: extent,

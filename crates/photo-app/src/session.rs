@@ -1194,6 +1194,16 @@ impl PhotoApp {
             return;
         }
         self.engine_path = Some(path.clone());
+        if let Some(image) = self.engine.image().filter(|i| i.proxy_factor() > 1) {
+            let k = image.proxy_factor();
+            self.set_status(format!(
+                "{} is larger than this GPU can hold: it is edited and exported at 1/{k} \
+                 size ({} × {}).",
+                file_name(&path),
+                image.sensor_width,
+                image.sensor_height
+            ));
+        }
         self.apply_orientation(orientation);
         if std::mem::take(&mut self.edit_when_opened) {
             // The grid of tools, to choose from.

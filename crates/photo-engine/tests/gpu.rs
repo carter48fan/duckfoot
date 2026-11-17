@@ -3146,3 +3146,49 @@ fn grain_is_mid_toned_repeatable_and_the_preview_shows_the_exports() {
         "the preview's grain (sd {a}) is not the export's at its size (sd {b})"
     );
 }
+
+/// A photo larger than the GPU's textures opens as a proxy, a whole fraction of its size,
+/// and exports at that size, rather than not opening at all: here on a device held to
+/// 1024 px textures.
+#[test]
+fn a_photo_too_big_for_the_gpu_opens_at_a_fraction_of_its_size() {
+    let gpu = gpu_or_skip!();
+    let small = wgpu::Limits {
+        max_texture_dimension_2d: 1024,
+        ..wgpu::Limits::downlevel_defaults().using_resolution(gpu.adapter.limits())
+    };
+    let Ok((device, queue)) =
+        pollster::block_on(gpu.adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("a small GPU"),
+            required_limits: small,
+            ..Default::default()
+        }))
+    else {
+        eprintln!("notice: this adapter will not lower its limits; skipped");
+        return;
+    };
+    assert_eq!(device.limits().max_texture_dimension_2d, 1024);
+
+    // A Bayer mosaic and a raster, each twice too wide.
+    let mut engine = Engine::new(&device);
+    engine
+        .load(&device, &queue, testkit::flat(2048, 1536, 0.4))
+        .expect("the mosaic opens");
+    let image = engine.image().unwrap();
+    assert_eq!(image.proxy_factor(), 2);
+    assert_eq!((image.sensor_width, image.sensor_height), (1024, 768));
+    let out = engine
+        .export(&device, &queue, &PhotoStack::default())
+        .unwrap();
+    assert_eq!((out.width, out.height), (1024, 768));
+    let mid = out.rgba[((384 * 1024 + 512) * 4 + 1) as usize];
+    assert!(mid > 20, "the proxy came out black: {mid}");
+
+    let raster = testkit::raster_from_fn(3000, 600, |_, _| [0.2, 0.2, 0.2]);
+    engine
+        .load_raster(&device, &queue, raster)
+        .expect("the raster opens");
+    let image = engine.image().unwrap();
+    assert_eq!(image.proxy_factor(), 3);
+    assert_eq!((image.sensor_width, image.sensor_height), (1000, 200));
+}
