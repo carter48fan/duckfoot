@@ -72,6 +72,107 @@ pub fn sans_strong() -> FontFamily {
     FontFamily::Name("sans-strong".into())
 }
 
+/// A font with Chinese, Japanese and Korean glyphs, from the system, once it is read.
+/// None of the bundled faces has them, so a CJK file or folder name would show as boxes.
+/// Bundling one would add 16-20 MB per weight, and a subset cannot know which characters
+/// people's file names will use, so the system's own is borrowed instead.
+///
+/// Read on a thread (the files run to tens of MB) and kept for the life of the process:
+/// leaked once, so every egui context (one is rebuilt when the renderer is) borrows the
+/// same bytes rather than copying them.
+static CJK_FONT: std::sync::OnceLock<Option<&'static [u8]>> = std::sync::OnceLock::new();
+
+/// Where each OS keeps a CJK face, most likely first.
+fn cjk_font_paths() -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if cfg!(target_os = "windows") {
+        let fonts = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "C:\\Windows".into())
+            .join("Fonts");
+        for f in [
+            "msyh.ttc",
+            "YuGothR.ttc",
+            "meiryo.ttc",
+            "malgun.ttf",
+            "msgothic.ttc",
+        ] {
+            paths.push(fonts.join(f));
+        }
+    } else if cfg!(target_os = "macos") {
+        for f in [
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+        ] {
+            paths.push(f.into());
+        }
+    } else if cfg!(target_os = "android") {
+        paths.push("/system/fonts/NotoSansCJK-Regular.ttc".into());
+    } else {
+        for f in [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        ] {
+            paths.push(f.into());
+        }
+    }
+    paths
+}
+
+/// The first readable font file among `paths`, if it looks like one: a broken file must
+/// not reach the font parser, which would take the whole UI down with it.
+fn read_font(paths: &[std::path::PathBuf]) -> Option<Vec<u8>> {
+    const MAX: u64 = 64 << 20;
+    paths.iter().find_map(|p| {
+        let len = std::fs::metadata(p).ok()?.len();
+        if len > MAX {
+            return None;
+        }
+        let bytes = std::fs::read(p).ok()?;
+        let magic = bytes.get(..4)?;
+        let font = matches!(magic, b"ttcf" | b"OTTO" | b"true" | [0, 1, 0, 0]);
+        font.then(|| {
+            log::info!("CJK fallback font: {}", p.display());
+            bytes
+        })
+    })
+}
+
+/// Starts reading the CJK fallback, once per process; `ctx` is asked to repaint when it
+/// is in, so [`refresh_fonts`] can install it.
+fn load_cjk_font(ctx: &egui::Context) {
+    if CJK_FONT.get().is_some() {
+        return;
+    }
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new()
+        .name("duckfoot-fonts".into())
+        .spawn(move || {
+            CJK_FONT.get_or_init(|| {
+                read_font(&cjk_font_paths()).map(|bytes| &*Box::leak(bytes.into_boxed_slice()))
+            });
+            ctx.request_repaint();
+        });
+}
+
+/// Installs the CJK fallback into `ctx` once it has been read. Cheap; call every frame.
+pub fn refresh_fonts(ctx: &egui::Context) {
+    let id = egui::Id::new("duckfoot-cjk-installed");
+    if CJK_FONT.get().copied().flatten().is_none() || ctx.data(|d| d.get_temp::<bool>(id)).is_some()
+    {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, true));
+    install_fonts(ctx);
+}
+
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
@@ -94,12 +195,19 @@ fn install_fonts(ctx: &egui::Context) {
     }
 
     // egui's own fonts stay behind ours as fallbacks: they carry the arrows, emoji and
-    // geometric symbols the three text faces don't.
+    // geometric symbols the three text faces don't. The system's CJK face, once read,
+    // comes last.
+    if let Some(bytes) = CJK_FONT.get().copied().flatten() {
+        fonts
+            .font_data
+            .insert("cjk".to_owned(), FontData::from_static(bytes).into());
+    }
     let fallbacks: Vec<String> = [
         "Hack",
         "Ubuntu-Light",
         "NotoEmoji-Regular",
         "emoji-icon-font",
+        "cjk",
     ]
     .into_iter()
     .filter(|f| fonts.font_data.contains_key(*f))
@@ -125,6 +233,7 @@ fn install_fonts(ctx: &egui::Context) {
 
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
+    load_cjk_font(ctx);
 
     let mut v = Visuals::dark();
 
@@ -250,4 +359,57 @@ pub fn tag(text: impl Into<String>) -> egui::RichText {
         .family(mono_bold())
         .size(10.5)
         .extra_letter_spacing(0.3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where this machine has a CJK face, it parses and lays out a CJK name. (Skipped
+    /// where it has none.)
+    #[test]
+    fn a_systems_cjk_face_lays_out_cjk_text() {
+        let Some(bytes) = read_font(&cjk_font_paths()) else {
+            eprintln!("no CJK font on this machine; skipped");
+            return;
+        };
+        let ctx = egui::Context::default();
+        let mut fonts = FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("cjk".into(), FontData::from_owned(bytes).into());
+        fonts
+            .families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap()
+            .push("cjk".into());
+        ctx.set_fonts(fonts);
+        let mut width = 0.0;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                "写真_2026.ARW".into(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+            );
+            width = galley.size().x;
+        });
+        out.textures_delta.clear();
+        assert!(width > 0.0);
+    }
+
+    #[test]
+    fn only_a_font_file_is_taken_as_one() {
+        let dir = std::env::temp_dir().join(format!("duckfoot-fonts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join("junk.ttc");
+        std::fs::write(&junk, b"<html>not a font</html>").unwrap();
+        let font = dir.join("font.ttf");
+        std::fs::write(&font, HANKEN_GROTESK).unwrap();
+        assert!(read_font(&[dir.join("missing.ttc"), junk.clone()]).is_none());
+        assert_eq!(
+            read_font(&[junk, font]).map(|b| b.len()),
+            Some(HANKEN_GROTESK.len())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

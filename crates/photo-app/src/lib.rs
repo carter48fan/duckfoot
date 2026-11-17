@@ -1818,6 +1818,7 @@ impl PhotoApp {
     pub fn update(&mut self, ui: &mut egui::Ui, gpu: &Gpu) {
         let ctx = ui.ctx().clone();
         self.frame_no += 1;
+        theme::refresh_fonts(&ctx);
         // The text-size setting, and only it: egui's own Ctrl+/- zoom would fight it.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let scale = self.settings.ui_scale.clamp(0.85, 1.5);
