@@ -1084,7 +1084,7 @@ impl PhotoApp {
         let current = self
             .loaded_path
             .as_ref()
-            .and_then(|p| self.shelf.iter().find(|it| &it.path == p))
+            .and_then(|p| self.shelf.get(p))
             .map(|it| (it.path.clone(), it.metadata.rating, it.metadata.flag));
         if !many && current.is_none() {
             return;

@@ -73,7 +73,7 @@ impl PhotoApp {
     /// The open photo's metadata, once read.
     pub(crate) fn open_info(&self) -> Option<&PhotoInfo> {
         let path = self.loaded_path.as_ref()?;
-        self.shelf.iter().find(|it| &it.path == path)?.info.as_ref()
+        self.shelf.get(path)?.info.as_ref()
     }
 
     /// The desktop inspector's Info band: folded to its name until opened.
@@ -128,7 +128,7 @@ impl PhotoApp {
                 ),
             ));
         }
-        if let Some(item) = self.shelf.iter().find(|it| it.path == path) {
+        if let Some(item) = self.shelf.get(path) {
             rows.push((tr("info-size"), crate::parts::format_bytes(item.bytes)));
         }
         match &info {

@@ -99,7 +99,7 @@ impl PhotoApp {
         let current = self
             .loaded_path
             .as_ref()
-            .and_then(|p| self.shelf.iter().find(|it| &it.path == p))
+            .and_then(|p| self.shelf.get(p))
             .and_then(|it| it.metadata.color_label.clone());
         let many = self.selection.count() > 1;
         for (name, fill) in LABELS {
@@ -118,8 +118,7 @@ impl PhotoApp {
         };
         let keywords = self
             .shelf
-            .iter()
-            .find(|it| it.path == path)
+            .get(&path)
             .map(|it| it.metadata.keywords.clone())
             .unwrap_or_default();
         let mut remove = None;

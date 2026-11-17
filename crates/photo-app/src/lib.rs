@@ -15,6 +15,7 @@ mod on_photo;
 pub mod platform;
 pub mod presets;
 pub mod settings;
+pub mod shelf;
 pub mod theme;
 pub mod tonemap_3d;
 pub mod widgets;
@@ -604,7 +605,7 @@ pub struct PhotoApp {
     /// Where the whole frame was drawn on the stage last frame.
     stage_frame: Option<egui::Rect>,
     /// The Shelf: assets in the project/session.
-    pub shelf: Vec<ShelfItem>,
+    pub shelf: shelf::Shelf,
     /// The history panel at the left is open, not folded to its edge (desktop).
     pub shelf_open: bool,
     /// The shelf under the stage (desktop): hidden, a strip or a grid.
@@ -949,7 +950,7 @@ impl PhotoApp {
             crop_aspect: crop_tool::Aspect::Free,
             crop_guide: crop_tool::Guide::default(),
             stage_frame: None,
-            shelf: Vec::new(),
+            shelf: Default::default(),
             shelf_open: false,
             strip: StripMode::default(),
             split_active: false,

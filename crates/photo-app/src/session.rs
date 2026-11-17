@@ -70,15 +70,14 @@ impl PhotoApp {
         }
         let metadata = self
             .shelf
-            .iter()
-            .find(|it| it.path == path)
+            .get(&path)
             .map(|it| it.metadata.clone())
             .unwrap_or_default();
         let stack = self.committed_stack();
         match photo_engine::save_sidecar_with_history(&path, &stack, &metadata, &self.history.past)
         {
             Ok(_) => {
-                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                if let Some(item) = self.shelf.get_mut(&path) {
                     item.has_sidecar = true;
                     item.is_edited = false;
                 }
@@ -111,7 +110,7 @@ impl PhotoApp {
         p: &Path,
         change: impl Fn(&mut photo_engine::AssetMetadata),
     ) {
-        let Some(item) = self.shelf.iter_mut().find(|it| it.path == p) else {
+        let Some(item) = self.shelf.get_mut(p) else {
             return;
         };
         // Marked before its sidecar was read: read it now, so the marks it already has
@@ -272,7 +271,7 @@ impl PhotoApp {
                 self.saved_stack = Some(saved.clone());
                 self.stack = saved;
                 self.needs_render = true;
-                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                if let Some(item) = self.shelf.get_mut(&path) {
                     item.is_edited = false;
                 }
                 self.set_status("Reverted to saved sidecar");
@@ -398,7 +397,7 @@ impl PhotoApp {
             match result {
                 Ok(_) => {
                     before.push((path.clone(), previous));
-                    if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                    if let Some(item) = self.shelf.get_mut(&path) {
                         item.has_sidecar = true;
                     }
                     count += 1;
@@ -435,7 +434,7 @@ impl PhotoApp {
             if restored.is_err() {
                 self.error = Some(format!("Could not restore {}", file_name(&sidecar)));
             }
-            if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+            if let Some(item) = self.shelf.get_mut(&path) {
                 item.has_sidecar = find_sidecar(&path).is_some();
             }
         }
@@ -450,7 +449,7 @@ impl PhotoApp {
         let open_first = self.loaded_path.is_none();
         let mut to_open = None;
         for path in paths {
-            if !self.shelf.iter().any(|it| it.path == path) {
+            if !self.shelf.contains(&path) {
                 if open_first && to_open.is_none() {
                     to_open = Some(path.clone());
                 }
@@ -474,8 +473,7 @@ impl PhotoApp {
         if self.loaded_path.as_deref() == Some(of) {
             self.flush();
         }
-        let copy =
-            photo_engine::copies::next_copy(of, |p| self.shelf.iter().any(|it| it.path == p));
+        let copy = photo_engine::copies::next_copy(of, |p| self.shelf.contains(p));
         let (stack, metadata) = match photo_engine::load_sidecar_full(of) {
             Ok(Some(data)) => (data.stack, data.metadata),
             _ => (None, photo_engine::AssetMetadata::default()),
@@ -492,7 +490,7 @@ impl PhotoApp {
         let source = photo_engine::copies::source_file(of).into_owned();
         let same_photo =
             |p: &std::path::Path| photo_engine::copies::source_file(p).as_ref() == source;
-        let at = match self.shelf.iter().position(|it| it.path == of) {
+        let at = match self.shelf.position(of) {
             Some(i) => {
                 i + 1
                     + self.shelf[i + 1..]
@@ -531,7 +529,7 @@ impl PhotoApp {
 
     fn take_scan(&mut self, gpu: &Gpu, scan: dam::watch::Scan) {
         let mut returned = Vec::new();
-        for item in &mut self.shelf {
+        for item in self.shelf.iter_mut() {
             let file = photo_engine::copies::source_file(&item.path).into_owned();
             let watched = file
                 .parent()
@@ -552,7 +550,7 @@ impl PhotoApp {
         let new: Vec<PathBuf> = scan
             .new
             .into_iter()
-            .filter(|p| !self.shelf.iter().any(|it| it.path == *p))
+            .filter(|p| !self.shelf.contains(p))
             .collect();
         if !new.is_empty() {
             let n = new.len();
@@ -716,7 +714,7 @@ impl PhotoApp {
     pub fn open_path(&mut self, gpu: &Gpu, path: PathBuf) {
         log::info!("open {}", path.display());
         if !photo_engine::copies::source_file(&path).exists() {
-            if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+            if let Some(item) = self.shelf.get_mut(&path) {
                 item.missing = true;
             }
             self.set_status(format!(
@@ -728,7 +726,7 @@ impl PhotoApp {
         // Its metadata comes with its thumbnail, and the Info card wants it whether or
         // not its tile is in view.
         self.request_thumbnail(&path);
-        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+        if let Some(item) = self.shelf.get_mut(&path) {
             item.missing = false;
         }
         if self.loaded_path.as_ref() == Some(&path) {
@@ -825,7 +823,7 @@ impl PhotoApp {
                 }
             };
 
-        if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+        if let Some(item) = self.shelf.get_mut(path) {
             if item.pending {
                 item.take(ShelfFacts::read(path));
                 self.shelf_pending.remove(path);
@@ -1018,10 +1016,7 @@ impl PhotoApp {
                 }
                 loader::Done::Shelf(facts) => {
                     if self.shelf_pending.remove(&facts.path) {
-                        if let Some(item) = self
-                            .shelf
-                            .iter_mut()
-                            .find(|it| it.path == facts.path && it.pending)
+                        if let Some(item) = self.shelf.get_mut(&facts.path).filter(|it| it.pending)
                         {
                             item.take(facts);
                         }
@@ -1052,7 +1047,7 @@ impl PhotoApp {
                 } => self.take_library(entries, deleted, failed),
                 loader::Done::Thumbnail { path, image, info } => {
                     self.thumbs_pending.remove(&path);
-                    if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                    if let Some(item) = self.shelf.get_mut(&path) {
                         item.info = info.map(|i| *i);
                     }
                     if let Some(image) = image {
@@ -1162,7 +1157,7 @@ impl PhotoApp {
             .collect();
         match photo_engine::update_sidecar(&path, |data| data.snapshots = snapshots.clone()) {
             Ok(_) => {
-                if let Some(item) = self.shelf.iter_mut().find(|it| it.path == path) {
+                if let Some(item) = self.shelf.get_mut(&path) {
                     item.has_sidecar = true;
                 }
             }
@@ -1371,17 +1366,7 @@ impl PhotoApp {
     /// The shelf's items `gone` picks, taken off it with their thumbnails, each with the
     /// index it stood at.
     fn take_off_shelf(&mut self, gone: impl Fn(&PathBuf) -> bool) -> Vec<(usize, ShelfItem)> {
-        let mut removed = Vec::new();
-        let mut i = 0;
-        let mut index = 0;
-        while i < self.shelf.len() {
-            if gone(&self.shelf[i].path) {
-                removed.push((index, self.shelf.remove(i)));
-            } else {
-                i += 1;
-            }
-            index += 1;
-        }
+        let removed = self.shelf.take_where(|it| gone(&it.path));
         for (_, item) in &removed {
             self.selection.selected.remove(&item.path);
             // The texture goes with its handle.
@@ -1527,9 +1512,7 @@ impl PhotoApp {
     pub fn undo_remove_from_shelf(&mut self) {
         let removed = std::mem::take(&mut self.removed_from_shelf);
         let n = removed.len();
-        for (index, item) in removed {
-            self.shelf.insert(index.min(self.shelf.len()), item);
-        }
+        self.shelf.put_back(removed);
         self.bump_shelf_epoch();
         self.set_status(format!("Put {n} back on the shelf"));
     }
