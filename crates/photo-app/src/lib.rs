@@ -646,6 +646,8 @@ pub struct PhotoApp {
     /// The caption fields as typed (title, caption, creator, copyright), for the photo
     /// they were opened on; written when a field is left.
     caption_drafts: Option<(PathBuf, [String; 4])>,
+    /// The batch dialog's rename preview: its sample photo, camera model and date.
+    rename_sample: Option<(PathBuf, Option<String>, Option<String>)>,
     /// A subject or sky mask being found, off the UI thread.
     finding: Option<found_masks::Finding>,
     /// The selection side by side, to choose between (desktop; `N`).
@@ -1001,6 +1003,7 @@ impl PhotoApp {
             paste_picker_open: false,
             keyword_draft: String::new(),
             caption_drafts: None,
+            rename_sample: None,
             finding: None,
             survey: None,
             saved_filters: Vec::new(),

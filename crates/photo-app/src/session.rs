@@ -647,6 +647,11 @@ impl PhotoApp {
     }
 
     pub(crate) fn request_thumbnail(&mut self, path: &std::path::Path) {
+        // Asked every frame for every tile in view: the set answers first, so the disk (a
+        // dead network share, say) is touched once per photo, not once per frame.
+        if self.thumbs_requested.contains(path) {
+            return;
+        }
         if !photo_engine::copies::source_file(path).exists() {
             return;
         }

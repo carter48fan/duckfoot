@@ -412,21 +412,31 @@ impl PhotoApp {
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("DSC08450.ARW"));
 
-                // The preview uses the sample photo's own metadata, as the batch will.
-                let sample_info =
-                    photo_engine::read_info(&photo_engine::copies::source_file(&sample_path));
-                let sample_date = sample_info
+                // The preview uses the sample photo's own metadata, as the batch will: read
+                // once per sample photo, not on every frame the dialog is drawn (a header
+                // read and a stat on a network share each time).
+                if self
+                    .rename_sample
                     .as_ref()
-                    .and_then(|i| i.capture_date_compact())
-                    .or_else(|| {
-                        photo_engine::file_date_compact(&photo_engine::copies::source_file(
-                            &sample_path,
-                        ))
-                    });
+                    .is_none_or(|(p, _, _)| *p != sample_path)
+                {
+                    let file = photo_engine::copies::source_file(&sample_path);
+                    let info = photo_engine::read_info(&file);
+                    let date = info
+                        .as_ref()
+                        .and_then(|i| i.capture_date_compact())
+                        .or_else(|| photo_engine::file_date_compact(&file));
+                    self.rename_sample = Some((sample_path.clone(), info.map(|i| i.model), date));
+                }
+                let (sample_model, sample_date) = self
+                    .rename_sample
+                    .as_ref()
+                    .map(|(_, m, d)| (m.clone(), d.clone()))
+                    .unwrap_or_default();
                 let sample_ctx = batch::RenameContext {
                     source_path: &sample_path,
                     sequence_index: 0,
-                    camera_model: sample_info.as_ref().map(|i| i.model.as_str()),
+                    camera_model: sample_model.as_deref(),
                     rating: 5,
                     custom_text: "",
                     target_extension: "jpg",

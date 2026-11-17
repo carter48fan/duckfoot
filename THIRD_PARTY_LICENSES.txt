@@ -106,6 +106,7 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `anyhow` | `1.0.104` | MIT OR Apache-2.0 | [https://github.com/dtolnay/anyhow](https://github.com/dtolnay/anyhow) |
 | `anymap3` | `1.1.0` | BlueOak-1.0.0 OR MIT OR Apache-2.0 | [https://github.com/reivilibre/anymap3](https://github.com/reivilibre/anymap3) |
 | `arbitrary` | `1.5.0` | MIT OR Apache-2.0 | [https://github.com/rust-fuzz/arbitrary/](https://github.com/rust-fuzz/arbitrary/) |
+| `arboard` | `3.6.1` | MIT OR Apache-2.0 | [https://github.com/1Password/arboard](https://github.com/1Password/arboard) |
 | `arg_enum_proc_macro` | `0.3.4` | MIT | [https://github.com/lu-zero/arg_enum_proc_macro](https://github.com/lu-zero/arg_enum_proc_macro) |
 | `arrayref` | `0.3.9` | BSD-2-Clause | [https://github.com/droundy/arrayref](https://github.com/droundy/arrayref) |
 | `arrayvec` | `0.7.8` | MIT OR Apache-2.0 | [https://github.com/bluss/arrayvec](https://github.com/bluss/arrayvec) |
@@ -152,13 +153,16 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `byteorder-lite` | `0.1.0` | Unlicense OR MIT | [https://github.com/image-rs/byteorder-lite](https://github.com/image-rs/byteorder-lite) |
 | `bytes` | `1.12.1` | MIT | [https://github.com/tokio-rs/bytes](https://github.com/tokio-rs/bytes) |
 | `calloop` | `0.13.0` | MIT | [https://github.com/Smithay/calloop](https://github.com/Smithay/calloop) |
+| `calloop` | `0.14.5` | MIT | [https://github.com/Smithay/calloop](https://github.com/Smithay/calloop) |
 | `calloop-wayland-source` | `0.3.0` | MIT | [https://github.com/smithay/calloop-wayland-source](https://github.com/smithay/calloop-wayland-source) |
+| `calloop-wayland-source` | `0.4.1` | MIT | [https://github.com/smithay/calloop-wayland-source](https://github.com/smithay/calloop-wayland-source) |
 | `cc` | `1.4.6` | MIT OR Apache-2.0 | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
 | `cesu8` | `1.1.0` | Apache-2.0/MIT | [https://github.com/emk/cesu8-rs](https://github.com/emk/cesu8-rs) |
 | `cfg-if` | `1.0.5` | MIT OR Apache-2.0 | [https://github.com/rust-lang/cfg-if](https://github.com/rust-lang/cfg-if) |
 | `cfg_aliases` | `0.2.2` | MIT | [https://github.com/katharostech/cfg_aliases](https://github.com/katharostech/cfg_aliases) |
 | `chacha20` | `0.10.2` | MIT OR Apache-2.0 | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
 | `chrono` | `0.4.45` | MIT OR Apache-2.0 | [https://github.com/chronotope/chrono](https://github.com/chronotope/chrono) |
+| `clipboard-win` | `5.4.3` | BSL-1.0 | [https://github.com/DoumanAsh/clipboard-win](https://github.com/DoumanAsh/clipboard-win) |
 | `codespan-reporting` | `0.13.1` | Apache-2.0 | [https://github.com/brendanzab/codespan](https://github.com/brendanzab/codespan) |
 | `color` | `0.3.3` | Apache-2.0 OR MIT | [https://github.com/linebender/color](https://github.com/linebender/color) |
 | `colorchoice` | `1.0.5` | MIT OR Apache-2.0 | [https://github.com/rust-cli/anstyle.git](https://github.com/rust-cli/anstyle.git) |
@@ -210,6 +214,7 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `equivalent` | `1.0.2` | Apache-2.0 OR MIT | [https://github.com/indexmap-rs/equivalent](https://github.com/indexmap-rs/equivalent) |
 | `erased-serde` | `0.4.10` | MIT OR Apache-2.0 | [https://github.com/dtolnay/erased-serde](https://github.com/dtolnay/erased-serde) |
 | `errno` | `0.3.14` | MIT OR Apache-2.0 | [https://github.com/lambda-fairy/rust-errno](https://github.com/lambda-fairy/rust-errno) |
+| `error-code` | `3.4.0` | BSL-1.0 | [https://github.com/DoumanAsh/error-code](https://github.com/DoumanAsh/error-code) |
 | `euclid` | `0.22.14` | MIT OR Apache-2.0 | [https://github.com/servo/euclid](https://github.com/servo/euclid) |
 | `event-listener` | `5.4.2` | Apache-2.0 OR MIT | [https://github.com/smol-rs/event-listener](https://github.com/smol-rs/event-listener) |
 | `event-listener-strategy` | `0.5.4` | Apache-2.0 OR MIT | [https://github.com/smol-rs/event-listener-strategy](https://github.com/smol-rs/event-listener-strategy) |
@@ -483,6 +488,8 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `slotmap` | `1.1.1` | Zlib | [https://github.com/orlp/slotmap](https://github.com/orlp/slotmap) |
 | `smallvec` | `1.16.1` | MIT OR Apache-2.0 | [https://github.com/servo/rust-smallvec](https://github.com/servo/rust-smallvec) |
 | `smithay-client-toolkit` | `0.19.2` | MIT | [https://github.com/smithay/client-toolkit](https://github.com/smithay/client-toolkit) |
+| `smithay-client-toolkit` | `0.20.0` | MIT | [https://github.com/smithay/client-toolkit](https://github.com/smithay/client-toolkit) |
+| `smithay-clipboard` | `0.7.3` | MIT | [https://github.com/smithay/smithay-clipboard](https://github.com/smithay/smithay-clipboard) |
 | `smol_str` | `0.2.2` | MIT OR Apache-2.0 | [https://github.com/rust-analyzer/smol_str](https://github.com/rust-analyzer/smol_str) |
 | `spirv` | `0.4.0+sdk-1.4.341.0` | Apache-2.0 | [https://github.com/gfx-rs/rspirv](https://github.com/gfx-rs/rspirv) |
 | `stable_deref_trait` | `1.2.1` | MIT OR Apache-2.0 | [https://github.com/storyyeller/stable_deref_trait](https://github.com/storyyeller/stable_deref_trait) |
@@ -555,6 +562,8 @@ the fill was ported by LightCraft from PhotoCraft, under the same licence):
 | `wayland-csd-frame` | `0.3.0` | MIT | [https://github.com/rust-windowing/wayland-csd-frame](https://github.com/rust-windowing/wayland-csd-frame) |
 | `wayland-cursor` | `0.31.14` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
 | `wayland-protocols` | `0.32.13` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
+| `wayland-protocols-experimental` | `20250721.0.1` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
+| `wayland-protocols-misc` | `0.3.12` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
 | `wayland-protocols-plasma` | `0.3.12` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
 | `wayland-protocols-wlr` | `0.3.12` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
 | `wayland-scanner` | `0.31.11` | MIT | [https://github.com/smithay/wayland-rs](https://github.com/smithay/wayland-rs) |
@@ -662,6 +671,7 @@ Each crate's copyright notices, as its own licence files state them. A crate lis
 - `anstyle-wincon` 3.0.11: Copyright (c) Individual contributors
 - `anymap3` 1.1.0: Copyright © 2014–2022 Chris Morgan
 - `arbitrary` 1.5.0: Copyright (c) 2019 Manish Goregaokar
+- `arboard` 3.6.1: Copyright (c) 2022 The Arboard contributors
 - `arg_enum_proc_macro` 0.3.4: Copyright (c) 2018 Luca Barbato
 - `arrayvec` 0.7.8: Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
 - `as-raw-xcb-connection` 1.0.1: Copyright 2019 as-raw-xcb-connection Contributers
@@ -692,7 +702,9 @@ Each crate's copyright notices, as its own licence files state them. A crate lis
 - `byteorder-lite` 0.1.0: Copyright (c) 2015 Andrew Gallant
 - `bytes` 1.12.1: Copyright (c) 2018 Carl Lerche
 - `calloop` 0.13.0: Copyright (c) 2018 Victor Berger
+- `calloop` 0.14.5: Copyright (c) 2018 Victor Berger
 - `calloop-wayland-source` 0.3.0: Copyright (c) 2023 Kirill Chibisov
+- `calloop-wayland-source` 0.4.1: Copyright (c) 2023 Kirill Chibisov
 - `cc` 1.4.6: Copyright (c) 2014 Alex Crichton
 - `cesu8` 1.1.0: Copyright (C) 2000-2010 Julian Seward.  All rights; Copyright (c) 2003-2013 University of Illinois at; Copyright (c) 2009-2014 by the contributors listed in; Copyright (C) 2008-2010 Tachyon Technologies.; Copyright (c) 2008, Natacha Porté; Copyright (c) 2011, Vicent Martí
 - `cfg-if` 1.0.5: Copyright (c) 2014 Alex Crichton
@@ -890,6 +902,8 @@ Each crate's copyright notices, as its own licence files state them. A crate lis
 - `slab` 0.4.12: Copyright (c) 2019 Carl Lerche
 - `smallvec` 1.16.1: Copyright (c) 2018 The Servo Project Developers
 - `smithay-client-toolkit` 0.19.2: Copyright (c) 2018 Victor Berger
+- `smithay-client-toolkit` 0.20.0: Copyright (c) 2018 Victor Berger
+- `smithay-clipboard` 0.7.3: Copyright (c) 2018 Lucas Timmins & Victor Berger
 - `stable_deref_trait` 1.2.1: Copyright (c) 2017 Robert Grosse
 - `static_assertions` 1.1.0: Copyright (c) 2017 Nikolai Vazquez
 - `strength_reduce` 0.2.4: Copyright (c) 2015 The RustFFT Developers
@@ -940,6 +954,8 @@ Each crate's copyright notices, as its own licence files state them. A crate lis
 - `wayland-csd-frame` 0.3.0: Copyright (c) 2023 Kirill Chibisov
 - `wayland-cursor` 0.31.14: Copyright (c) 2015 Elinor Berger
 - `wayland-protocols` 0.32.13: Copyright (c) 2015 Elinor Berger
+- `wayland-protocols-experimental` 20250721.0.1: Copyright (c) 2015 Elinor Berger
+- `wayland-protocols-misc` 0.3.12: Copyright (c) 2015 Elinor Berger
 - `wayland-protocols-plasma` 0.3.12: Copyright (c) 2015 Elinor Berger
 - `wayland-protocols-wlr` 0.3.12: Copyright (c) 2015 Elinor Berger
 - `wayland-scanner` 0.31.11: Copyright (c) 2015 Elinor Berger

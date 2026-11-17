@@ -125,10 +125,27 @@ pub const UI_SCALES: [(f32, &str); 5] = [
 
 impl Settings {
     pub fn load(dir: Option<&Path>) -> Self {
-        dir.map(file)
-            .and_then(|f| std::fs::read(f).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let Some(path) = dir.map(file) else {
+            return Self::default();
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Self::default();
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(settings) => settings,
+            Err(e) => {
+                // Unreadable: start from the defaults, but keep the file (the shelf, the
+                // module order) beside the new one rather than writing over it.
+                let kept = path.with_extension("json.unreadable");
+                log::warn!(
+                    "{} could not be read ({e}); kept as {} and starting afresh",
+                    path.display(),
+                    kept.display()
+                );
+                let _ = std::fs::rename(&path, &kept);
+                Self::default()
+            }
+        }
     }
 
     /// Writes the settings unless they are what `last` says was written already, and
@@ -225,6 +242,21 @@ pub fn merge_sections_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_settings_file_is_kept_not_overwritten() {
+        let dir =
+            std::env::temp_dir().join(format!("duckfoot-settings-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(file(&dir), b"{ \"shelf\": [ broken").unwrap();
+        let s = Settings::load(Some(&dir));
+        assert!(s.shelf.is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("settings.json.unreadable")).unwrap(),
+            b"{ \"shelf\": [ broken"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_unchanged_save_writes_nothing() {

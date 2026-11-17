@@ -2059,7 +2059,11 @@ mod tests {
     fn the_cube_and_opcode_seeds_run() {
         fuzzing::cube(include_bytes!("../../../fuzz/seeds/cube/identity.cube"));
         let seed = include_bytes!("../../../fuzz/seeds/opcodes/gain_map.bin");
-        assert_eq!(crate::opcodes::parse_list(seed).len(), 1, "the seed is a gain map");
+        assert_eq!(
+            crate::opcodes::parse_list(seed).len(),
+            1,
+            "the seed is a gain map"
+        );
         fuzzing::opcodes(seed);
         fuzzing::opcodes(&seed[..seed.len() / 2]);
     }

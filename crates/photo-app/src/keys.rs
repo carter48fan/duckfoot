@@ -95,6 +95,11 @@ impl PhotoApp {
         if self.batch_dialog_open {
             return;
         }
+        // Preferences and About are dialogs too: Esc closes them (their own code), and no
+        // key reaches the photo behind them.
+        if self.preferences_open || self.about_open {
+            return;
+        }
         if self.survey_keys(ctx, gpu) {
             return;
         }
@@ -203,8 +208,14 @@ impl PhotoApp {
             self.needs_render = true;
         }
         if ctrl_a {
-            let all_paths: Vec<PathBuf> = self.shelf.iter().map(|it| it.path.clone()).collect();
-            self.selection.select_all(&all_paths);
+            // Everything shown: a photo the filter hides is not what "all" means on screen,
+            // and a batch export of the selection would otherwise take it too.
+            let shown: Vec<PathBuf> = self
+                .displayed_indices()
+                .into_iter()
+                .map(|i| self.shelf[i].path.clone())
+                .collect();
+            self.selection.select_all(&shown);
         }
         if batch_export {
             self.batch_dialog_open = true;

@@ -8,6 +8,7 @@ impl PhotoApp {
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let mut notice_action = None;
         let mut cancel_export = false;
+        let mut dismiss_error = false;
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -87,6 +88,14 @@ impl PhotoApp {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             if let Some(err) = &self.error {
                                 widgets::dot(ui, theme::DANGER);
+                                // Read, then put away: until then it would hold the line,
+                                // hiding any notice's Undo or a scan's Cancel.
+                                if widgets::chip(ui, true, "×")
+                                    .on_hover_text("Dismiss this message")
+                                    .clicked()
+                                {
+                                    dismiss_error = true;
+                                }
                                 ui.add(
                                     egui::Label::new(
                                         theme::num(err).size(11.5).color(theme::DANGER),
@@ -118,6 +127,9 @@ impl PhotoApp {
             });
         if cancel_export {
             self.cancel_export();
+        }
+        if dismiss_error {
+            self.error = None;
         }
         if let Some(action) = notice_action {
             self.run_notice_action(action);

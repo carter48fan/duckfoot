@@ -1018,7 +1018,10 @@ mod tests {
         let raw = Path::new("/photos/IMG_1.CR3");
         let jpeg = Path::new("/photos/IMG_1.JPG");
         assert!(sidecar_paths(raw).contains(&PathBuf::from("/photos/IMG_1.xmp")));
-        assert_eq!(sidecar_paths(jpeg), [PathBuf::from("/photos/IMG_1.JPG.xmp")]);
+        assert_eq!(
+            sidecar_paths(jpeg),
+            [PathBuf::from("/photos/IMG_1.JPG.xmp")]
+        );
     }
 
     fn marks(rating: u8, label: Option<&str>, words: &[&str]) -> AssetMetadata {
