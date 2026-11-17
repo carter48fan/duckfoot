@@ -78,3 +78,17 @@ path = "fuzz_targets/xmp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cube"
+path = "fuzz_targets/cube.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opcodes"
+path = "fuzz_targets/opcodes.rs"
+test = false
+doc = false
+bench = false

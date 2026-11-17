@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tiff, embedded_jpeg, raster, raw, sidecar, preset, icc, xmp]
+        target: [tiff, embedded_jpeg, raster, raw, sidecar, preset, icc, xmp, cube, opcodes]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # photo-app, which the preset target links, needs these to build on Linux.

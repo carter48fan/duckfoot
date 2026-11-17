@@ -1325,6 +1325,26 @@ pub mod fuzzing {
         }
     }
 
+    /// A `.cube` look file, parsed and baked into its table.
+    pub fn cube(bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if let Ok(lut) = crate::lut3d::parse_cube(text) {
+                let _ = lut.bake();
+            }
+        }
+    }
+
+    /// A DNG opcode list, parsed and applied to a small mosaic, as decoding a DNG does.
+    pub fn opcodes(bytes: &[u8]) {
+        let ops = crate::opcodes::parse_list(bytes);
+        let mut data = vec![1000u16; 16 * 12];
+        let area = crate::opcodes::Area {
+            offset: (0, 0),
+            size: (16, 12),
+        };
+        crate::opcodes::apply_gains(&ops, &mut data, 16, area, |_, _| 64.0);
+    }
+
     /// A raster file (JPEG, PNG, TIFF, WebP…).
     pub fn raster(bytes: &[u8]) {
         let _ = decode_raster(bytes);
@@ -2033,6 +2053,16 @@ pub(crate) fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The new fuzz targets' seeds run cleanly, so the fuzzer starts from real inputs.
+    #[test]
+    fn the_cube_and_opcode_seeds_run() {
+        fuzzing::cube(include_bytes!("../../../fuzz/seeds/cube/identity.cube"));
+        let seed = include_bytes!("../../../fuzz/seeds/opcodes/gain_map.bin");
+        assert_eq!(crate::opcodes::parse_list(seed).len(), 1, "the seed is a gain map");
+        fuzzing::opcodes(seed);
+        fuzzing::opcodes(&seed[..seed.len() / 2]);
+    }
 
     #[test]
     fn a_decoder_that_panics_fails_instead_of_unwinding() {
