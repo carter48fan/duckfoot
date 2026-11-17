@@ -126,16 +126,9 @@ pub fn find_model(model: &RembgModel) -> Option<PathBuf> {
         }
     }
 
-    // 4. Current working directory / models / data
-    let local = Path::new("models").join(fname);
-    if local.exists() {
-        return Some(local);
-    }
-    let data = Path::new("crates/photo-engine/data").join(fname);
-    if data.exists() {
-        return Some(data);
-    }
-
+    // Nothing relative to the current directory: Duckfoot started from a download folder
+    // (or a file manager's) would load whatever `models/u2net.onnx` sat there. The bundled
+    // model is the fallback.
     None
 }
 

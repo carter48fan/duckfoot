@@ -154,11 +154,17 @@ pub fn parse(s: &str) -> Result<Xmp, XmpError> {
 }
 
 /// The sidecars other applications keep beside `photo`: darktable's `IMG_1.CR3.xmp` and
-/// Lightroom's `IMG_1.xmp`, in that order.
-pub fn sidecar_paths(photo: &Path) -> [PathBuf; 2] {
+/// Lightroom's `IMG_1.xmp`, in that order. Lightroom's name is a RAW's only: a camera
+/// shooting RAW+JPEG gives both the same stem, `IMG_1.xmp` is the RAW's, and a JPEG must
+/// neither take its marks from it nor write its own into it (as `.duckfoot` sidecars).
+pub fn sidecar_paths(photo: &Path) -> Vec<PathBuf> {
     let mut full = photo.as_os_str().to_owned();
     full.push(".xmp");
-    [PathBuf::from(full), photo.with_extension("xmp")]
+    let mut paths = vec![PathBuf::from(full)];
+    if !crate::is_raster_path(photo) {
+        paths.push(photo.with_extension("xmp"));
+    }
+    paths
 }
 
 /// How much of a photo is searched for an embedded packet. JPEG, PNG, WebP and TIFF keep
@@ -1006,6 +1012,14 @@ fn merge_packets(existing: &str, fresh: &str, rules: MergeRules) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jpeg_never_takes_its_raws_xmp() {
+        let raw = Path::new("/photos/IMG_1.CR3");
+        let jpeg = Path::new("/photos/IMG_1.JPG");
+        assert!(sidecar_paths(raw).contains(&PathBuf::from("/photos/IMG_1.xmp")));
+        assert_eq!(sidecar_paths(jpeg), [PathBuf::from("/photos/IMG_1.JPG.xmp")]);
+    }
 
     fn marks(rating: u8, label: Option<&str>, words: &[&str]) -> AssetMetadata {
         let mut m = AssetMetadata {

@@ -15,8 +15,13 @@ use anyhow::{Context, Result};
 pub fn atomic_write(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     let tmp = temp_path(path);
     let result = (|| {
-        let mut file =
-            File::create(&tmp).with_context(|| format!("could not create {}", tmp.display()))?;
+        // A new file or nothing: an existing file, or a symlink, already at the temporary
+        // name (put there by anyone else who can write the folder) is not written through.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("could not create {}", tmp.display()))?;
         write(&mut file)?;
         file.flush()?;
         file.sync_all()
