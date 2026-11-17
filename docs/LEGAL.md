@@ -4,7 +4,7 @@ MIT — see [LICENSE](../LICENSE).
 
 Duckfoot uses `rawler` and `rawloader` for RAW format decoding, which are licensed under the **GNU LGPL-2.1**. In compliance with LGPL-2.1 §6, complete corresponding source archives (`duckfoot-<version>-source.tar.gz`) are provided with every release to enable inspection, modification, and relinking.
 
-The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono, Space Grotesk and Hanken Grotesk (`crates/photo-app/assets/fonts/`). Lens correction data is adapted from the Lensfun database (**CC BY-SA 3.0**, `crates/photo-engine/data/LENSFUN-NOTICE.md`).
+The UI bundles three typefaces under the **SIL Open Font License 1.1** — JetBrains Mono, Space Grotesk and Hanken Grotesk (`crates/photo-app/assets/fonts/`). Lens correction data is adapted from the Lensfun database (**CC BY-SA 3.0**, `crates/photo-engine/data/LENSFUN-NOTICE.md`). Background cutout runs the U²-Net small model (`u2netp.onnx`, **Apache-2.0**, © 2020 Xuebin Qin et al.), embedded in the binary.
 
 Duckfoot contains code adapted from [LightCraft](https://github.com/storytold/lightcraft) (MIT OR Apache-2.0, used under MIT): its XMP reader and merge, HEIF decoder and content-aware fill; see `THIRD_PARTY_LICENSES.md` and each `crates/vendor/*/VENDORED.md`.
 

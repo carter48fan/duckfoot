@@ -18,7 +18,7 @@ from pathlib import Path
 LGPL_NOTICE = """## Special Notice: GNU Lesser General Public License (LGPL-2.1)
 
 Duckfoot links against the following libraries licensed under the GNU Lesser General Public License, Version 2.1:
-- `rawler` (https://github.com/pedrocr/rawler)
+- `rawler` (https://github.com/dnglab/dnglab)
 - `rawloader` (https://github.com/pedrocr/rawloader)
 
 In accordance with Section 6 of the GNU LGPL-2.1:
@@ -53,11 +53,22 @@ Duckfoot includes distilled lens and camera calibration tables derived from the 
 LIGHTCRAFT_NOTICE = """## LightCraft Code Attribution (MIT)
 
 Duckfoot contains code adapted from LightCraft (https://github.com/storytold/lightcraft): the XMP
-reader and merge in `crates/photo-engine/src/xmp.rs`, and its HEIF decoder and content-aware
+reader and merge in `crates/photo-engine/src/xmp.rs`, the gain map metadata and container in
+`crates/photo-engine/src/gainmap.rs`, and its HEIF decoder and content-aware
 fill, vendored as `crates/vendor/lc-heif` and `crates/vendor/lc-inpaint` (see their VENDORED.md;
 the fill was ported by LightCraft from PhotoCraft, under the same licence):
 - Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
 - LightCraft is licensed MIT OR Apache-2.0; Duckfoot uses it under the terms of the MIT License.
+"""
+
+U2NET_NOTICE = """## Bundled Segmentation Model (Apache-2.0)
+
+Duckfoot embeds `u2netp.onnx` (`crates/photo-engine/data/`), the small U²-Net salient-object
+model, for background cutout:
+- **U²-Net**: Copyright (c) 2020 Xuebin Qin, Zichen Zhang, Chenyang Huang, Masood Dehghan,
+  Osmar R. Zaiane and Martin Jagersand (https://github.com/xuebinqin/U-2-Net)
+- Licensed under the Apache License, Version 2.0; the full text is in the license text section
+  below. The ONNX export is the one distributed by rembg (https://github.com/danielgatis/rembg).
 """
 
 OPENCUT_NOTICE = """## OpenCut Code Attribution (MIT)
@@ -539,6 +550,7 @@ def main():
     lines.append(LGPL_NOTICE)
     lines.append(FONTS_NOTICE)
     lines.append(LENSFUN_NOTICE)
+    lines.append(U2NET_NOTICE)
     lines.append(OPENCUT_NOTICE)
     lines.append(LIGHTCRAFT_NOTICE)
 
