@@ -1,0 +1,5 @@
+# Text is LF in every checkout, Windows included: tests read docs and data files and match
+# them line by line, and a CRLF checkout made them fail there only.
+* text=auto eol=lf
+# Windows batch files need CRLF to run.
+*.bat text eol=crlf
