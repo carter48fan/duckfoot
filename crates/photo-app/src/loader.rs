@@ -840,7 +840,10 @@ mod tests {
         };
         assert!(matches!(
             scan.answer_if_panicked()("crashed".into()),
-            Done::Scanned { cancelled: true, .. }
+            Done::Scanned {
+                cancelled: true,
+                ..
+            }
         ));
     }
 

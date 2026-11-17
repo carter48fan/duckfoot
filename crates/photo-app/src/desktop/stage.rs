@@ -53,8 +53,9 @@ impl PhotoApp {
 
                 if self.cutout_studio.open {
                     let needs_prepare = self.loaded_path.as_ref().is_some_and(|p| {
-                        self.cutout_studio.cached_source_path.as_deref() != Some(p.as_path())
-                            || self.cutout_studio.cached_pred_320.is_none()
+                        (self.cutout_studio.cached_source_path.as_deref() != Some(p.as_path())
+                            || self.cutout_studio.cached_pred_320.is_none())
+                            && self.cutout_studio.failed_for.as_deref() != Some(p.as_path())
                     });
                     if needs_prepare {
                         self.prepare_cutout_studio(ui.ctx(), gpu);

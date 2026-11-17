@@ -40,6 +40,10 @@ pub struct CutoutStudioState {
     pub preview_texture: Option<egui::TextureHandle>,
     pub preview_base_rgba: Option<RgbaImage>,
     pub status: Option<String>,
+    /// The photo preparation last failed for. Preparing runs from the stage's draw, so
+    /// without this a failure would be retried, export and inference and all, every
+    /// frame; it is retried only when asked (Retry) or for another photo.
+    pub failed_for: Option<PathBuf>,
 }
 
 impl Default for CutoutStudioState {
@@ -64,6 +68,7 @@ impl Default for CutoutStudioState {
             preview_texture: None,
             preview_base_rgba: None,
             status: None,
+            failed_for: None,
         }
     }
 }
@@ -78,6 +83,7 @@ impl CutoutStudioState {
         self.preview_base_rgba = None;
         self.touchups.clear();
         self.status = None;
+        self.failed_for = None;
     }
 
     /// Invalidate neural prediction and preview texture without wiping manual touch-up dabs.
@@ -88,6 +94,7 @@ impl CutoutStudioState {
         self.preview_texture = None;
         self.preview_base_rgba = None;
         self.status = None;
+        self.failed_for = None;
     }
 
     /// Prepare Cutout Studio using a pre-rendered image (e.g. from the GPU pipeline with full exposure/edits).
@@ -139,10 +146,12 @@ impl CutoutStudioState {
                 }
                 Err(e) => {
                     self.status = Some(format!("Inference failed: {e}"));
+                    self.failed_for = Some(path.to_path_buf());
                 }
             },
             Err(e) => {
                 self.status = Some(format!("Failed to load rembg model: {e}"));
+                self.failed_for = Some(path.to_path_buf());
             }
         }
     }
@@ -162,6 +171,7 @@ impl CutoutStudioState {
                 self.reset_cache();
                 self.cached_source_path = Some(path.to_path_buf());
                 self.status = Some(format!("Failed to open image for cutout: {e}"));
+                self.failed_for = Some(path.to_path_buf());
             }
         }
     }
@@ -442,6 +452,13 @@ impl CutoutStudioState {
         if let Some(status) = &self.status {
             ui.label(RichText::new(status).size(11.0).color(theme::TEXT_DIM));
         }
+        if self.failed_for.is_some()
+            && widgets::outlined_chip(ui, true, false, "retry")
+                .on_hover_text("Try finding the subject again")
+                .clicked()
+        {
+            self.invalidate_prediction();
+        }
         let hint = if widgets::is_touch(ui.ctx()) {
             "Paint on the photo to keep or erase · pinch to zoom"
         } else {
@@ -580,6 +597,20 @@ mod tests {
             1,
             "Touchups should be preserved on invalidate"
         );
+    }
+
+    /// A photo that cannot be prepared is remembered, so the stage (which asks every
+    /// frame) does not try again until told to.
+    #[test]
+    fn a_failed_preparation_is_remembered_until_retried() {
+        let ctx = egui::Context::default();
+        let mut state = CutoutStudioState::default();
+        let path = Path::new("/nowhere/at/all.png");
+        state.prepare(&ctx, path);
+        assert_eq!(state.failed_for.as_deref(), Some(path));
+        assert!(state.status.is_some());
+        state.invalidate_prediction();
+        assert!(state.failed_for.is_none());
     }
 
     #[test]
