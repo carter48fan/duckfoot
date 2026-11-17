@@ -11,6 +11,13 @@ ignore = [
     # `paste` is unmaintained, though finished: a proc-macro run at build time, through
     # rav1e (AVIF export). Nothing to replace it with from here.
     { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro via rav1e; no maintained drop-in" },
+    # Unmaintained (not vulnerable), and each reached only through a dependency, so not
+    # ours to swap: revisit when those move.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: via ab_glyph (export watermark glyphs)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: via zbus (Linux file dialogs, AccessKit)" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: via zbus (Linux file dialogs, AccessKit)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: via zbus (Linux file dialogs, AccessKit)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: via rawler (RAW decoding)" },
 ]
 
 [licenses]
@@ -28,6 +35,8 @@ allow = [
     "0BSD",
     "ISC",
     "Zlib",
+    # Boost: no notice needed for a binary (only for source copies). The Windows clipboard.
+    "BSL-1.0",
     "Unlicense",
     "CC0-1.0",
     "BlueOak-1.0.0",
