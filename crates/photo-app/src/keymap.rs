@@ -138,6 +138,11 @@ pub(crate) const KEYMAP: &[Shortcut] = &[
     s(View, "`Ctrl+,`", "preferences (desktop)"),
     s(
         Library,
+        "`N` with two or more selected",
+        "compare them side by side: ← → move, marks go to the one framed, Enter opens it, Esc returns",
+    ),
+    s(
+        Library,
         "`0`–`5`",
         "star rating for the selection (`0` clears)",
     ),

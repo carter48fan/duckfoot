@@ -3941,3 +3941,51 @@ fn a_folder_chosen_narrows_the_shelf_to_it() {
     assert_eq!(app.loaded_path(), Some(paths[1].as_path()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Survey (`N`): marks go to the photo framed, not the whole selection; ← → move the
+/// frame; Esc leaves, and marks go to the selection again.
+#[test]
+fn a_survey_marks_only_the_photo_framed() {
+    let dir = scratch_dir("survey");
+    let paths: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("p{i}.png"))).collect();
+    for p in &paths {
+        image::RgbImage::new(32, 24).save(p).unwrap();
+    }
+    let h = Headless::new();
+    let mut app = quiet_app(&h);
+    h.frame(&mut app, Default::default());
+    app.add_to_shelf(&h.gpu(), paths.clone());
+    h.settle(&mut app, Duration::from_secs(30));
+    for p in &paths {
+        app.selection.selected.insert(p.clone());
+    }
+    let stars = |app: &PhotoApp| -> Vec<u8> {
+        paths
+            .iter()
+            .map(|p| app.shelf.get(p).unwrap().metadata.rating)
+            .collect()
+    };
+
+    h.frame(&mut app, key(egui::Key::N));
+    // The open photo (the first) is framed.
+    h.frame(&mut app, key(egui::Key::Num3));
+    assert_eq!(stars(&app), [3, 0, 0]);
+    h.frame(&mut app, key(egui::Key::ArrowRight));
+    h.frame(&mut app, key(egui::Key::Num5));
+    assert_eq!(stars(&app), [3, 5, 0]);
+    assert_eq!(
+        app.loaded_path(),
+        Some(paths[0].as_path()),
+        "the stage did not step"
+    );
+
+    h.frame(&mut app, key(egui::Key::Escape));
+    h.frame(&mut app, key(egui::Key::Num1));
+    assert_eq!(
+        stars(&app),
+        [1, 1, 1],
+        "out of the survey, the selection is marked"
+    );
+    h.settle(&mut app, Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -639,6 +639,8 @@ pub struct PhotoApp {
     caption_drafts: Option<(PathBuf, [String; 4])>,
     /// A subject or sky mask being found, off the UI thread.
     finding: Option<found_masks::Finding>,
+    /// The selection side by side, to choose between (desktop; `N`).
+    survey: Option<desktop::survey::Survey>,
     /// Filters kept under a name, and the name being typed for a new one.
     pub saved_filters: Vec<dam::SavedFilter>,
     saved_filter_draft: Option<String>,
@@ -985,6 +987,7 @@ impl PhotoApp {
             keyword_draft: String::new(),
             caption_drafts: None,
             finding: None,
+            survey: None,
             saved_filters: Vec::new(),
             saved_filter_draft: None,
             folder_watch: Default::default(),

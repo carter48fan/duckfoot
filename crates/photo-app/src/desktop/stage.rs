@@ -14,6 +14,10 @@ impl PhotoApp {
                     .inner_margin(Margin::same(16)),
             )
             .show(ui, |ui| {
+                if self.survey.is_some() {
+                    self.survey_view(ui, gpu);
+                    return;
+                }
                 if let Some((path, preview)) = &self.stage_preview {
                     if self.loaded_path.as_ref() == Some(path) && !self.photo_on_stage() {
                         stage_preview(ui, preview, path);

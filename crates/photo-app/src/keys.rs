@@ -95,6 +95,15 @@ impl PhotoApp {
         if self.batch_dialog_open {
             return;
         }
+        if self.survey_keys(ctx, gpu) {
+            return;
+        }
+        if !self.layout.is_compact()
+            && ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::N))
+        {
+            self.start_survey(ctx);
+            return;
+        }
         if (self.selected_mask.is_some() || self.healing)
             && !self.cropping
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))

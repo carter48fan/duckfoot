@@ -34,6 +34,7 @@ Press `?` in the app for the same list, or **Help** for the guide and a tour.
 | `?` or `F1` | this list of shortcuts |
 | `Ctrl+,` | preferences (desktop) |
 | **Library** | |
+| `N` with two or more selected | compare them side by side: ← → move, marks go to the one framed, Enter opens it, Esc returns |
 | `0`–`5` | star rating for the selection (`0` clears) |
 | `6` / `7` / `8` / `9` | red / yellow / green / blue label (again takes it off) |
 | `P` / `X` / `U` | flag as pick / reject / clear the flag |

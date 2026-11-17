@@ -55,6 +55,7 @@ DESIGN.md invariant 8.
 | **App** | filmstrip thumbnails | Working | LRU-managed tile cache (1,500 desktop, 400 phone) decoded on background workers |
 | **App** | open stand-in | Working | Embedded preview on stage in ~20–35 ms while full decode runs |
 | **App** | the shelf | Working | Collapsible asset manager, switch photo, copy/paste stack, virtual copies |
+| **App** | survey (compare) | Working | `N` shows up to 12 selected photos side by side from their camera previews (up to 1200 px, read on a thread); marks act on the framed photo; Enter opens it. Desktop only; shows what was shot, not the edit |
 | **App** | before / after split view | Working | Draggable divider (`\`), raw baseline vs active stack |
 | **App** | crop tool overlay | Working | 8-handle crop framing, rule-of-thirds, golden ratio, aspect ratios (`C` / `Esc`) |
 | **App** | export | Working | Banded export dialog (Ctrl+E) and phone Export sheet sharing unified recipes; a single export renders on its own thread from the file, with Cancel |

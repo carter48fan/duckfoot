@@ -654,33 +654,48 @@ fn wake(repaint: &Mutex<Option<egui::Context>>) {
 }
 
 fn generate_thumbnail(path: &Path) -> Option<egui::ColorImage> {
+    generate_preview(path, THUMB_SIDE)
+}
+
+/// A photo seen at a glance, about `side` on its long edge, for comparing photos side by
+/// side (the survey): the camera's own preview where there is one, else the file itself,
+/// shrunk. A mosaic with no preview is still a thumbnail's size. Off the UI thread; a
+/// file whose decoder panics gives `None`.
+pub(crate) fn survey_preview(path: &Path, side: usize) -> Option<egui::ColorImage> {
+    let file = photo_engine::copies::source_file(path).into_owned();
+    guarded(path, || Ok(generate_preview(&file, side)))
+        .ok()
+        .flatten()
+}
+
+fn generate_preview(path: &Path, side: usize) -> Option<egui::ColorImage> {
     if is_raster_path(path) {
         let bytes = fs::read(path).ok()?;
         if photo_engine::heif::is_heif(&bytes) {
             // Its own thumbnail (an iPhone's is 320 px), else the whole photo, shrunk.
-            let preview = photo_engine::heif::thumbnail(&bytes, THUMB_SIDE as u32)
+            let preview = photo_engine::heif::thumbnail(&bytes, side as u32)
                 .or_else(|| photo_engine::heif::preview(&bytes))?;
-            return Some(preview_image(preview, Some(THUMB_SIDE)));
+            return Some(preview_image(preview, Some(side)));
         }
         // A JPEG is decoded at reduced size in the DCT, like a RAW's preview is; a 24 MP
         // camera JPEG decoded at full size and then shrunk is ~10× the work.
-        if let Some((width, height, rgb)) = decode_jpeg_scaled(&bytes, THUMB_SIDE as u32) {
+        if let Some((width, height, rgb)) = decode_jpeg_scaled(&bytes, side as u32) {
             let preview = Preview {
                 width,
                 height,
                 rgb,
                 orientation: raster_orientation(&bytes),
             };
-            return Some(preview_image(preview, Some(THUMB_SIDE)));
+            return Some(preview_image(preview, Some(side)));
         }
         let img = image::load_from_memory(&bytes).ok()?;
         return Some(orient(
-            downsample_to_thumb(img),
+            downsample_to_thumb_side(img, side),
             &raster_orientation(&bytes),
         ));
     }
-    if let Some(preview) = load_embedded_preview(path, THUMB_SIDE as u32) {
-        return Some(preview_image(preview, Some(THUMB_SIDE)));
+    if let Some(preview) = load_embedded_preview(path, side as u32) {
+        return Some(preview_image(preview, Some(side)));
     }
     // No preview this can read: build one from the mosaic. A whole-sensor decode each, so
     // one at a time however many workers there are, or a roll of such files would hold
@@ -743,10 +758,6 @@ fn preview_image(preview: Preview, side: Option<usize>) -> egui::ColorImage {
         None => to_color_image(&img),
     };
     orient(img, &orientation)
-}
-
-fn downsample_to_thumb(img: image::DynamicImage) -> egui::ColorImage {
-    downsample_to_thumb_side(img, THUMB_SIDE)
 }
 
 fn downsample_to_thumb_side(img: image::DynamicImage, side: usize) -> egui::ColorImage {
