@@ -57,7 +57,7 @@ and scroll down to **Assets**. Pick the file for your device:
 | **Android** phone or tablet (Android 11 or newer) | `android-arm64.apk` |
 | **Linux** | `linux-x86_64.AppImage` (see [Linux](#linux-advanced)) |
 
-The file names include the version number, for example `duckfoot-v0.3.17-windows-x86_64.zip`,
+The file names include the version number, for example `duckfoot-v0.4.0-windows-x86_64.zip`,
 so look for the ending, not the whole name.
 
 > **A note on warnings.** Duckfoot is a free project and its Windows and Mac downloads are
