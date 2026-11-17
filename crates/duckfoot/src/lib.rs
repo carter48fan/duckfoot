@@ -50,17 +50,20 @@ pub struct Options {
     /// Builds the platform for the app. Called once per app, which is normally once per
     /// run (see [`Shell::resumed`] for the exception).
     pub platform: Box<dyn FnMut() -> Box<dyn Platform>>,
+    /// Shows why starting failed, where the platform can (Android's own dialog, say). The
+    /// desktop's message box and log file are used when this is `None`.
+    pub fatal: Option<ShowFatal>,
 }
+
+/// Shows the text of a failed start.
+pub type ShowFatal = Box<dyn Fn(&str)>;
 
 /// Starting failed for want of a GPU (or a window): say so where the user will see it, a
 /// dialog and a log file beside the settings, rather than just exiting (WP5.6).
 fn fatal(detail: &str) {
     #[cfg(not(target_os = "android"))]
     {
-        let text = format!(
-            "Duckfoot needs a GPU with Vulkan, Metal or DirectX 12, and could not start one.\n\n\
-             {detail}\n\nSee Troubleshooting in the README."
-        );
+        let text = fatal_text(detail);
         if let Some(dir) = photo_app::platform::desktop_settings_dir() {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("duckfoot.log"), format!("{text}\n"));
@@ -73,6 +76,14 @@ fn fatal(detail: &str) {
     }
     #[cfg(target_os = "android")]
     let _ = detail;
+}
+
+/// What a failed start says, on any platform.
+pub fn fatal_text(detail: &str) -> String {
+    format!(
+        "Duckfoot needs a GPU with Vulkan, Metal or DirectX 12, and could not start one.\n\n\
+         {detail}\n\nSee Troubleshooting in the README."
+    )
 }
 
 /// Create the event loop type [`run`] expects.
@@ -101,12 +112,23 @@ struct GpuState {
 
 impl GpuState {
     fn new(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> anyhow::Result<Self> {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))?;
+        let request = |force_fallback_adapter| {
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(surface),
+                force_fallback_adapter,
+                ..Default::default()
+            }))
+        };
+        // No GPU that can draw to the window: a software one (lavapipe, WARP), where the
+        // system has one, is slow but beats not starting at all.
+        let adapter = match request(false) {
+            Ok(adapter) => adapter,
+            Err(first) => {
+                log::warn!("no hardware adapter ({first}); trying a software one");
+                request(true).map_err(|_| first)?
+            }
+        };
         log::info!("adapter: {:?}", adapter.get_info());
 
         let (device, queue) =
@@ -501,6 +523,12 @@ impl Shell {
 
         if self.app.is_none() {
             let mut app = PhotoApp::with_platform(&gpu.gpu(), (self.options.platform)());
+            if gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+                app.set_status(
+                    "No usable GPU was found: running on a software renderer, which is slow. \
+                     See Troubleshooting in the README.",
+                );
+            }
             let paths = std::mem::take(&mut self.options.pending_open);
             if !paths.is_empty() {
                 app.add_to_shelf(&gpu.gpu(), paths);
@@ -566,7 +594,10 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
         if let Err(e) = self.open_window(event_loop) {
             log::error!("could not create a window or GPU device: {e:#}");
-            fatal(&format!("{e:#}"));
+            match &self.options.fatal {
+                Some(show) => show(&fatal_text(&format!("{e:#}"))),
+                None => fatal(&format!("{e:#}")),
+            }
             event_loop.exit();
         }
     }

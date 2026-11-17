@@ -226,6 +226,22 @@ public class DuckfootActivity extends NativeActivity {
     }
 
     /**
+     * The Rust side could not start (no usable GPU, most often): say why, and end the app
+     * when the message is dismissed, rather than leaving a black screen.
+     */
+    public void fatal(String message) {
+        runOnUiThread(() -> new android.app.AlertDialog.Builder(this)
+                .setTitle("Duckfoot could not start")
+                .setMessage(message)
+                .setCancelable(false)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    finishAndRemoveTask();
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                })
+                .show());
+    }
+
+    /**
      * Where an edge swipe is the app's (the tab bar, the module strip) rather than the
      * system's Back: {@code left, top, right, bottom} in window pixels, four ints each.
      * Android honours up to 200 dp of each edge.

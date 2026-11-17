@@ -37,6 +37,9 @@ const PICK_ADD: i32 = 1;
 const PICK_FOLDER: i32 = 2;
 const PICK_PRESET: i32 = 3;
 
+/// Starting failed and the activity is showing why; it ends the process itself.
+static FAILED_TO_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -71,9 +74,16 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
     // a second android_main in the same process came up to a black screen (H12), so the
     // next launch is a clean cold start instead.
     let exit_bridge = bridge.clone();
+    let fatal_bridge = bridge.clone();
     duckfoot::run(
         event_loop,
         duckfoot::Options {
+            // A failed start says why in a dialog, whose OK ends the app, rather than
+            // leaving a black screen; the process is then left for the dialog to end.
+            fatal: Some(Box::new(move |text| {
+                FAILED_TO_START.store(true, std::sync::atomic::Ordering::SeqCst);
+                fatal_bridge.call_with_string("fatal", text);
+            })),
             pending_open: Vec::new(),
             platform: Box::new(move || {
                 Box::new(AndroidPlatform {
@@ -85,7 +95,9 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
             }),
         },
     )?;
-    exit_bridge.call_void("die", "()V", &[]);
+    if !FAILED_TO_START.load(std::sync::atomic::Ordering::SeqCst) {
+        exit_bridge.call_void("die", "()V", &[]);
+    }
     Ok(())
 }
 

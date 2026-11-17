@@ -33,6 +33,7 @@ fn main() -> anyhow::Result<()> {
     duckfoot::run(
         duckfoot::event_loop()?,
         duckfoot::Options {
+            fatal: None,
             // Every argument (a file manager's %F passes several), and paths that are
             // not UTF-8 too.
             pending_open: std::env::args_os().skip(1).map(Into::into).collect(),
